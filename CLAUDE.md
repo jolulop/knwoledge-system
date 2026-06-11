@@ -19,6 +19,29 @@ Build and maintain a structured knowledge base that stores immutable raw sources
 9. **Human approval is mandatory for deletion, contradiction resolution, entity merging, and deprecation.**
 10. **Prefer small, deterministic scripts for structural enforcement.**
 
+## Grill-with-docs usage rule
+
+Use `/grill-with-docs` only as a phase-gate planning and documentation workflow.
+
+Allowed outputs:
+- Ask clarifying questions one at a time.
+- Update `CONTEXT.md`.
+- Create or update ADRs in `docs/adr/`.
+- Update planning documentation when explicitly requested.
+
+Not allowed unless the user explicitly says "implement now":
+- Writing production code.
+- Modifying application logic.
+- Creating migrations.
+- Changing tests.
+- Running implementation tasks.
+
+When a grilling session completes, stop and summarize:
+1. resolved decisions,
+2. unresolved questions,
+3. documentation files changed,
+4. recommended next implementation step.
+
 ## Core folders
 
 ```text
