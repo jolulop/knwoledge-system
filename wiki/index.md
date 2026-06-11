@@ -3,7 +3,7 @@
 > [!summary]
 > Auto-generated navigation index for the wiki. Do not edit manually; update source pages and run `scripts/rebuild_index.py` instead.
 
-Generated: 2026-06-10T21:27:07+00:00
+Generated: 2026-06-11T18:30:56+00:00
 
 ## Navigation Counts
 
