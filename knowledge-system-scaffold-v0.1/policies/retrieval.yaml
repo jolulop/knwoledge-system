@@ -1,0 +1,24 @@
+version: 0.1
+policy_name: default_retrieval
+routing:
+  synthesis_or_discovery:
+    - index
+    - summary_callouts
+    - graph
+    - selected_pages
+  exact_lookup:
+    - keyword
+    - vector_chunks
+  disagreements:
+    - claim_graph
+    - contradiction_edges
+  recency:
+    - log
+    - metadata_db
+budgets:
+  max_candidate_concepts_initial: 5
+  max_candidate_sources_initial: 8
+  max_graph_depth_default: 2
+  max_answer_unsourced_claims: 0
+fallbacks:
+  no_source_found_text: "No source found in vault."

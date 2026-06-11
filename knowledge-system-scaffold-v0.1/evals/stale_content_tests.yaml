@@ -1,0 +1,8 @@
+version: 0.1
+tests:
+  - id: stale_001
+    description: "Documents older than three years should be marked archive_candidate."
+    rule: older_than_three_years_archive_candidate
+  - id: stale_002
+    description: "Summaries should be checked for drift from page body."
+    rule: summary_rot_check

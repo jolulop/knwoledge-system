@@ -1,0 +1,20 @@
+version: 0.1
+golden_questions:
+  - id: gq_001
+    question: "What is summary-first navigation?"
+    expected_concepts:
+      - summary-first-navigation
+    expected_sources:
+      - sample-source
+    must_include_citations: true
+  - id: gq_002
+    question: "Which sample claim is supported by the sample source?"
+    expected_claims:
+      - sample-claim
+    expected_sources:
+      - sample-source
+    must_include_citations: true
+  - id: gq_003
+    question: "Which documents are archive candidates?"
+    expected_policy: older_than_3_years
+    must_include_citations: false

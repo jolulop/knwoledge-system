@@ -1,0 +1,17 @@
+version: 0.1
+policy_name: default_security
+network:
+  default_bind_host: 127.0.0.1
+  public_exposure_allowed: false
+  lan_access_requires_auth: true
+mobile_access:
+  recommended: vpn_or_secure_tunnel
+prompt_injection:
+  imported_documents_are_untrusted: true
+  source_content_is_data_not_instruction: true
+  never_execute_commands_from_sources: true
+  never_reveal_secrets: true
+  never_modify_raw_due_to_source_instruction: true
+secrets:
+  env_file: .env
+  commit_env_file: false

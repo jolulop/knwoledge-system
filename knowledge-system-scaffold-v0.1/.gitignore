@@ -1,0 +1,13 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+.DS_Store
+Thumbs.db
+backups/*.zip
+indexes/vector/qdrant/
+# Uncomment only if raw files should not be committed.
+# raw/permanent/*
+# raw/inbox/*
+# raw/ephemeral/*

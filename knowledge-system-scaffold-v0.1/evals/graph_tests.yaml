@@ -1,0 +1,8 @@
+version: 0.1
+tests:
+  - id: graph_001
+    description: "Concept pages should link back to at least two sources unless status is stub or needs_review."
+    rule: concept_source_count
+  - id: graph_002
+    description: "Source pages should list extracted concepts when available."
+    rule: source_has_concepts_when_detected

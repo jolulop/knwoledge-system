@@ -1,0 +1,24 @@
+version: 0.1
+policy_name: default_retention
+raw_files:
+  auto_delete: false
+  deletion_requires_review: true
+  archive_requires_review: true
+  older_than_years_archive_candidate: 3
+  archive_status: archive_candidate
+wiki_pages:
+  auto_delete: false
+  deprecation_requires_review: true
+  hide_requires_review: true
+ephemeral:
+  enabled: true
+  delete_candidate_after_days: 90
+  deletion_requires_review: true
+statuses:
+  - active
+  - stale_candidate
+  - deprecated_candidate
+  - archive_candidate
+  - archived
+  - delete_candidate
+  - deleted

@@ -1,0 +1,10 @@
+version: 0.1
+tests:
+  - id: citation_001
+    description: "Every claim page must list at least one source or be marked unsourced."
+    target: wiki/Claims
+    rule: claim_requires_source_or_unsourced_marker
+  - id: citation_002
+    description: "Wikilink citations must resolve to real wiki pages."
+    target: wiki
+    rule: wikilinks_resolve
