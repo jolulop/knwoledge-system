@@ -34,6 +34,12 @@ By the end of Phase 2, for every extractable source already catalogued in
 
 Phase 2 does **not** call an LLM, generate wiki pages, or build search/graph indexes.
 
+Manifest JSON files are local runtime state in Phase 2. They are authoritative for
+the running workspace, but generated `raw/manifests/*.json` files are not committed
+to git. Phase 2 should preserve this by updating manifests in place locally and by
+keeping portable references repository-relative in normalized artifacts and API
+responses.
+
 ---
 
 ## 2. Scope
@@ -111,6 +117,9 @@ Field notes:
 - `ingestion_status` transitions `new → extracted | partial | error`. `partial` covers
   recoverable cases (e.g. `needs_ocr`, `truncated` if ever enabled).
 - `normalized.*` paths are repository-relative. `tables_dir` is present even when empty.
+- Existing absolute `raw_path` values may remain in local manifests for runtime file
+  resolution, but portable outputs must use `relative_raw_path` or `occurrences[]`
+  repository-relative paths.
 - `extracted_at`, `extraction_tool[_version]` are refreshed on each successful run.
 - `page_count` is the source page count for paginated formats, else `null`.
 - All Phase 1 fields (occurrences, sha256, retention_class, etc.) are preserved

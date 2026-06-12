@@ -10,12 +10,14 @@ The pre-existing monolithic `normalized/chunks/chunks.jsonl` is a wiki keyword-i
 artifact owned by Phase 4 reindexing, not part of the Phase 2 per-source chunk store.
 
 Extraction state is recorded on the manifest, which stays the single authoritative
-per-source record that `/sources` reads (ADR-0008). The manifest's `ingestion_status`
-evolves `new → extracted | partial | error`, and the manifest gains `normalized_path`,
-`extracted_at`, `extraction_tool` (with version), and `text_char_count`. Detailed
-per-run diagnostics live in the extraction log, not the manifest. A new `extract`
-job type tracks each run. Re-extraction is skipped for a source that is already
-`extracted` and whose content is unchanged, unless explicitly forced.
+per-source local runtime record that `/sources` reads (ADR-0008). Generated manifest
+JSON is not committed to git, even though it is authoritative for the current
+workspace. The manifest's `ingestion_status` evolves `new → extracted | partial |
+error`, and the manifest gains `normalized_path`, `extracted_at`, `extraction_tool`
+(with version), and `text_char_count`. Detailed per-run diagnostics live in the
+extraction log, not the manifest. A new `extract` job type tracks each run.
+Re-extraction is skipped for a source that is already `extracted` and whose content
+is unchanged, unless explicitly forced.
 
 Consequences: a source's complete state — discovery, checksum, occurrences, and
 extraction outcome — is readable from one manifest file, and the normalized outputs
