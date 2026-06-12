@@ -11,7 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.backend import db
+from app.backend import db, manifests
 from app.backend.config import get_settings
 from app.backend.models import (
     HealthResponse,
@@ -33,13 +33,13 @@ def health() -> dict[str, Any]:
 
 @app.get("/sources", response_model=SourcesResponse)
 def list_sources() -> dict[str, Any]:
-    sources = intake.list_manifests(settings.manifests_dir)
+    sources = manifests.list_manifests(settings.manifests_dir)
     return {"count": len(sources), "sources": sources}
 
 
 @app.get("/sources/{source_id}", response_model=Source)
 def get_source(source_id: str) -> dict[str, Any]:
-    manifest = intake.load_manifest(settings.manifests_dir, source_id)
+    manifest = manifests.load_manifest(settings.manifests_dir, source_id)
     if manifest is None:
         raise HTTPException(status_code=404, detail=f"source not found: {source_id}")
     return manifest

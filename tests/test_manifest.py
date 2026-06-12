@@ -8,18 +8,19 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from app.backend import manifests
 from app.workers import intake
 
 
 def test_source_id_derivation():
     sha = "a" * 64
-    assert intake.source_id_for(sha) == "src_" + "a" * 16
+    assert manifests.source_id_for(sha) == "src_" + "a" * 16
 
 
 def test_sha256_file(tmp_path):
     f = tmp_path / "x.txt"
     f.write_bytes(b"hello world")
-    assert intake.sha256_file(f) == hashlib.sha256(b"hello world").hexdigest()
+    assert manifests.sha256_file(f) == hashlib.sha256(b"hello world").hexdigest()
 
 
 def test_manifest_has_required_fields(tmp_path):
@@ -29,7 +30,7 @@ def test_manifest_has_required_fields(tmp_path):
 
     summary = intake.scan_inbox(tmp_path, jobs_db=tmp_path / "db" / "jobs.sqlite")
     sid = summary["source_ids"][0]
-    manifest = intake.load_manifest(tmp_path / "raw" / "manifests", sid)
+    manifest = manifests.load_manifest(tmp_path / "raw" / "manifests", sid)
 
     assert manifest is not None
     assert manifest["source_id"] == sid
@@ -51,7 +52,7 @@ def test_empty_file_is_flagged(tmp_path):
 
     summary = intake.scan_inbox(tmp_path, jobs_db=tmp_path / "db" / "jobs.sqlite")
     sid = summary["source_ids"][0]
-    manifest = intake.load_manifest(tmp_path / "raw" / "manifests", sid)
+    manifest = manifests.load_manifest(tmp_path / "raw" / "manifests", sid)
 
     assert "empty_file" in manifest["notes"]
     assert any(w["warning"] == "empty_file" for w in summary["warnings"])

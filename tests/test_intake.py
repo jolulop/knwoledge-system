@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.backend import db
+from app.backend import db, manifests
 from app.workers import intake
 
 
@@ -31,10 +31,10 @@ def test_scan_detects_exact_duplicate(tmp_path):
     assert summary["duplicates"] == 1
     assert summary["errors"] == 0
 
-    manifests = intake.list_manifests(tmp_path / "raw" / "manifests")
-    assert len(manifests) == 2
+    records = manifests.list_manifests(tmp_path / "raw" / "manifests")
+    assert len(records) == 2
 
-    dup = [m for m in manifests if len(m["occurrences"]) == 2]
+    dup = [m for m in records if len(m["occurrences"]) == 2]
     assert len(dup) == 1
     rels = {o["relative_path"] for o in dup[0]["occurrences"]}
     assert any(r.endswith("one.md") for r in rels)
@@ -48,7 +48,7 @@ def test_scan_is_idempotent(tmp_path):
 
     first = intake.scan_inbox(tmp_path, jobs_db=jobs_db)
     discovered = {
-        sid: intake.load_manifest(manifests_dir, sid)["discovered_at"]
+        sid: manifests.load_manifest(manifests_dir, sid)["discovered_at"]
         for sid in first["source_ids"]
     }
 
@@ -58,11 +58,11 @@ def test_scan_is_idempotent(tmp_path):
     assert second["new_manifests"] == 0
     assert second["updated_manifests"] == 2
     assert second["unique_contents"] == 2
-    assert len(intake.list_manifests(manifests_dir)) == 2
+    assert len(manifests.list_manifests(manifests_dir)) == 2
 
     # discovered_at is set once at first intake and must survive every rescan.
     for sid in second["source_ids"]:
-        assert intake.load_manifest(manifests_dir, sid)["discovered_at"] == discovered[sid]
+        assert manifests.load_manifest(manifests_dir, sid)["discovered_at"] == discovered[sid]
 
 
 def test_symlink_escape_is_skipped(tmp_path):
@@ -79,7 +79,7 @@ def test_symlink_escape_is_skipped(tmp_path):
     assert summary["skipped"] == 1
     assert any(w["warning"] == "skipped_symlink" for w in summary["warnings"])
     # The escaped file's path must never leak into a manifest.
-    blob = json.dumps(intake.list_manifests(tmp_path / "raw" / "manifests"))
+    blob = json.dumps(manifests.list_manifests(tmp_path / "raw" / "manifests"))
     assert "outside-secret" not in blob
 
 

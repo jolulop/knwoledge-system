@@ -9,8 +9,6 @@ deleted; the worker writes only under raw/manifests/ and db/jobs.sqlite.
 """
 from __future__ import annotations
 
-import hashlib
-import json
 import mimetypes
 import uuid
 from datetime import datetime, timezone
@@ -18,35 +16,24 @@ from pathlib import Path
 from typing import Any
 
 from app.backend import db
+from app.backend.manifests import (
+    iso_now,
+    load_manifest,
+    save_manifest,
+    sha256_file,
+    source_id_for,
+)
 
-_CHUNK = 1 << 20  # 1 MiB streaming read for checksums
 _SKIP_SUFFIXES = ("~", ".tmp", ".swp", ".part", ".crdownload")
 
 
 # --- primitives -------------------------------------------------------------
 
 
-def iso_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
 def _iso_mtime(stat_result: Any) -> str:
     return datetime.fromtimestamp(stat_result.st_mtime, timezone.utc).isoformat(
         timespec="seconds"
     )
-
-
-def sha256_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as fh:
-        for block in iter(lambda: fh.read(_CHUNK), b""):
-            h.update(block)
-    return h.hexdigest()
-
-
-def source_id_for(sha256: str) -> str:
-    """Deterministic content-derived source id: src_<first 16 hex chars>."""
-    return f"src_{sha256[:16]}"
 
 
 def _is_ignorable(path: Path) -> bool:
@@ -159,29 +146,6 @@ def _merge_occurrences(
     manifest["occurrences"] = [by_rel[k] for k in sorted(by_rel)]
 
 
-def list_manifests(manifests_dir: Path) -> list[dict[str, Any]]:
-    manifests_dir = Path(manifests_dir)
-    if not manifests_dir.exists():
-        return []
-    out: list[dict[str, Any]] = []
-    for path in sorted(manifests_dir.glob("*.json")):
-        try:
-            out.append(json.loads(path.read_text(encoding="utf-8")))
-        except (OSError, json.JSONDecodeError):
-            continue
-    return out
-
-
-def load_manifest(manifests_dir: Path, source_id: str) -> dict[str, Any] | None:
-    path = Path(manifests_dir) / f"{source_id}.json"
-    if not path.exists():
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-
-
 # --- scan -------------------------------------------------------------------
 
 
@@ -236,10 +200,10 @@ def scan_inbox(
             canonical_meta = observed[0]
             canonical_path = (root / canonical_meta["relative_path"]).resolve()
             source_id = source_id_for(sha)
-            manifest_path = manifests_dir / f"{source_id}.json"
+            existing = load_manifest(manifests_dir, source_id)
 
-            if manifest_path.exists():
-                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if existing is not None:
+                manifest = existing
                 # Manifests are authoritative (ADR-0008): never merge into a record
                 # whose stored checksum disagrees with the scanned content.
                 if manifest.get("sha256") != sha:
@@ -265,10 +229,7 @@ def scan_inbox(
                 manifest.setdefault("notes", []).append("empty_file")
                 warnings.append({"source_id": source_id, "warning": "empty_file"})
 
-            manifest_path.write_text(
-                json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
-                encoding="utf-8",
-            )
+            save_manifest(manifests_dir, manifest)
             source_ids.append(source_id)
             new_manifests += int(created)
             updated_manifests += int(not created)
