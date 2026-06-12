@@ -7,6 +7,7 @@ case "$FILE_PATH" in
     cd "${CLAUDE_PROJECT_DIR:-.}" || exit 0
     python3 scripts/reindex_keyword.py . >&2 || true
     python3 scripts/reindex_vector.py . >&2 || true
+    python3 scripts/validate_index_consistency.py . >&2 || true
     ;;
   *)
     :

@@ -34,11 +34,12 @@ Run the relevant scripts:
 
 ```bash
 python3 scripts/rebuild_index.py .
-python3 scripts/validate_frontmatter.py .
-python3 scripts/validate_wikilinks.py .
-python3 scripts/validate_citations.py .
 python3 scripts/reindex_keyword.py .
 python3 scripts/reindex_vector.py .
+# Runs every scripts/validate_*.py (frontmatter, wikilinks, citations, index
+# consistency) and exits non-zero on any failure. Run after reindexing so the
+# index-consistency check sees freshly generated indexes.
+python3 scripts/validate_all.py .
 python3 scripts/backup.py .
 ```
 
