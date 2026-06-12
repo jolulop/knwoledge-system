@@ -35,6 +35,8 @@ def main() -> int:
     print(f"New manifests: {summary['new_manifests']}")
     print(f"Updated manifests: {summary['updated_manifests']}")
     print(f"Duplicates: {summary['duplicates']}")
+    if summary["skipped"]:
+        print(f"Skipped (symlinks/escapes): {summary['skipped']}")
     print(f"Errors: {summary['errors']}")
     if summary["warnings"]:
         print(f"Warnings: {len(summary['warnings'])}")

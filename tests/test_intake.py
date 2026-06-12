@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -43,19 +44,70 @@ def test_scan_detects_exact_duplicate(tmp_path):
 def test_scan_is_idempotent(tmp_path):
     _setup_inbox(tmp_path)
     jobs_db = tmp_path / "db" / "jobs.sqlite"
+    manifests_dir = tmp_path / "raw" / "manifests"
+
     first = intake.scan_inbox(tmp_path, jobs_db=jobs_db)
+    discovered = {
+        sid: intake.load_manifest(manifests_dir, sid)["discovered_at"]
+        for sid in first["source_ids"]
+    }
+
     second = intake.scan_inbox(tmp_path, jobs_db=jobs_db)
 
     assert first["new_manifests"] == 2
     assert second["new_manifests"] == 0
     assert second["updated_manifests"] == 2
     assert second["unique_contents"] == 2
-    assert len(intake.list_manifests(tmp_path / "raw" / "manifests")) == 2
+    assert len(intake.list_manifests(manifests_dir)) == 2
 
-    # discovered_at is preserved across rescans; last_scanned_at refreshes.
-    sid = second["source_ids"][0]
-    m = intake.load_manifest(tmp_path / "raw" / "manifests", sid)
-    assert m["discovered_at"] == m["discovered_at"]  # stable field present
+    # discovered_at is set once at first intake and must survive every rescan.
+    for sid in second["source_ids"]:
+        assert intake.load_manifest(manifests_dir, sid)["discovered_at"] == discovered[sid]
+
+
+def test_symlink_escape_is_skipped(tmp_path):
+    inbox = tmp_path / "raw" / "inbox"
+    inbox.mkdir(parents=True)
+    (inbox / "real.md").write_text("real inbox content\n", encoding="utf-8")
+    outside = tmp_path / "outside-secret.txt"
+    outside.write_text("secret living outside the raw repository\n", encoding="utf-8")
+    (inbox / "escape.md").symlink_to(outside)
+
+    summary = intake.scan_inbox(tmp_path, jobs_db=tmp_path / "db" / "jobs.sqlite")
+
+    assert summary["files_found"] == 1  # only the real file is hashed
+    assert summary["skipped"] == 1
+    assert any(w["warning"] == "skipped_symlink" for w in summary["warnings"])
+    # The escaped file's path must never leak into a manifest.
+    blob = json.dumps(intake.list_manifests(tmp_path / "raw" / "manifests"))
+    assert "outside-secret" not in blob
+
+
+def test_manifest_sha_mismatch_is_rejected(tmp_path):
+    inbox = tmp_path / "raw" / "inbox"
+    inbox.mkdir(parents=True)
+    (inbox / "doc.md").write_text("authentic content\n", encoding="utf-8")
+    jobs_db = tmp_path / "db" / "jobs.sqlite"
+    manifests_dir = tmp_path / "raw" / "manifests"
+
+    first = intake.scan_inbox(tmp_path, jobs_db=jobs_db)
+    manifest_path = manifests_dir / f"{first['source_ids'][0]}.json"
+
+    # Corrupt the stored checksum so it no longer matches the file content.
+    corrupt = json.loads(manifest_path.read_text())
+    corrupt["sha256"] = "0" * 64
+    occ_before = len(corrupt["occurrences"])
+    manifest_path.write_text(json.dumps(corrupt))
+
+    second = intake.scan_inbox(tmp_path, jobs_db=jobs_db)
+
+    assert second["errors"] == 1
+    assert second["new_manifests"] == 0
+    assert second["updated_manifests"] == 0
+    # The mismatched manifest is left exactly as found, never merged into.
+    after = json.loads(manifest_path.read_text())
+    assert after["sha256"] == "0" * 64
+    assert len(after["occurrences"]) == occ_before
 
 
 def test_scan_does_not_modify_raw_files(tmp_path):

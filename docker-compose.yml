@@ -1,9 +1,12 @@
 services:
   app:
     build: .
-    command: uvicorn app.backend.main:app --host 0.0.0.0 --port 8000 --reload
+    # Reserved API port is 18000 (ADR-0005). The container listens on 0.0.0.0 (so the
+    # published port is reachable), but it is published only to host loopback, so the
+    # service is never exposed on LAN/public interfaces (Build Spec: local-only).
+    command: uvicorn app.backend.main:app --host 0.0.0.0 --port 18000 --reload
     ports:
-      - "8000:8000"
+      - "127.0.0.1:18000:18000"
     volumes:
       - .:/workspace
     working_dir: /workspace
@@ -15,7 +18,7 @@ services:
   qdrant:
     image: qdrant/qdrant:latest
     ports:
-      - "6333:6333"
+      - "127.0.0.1:6333:6333"
     volumes:
       - ./indexes/vector/qdrant:/qdrant/storage
     profiles: ["vector"]

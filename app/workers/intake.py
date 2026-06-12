@@ -58,12 +58,35 @@ def _is_ignorable(path: Path) -> bool:
     return name.endswith(_SKIP_SUFFIXES)
 
 
-def iter_inbox_files(inbox: Path) -> list[Path]:
-    """Recursively list real files in the inbox, skipping hidden/temp artifacts."""
+def _within(path: Path, root: Path) -> bool:
+    """True if path's real location stays inside root (defeats symlink escape)."""
+    try:
+        path.resolve().relative_to(root)
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def iter_inbox_files(inbox: Path) -> tuple[list[Path], list[Path]]:
+    """Return (safe_files, skipped).
+
+    Skips hidden/temp artifacts. Rejects symlinks and any path whose real location
+    escapes the inbox, so a link under raw/inbox can never cause hashing or
+    manifesting of files outside the raw repository (untrusted-data contract).
+    """
     if not inbox.exists():
-        return []
-    files = [p for p in inbox.rglob("*") if p.is_file() and not _is_ignorable(p)]
-    return sorted(files, key=lambda p: str(p).lower())
+        return [], []
+    inbox_real = inbox.resolve()
+    files: list[Path] = []
+    skipped: list[Path] = []
+    for path in sorted(inbox.rglob("*"), key=lambda p: str(p).lower()):
+        if not path.is_file() or _is_ignorable(path):
+            continue
+        if path.is_symlink() or not _within(path, inbox_real):
+            skipped.append(path)
+            continue
+        files.append(path)
+    return files, skipped
 
 
 def _rel(path: Path, root: Path) -> str:
@@ -189,8 +212,11 @@ def scan_inbox(
         )
 
     try:
-        files = iter_inbox_files(inbox)
+        files, skipped = iter_inbox_files(inbox)
         errors: list[dict[str, str]] = []
+        warnings: list[dict[str, str]] = []
+        for link in skipped:
+            warnings.append({"path": _rel(link, root), "warning": "skipped_symlink"})
         by_content: dict[str, list[dict[str, Any]]] = {}
         for path in files:
             try:
@@ -203,7 +229,6 @@ def scan_inbox(
 
         new_manifests = 0
         updated_manifests = 0
-        warnings: list[dict[str, str]] = []
         source_ids: list[str] = []
 
         for sha, observed in by_content.items():
@@ -215,6 +240,14 @@ def scan_inbox(
 
             if manifest_path.exists():
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                # Manifests are authoritative (ADR-0008): never merge into a record
+                # whose stored checksum disagrees with the scanned content.
+                if manifest.get("sha256") != sha:
+                    errors.append({
+                        "path": canonical_meta["relative_path"],
+                        "error": f"manifest sha256 mismatch for {source_id}; skipped",
+                    })
+                    continue
                 created = False
             else:
                 manifest = _new_manifest(
@@ -250,6 +283,7 @@ def scan_inbox(
             "new_manifests": new_manifests,
             "updated_manifests": updated_manifests,
             "duplicates": files_found - unique_contents,
+            "skipped": len(skipped),
             "errors": len(errors),
             "error_details": errors,
             "warnings": warnings,

@@ -13,24 +13,31 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from app.backend import db
 from app.backend.config import get_settings
+from app.backend.models import (
+    HealthResponse,
+    Job,
+    JobsResponse,
+    Source,
+    SourcesResponse,
+)
 from app.workers import intake
 
 settings = get_settings()
 app = FastAPI(title="Knowledge System", version=settings.app_version)
 
 
-@app.get("/health")
+@app.get("/health", response_model=HealthResponse)
 def health() -> dict[str, Any]:
     return {"status": "ok", "app": settings.app_name, "version": settings.app_version}
 
 
-@app.get("/sources")
+@app.get("/sources", response_model=SourcesResponse)
 def list_sources() -> dict[str, Any]:
     sources = intake.list_manifests(settings.manifests_dir)
     return {"count": len(sources), "sources": sources}
 
 
-@app.get("/sources/{source_id}")
+@app.get("/sources/{source_id}", response_model=Source)
 def get_source(source_id: str) -> dict[str, Any]:
     manifest = intake.load_manifest(settings.manifests_dir, source_id)
     if manifest is None:
@@ -38,7 +45,7 @@ def get_source(source_id: str) -> dict[str, Any]:
     return manifest
 
 
-@app.get("/jobs")
+@app.get("/jobs", response_model=JobsResponse)
 def list_jobs(limit: int = 100, status: str | None = None) -> dict[str, Any]:
     db.init_db(settings.jobs_db_path)
     conn = db.connect(settings.jobs_db_path)
@@ -49,7 +56,7 @@ def list_jobs(limit: int = 100, status: str | None = None) -> dict[str, Any]:
     return {"count": len(jobs), "jobs": jobs}
 
 
-@app.get("/jobs/{job_id}")
+@app.get("/jobs/{job_id}", response_model=Job)
 def get_job(job_id: str) -> dict[str, Any]:
     db.init_db(settings.jobs_db_path)
     conn = db.connect(settings.jobs_db_path)
