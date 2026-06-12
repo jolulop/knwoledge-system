@@ -16,3 +16,10 @@ extraction = ["pypdf>=4.0.0", "python-docx>=1.1.0", "beautifulsoup4>=4.12.0", "p
 
 [tool.ruff]
 line-length = 100
+
+[tool.ruff.lint.per-file-ignores]
+# These modules insert the repo root on sys.path before importing app.*,
+# so imports intentionally follow that bootstrap.
+"app/backend/main.py" = ["E402"]
+"scripts/*" = ["E402"]
+"tests/*" = ["E402"]
