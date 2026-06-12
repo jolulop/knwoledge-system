@@ -11,10 +11,13 @@ An original document, transcript, image, screenshot, HTML file, PDF, DOCX, sprea
 A deterministic identifier for a raw source derived from its content: `src_<first 16 hex characters of the SHA256>`. Because it is content-derived, byte-identical files share a single Source ID, which makes repeated intake scans idempotent.
 
 **Manifest**
-A JSON record at `raw/manifests/<source_id>.json` describing one unique raw source. There is one manifest per unique content, not per file. It holds the checksum, canonical file metadata, and an `occurrences[]` list. In Phase 1 the manifest files are the authoritative listing for the `/sources` endpoint and CLI.
+A JSON record at `raw/manifests/<source_id>.json` describing one unique raw source. There is one manifest per unique content, not per file. It holds the checksum, canonical file metadata, and an `occurrences[]` list. In Phase 1 and Phase 2 the manifest files are the authoritative local runtime listing for the `/sources` endpoint and CLI, but generated `*.json` manifests are not committed to git.
 
 **Occurrence**
 One observed file path for a given Source ID. Byte-identical copies of the same content are recorded as additional occurrences inside the one manifest rather than as separate manifests. A redundant copy is an exact (SHA256) duplicate and does not require human review.
+
+**Raw Path**
+The manifest may retain an absolute `raw_path` for local runtime operations where resolving the exact file matters. Portable references, API responses, wiki pages, and normalized artifacts should use repository-relative paths such as `relative_raw_path` and `occurrences[].relative_path`.
 
 **Normalized Document**
 A parsed representation of a raw source, usually Markdown or JSON, used for indexing, chunking, citation anchoring, and downstream processing. Normalized artifacts are content-keyed: each raw source's Markdown, chunks, tables, and extraction log live in per-source files named by its Source ID, mirroring the manifest model.
