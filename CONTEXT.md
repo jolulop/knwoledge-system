@@ -17,7 +17,16 @@ A JSON record at `raw/manifests/<source_id>.json` describing one unique raw sour
 One observed file path for a given Source ID. Byte-identical copies of the same content are recorded as additional occurrences inside the one manifest rather than as separate manifests. A redundant copy is an exact (SHA256) duplicate and does not require human review.
 
 **Normalized Document**
-A parsed representation of a raw source, usually Markdown or JSON, used for indexing, chunking, citation anchoring, and downstream processing.
+A parsed representation of a raw source, usually Markdown or JSON, used for indexing, chunking, citation anchoring, and downstream processing. Normalized artifacts are content-keyed: each raw source's Markdown, chunks, tables, and extraction log live in per-source files named by its Source ID, mirroring the manifest model.
+
+**Chunk**
+A contiguous span of a normalized document produced by heading-aware splitting, identified as `<source_id>::<ordinal>` and stored per source at `normalized/chunks/<source_id>.jsonl`. Each chunk carries citation anchors so downstream answers can cite verifiable evidence.
+
+**Citation Anchor**
+A mechanically derived pointer to where evidence lives in a source — heading/section path and character range (always), source page number (for paginated formats), or table/sheet reference. Anchors are drawn only from the accepted anchors in `policies/citation.yaml` and are never estimated or invented.
+
+**Extraction Log**
+A per-source diagnostic record at `normalized/extraction_logs/<source_id>.json` describing one extraction run: tool and version, character counts, warnings such as `needs_ocr`, and any error or skip reason. The manifest holds the summary extraction status; the extraction log holds the detail.
 
 **Wiki Page**
 A derived Markdown page used for human browsing and agent navigation. Wiki pages are generated or maintained from raw sources and normalized documents.
