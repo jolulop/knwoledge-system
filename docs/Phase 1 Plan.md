@@ -80,7 +80,9 @@ For Phase 1, files may remain in `raw/inbox/`. Moving them to `raw/permanent/` c
 
 ## 4. Manifest Schema
 
-Create one manifest per raw source.
+Create one manifest per **unique content** (not per file).
+
+> **Finalized in [ADR-0007](adr/0007-content-keyed-manifests-with-occurrences.md).** The schema below supersedes the original draft: `duplicate_of` is removed (a content-keyed manifest would only self-reference), every observed file path is recorded under `occurrences[]`, and inbox files default to `retention_class: unknown`.
 
 Recommended path:
 
@@ -103,12 +105,32 @@ Manifest fields:
   "created_at": "datetime",
   "modified_at": "datetime",
   "discovered_at": "datetime",
-  "ingestion_status": "new|queued|duplicate|error",
-  "duplicate_of": "string|null",
+  "last_seen_at": "datetime",
+  "last_scanned_at": "datetime",
+  "ingestion_status": "new|queued|error",
   "retention_class": "permanent|ephemeral|unknown",
+  "occurrences": [
+    {
+      "relative_path": "string",
+      "filename": "string",
+      "size_bytes": 0,
+      "modified_at": "datetime",
+      "first_seen_at": "datetime",
+      "last_seen_at": "datetime"
+    }
+  ],
   "notes": []
 }
 ```
+
+Field notes:
+
+- `source_id`, `created_at`, and `discovered_at` are set once at first intake and preserved across rescans.
+- `last_seen_at` / `last_scanned_at` are refreshed on every scan run.
+- `original_filename`, `raw_path`, and `relative_raw_path` describe the canonical (first-seen) file; all paths, including byte-identical copies, also appear in `occurrences[]`.
+- `ingestion_status` is normally `new` at the manifest level; the "duplicate" disposition belongs to a scan occurrence and the run summary, not to a manifest (see [ADR-0007](adr/0007-content-keyed-manifests-with-occurrences.md)).
+- `retention_class` defaults to `unknown` for files arriving in `raw/inbox/`.
+- `notes` carries per-source warnings such as `empty_file`.
 
 ---
 
@@ -184,12 +206,15 @@ Rule:
 If two files have the same SHA256 hash, they are exact duplicates.
 ```
 
-Behavior:
+Behavior (content-keyed model, see [ADR-0007](adr/0007-content-keyed-manifests-with-occurrences.md)):
 
 - Do not delete either file.
-- Mark later file as `duplicate` in manifest.
-- Set `duplicate_of` to the original `source_id`.
-- Create or update job status as `skipped` or `succeeded` with duplicate flag.
+- Do not create a second manifest for the duplicate.
+- Record the duplicate file's path as an additional entry in the existing manifest's `occurrences[]`.
+- Count the redundant copy in the scan run summary (`duplicates = files_found - unique_contents`).
+- Exact (SHA256) duplicates do not require human review.
+
+The per-run `intake_scan` job records the duplicate counts in its summary; Phase 1 does not create one job per file (see Section 5 and decision log).
 
 Near-duplicate and semantic duplicate detection are deferred.
 
