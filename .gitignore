@@ -6,6 +6,10 @@ node_modules/
 .DS_Store
 Thumbs.db
 backups/*.zip
+# Windows mark-of-the-web metadata (WSL)
+*:Zone.Identifier
+# Distributable docs archive (docs are tracked under docs/)
+knowledge-system-docs-*.zip
 indexes/vector/qdrant/
 # Uncomment only if raw files should not be committed.
 # raw/permanent/*
