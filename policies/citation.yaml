@@ -4,16 +4,27 @@ require_citations_for:
   - claim
   - synthesis
   - query_answer
+# Anchor fields a citation may use. The authoritative locator for a citation object
+# (ADR-0019/0020) is (source_id, char_start, char_end); chunk_id is advisory only.
 accepted_citation_anchors:
-  - raw_path
-  - source_page
+  - source_id
+  - char_start
+  - char_end
   - page
+  - page_end
   - section
-  - timestamp
-  - line_range
   - table_reference
   - sheet_reference
-  - image_id
+  - chunk_id        # advisory pointer only; recomputed, never trusted as identity
+  - line_range      # reserved (transcripts)
+  - timestamp       # reserved (audio/video transcripts)
+  - image_id        # reserved (image/caption sources)
+authoritative_anchor:
+  - source_id
+  - char_start
+  - char_end
+advisory_anchors:
+  - chunk_id
 when_no_source_found: "No source found in vault."
 forbidden:
   - invented_filenames

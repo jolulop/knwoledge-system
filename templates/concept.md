@@ -1,13 +1,19 @@
 ---
 type: concept
+concept_id: "{{concept_id}}"      # cpt_<sha256(normalized_canonical_name)[:16]>, frozen at creation (ADR-0021)
 title: "{{concept_name}}"
-status: stub
+aliases: []                       # synonyms / surface variants; drives dedup + Obsidian display (ADR-0017)
+status: candidate                 # candidate | active | deprecated_candidate | archived (ADR-0018/0022)
+review_status: none               # none | pending | approved | rejected | deferred
+generation_status: enriched       # deterministic | enriched | human_edited
 confidence: low
-sources: []
-claims: []
-related_concepts: []
+source_count: 0                   # count of INDEPENDENT sources; ≥2 auto-promotes (ADR-0018)
+derived_from: []                  # source_ids evidencing this concept
+related_concepts: []              # concept_ids
+claims: []                        # claim_ids
 created: "{{created_at}}"
 updated: "{{updated_at}}"
+last_compiled_at: "{{last_compiled_at}}"
 ---
 
 # {{concept_name}}
@@ -25,7 +31,7 @@ updated: "{{updated_at}}"
 
 ## Source Evidence
 
-- [[Sources/{{source_slug}}]] — {{evidence_summary}}
+- [[Sources/{{source_id}}]] — {{evidence_summary}}
 
 ## Related Claims
 
@@ -33,7 +39,7 @@ updated: "{{updated_at}}"
 
 ## Related Concepts
 
-- [[Concepts/{{related_concept}}]]
+- [[Concepts/{{related_concept_slug}}]]
 
 ## Open Questions
 
