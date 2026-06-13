@@ -54,23 +54,51 @@ def _within(path: Path, root: Path) -> bool:
         return False
 
 
-def iter_inbox_files(inbox: Path) -> tuple[list[Path], list[Path]]:
-    """Return (safe_files, skipped).
+def _saved_page_asset_dirs(inbox: Path) -> set[Path]:
+    """Resolved paths of browser "save page complete" companion dirs (``<name>_files``).
+
+    A directory named ``<stem>_files`` sitting next to a saved ``<stem>.htm(l)`` page
+    holds that page's downloaded assets (scripts, styles, images, helper fragments),
+    not standalone user sources. Treating each asset as its own source floods the
+    manifest store with noise, so files under such a directory are skipped at intake.
+    """
+    dirs: set[Path] = set()
+    for path in inbox.rglob("*"):
+        if not path.is_dir() or not path.name.endswith("_files"):
+            continue
+        stem = path.name[: -len("_files")].lower()
+        try:
+            siblings = {p.name.lower() for p in path.parent.iterdir() if p.is_file()}
+        except OSError:
+            continue
+        if f"{stem}.htm" in siblings or f"{stem}.html" in siblings:
+            dirs.add(path.resolve())
+    return dirs
+
+
+def iter_inbox_files(inbox: Path) -> tuple[list[Path], list[tuple[Path, str]]]:
+    """Return (safe_files, skipped) where skipped is a list of (path, reason).
 
     Skips hidden/temp artifacts. Rejects symlinks and any path whose real location
     escapes the inbox, so a link under raw/inbox can never cause hashing or
-    manifesting of files outside the raw repository (untrusted-data contract).
+    manifesting of files outside the raw repository (untrusted-data contract). Also
+    skips the asset files of saved web pages (``<name>_files/``), which are page
+    resources rather than sources.
     """
     if not inbox.exists():
         return [], []
     inbox_real = inbox.resolve()
+    asset_dirs = _saved_page_asset_dirs(inbox)
     files: list[Path] = []
-    skipped: list[Path] = []
+    skipped: list[tuple[Path, str]] = []
     for path in sorted(inbox.rglob("*"), key=lambda p: str(p).lower()):
         if not path.is_file() or _is_ignorable(path):
             continue
         if path.is_symlink() or not _within(path, inbox_real):
-            skipped.append(path)
+            skipped.append((path, "skipped_symlink"))
+            continue
+        if asset_dirs and asset_dirs.intersection(path.resolve().parents):
+            skipped.append((path, "saved_page_asset"))
             continue
         files.append(path)
     return files, skipped
@@ -179,8 +207,8 @@ def scan_inbox(
         files, skipped = iter_inbox_files(inbox)
         errors: list[dict[str, str]] = []
         warnings: list[dict[str, str]] = []
-        for link in skipped:
-            warnings.append({"path": _rel(link, root), "warning": "skipped_symlink"})
+        for skipped_path, reason in skipped:
+            warnings.append({"path": _rel(skipped_path, root), "warning": reason})
         by_content: dict[str, list[dict[str, Any]]] = {}
         for path in files:
             try:
@@ -245,6 +273,7 @@ def scan_inbox(
             "updated_manifests": updated_manifests,
             "duplicates": files_found - unique_contents,
             "skipped": len(skipped),
+            "skipped_assets": sum(1 for _, r in skipped if r == "saved_page_asset"),
             "errors": len(errors),
             "error_details": errors,
             "warnings": warnings,

@@ -110,6 +110,40 @@ def test_manifest_sha_mismatch_is_rejected(tmp_path):
     assert len(after["occurrences"]) == occ_before
 
 
+def test_saved_page_assets_are_skipped(tmp_path):
+    inbox = tmp_path / "raw" / "inbox"
+    assets = inbox / "Article_files"
+    assets.mkdir(parents=True)
+    (inbox / "Article.html").write_text(
+        "<html><body><p>real page</p></body></html>", encoding="utf-8"
+    )
+    (assets / "app.js").write_text("console.log(1)\n", encoding="utf-8")
+    (assets / "style.css").write_text("body{}\n", encoding="utf-8")
+    (assets / "fragment.htm").write_text("<html><body></body></html>", encoding="utf-8")
+
+    summary = intake.scan_inbox(tmp_path, jobs_db=tmp_path / "db" / "jobs.sqlite")
+
+    # Only the page itself is manifested; the _files/ assets are skipped as noise.
+    records = manifests.list_manifests(tmp_path / "raw" / "manifests")
+    assert len(records) == 1
+    assert records[0]["original_filename"] == "Article.html"
+    assert summary["skipped_assets"] == 3
+    assert summary["skipped"] == 3
+    assert {w["warning"] for w in summary["warnings"]} == {"saved_page_asset"}
+
+
+def test_orphan_files_dir_without_page_is_not_skipped(tmp_path):
+    # A *_files dir with no sibling HTML page is ordinary content, not a saved page.
+    inbox = tmp_path / "raw" / "inbox"
+    loose = inbox / "data_files"
+    loose.mkdir(parents=True)
+    (loose / "report.md").write_text("# real content\n", encoding="utf-8")
+
+    summary = intake.scan_inbox(tmp_path, jobs_db=tmp_path / "db" / "jobs.sqlite")
+    assert summary["files_found"] == 1
+    assert summary["skipped_assets"] == 0
+
+
 def test_scan_does_not_modify_raw_files(tmp_path):
     inbox = _setup_inbox(tmp_path)
     before = {p.name: p.read_bytes() for p in inbox.iterdir()}

@@ -48,6 +48,17 @@ class Settings:
     manifests_dir: Path
     db_dir: Path
     jobs_db_path: Path
+    # Phase 2 normalized layer (ADR-0011): one set of files per source id.
+    normalized_dir: Path
+    markdown_dir: Path
+    chunks_dir: Path
+    tables_dir: Path
+    extraction_logs_dir: Path
+    # Phase 2 extraction safety + chunking limits (ADR-0010 / Phase 2 Plan §13).
+    extract_max_file_mb: int
+    extract_timeout_s: int
+    chunk_target_chars: int
+    chunk_max_chars: int
     app_host: str
     app_port: int
     app_name: str = "knowledge-system"
@@ -61,12 +72,22 @@ def get_settings(root: Path | None = None) -> Settings:
     def cfg(key: str, default: str) -> str:
         return os.environ.get(key) or file_env.get(key) or default
 
+    normalized = resolved / "normalized"
     return Settings(
         root=resolved,
         inbox_dir=resolved / "raw" / "inbox",
         manifests_dir=resolved / "raw" / "manifests",
         db_dir=resolved / "db",
         jobs_db_path=resolved / "db" / "jobs.sqlite",
+        normalized_dir=normalized,
+        markdown_dir=normalized / "markdown",
+        chunks_dir=normalized / "chunks",
+        tables_dir=normalized / "tables",
+        extraction_logs_dir=normalized / "extraction_logs",
+        extract_max_file_mb=int(cfg("EXTRACT_MAX_FILE_MB", "50")),
+        extract_timeout_s=int(cfg("EXTRACT_TIMEOUT_S", "120")),
+        chunk_target_chars=int(cfg("EXTRACT_CHUNK_TARGET_CHARS", "1000")),
+        chunk_max_chars=int(cfg("EXTRACT_CHUNK_MAX_CHARS", "2000")),
         app_host=cfg("APP_HOST", "127.0.0.1"),
         app_port=int(cfg("APP_PORT", "18000")),
     )

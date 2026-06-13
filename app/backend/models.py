@@ -28,6 +28,14 @@ class Occurrence(BaseModel):
     last_seen_at: str
 
 
+class NormalizedPaths(BaseModel):
+    # All repository-relative (ADR-0009: never expose absolute paths).
+    markdown_path: str
+    chunks_path: str
+    tables_dir: str
+    extraction_log_path: str
+
+
 class Source(BaseModel):
     # No raw_path: absolute filesystem paths are never returned over the API.
     source_id: str
@@ -46,11 +54,48 @@ class Source(BaseModel):
     retention_class: str
     occurrences: list[Occurrence] = []
     notes: list[str] = []
+    # Phase 2 extraction state (ADR-0011). Absent on not-yet-extracted Phase 1
+    # manifests, so every field is optional with a Phase 1-compatible default.
+    normalized: NormalizedPaths | None = None
+    extracted_at: str | None = None
+    extraction_tool: str | None = None
+    extraction_tool_version: str | None = None
+    text_char_count: int = 0
+    chunk_count: int = 0
+    page_count: int | None = None
 
 
 class SourcesResponse(BaseModel):
     count: int
     sources: list[Source]
+
+
+class Chunk(BaseModel):
+    chunk_id: str
+    source_id: str
+    ordinal: int
+    kind: str
+    heading_path: list[str] = []
+    section: str | None = None
+    text: str
+    char_start: int
+    char_end: int
+    page: int | None = None
+    page_end: int | None = None
+    table_reference: str | None = None
+    sheet_reference: str | None = None
+
+
+class ChunksResponse(BaseModel):
+    source_id: str
+    count: int
+    chunks: list[Chunk]
+
+
+class NormalizedResponse(BaseModel):
+    source_id: str
+    markdown_path: str
+    content: str
 
 
 class Job(BaseModel):

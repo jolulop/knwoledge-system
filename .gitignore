@@ -18,6 +18,13 @@ db/jobs.sqlite
 # content by scripts/reindex_keyword.py and scripts/reindex_vector.py.
 db/metadata.sqlite
 normalized/chunks/chunks.jsonl
+# Phase 2 normalized layer is regenerable local runtime state (ADR-0011): the
+# per-source markdown, chunks, tables, and extraction logs are rebuilt from raw
+# sources by scripts/extract_sources.py and are not committed. Keep the .gitkeeps.
+normalized/markdown/*.md
+normalized/chunks/*.jsonl
+normalized/tables/*/
+normalized/extraction_logs/*.json
 # Inbox is transient staging for scans; keep its contents out of git.
 raw/inbox/*
 !raw/inbox/.gitkeep

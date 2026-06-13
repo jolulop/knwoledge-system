@@ -11,7 +11,9 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-JOB_TYPES = frozenset({"intake_scan", "manifest_create", "duplicate_check"})
+JOB_TYPES = frozenset(
+    {"intake_scan", "manifest_create", "duplicate_check", "extract"}
+)
 JOB_STATUSES = frozenset(
     {"pending", "running", "succeeded", "failed", "partial", "skipped"}
 )
@@ -67,6 +69,10 @@ def insert_job(
     warnings: list[Any] | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> None:
+    if job_type not in JOB_TYPES:
+        raise ValueError(f"unknown job_type {job_type!r}; allowed: {sorted(JOB_TYPES)}")
+    if status not in JOB_STATUSES:
+        raise ValueError(f"unknown job status {status!r}; allowed: {sorted(JOB_STATUSES)}")
     conn.execute(
         """INSERT INTO jobs (
             job_id, job_type, status, source_id, input_path, output_path,
@@ -86,6 +92,10 @@ def update_job(conn: sqlite3.Connection, job_id: str, **fields: Any) -> None:
     """Update a job. The keys `warnings` and `metadata` are JSON-encoded for you."""
     if not fields:
         return
+    if "status" in fields and fields["status"] not in JOB_STATUSES:
+        raise ValueError(
+            f"unknown job status {fields['status']!r}; allowed: {sorted(JOB_STATUSES)}"
+        )
     assignments: list[str] = []
     values: list[Any] = []
     for key, value in fields.items():

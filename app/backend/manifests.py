@@ -62,6 +62,42 @@ def list_manifests(manifests_dir: Path) -> list[dict[str, Any]]:
     return out
 
 
+def normalized_paths(source_id: str) -> dict[str, str]:
+    """Repository-relative normalized-layer paths for a source (ADR-0011)."""
+    return {
+        "markdown_path": f"normalized/markdown/{source_id}.md",
+        "chunks_path": f"normalized/chunks/{source_id}.jsonl",
+        "tables_dir": f"normalized/tables/{source_id}",
+        "extraction_log_path": f"normalized/extraction_logs/{source_id}.json",
+    }
+
+
+def apply_extraction_state(
+    manifest: dict[str, Any],
+    *,
+    ingestion_status: str,
+    extracted_at: str | None,
+    extraction_tool: str | None,
+    extraction_tool_version: str | None,
+    text_char_count: int,
+    chunk_count: int,
+    page_count: int | None,
+) -> None:
+    """Set Phase 2 extraction fields on a manifest in place (Phase 2 Plan §4).
+
+    Phase 1 fields (occurrences, sha256, retention_class, …) are left untouched;
+    ``retention_class`` deliberately stays whatever intake set (``unknown`` in Phase 2).
+    """
+    manifest["ingestion_status"] = ingestion_status
+    manifest["normalized"] = normalized_paths(manifest["source_id"])
+    manifest["extracted_at"] = extracted_at
+    manifest["extraction_tool"] = extraction_tool
+    manifest["extraction_tool_version"] = extraction_tool_version
+    manifest["text_char_count"] = text_char_count
+    manifest["chunk_count"] = chunk_count
+    manifest["page_count"] = page_count
+
+
 def save_manifest(manifests_dir: Path, manifest: dict[str, Any]) -> Path:
     """Write a manifest with the canonical formatting.
 

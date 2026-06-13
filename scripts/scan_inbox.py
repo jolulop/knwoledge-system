@@ -36,7 +36,9 @@ def main() -> int:
     print(f"Updated manifests: {summary['updated_manifests']}")
     print(f"Duplicates: {summary['duplicates']}")
     if summary["skipped"]:
-        print(f"Skipped (symlinks/escapes): {summary['skipped']}")
+        print(f"Skipped (non-source files): {summary['skipped']}")
+        if summary.get("skipped_assets"):
+            print(f"  of which saved-page assets: {summary['skipped_assets']}")
     print(f"Errors: {summary['errors']}")
     if summary["warnings"]:
         print(f"Warnings: {len(summary['warnings'])}")

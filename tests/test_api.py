@@ -81,3 +81,53 @@ def test_jobs_endpoints(client, tmp_path):
     assert body["status"] == "succeeded"
 
     assert client.get("/jobs/job_missing").status_code == 404
+
+
+def test_extract_endpoint_then_serve_chunks_and_normalized(client, tmp_path):
+    # Markdown needs no extraction extras, so this exercises the full path in core.
+    _seed(tmp_path, "doc.md", "# Title\n\nA paragraph of real body text.\n")
+    client.post("/jobs/intake-scan")
+
+    extracted = client.post("/jobs/extract")
+    assert extracted.status_code == 200
+    assert extracted.json()["extracted"] == 1
+
+    sid = client.get("/sources").json()["sources"][0]["source_id"]
+
+    chunks = client.get(f"/sources/{sid}/chunks")
+    assert chunks.status_code == 200
+    body = chunks.json()
+    assert body["source_id"] == sid
+    assert body["count"] >= 1
+
+    normalized = client.get(f"/sources/{sid}/normalized")
+    assert normalized.status_code == 200
+    assert "Title" in normalized.json()["content"]
+    assert normalized.json()["markdown_path"] == f"normalized/markdown/{sid}.md"
+
+
+def test_chunks_and_normalized_404_before_extraction(client, tmp_path):
+    _seed(tmp_path, "doc.md", "# T\n\nbody text here.\n")
+    client.post("/jobs/intake-scan")
+    sid = client.get("/sources").json()["sources"][0]["source_id"]
+
+    # Manifested but not yet extracted → gated on ingestion_status, not file existence.
+    assert client.get(f"/sources/{sid}/chunks").status_code == 404
+    assert client.get(f"/sources/{sid}/normalized").status_code == 404
+    # Unknown source id.
+    assert client.get("/sources/src_missing/chunks").status_code == 404
+
+
+def test_assert_safe_bind():
+    from app.backend.main import assert_safe_bind
+
+    # Loopback is always fine; explicit override allows a non-loopback bind.
+    assert_safe_bind("127.0.0.1", False)
+    assert_safe_bind("localhost", False)
+    assert_safe_bind("::1", False)
+    assert_safe_bind("0.0.0.0", True)
+    # Non-loopback without the override must refuse startup.
+    with pytest.raises(RuntimeError):
+        assert_safe_bind("0.0.0.0", False)
+    with pytest.raises(RuntimeError):
+        assert_safe_bind("192.168.1.10", False)
