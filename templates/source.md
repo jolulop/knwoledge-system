@@ -16,7 +16,7 @@ summary_status: stub
 generation_status: deterministic
 created: "{{created_at}}"
 ingested: "{{ingested_at}}"
-last_compiled_at: "{{last_compiled_at}}"
+input_fingerprint: "{{input_fingerprint}}"
 tags: []
 concepts: []
 entities: []

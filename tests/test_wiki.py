@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 import sys
 from pathlib import Path
 
@@ -84,7 +83,7 @@ def test_idempotent_skip_and_force(tmp_path):
     assert forced["skipped_unchanged"] == 0
 
 
-def test_deterministic_ignoring_compile_timestamp(tmp_path):
+def test_pages_are_byte_stable(tmp_path):
     _build(tmp_path)
     sid = _status(tmp_path, "doc.md")["source_id"]
     page = tmp_path / "wiki" / "Sources" / f"{sid}.md"
@@ -93,11 +92,9 @@ def test_deterministic_ignoring_compile_timestamp(tmp_path):
     first = page.read_text(encoding="utf-8")
     _gen(tmp_path, force=True)
     second = page.read_text(encoding="utf-8")
-
-    def strip(t: str) -> str:
-        return re.sub(r"^last_compiled_at:.*$", "", t, flags=re.M)
-
-    assert strip(first) == strip(second)
+    # Deterministic: no wall-clock timestamp, so force-regen is byte-identical (ADR-0023).
+    assert first == second
+    assert "last_compiled_at" not in first
 
 
 def test_generate_job_recorded_and_log_appended(tmp_path):

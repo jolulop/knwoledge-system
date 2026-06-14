@@ -11,8 +11,6 @@ if str(ROOT) not in sys.path:
 
 from app.workers import wiki_render
 
-NOW = "2026-01-02T03:04:05+00:00"
-
 
 def _manifest(**over):
     base = {
@@ -73,7 +71,7 @@ def test_render_source_page_is_clean_and_complete():
     template = (ROOT / "templates" / "source.md").read_text(encoding="utf-8")
     md = "# Title\n\nA sufficiently long opening paragraph of real prose content here.\n"
     page = wiki_render.render_source_page(
-        template, _manifest(), md, summary_max=320, summary_min=40, now=NOW,
+        template, _manifest(), md, summary_max=320, summary_min=40,
     )
     # No unrendered tokens, no absolute paths, relative path present.
     assert "{{" not in page and "}}" not in page
@@ -82,17 +80,32 @@ def test_render_source_page_is_clean_and_complete():
     assert not any(ln.startswith("raw_path:") for ln in page.splitlines())
     assert "relative_raw_path:" in page
     assert "> [!summary] Extractive excerpt" in page
+    # Deterministic: no wall-clock timestamp, but a content fingerprint (ADR-0023).
+    assert "last_compiled_at" not in page
     fm = wiki_render.parse_frontmatter(page)
     assert fm["source_id"] == "src_0123456789abcdef"
     assert fm["status"] == "active"
     assert fm["ingestion_status"] == "extracted"
     assert fm["summary_status"] == "stub"
     assert fm["generation_status"] == "deterministic"
+    assert len(fm["input_fingerprint"]) == 16
 
 
-def test_render_is_deterministic_for_fixed_now():
+def test_render_is_deterministic():
     template = (ROOT / "templates" / "source.md").read_text(encoding="utf-8")
     md = "# T\n\nStable body paragraph long enough for an extractive summary stub.\n"
-    a = wiki_render.render_source_page(template, _manifest(), md, summary_max=320, summary_min=40, now=NOW)
-    b = wiki_render.render_source_page(template, _manifest(), md, summary_max=320, summary_min=40, now=NOW)
+    a = wiki_render.render_source_page(template, _manifest(), md, summary_max=320, summary_min=40)
+    b = wiki_render.render_source_page(template, _manifest(), md, summary_max=320, summary_min=40)
     assert a == b
+
+
+def test_fingerprint_changes_when_summary_config_changes():
+    template = (ROOT / "templates" / "source.md").read_text(encoding="utf-8")
+    md = "# T\n\n" + ("A long opening paragraph of real prose content. " * 20) + "\n"
+    a = wiki_render.parse_frontmatter(
+        wiki_render.render_source_page(template, _manifest(), md, summary_max=320, summary_min=40)
+    )["input_fingerprint"]
+    b = wiki_render.parse_frontmatter(
+        wiki_render.render_source_page(template, _manifest(), md, summary_max=80, summary_min=40)
+    )["input_fingerprint"]
+    assert a != b

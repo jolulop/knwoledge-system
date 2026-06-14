@@ -16,8 +16,12 @@ generation_status: deterministic # how the content was produced: deterministic |
 confidence:        low           # low | medium | high  (semantic nodes only)
 source_count:      0             # count of independent sources (concepts/entities/synthesis; see ADR-0018)
 derived_from:      []            # provenance: list of source_ids this page is derived from
-last_compiled_at:  null          # timestamp of the last (re)generation
 ```
+
+Deterministic pages (Source pages, ADR-0016) do **not** carry a wall-clock
+`last_compiled_at`; it is superseded by an `input_fingerprint` so the page stays
+byte-stable and freshness is content-keyed (ADR-0023). Non-deterministic semantic pages
+introduced later may reintroduce a compile timestamp if useful.
 
 Source pages additionally carry `ingestion_status` **mirrored read-only from the
 manifest** (the authoritative copy stays on the manifest, ADR-0011) so the two axes are

@@ -43,6 +43,9 @@ A derived Markdown page used for human browsing and agent navigation. Wiki pages
 **Source Page**
 A wiki page representing one raw source, stored content-keyed at `wiki/Sources/<source_id>.md` with the human-readable title carried in frontmatter (ADR-0015). In the Phase 3 deterministic backbone a Source page asserts only mechanically-derived facts; sections that require an LLM (tags, concepts, entities, claims, etc.) are rendered as `_Pending semantic enrichment_` placeholders until a later phase fills them (ADR-0013, ADR-0016).
 
+**Input Fingerprint**
+A hash recorded in a deterministic page's frontmatter (`input_fingerprint`) covering every input that determines the page's bytes — schema version, template, the source's normalized Markdown, manifest fields, and config. Regeneration skips a page only when the freshly rendered candidate's fingerprint matches the stored one, so template/config/extractor changes are picked up without `--force`. Deterministic artifacts (Source pages, `index.md`) carry no wall-clock timestamp; freshness lives in the fingerprint, file mtime, `log.md`, and the job record (ADR-0023).
+
 **Summary Stub**
 A deterministic, extractive `> [!summary]` callout written without an LLM — typically the first meaningful paragraph of the normalized Markdown (or a structural fallback when text is too sparse). It is marked `summary_status: stub` in frontmatter; a later phase replaces it with an LLM summary and flips the flag to `enriched`. The maintenance linter treats a stub as expected, not as summary rot (ADR-0016).
 

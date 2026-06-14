@@ -24,6 +24,7 @@ _EXTRACTED = {"extracted", "partial"}
 _REQUIRED_FIELDS = (
     "type", "source_id", "title", "relative_raw_path", "normalized_path",
     "sha256", "status", "ingestion_status", "summary_status", "generation_status",
+    "input_fingerprint",
 )
 _WIKILINK = re.compile(r"\[\[([^\]]+)\]\]")
 _ABSOLUTE = re.compile(r':\s*"?/')  # a frontmatter value beginning with "/"

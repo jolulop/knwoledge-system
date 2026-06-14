@@ -11,6 +11,7 @@ Also exposes a tiny frontmatter parser reused by the API and the wiki validator.
 """
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Any
 
@@ -18,6 +19,10 @@ _TOKEN = re.compile(r"\{\{(\w+)\}\}")
 _FRONTMATTER = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 _WS = re.compile(r"\s+")
 _SENTENCE = re.compile(r"[.!?]")
+_FP_LINE = re.compile(r"(?m)^input_fingerprint:.*\n?")
+
+# Bump to force a global Source-page rebuild even when rendered bytes are unchanged.
+SOURCE_SCHEMA_VERSION = "wiki-source-v1"
 
 
 # --- frontmatter (dependency-free, project subset) --------------------------
@@ -102,7 +107,7 @@ def summary_excerpt(
 
 def build_source_values(
     manifest: dict[str, Any], normalized_markdown: str, *,
-    summary_max: int, summary_min: int, now: str,
+    summary_max: int, summary_min: int,
 ) -> dict[str, Any]:
     sid = manifest["source_id"]
     title = title_from_filename(manifest.get("original_filename", sid))
@@ -122,7 +127,6 @@ def build_source_values(
         "ingestion_status": manifest.get("ingestion_status", ""),
         "created_at": manifest.get("created_at", ""),
         "ingested_at": manifest.get("discovered_at", ""),
-        "last_compiled_at": now,
         "extractive_excerpt": summary_excerpt(
             normalized_markdown, title, page_count, chunk_count,
             max_chars=summary_max, min_chars=summary_min,
@@ -131,12 +135,28 @@ def build_source_values(
     }
 
 
+def _fingerprint(page_without_fp: str) -> str:
+    h = hashlib.sha256()
+    h.update(SOURCE_SCHEMA_VERSION.encode("utf-8"))
+    h.update(b"\0")
+    h.update(page_without_fp.encode("utf-8"))
+    return h.hexdigest()[:16]
+
+
 def render_source_page(
     template: str, manifest: dict[str, Any], normalized_markdown: str, *,
-    summary_max: int, summary_min: int, now: str,
+    summary_max: int, summary_min: int,
 ) -> str:
+    """Render a deterministic Source page, stamping its input_fingerprint.
+
+    The fingerprint hashes the page's own rendered content (with the fingerprint line
+    excluded) plus a schema version, so it transitively covers the template, the
+    normalized text, the manifest fields, and the summary config — every input that
+    determines the bytes (ADR-0023). No wall-clock value is embedded.
+    """
     values = build_source_values(
-        manifest, normalized_markdown,
-        summary_max=summary_max, summary_min=summary_min, now=now,
+        manifest, normalized_markdown, summary_max=summary_max, summary_min=summary_min,
     )
-    return render_template(template, values)
+    draft = render_template(template, {**values, "input_fingerprint": ""})
+    fingerprint = _fingerprint(_FP_LINE.sub("", draft))
+    return draft.replace('input_fingerprint: ""', f'input_fingerprint: "{fingerprint}"', 1)

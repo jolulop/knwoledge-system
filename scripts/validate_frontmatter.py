@@ -15,7 +15,7 @@ REQUIRED_BY_TYPE = {
     "source": [
         "type", "source_id", "title", "relative_raw_path", "normalized_path",
         "sha256", "file_type", "status", "ingestion_status", "summary_status",
-        "generation_status",
+        "generation_status", "input_fingerprint",
     ],
     "concept": ["type", "concept_id", "title", "status", "confidence"],
     "claim": ["type", "claim_id", "status", "confidence"],

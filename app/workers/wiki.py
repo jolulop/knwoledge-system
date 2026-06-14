@@ -26,17 +26,6 @@ from app.workers import wiki_render
 _GENERATED_STATUSES = {"extracted", "partial"}
 
 
-def _needs_generation(manifest: dict[str, Any], page_path: Path) -> bool:
-    """True unless an existing page already reflects this manifest's sha + status."""
-    if not page_path.exists():
-        return True
-    fm = wiki_render.parse_frontmatter(page_path.read_text(encoding="utf-8"))
-    return (
-        fm.get("sha256") != manifest.get("sha256")
-        or fm.get("ingestion_status") != manifest.get("ingestion_status")
-    )
-
-
 def _append_log(wiki_dir: Path, now: str, summary: dict[str, Any]) -> None:
     log_path = wiki_dir / "log.md"
     if not log_path.exists():
@@ -121,22 +110,30 @@ def generate_wiki(
                 continue
             considered += 1
             page_path = sources_dir / f"{source_id}.md"
-            if not force and not _needs_generation(manifest, page_path):
-                skipped_unchanged += 1
-                continue
             try:
                 md_path = markdown_dir / f"{source_id}.md"
                 normalized_markdown = (
                     md_path.read_text(encoding="utf-8") if md_path.exists() else ""
                 )
-                page = wiki_render.render_source_page(
+                candidate = wiki_render.render_source_page(
                     template, manifest, normalized_markdown,
-                    summary_max=summary_max, summary_min=summary_min, now=now,
+                    summary_max=summary_max, summary_min=summary_min,
                 )
-                page_path.write_text(page, encoding="utf-8")
-                generated += 1
             except Exception as exc:  # one page's failure must not abort the run
                 errors.append({"source_id": source_id, "error": f"{type(exc).__name__}: {exc}"})
+                continue
+
+            # Idempotent: skip when the rendered page is unchanged (input fingerprint).
+            if not force and page_path.exists():
+                existing_fp = wiki_render.parse_frontmatter(
+                    page_path.read_text(encoding="utf-8")
+                ).get("input_fingerprint")
+                candidate_fp = wiki_render.parse_frontmatter(candidate).get("input_fingerprint")
+                if existing_fp and existing_fp == candidate_fp:
+                    skipped_unchanged += 1
+                    continue
+            page_path.write_text(candidate, encoding="utf-8")
+            generated += 1
 
         summary: dict[str, Any] = {
             "job_id": job_id,

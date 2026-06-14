@@ -38,7 +38,7 @@ def _setup(tmp: Path, *, status: str = "extracted") -> dict:
     (tmp / "raw" / "manifests" / f"{SID}.json").write_text(json.dumps(manifest), encoding="utf-8")
     page = wiki_render.render_source_page(
         TEMPLATE, manifest, "A sufficiently long opening paragraph of real prose here.",
-        summary_max=320, summary_min=40, now=NOW,
+        summary_max=320, summary_min=40,
     )
     (tmp / "wiki" / "Sources" / f"{SID}.md").write_text(page, encoding="utf-8")
     return manifest

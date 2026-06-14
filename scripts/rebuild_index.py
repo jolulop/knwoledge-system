@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import re
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -110,14 +109,12 @@ def collect_pages(wiki_root: Path) -> dict[str, list[dict[str, Any]]]:
 
 
 def render_index(sections: dict[str, list[dict[str, Any]]]) -> str:
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    # Deterministic: a pure function of the wiki pages, no wall-clock (ADR-0023).
     lines: list[str] = [
         "# Index",
         "",
         "> [!summary]",
         "> Auto-generated navigation index for the wiki. Do not edit manually; update source pages and run `scripts/rebuild_index.py` instead.",
-        "",
-        f"Generated: {now}",
         "",
         "## Navigation Counts",
         "",

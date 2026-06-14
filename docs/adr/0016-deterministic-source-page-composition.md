@@ -32,9 +32,11 @@ shape is stable across phases, and fills it deterministically:
   carried in both frontmatter and body was a portability/citation contradiction).
   Deterministic frontmatter fields are: `source_id`, `title`, `aliases`,
   `relative_raw_path`, `normalized_path`, `sha256`, `file_type`, `language`,
-  `page_count`, `chunk_count`, `summary_status`, plus the shared lifecycle fields of
-  ADR-0022 (`status`, `ingestion_status` mirrored read-only from the manifest,
-  `generation_status`, `created`, `ingested`, `last_compiled_at`).
+  `page_count`, `chunk_count`, `summary_status`, an `input_fingerprint` for
+  deterministic freshness (ADR-0023), plus the shared lifecycle fields of ADR-0022
+  (`status`, `ingestion_status` mirrored read-only from the manifest,
+  `generation_status`, `created`, `ingested`). Deterministic Source pages carry no
+  wall-clock timestamp (ADR-0023).
 
 - **Backbone link invariant.** The Phase 3 backbone records **no semantic backlinks**.
   Bidirectional linking between sources and concepts/entities/claims (Build Spec §3.5)
