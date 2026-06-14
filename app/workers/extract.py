@@ -22,6 +22,7 @@ import threading
 import uuid
 import zipfile
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -305,11 +306,33 @@ def _extract_one(
 # --- run --------------------------------------------------------------------
 
 
-def _already_extracted(manifest: dict[str, Any], markdown_dir: Path) -> bool:
+def _iso_mtime(path: Path) -> str:
+    return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat(timespec="seconds")
+
+
+def _already_extracted(manifest: dict[str, Any], root: Path, markdown_dir: Path) -> bool:
+    """True only when a prior extraction is on disk AND the raw file has not drifted.
+
+    The skip stays cheap (no re-hash) but is gated on the raw file's size/mtime still
+    matching the manifest. A drifted (or missing) raw file is NOT skipped, so
+    _extract_one re-hashes it and surfaces a checksum_mismatch instead of silently
+    generating from stale normalized evidence (ADR-0024).
+    """
     if manifest.get("ingestion_status") not in {"extracted", "partial"}:
         return False
-    # Only skip when the normalized output is actually on disk.
-    return (markdown_dir / f"{manifest['source_id']}.md").exists()
+    if not (markdown_dir / f"{manifest['source_id']}.md").exists():
+        return False
+    raw_file = (root / manifest.get("relative_raw_path", "")).resolve()
+    if not raw_file.is_file():
+        return False
+    try:
+        if raw_file.stat().st_size != manifest.get("size_bytes"):
+            return False
+        if _iso_mtime(raw_file) != manifest.get("modified_at"):
+            return False
+    except OSError:
+        return False
+    return True
 
 
 def extract_sources(
@@ -371,7 +394,7 @@ def extract_sources(
                 counts["skipped_unsupported"] += 1
                 continue
             considered += 1
-            if not force and _already_extracted(manifest, dirs["markdown"]):
+            if not force and _already_extracted(manifest, root, dirs["markdown"]):
                 counts["skipped_unchanged"] += 1
                 continue
 

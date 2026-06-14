@@ -6,6 +6,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+SCRIPTS = ROOT / "scripts"
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+
+import rebuild_index  # noqa: E402
 
 from app.backend import db, manifests
 from app.workers import extract, intake, wiki
@@ -95,6 +100,33 @@ def test_pages_are_byte_stable(tmp_path):
     # Deterministic: no wall-clock timestamp, so force-regen is byte-identical (ADR-0023).
     assert first == second
     assert "last_compiled_at" not in first
+
+
+def test_regenerates_when_normalized_text_changes(tmp_path):
+    _build(tmp_path)
+    sid = _status(tmp_path, "doc.md")["source_id"]
+    _gen(tmp_path)
+
+    # Change the normalized text (affects the extractive summary) without touching the
+    # manifest sha256 / ingestion_status. Fingerprint freshness must catch it.
+    md = tmp_path / "normalized" / "markdown" / f"{sid}.md"
+    md.write_text(
+        "# T\n\nA completely different opening paragraph, long enough to summarize now.\n",
+        encoding="utf-8",
+    )
+    summary = _gen(tmp_path)  # no force
+    assert summary["generated"] == 1  # the changed source regenerated...
+    assert summary["skipped_unchanged"] == 1  # ...the unchanged one skipped
+
+
+def test_rebuild_index_is_deterministic_and_untimed(tmp_path):
+    _build(tmp_path)
+    _gen(tmp_path)
+    wiki_root = tmp_path / "wiki"
+    a = rebuild_index.render_index(rebuild_index.collect_pages(wiki_root))
+    b = rebuild_index.render_index(rebuild_index.collect_pages(wiki_root))
+    assert a == b
+    assert "Generated:" not in a
 
 
 def test_generate_job_recorded_and_log_appended(tmp_path):

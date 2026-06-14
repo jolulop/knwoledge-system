@@ -1,7 +1,7 @@
 # Phase 3 Plan
 ## Filing-Cabinet Wiki Layer — Deterministic Source-Page Backbone
 
-**Status:** Planned
+**Status:** Implemented (commits 8579c8a, f999554, 3d83e3f; refinements per ADR-0023/0024)
 **Depends on:** Phase 2 (Extraction and Normalization) complete
 **Repository root:** `~/code/knowledge-system`
 **Goal:** Generate the wiki Source-page layer and its supporting machinery

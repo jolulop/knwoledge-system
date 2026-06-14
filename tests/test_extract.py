@@ -234,6 +234,26 @@ def test_missing_dependency_surfaces_as_error(tmp_path, monkeypatch):
     assert summary["error_details"][0]["skip_reason"] == "missing_dependency"
 
 
+def test_mutated_raw_after_extraction_is_not_silently_skipped(tmp_path):
+    import time
+
+    inbox = tmp_path / "raw" / "inbox"
+    inbox.mkdir(parents=True)
+    (inbox / "doc.md").write_text("original content for extraction\n", encoding="utf-8")
+    intake.scan_inbox(tmp_path, jobs_db=tmp_path / "db" / "jobs.sqlite")
+    assert _run(tmp_path)["extracted"] == 1
+
+    # Mutate the raw bytes in place without re-scanning (size + mtime drift).
+    time.sleep(0.01)
+    (inbox / "doc.md").write_text("MUTATED content of a clearly different length\n", encoding="utf-8")
+    second = _run(tmp_path)  # no force
+
+    # The drifted source is re-verified, not skipped: surfaced as checksum_mismatch.
+    assert second["skipped_unchanged"] == 0
+    assert second["errors"] == 1
+    assert second["error_details"][0]["skip_reason"] == "checksum_mismatch"
+
+
 def test_raw_files_are_not_modified(tmp_path):
     _build_project(tmp_path)
     inbox = tmp_path / "raw" / "inbox"

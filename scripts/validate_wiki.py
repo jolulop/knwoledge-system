@@ -23,9 +23,13 @@ from app.workers.wiki_render import parse_frontmatter
 _EXTRACTED = {"extracted", "partial"}
 _REQUIRED_FIELDS = (
     "type", "source_id", "title", "relative_raw_path", "normalized_path",
-    "sha256", "status", "ingestion_status", "summary_status", "generation_status",
+    "sha256", "file_type", "language", "page_count", "chunk_count",
+    "status", "ingestion_status", "summary_status", "generation_status",
     "input_fingerprint",
 )
+_VALID_STATUS = {"active", "candidate", "deprecated_candidate", "archive_candidate", "archived"}
+_VALID_GENERATION = {"deterministic", "enriched", "human_edited"}
+_VALID_SUMMARY = {"stub", "enriched"}
 _WIKILINK = re.compile(r"\[\[([^\]]+)\]\]")
 _ABSOLUTE = re.compile(r':\s*"?/')  # a frontmatter value beginning with "/"
 
@@ -69,6 +73,24 @@ def _check_page(root: Path, path: Path, manifests: dict[str, dict]) -> list[str]
             errors.append(f"{sid}: page sha256 does not match manifest")
         if fm.get("relative_raw_path") != manifest.get("relative_raw_path"):
             errors.append(f"{sid}: page relative_raw_path does not match manifest")
+        expected_norm = (manifest.get("normalized") or {}).get("markdown_path")
+        if fm.get("normalized_path") != expected_norm:
+            errors.append(f"{sid}: page normalized_path does not match manifest")
+        expected_pages = "null" if manifest.get("page_count") is None else str(manifest["page_count"])
+        if fm.get("page_count") != expected_pages:
+            errors.append(f"{sid}: page_count {fm.get('page_count')} != manifest {expected_pages}")
+        if fm.get("chunk_count") != str(manifest.get("chunk_count") or 0):
+            errors.append(f"{sid}: chunk_count {fm.get('chunk_count')} != manifest")
+        if fm.get("ingestion_status") != manifest.get("ingestion_status"):
+            errors.append(f"{sid}: ingestion_status does not match manifest")
+
+    # Lifecycle fields use the controlled vocabularies (ADR-0018/0022).
+    if fm.get("status") and fm["status"] not in _VALID_STATUS:
+        errors.append(f"{sid}: invalid status {fm['status']!r}")
+    if fm.get("generation_status") and fm["generation_status"] not in _VALID_GENERATION:
+        errors.append(f"{sid}: invalid generation_status {fm['generation_status']!r}")
+    if fm.get("summary_status") and fm["summary_status"] not in _VALID_SUMMARY:
+        errors.append(f"{sid}: invalid summary_status {fm['summary_status']!r}")
 
     # No absolute paths may leak (ADR-0009).
     if "raw_path" in fm:

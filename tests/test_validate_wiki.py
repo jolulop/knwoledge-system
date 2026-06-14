@@ -112,3 +112,24 @@ def test_dangling_wikilink_fails(tmp_path):
     page = _page(tmp_path)
     page.write_text(page.read_text() + "\n- [[Concepts/does-not-exist]]\n", encoding="utf-8")
     assert v.main([str(tmp_path)]) == 1
+
+
+def test_normalized_path_mismatch_fails(tmp_path):
+    _setup(tmp_path)
+    page = _page(tmp_path)
+    page.write_text(page.read_text().replace("normalized/markdown/", "normalized/WRONG/"), encoding="utf-8")
+    assert v.main([str(tmp_path)]) == 1
+
+
+def test_page_count_mismatch_fails(tmp_path):
+    _setup(tmp_path)  # manifest page_count == 2
+    page = _page(tmp_path)
+    page.write_text(page.read_text().replace("page_count: 2", "page_count: 99"), encoding="utf-8")
+    assert v.main([str(tmp_path)]) == 1
+
+
+def test_invalid_lifecycle_status_fails(tmp_path):
+    _setup(tmp_path)
+    page = _page(tmp_path)
+    page.write_text(page.read_text().replace("status: active", "status: bogus"), encoding="utf-8")
+    assert v.main([str(tmp_path)]) == 1
