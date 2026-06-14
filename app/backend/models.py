@@ -98,6 +98,29 @@ class NormalizedResponse(BaseModel):
     content: str
 
 
+class WikiPage(BaseModel):
+    # No absolute paths (ADR-0009); wiki_path is repository-relative.
+    source_id: str
+    title: str
+    status: str
+    ingestion_status: str | None = None
+    summary_status: str | None = None
+    summary: str
+    wiki_path: str
+
+
+class WikiPagesResponse(BaseModel):
+    count: int
+    pages: list[WikiPage]
+
+
+class WikiPageDetail(BaseModel):
+    source_id: str
+    wiki_path: str
+    frontmatter: dict[str, Any]
+    content: str
+
+
 class Job(BaseModel):
     job_id: str
     job_type: str

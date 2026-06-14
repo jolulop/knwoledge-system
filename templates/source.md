@@ -10,10 +10,10 @@ file_type: "{{file_type}}"
 language: "{{language}}"
 page_count: {{page_count}}
 chunk_count: {{chunk_count}}
-status: active                 # wiki lifecycle (ADR-0022); not extraction state
-ingestion_status: "{{ingestion_status}}"   # read-only mirror of the manifest (ADR-0011/0022)
-summary_status: stub           # stub | enriched (ADR-0016)
-generation_status: deterministic   # deterministic | enriched | human_edited (ADR-0022)
+status: active
+ingestion_status: "{{ingestion_status}}"
+summary_status: stub
+generation_status: deterministic
 created: "{{created_at}}"
 ingested: "{{ingested_at}}"
 last_compiled_at: "{{last_compiled_at}}"

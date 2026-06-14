@@ -23,8 +23,11 @@ from app.backend.models import (
     NormalizedResponse,
     Source,
     SourcesResponse,
+    WikiPageDetail,
+    WikiPagesResponse,
 )
-from app.workers import extract, intake
+from app.workers import extract, intake, wiki
+from app.workers.wiki_render import parse_frontmatter
 
 # Hosts on which serving the unauthenticated API is acceptable (loopback only).
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost", ""}
@@ -163,6 +166,74 @@ def get_source_normalized(source_id: str) -> dict[str, Any]:
         "source_id": source_id,
         "markdown_path": f"normalized/markdown/{source_id}.md",
         "content": path.read_text(encoding="utf-8"),
+    }
+
+
+@app.post("/jobs/generate-wiki")
+def run_generate_wiki(force: bool = False) -> dict[str, Any]:
+    # Phase 3 generation runs synchronously and offline (no API keys).
+    return wiki.generate_wiki(
+        settings.root,
+        force=force,
+        manifests_dir=settings.manifests_dir,
+        jobs_db=settings.jobs_db_path,
+        wiki_dir=settings.wiki_dir,
+        templates_dir=settings.templates_dir,
+        markdown_dir=settings.markdown_dir,
+        summary_max=settings.wiki_summary_max_chars,
+        summary_min=settings.wiki_summary_min_chars,
+    )
+
+
+def _summary_text(text: str) -> str:
+    """First body line(s) of the > [!summary] callout, label stripped."""
+    parts: list[str] = []
+    in_callout = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("> [!summary]"):
+            in_callout = True
+            continue
+        if in_callout:
+            if stripped.startswith(">"):
+                body = stripped.lstrip(">").strip()
+                if body:
+                    parts.append(body)
+            else:
+                break
+    return " ".join(parts)
+
+
+@app.get("/wiki/pages", response_model=WikiPagesResponse)
+def list_wiki_pages() -> dict[str, Any]:
+    pages: list[dict[str, Any]] = []
+    if settings.sources_dir.exists():
+        for path in sorted(settings.sources_dir.glob("*.md")):
+            text = path.read_text(encoding="utf-8")
+            fm = parse_frontmatter(text)
+            pages.append({
+                "source_id": fm.get("source_id", path.stem),
+                "title": fm.get("title", path.stem),
+                "status": fm.get("status", "unknown"),
+                "ingestion_status": fm.get("ingestion_status"),
+                "summary_status": fm.get("summary_status"),
+                "summary": _summary_text(text),
+                "wiki_path": f"wiki/Sources/{path.name}",
+            })
+    return {"count": len(pages), "pages": pages}
+
+
+@app.get("/wiki/pages/{source_id}", response_model=WikiPageDetail)
+def get_wiki_page(source_id: str) -> dict[str, Any]:
+    path = settings.sources_dir / f"{source_id}.md"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"wiki page not found: {source_id}")
+    text = path.read_text(encoding="utf-8")
+    return {
+        "source_id": source_id,
+        "wiki_path": f"wiki/Sources/{source_id}.md",
+        "frontmatter": parse_frontmatter(text),
+        "content": text,
     }
 
 

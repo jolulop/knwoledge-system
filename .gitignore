@@ -25,6 +25,21 @@ normalized/markdown/*.md
 normalized/chunks/*.jsonl
 normalized/tables/*/
 normalized/extraction_logs/*.json
+# Phase 3 wiki layer is mutable local data, not code (ADR-0014): generated Source
+# pages, the regenerated index.md, and the append-only log.md are reproduced by the
+# pipeline and made durable by the backup mechanism, never committed. Keep .gitkeeps.
+wiki/index.md
+wiki/log.md
+wiki/Sources/*.md
+wiki/Concepts/*.md
+wiki/Claims/*.md
+wiki/Entities/*.md
+wiki/People/*.md
+wiki/Organizations/*.md
+wiki/Projects/*.md
+wiki/Tags/*.md
+wiki/Synthesis/*.md
+wiki/Queries/*.md
 # Inbox is transient staging for scans; keep its contents out of git.
 raw/inbox/*
 !raw/inbox/.gitkeep

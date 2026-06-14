@@ -1,14 +1,13 @@
 ---
 type: synthesis
-synthesis_id: "{{synthesis_id}}"  # syn_<sha256(normalized_title)[:16]>, frozen at creation (ADR-0021)
+synthesis_id: "{{synthesis_id}}"
 title: "{{title}}"
-status: candidate                 # candidate | active | deprecated_candidate | archived (ADR-0022)
-review_status: none               # none | pending | approved | rejected | deferred
-generation_status: enriched       # deterministic | enriched | human_edited
+status: candidate
+review_status: none
+generation_status: enriched
 confidence: low
-source_count: 0                   # count of independent sources synthesized
-derived_from: []                  # source_ids
-# citations: structured objects (ADR-0019/0020); authoritative anchor is (source_id, char_start, char_end).
+source_count: 0
+derived_from: []
 citations:
   - source_id: "{{source_id}}"
     char_start: {{char_start}}
@@ -20,8 +19,8 @@ citations:
     sheet_reference: {{sheet_reference_or_null}}
     chunk_id: "{{chunk_id_advisory}}"
     quote: "{{short_quote}}"
-concepts: []                      # concept_ids
-claims: []                        # claim_ids
+concepts: []
+claims: []
 created: "{{created_at}}"
 updated: "{{updated_at}}"
 last_compiled_at: "{{last_compiled_at}}"

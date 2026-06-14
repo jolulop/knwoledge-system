@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import sys
 from pathlib import Path
 
@@ -116,6 +117,38 @@ def test_chunks_and_normalized_404_before_extraction(client, tmp_path):
     assert client.get(f"/sources/{sid}/normalized").status_code == 404
     # Unknown source id.
     assert client.get("/sources/src_missing/chunks").status_code == 404
+
+
+def test_generate_wiki_endpoint_and_pages(client, tmp_path):
+    # Templates are code; the temp project root needs them for generation.
+    shutil.copytree(ROOT / "templates", tmp_path / "templates")
+    _seed(tmp_path, "doc.md", "# Title\n\nA solid opening paragraph of real prose text.\n")
+    client.post("/jobs/intake-scan")
+    client.post("/jobs/extract")
+
+    gen = client.post("/jobs/generate-wiki")
+    assert gen.status_code == 200
+    assert gen.json()["generated"] == 1
+
+    listing = client.get("/wiki/pages")
+    assert listing.status_code == 200
+    body = listing.json()
+    assert body["count"] == 1
+    page = body["pages"][0]
+    sid = page["source_id"]
+    assert page["status"] == "active"
+    assert page["summary"]
+    assert page["wiki_path"] == f"wiki/Sources/{sid}.md"
+
+    detail = client.get(f"/wiki/pages/{sid}")
+    assert detail.status_code == 200
+    dj = detail.json()
+    assert dj["frontmatter"]["source_id"] == sid
+    # Title derives from the filename ("doc"); the extractive summary carries the prose.
+    assert dj["frontmatter"]["title"] == "doc"
+    assert "A solid opening paragraph" in dj["content"]
+
+    assert client.get("/wiki/pages/src_missing").status_code == 404
 
 
 def test_assert_safe_bind():

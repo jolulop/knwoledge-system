@@ -1,16 +1,16 @@
 ---
 type: entity
-entity_id: "{{entity_id}}"        # ent_<sha256(normalized_canonical_name)[:16]>, frozen at creation (ADR-0021)
+entity_id: "{{entity_id}}"
 title: "{{entity_name}}"
-aliases: []                       # synonyms / surface variants; drives dedup + Obsidian display (ADR-0017)
-status: candidate                 # candidate | active | deprecated_candidate | archived (ADR-0022)
-review_status: none               # none | pending | approved | rejected | deferred
-generation_status: enriched       # deterministic | enriched | human_edited
+aliases: []
+status: candidate
+review_status: none
+generation_status: enriched
 confidence: low
-source_count: 0                   # count of independent sources (ADR-0018)
-derived_from: []                  # source_ids evidencing this entity
-related_entities: []              # entity_ids
-claims: []                        # claim_ids
+source_count: 0
+derived_from: []
+related_entities: []
+claims: []
 created: "{{created_at}}"
 updated: "{{updated_at}}"
 last_compiled_at: "{{last_compiled_at}}"

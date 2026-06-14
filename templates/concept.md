@@ -1,16 +1,16 @@
 ---
 type: concept
-concept_id: "{{concept_id}}"      # cpt_<sha256(normalized_canonical_name)[:16]>, frozen at creation (ADR-0021)
+concept_id: "{{concept_id}}"
 title: "{{concept_name}}"
-aliases: []                       # synonyms / surface variants; drives dedup + Obsidian display (ADR-0017)
-status: candidate                 # candidate | active | deprecated_candidate | archived (ADR-0018/0022)
-review_status: none               # none | pending | approved | rejected | deferred
-generation_status: enriched       # deterministic | enriched | human_edited
+aliases: []
+status: candidate
+review_status: none
+generation_status: enriched
 confidence: low
-source_count: 0                   # count of INDEPENDENT sources; ≥2 auto-promotes (ADR-0018)
-derived_from: []                  # source_ids evidencing this concept
-related_concepts: []              # concept_ids
-claims: []                        # claim_ids
+source_count: 0
+derived_from: []
+related_concepts: []
+claims: []
 created: "{{created_at}}"
 updated: "{{updated_at}}"
 last_compiled_at: "{{last_compiled_at}}"

@@ -1,13 +1,11 @@
 ---
 type: claim
-claim_id: "{{claim_id}}"          # clm_<sha256(normalized_claim_text|primary_source_id)[:16]> (ADR-0021)
-status: active                    # wiki lifecycle (ADR-0022)
-review_status: none               # none | pending | approved | rejected | deferred
-generation_status: enriched       # deterministic | enriched | human_edited
+claim_id: "{{claim_id}}"
+status: active
+review_status: none
+generation_status: enriched
 confidence: low
-derived_from: []                  # source_ids this claim is drawn from
-# citations: structured objects (ADR-0019/0020). (source_id, char_start, char_end) is
-# the authoritative anchor; chunk_id is advisory only.
+derived_from: []
 citations:
   - source_id: "{{source_id}}"
     char_start: {{char_start}}
@@ -38,7 +36,8 @@ last_compiled_at: "{{last_compiled_at}}"
 
 ## Evidence
 
-<!-- Rendered view of frontmatter `citations` (the machine-readable record of truth). -->
+<!-- Rendered view of frontmatter `citations` (the machine-readable record of truth).
+     Authoritative anchor is (source_id, char_start, char_end); chunk_id is advisory. -->
 
 | Source | Page / Section | Char range | Quote |
 |---|---|---|---|

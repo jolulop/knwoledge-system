@@ -9,13 +9,19 @@ from pathlib import Path
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 WIKI_SUBDIRS = ["Sources", "Concepts", "Claims", "Entities", "People", "Organizations", "Projects", "Tags", "Synthesis", "Queries"]
 VALID_TYPES = {"source", "concept", "claim", "entity", "person", "organization", "project", "tag", "synthesis", "query"}
+# Field contracts per page type (ADR-0016/0020/0021/0022). Source pages use
+# relative_raw_path (never absolute raw_path) and the shared lifecycle fields.
 REQUIRED_BY_TYPE = {
-    "source": ["type", "source_id", "title", "raw_path", "sha256", "file_type", "language", "status"],
-    "concept": ["type", "title", "status", "confidence", "sources"],
-    "claim": ["type", "claim_id", "status", "confidence", "sources"],
-    "entity": ["type", "title", "status", "confidence", "sources"],
-    "synthesis": ["type", "title", "status", "sources", "claims"],
-    "query": ["type", "title", "question", "created"],
+    "source": [
+        "type", "source_id", "title", "relative_raw_path", "normalized_path",
+        "sha256", "file_type", "status", "ingestion_status", "summary_status",
+        "generation_status",
+    ],
+    "concept": ["type", "concept_id", "title", "status", "confidence"],
+    "claim": ["type", "claim_id", "status", "confidence"],
+    "entity": ["type", "entity_id", "title", "status", "confidence"],
+    "synthesis": ["type", "synthesis_id", "title", "status"],
+    "query": ["type", "query_id", "title", "question", "created"],
 }
 
 

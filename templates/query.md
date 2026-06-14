@@ -1,15 +1,14 @@
 ---
 type: query
-query_id: "{{query_id}}"          # qry_<sha256(normalized_question)[:16]>, frozen at creation (ADR-0021)
+query_id: "{{query_id}}"
 title: "{{question_title}}"
 question: "{{question}}"
-status: active                    # wiki lifecycle (ADR-0022)
-review_status: none               # none | pending | approved | rejected | deferred
-generation_status: enriched       # deterministic | enriched | human_edited
+status: active
+review_status: none
+generation_status: enriched
 confidence: low
-retrieval_modes: []               # which retrieval paths were used (policies/retrieval.yaml)
-derived_from: []                  # source_ids cited in the answer
-# citations: structured objects (ADR-0019/0020); authoritative anchor is (source_id, char_start, char_end).
+retrieval_modes: []
+derived_from: []
 citations:
   - source_id: "{{source_id}}"
     char_start: {{char_start}}

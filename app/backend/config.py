@@ -59,6 +59,12 @@ class Settings:
     extract_timeout_s: int
     chunk_target_chars: int
     chunk_max_chars: int
+    # Phase 3 wiki layer (ADR-0013..0022). Mutable local data, not committed (ADR-0014).
+    wiki_dir: Path
+    sources_dir: Path
+    templates_dir: Path
+    wiki_summary_max_chars: int
+    wiki_summary_min_chars: int
     app_host: str
     app_port: int
     app_name: str = "knowledge-system"
@@ -88,6 +94,11 @@ def get_settings(root: Path | None = None) -> Settings:
         extract_timeout_s=int(cfg("EXTRACT_TIMEOUT_S", "120")),
         chunk_target_chars=int(cfg("EXTRACT_CHUNK_TARGET_CHARS", "1000")),
         chunk_max_chars=int(cfg("EXTRACT_CHUNK_MAX_CHARS", "2000")),
+        wiki_dir=resolved / "wiki",
+        sources_dir=resolved / "wiki" / "Sources",
+        templates_dir=resolved / "templates",
+        wiki_summary_max_chars=int(cfg("WIKI_SUMMARY_MAX_CHARS", "320")),
+        wiki_summary_min_chars=int(cfg("WIKI_SUMMARY_MIN_CHARS", "40")),
         app_host=cfg("APP_HOST", "127.0.0.1"),
         app_port=int(cfg("APP_PORT", "18000")),
     )
