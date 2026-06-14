@@ -1,0 +1,61 @@
+# Non-deterministic enrichment: input-fingerprint freshness + a persistent response cache
+
+LLM output cannot be made byte-reproducible: on the current Claude models the sampling
+controls (`temperature`, `top_p`, `top_k`, seeds) are removed and rejected, and even
+where a temperature exists it never guaranteed identical output. So enriched artifacts
+cannot satisfy the byte-stability that deterministic artifacts have (ADR-0023).
+Phase 3.5 reconciles this with two mechanisms instead of pretending determinism.
+
+**Input-fingerprint freshness (idempotency, no churn).** Each enriched artifact records
+an `input_fingerprint` over everything that should force a refresh: the source's
+normalized Markdown, the prompt/template version, the resolved `model_ref` (provider +
+model id, from the tier mapping), and the schema version. If the fingerprint is unchanged,
+the artifact is fresh
+and the model is **not** called again — so a normal re-run neither re-pays nor churns the
+wiki, exactly as the deterministic backbone's fingerprint check does. A changed
+fingerprint (new extraction, edited prompt, retuned tier, bumped schema) marks the
+artifact stale and eligible for regeneration.
+
+**A persistent response cache (reproducibility + cost).** Raw model responses are stored
+in a local cache keyed by `hash(prompt + model_ref + schema)`, where `model_ref` includes
+the provider so the same logical model served via two providers/endpoints does not collide.
+A rebuild or a forced re-render **replays** the stored response rather than re-sampling — so enrichment is
+reproducible and free across rebuilds until an input actually changes or the cache is
+explicitly busted. The cache lives under `db/` and is **backed up by default** — `db/` is in the backup
+scope (`scripts/backup.py`) with no exclusion — which matters precisely because the wiki
+layer is gitignored and regenerable: without the cache, rebuilding the wiki after a wipe
+would re-pay the full LLM cost and produce different (though valid) content. The cache
+holds prompts (which embed source excerpts) and raw responses, but its sensitivity is no
+greater than the already-backed-up `indexes/` (embeddings of source text) and `wiki/`
+(generated content), and backups stay within the same local trust boundary; a documented
+opt-out is offered for users who would trade reproducibility for a smaller backup
+footprint.
+
+**The cache is a governed retention/security surface, not free-floating scratch.** It is a
+new place source excerpts and generated content persist, so it inherits explicit policy
+rather than defaults by omission: (1) *Retention* — cache entries are bounded by a
+configurable TTL and/or size cap; purge is a maintenance action, and because a purge
+forfeits reproducibility (a later forced regen will re-sample), bulk deletion is
+review-gated like other destructive operations (`policies/retention.yaml`,
+`policies/review.yaml`). (2) *Redaction* — none beyond what already governs sources: the
+cache's contents are no more sensitive than the normalized text and `indexes/` embeddings
+it derives from, all covered by the existing prompt-injection/secrets rules
+(`policies/security.yaml`); secrets never enter prompts, so they never enter the cache.
+(3) *Encryption at rest* — deferred, matching `raw/` and `db/`: the system's trust
+boundary is the local machine (ADR-0001/0009), so the cache gets the same at-rest posture
+as the raw sources, not a stricter one. These keys (`cache_ttl_days`, `cache_max_mb`,
+backup opt-out) are added to the policy files as part of 3.5a, not left implicit.
+
+Accepted output is the **artifact of record** — enriched pages carry
+`generation_status: enriched`, the model id, the `input_fingerprint`, and, unlike
+deterministic artifacts, a wall-clock timestamp is permitted (ADR-0023 already exempts
+non-deterministic pages). They are explicitly not expected to be byte-identical across a
+forced regeneration on a cache miss.
+
+Consequences: enrichment is idempotent and cheap in steady state, reproducible across
+rebuilds via the cache, and refreshes correctly when inputs change — without depending
+on determinism the models can't provide. The costs are a real cache to store, key
+correctly, invalidate, and back up; the rule that a forced regen on a cache miss yields
+new-but-valid content (clean diffs are not guaranteed for enriched pages the way they
+are for the backbone); and a fingerprint that must enumerate every refresh-worthy input
+or risk serving stale enrichment.

@@ -15,3 +15,8 @@ prompt_injection:
 secrets:
   env_file: .env
   commit_env_file: false
+response_cache:                              # raw LLM responses under db/ (ADR-0027)
+  contains_source_excerpts: true
+  sensitivity: same_as_normalized_and_indexes
+  secrets_excluded: true                     # secrets never enter prompts, so never enter the cache
+  encryption_at_rest: deferred               # matches raw/ and db/ posture; local trust boundary

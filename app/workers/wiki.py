@@ -5,8 +5,8 @@ For every source whose manifest reports `extracted`/`partial`, render
 `wiki/Sources/<source_id>.md` from `templates/source.md` (ADR-0015/0016), rebuild
 `wiki/index.md` (reusing scripts/rebuild_index.py), append `wiki/log.md`, and record a
 `generate_wiki` job. Deterministic and offline: identical inputs yield byte-identical
-pages. Idempotent — a page whose recorded sha256 + ingestion_status still match the
-manifest is skipped unless `force` is given.
+pages. Idempotent — a page whose recomputed input_fingerprint matches the stored one is
+skipped unless `force` is given (ADR-0023).
 
 The wiki layer is mutable local data (ADR-0014); this worker writes only under wiki/ and
 db/jobs.sqlite, never under raw/ or normalized/.

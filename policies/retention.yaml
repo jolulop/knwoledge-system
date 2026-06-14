@@ -14,6 +14,13 @@ ephemeral:
   enabled: true
   delete_candidate_after_days: 90
   deletion_requires_review: true
+response_cache:                 # raw LLM responses under db/ (ADR-0027)
+  enabled: true
+  location: db/
+  cache_ttl_days: 365           # entries older than this are purge candidates
+  cache_max_mb: 2048            # soft cap; oldest entries become purge candidates beyond it
+  purge_requires_review: true   # bulk purge forfeits reproducibility -> review-gated
+  backup: true                  # included by scripts/backup.py by default; set false to opt out
 statuses:
   - active
   - stale_candidate

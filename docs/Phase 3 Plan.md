@@ -113,7 +113,7 @@ summary_status: stub                           # stub | enriched (ADR-0016)
 generation_status: deterministic               # ADR-0022
 created: <iso>
 ingested: <iso>
-last_compiled_at: <iso>
+input_fingerprint: <hex>                       # freshness lives here; no wall-clock compile field (ADR-0023)
 tags: []                                       # empty until Phase 3.5
 concepts: []
 entities: []
@@ -199,10 +199,13 @@ A per-run `generate_wiki` job records in `metadata_json`:
 
 - Source pages are machine-owned, deterministic projections: identical inputs yield
   byte-identical pages (clean diffs, idempotent overwrite).
-- A source whose page exists and whose manifest `sha256` + `ingestion_status` are
-  unchanged is **skipped**; `--force` rewrites every page.
+- A source whose page exists and whose recomputed `input_fingerprint` matches the stored
+  one is **skipped** (the fingerprint covers schema/template, normalized Markdown, manifest
+  fields, and config — ADR-0023); `--force` rewrites every page.
 - Re-generation overwrites only that source's page (human edits to Source pages are not
-  preserved — Source pages are pure projections; ADR-0014).
+  preserved — Source pages are pure projections; ADR-0014). From Phase 3.5 the page is a
+  pure projection of its inputs **plus the per-source enrichment artifact** (ADR-0025), so
+  a rerun re-composes enriched summaries/tags rather than reverting them to stubs.
 
 ---
 

@@ -44,7 +44,25 @@ A derived Markdown page used for human browsing and agent navigation. Wiki pages
 A wiki page representing one raw source, stored content-keyed at `wiki/Sources/<source_id>.md` with the human-readable title carried in frontmatter (ADR-0015). In the Phase 3 deterministic backbone a Source page asserts only mechanically-derived facts; sections that require an LLM (tags, concepts, entities, claims, etc.) are rendered as `_Pending semantic enrichment_` placeholders until a later phase fills them (ADR-0013, ADR-0016).
 
 **Input Fingerprint**
-A hash recorded in a deterministic page's frontmatter (`input_fingerprint`) covering every input that determines the page's bytes — schema version, template, the source's normalized Markdown, manifest fields, and config. Regeneration skips a page only when the freshly rendered candidate's fingerprint matches the stored one, so template/config/extractor changes are picked up without `--force`. Deterministic artifacts (Source pages, `index.md`) carry no wall-clock timestamp; freshness lives in the fingerprint, file mtime, `log.md`, and the job record (ADR-0023).
+A hash recorded in a generated page's frontmatter (`input_fingerprint`) covering every input that determines the page — for deterministic backbone pages: schema version, template, the source's normalized Markdown, manifest fields, and config; for enriched pages it also covers the prompt/template version and the resolved `model_ref` (provider + model id). Regeneration skips a page when the candidate's fingerprint matches the stored one, so template/config/extractor/model changes are picked up without `--force`. Deterministic artifacts (Source pages, `index.md`) carry no wall-clock timestamp; freshness lives in the fingerprint, file mtime, `log.md`, and the job record (ADR-0023, ADR-0027).
+
+**Enrichment**
+The Phase 3.5 LLM stage that fills the semantic layer the deterministic backbone leaves as placeholders: real summaries, tags, concepts, entities, claims, and synthesis. Enrichment treats source text as untrusted data and the model as a pure text→data function with no acting tools; its output is schema-constrained, citation-grounded, and human-reviewed for semantic/destructive changes (ADR-0025, ADR-0026). It is provider-agnostic — any model reachable through an LLM Adapter can serve a pass. Enriched pages carry `generation_status: enriched`.
+
+**Enrichment Artifact**
+A per-source, content-keyed record of an enrichment pass's validated, schema-conformant output (e.g. `normalized/enrichment/<source_id>.json`). It is the artifact of record for LLM output; enrichment passes write it, never `wiki/Sources/<source_id>.md` directly. The deterministic Source-page renderer stays the sole writer of the `.md` and composes the artifact into the page, filling the `_Pending semantic enrichment._` placeholders when present and falling back to them when absent — so the page remains a pure function of its inputs and a full rewrite never clobbers LLM content. The artifact carries its own `input_fingerprint` (normalized Markdown + prompt/template version + `model_ref` + schema) that drives re-enrichment (ADR-0025, ADR-0027).
+
+**LLM Adapter**
+The thin, provider-agnostic seam that abstracts model connection and usage behind one uniform call: `LLMClient.parse(messages, schema, model_ref) -> validated object`, returning a schema-valid object or raising a typed error. Per-provider adapters implement it — native `anthropic` SDK, native `openai` SDK, and a local adapter over the OpenAI-compatible HTTP wire (Ollama, vLLM). Provider-specific accelerators (prompt caching, Batch API) are optional adapter capabilities advertised by flags like `supports_batch`, never guarantees the caller depends on (ADR-0025).
+
+**Model Reference**
+The provider-aware identifier a tier maps to, written `provider:model_id` (e.g. `anthropic:claude-haiku-4-5`, `openai:…`, `local:…`). The provider half selects the LLM Adapter and its connection config (base URL, API-key env var); a `local` reference additionally needs a base URL. `model_ref` is what the response-cache key and `input_fingerprint` record, so switching provider or model is a cache miss and a refresh, not a silent collision (ADR-0025, ADR-0027).
+
+**Model Tier**
+The configurable model routing used by enrichment: tier 1 (light, default `anthropic:claude-haiku-4-5`) for summaries/tags, tier 2 (standard, default `anthropic:claude-sonnet-4-6`) for concept/entity/claim extraction, tier 3 (heavy, default `anthropic:claude-opus-4-8`) for synthesis/contradiction. Each pass declares its tier in code; only the tier→`model_ref` mapping is config, and it may point all tiers at one model or mix providers (ADR-0025).
+
+**Response Cache**
+A persistent local cache of raw LLM responses keyed by `hash(prompt + model_ref + schema)` — `model_ref` includes the provider so the same logical model served via two providers does not collide — stored under `db/` and covered by backups. Because LLM output is not byte-reproducible, the cache lets a rebuild or forced re-render replay the stored response — reproducible and free — until an input changes or the cache is busted (ADR-0027).
 
 **Summary Stub**
 A deterministic, extractive `> [!summary]` callout written without an LLM — typically the first meaningful paragraph of the normalized Markdown (or a structural fallback when text is too sparse). It is marked `summary_status: stub` in frontmatter; a later phase replaces it with an LLM summary and flips the flag to `enriched`. The maintenance linter treats a stub as expected, not as summary rot (ADR-0016).
@@ -66,6 +84,9 @@ A higher-level explanation, comparison, or conclusion across multiple sources, c
 
 **Review Item**
 A proposed semantic or destructive change requiring human approval, such as deletion, entity merging, contradiction resolution, deprecation, or archiving.
+
+**Graph (Source of Truth)**
+The SQLite store under `db/` that holds the canonical relationships — edges keyed on stable typed ids (`source_id`/`concept_id`/`entity_id`/`claim_id`), not slugs. It is authoritative; the wikilinks and backlink sections rendered into wiki pages are a derived, regenerable projection of it, so rename/merge is an id-level redirect plus re-projection and bidirectional backlinks stay synchronized by construction. Wikilinks authored in prose are validated edge *candidates* absorbed into the graph under review, not authority (ADR-0029, lands in Phase 3.5b/Phase 4).
 
 **Hybrid Retrieval**
 The combination of keyword search, semantic/vector search, graph traversal, and summary-first wiki navigation.
