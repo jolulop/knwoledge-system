@@ -566,18 +566,24 @@ v0.1 is successful when:
 
 ## 17. Build Phases
 
-| Phase | Goal |
-|---|---|
-| Phase 0 | Architecture spike and scaffold. |
-| Phase 0.5 | Development environment validation. |
-| Phase 1 | File Intake and Raw Repository. |
-| Phase 2 | Extraction and Normalization. |
-| Phase 3 | Filing-Cabinet Wiki Layer. |
-| Phase 4 | Search and Graph. |
-| Phase 5 | Query and Cited Answering. |
-| Phase 6 | Human Review UI. |
-| Phase 7 | Autonomous Maintenance. |
-| Phase 8 | Mobile and Hardening. |
+Phase 3 was split into a deterministic backbone (Phase 3) and an LLM-dependent semantic
+layer (Phase 3.5) per [ADR-0013](adr/0013-phase-3-deterministic-wiki-backbone.md), so
+that all offline/deterministic work is complete and tested before any LLM, API key, or
+prompt-injection surface is introduced.
+
+| Phase | Goal | Status |
+|---|---|---|
+| Phase 0 | Architecture spike and scaffold. | Complete |
+| Phase 0.5 | Development environment validation. | Complete |
+| Phase 1 | File Intake and Raw Repository. | Complete |
+| Phase 2 | Extraction and Normalization. | Complete |
+| Phase 3 | Filing-Cabinet Wiki Layer — deterministic Source-page backbone. | Complete |
+| Phase 3.5 | LLM semantic layer: enriched summaries, tags, concepts, entities, claims, synthesis, and bidirectional backlinks. | Next |
+| Phase 4 | Search and Graph. | Planned |
+| Phase 5 | Query and Cited Answering. | Planned |
+| Phase 6 | Human Review UI. | Planned |
+| Phase 7 | Autonomous Maintenance. | Planned |
+| Phase 8 | Mobile and Hardening. | Planned |
 
 ---
 
