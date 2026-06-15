@@ -257,6 +257,52 @@ def test_claim_text_authority_is_the_page(tmp_path):
     assert claims._read_claim_text(page) == "A durable claim."
 
 
+def _src_page_text(tmp_path):
+    sid = _sids(tmp_path)["doc.md"]
+    return (tmp_path / "wiki" / "Sources" / f"{sid}.md").read_text(encoding="utf-8")
+
+
+def test_source_page_projects_active_claims(tmp_path):
+    _build(tmp_path)
+    _gen_wiki(tmp_path)  # before any claims: Claims section is the placeholder
+    assert "_Pending semantic enrichment._" in _src_page_text(tmp_path)
+
+    _extract(tmp_path, FakeAdapter(claims_payload=[{"claim": "The doc has a first paragraph.", "quote": Q1}]))
+    _gen_wiki(tmp_path)  # refresh: project the source's active claims
+    cid = claims.claim_id("The doc has a first paragraph.")
+    text = _src_page_text(tmp_path)
+    assert f"[[Claims/{cid}|" in text  # linked with a short title
+    assert "The doc has a first paragraph" in text  # the resolved label
+    assert validate_wikilinks.main([str(tmp_path)]) == 0  # source<->claim links resolve
+
+
+def test_source_claims_drop_when_superseded(tmp_path):
+    _build(tmp_path)
+    _gen_wiki(tmp_path)
+    _extract(tmp_path, FakeAdapter(claims_payload=[{"claim": "Old Z.", "quote": Q1}]))
+    _gen_wiki(tmp_path)
+    old = claims.claim_id("Old Z.")
+    assert f"[[Claims/{old}" in _src_page_text(tmp_path)
+
+    sid = _sids(tmp_path)["doc.md"]
+    _set_md(tmp_path, sid, "# T\n\nA replacement sentence entirely.\n")
+    _extract(tmp_path, FakeAdapter(claims_payload=[{"claim": "New W.", "quote": "A replacement sentence entirely."}]))
+    _gen_wiki(tmp_path)
+    new = claims.claim_id("New W.")
+    text = _src_page_text(tmp_path)
+    assert f"[[Claims/{new}" in text          # the active claim is projected
+    assert f"[[Claims/{old}" not in text      # the superseded one is no longer listed
+
+
+def test_source_page_byte_stable_when_claims_unchanged(tmp_path):
+    _build(tmp_path)
+    _extract(tmp_path, FakeAdapter(claims_payload=[{"claim": "Stable claim.", "quote": Q1}]))
+    _gen_wiki(tmp_path)
+    first = _src_page_text(tmp_path)
+    _gen_wiki(tmp_path)  # re-run with no changes
+    assert _src_page_text(tmp_path) == first  # projection is deterministic, no churn
+
+
 def test_validate_citations_requires_a_manifest(tmp_path):
     # A claim page citing a source whose manifest is absent must fail (ADR-0020).
     (tmp_path / "normalized" / "markdown").mkdir(parents=True)

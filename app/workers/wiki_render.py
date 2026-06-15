@@ -131,10 +131,39 @@ def _render_tag_list(tags: list[Any]) -> str:
     return "[" + ", ".join(f'"{t}"' for t in seen) + "]"
 
 
+_PENDING = "_Pending semantic enrichment._"
+
+
+def _claim_alias(title: str) -> str:
+    """Wikilink-safe display alias for a claim link: de-linked, no `[]|`, collapsed, short."""
+    safe = _delink(_WS.sub(" ", str(title))).replace("[", "").replace("]", "").replace("|", " ")
+    safe = _WS.sub(" ", safe).strip()
+    return (safe[:77].rstrip() + "…") if len(safe) > 78 else safe
+
+
+def _claims_block(claims: list[dict[str, Any]] | None) -> str:
+    """Render the Source page's Claims section from passed-in claim data (no IO).
+
+    Each item is {claim_id, title|None}: a linked short title when a label is available,
+    else a bare id link. Empty/None -> the deterministic placeholder (byte-identical to the
+    Phase-3 backbone, so unenriched Source pages do not churn).
+    """
+    if not claims:
+        return _PENDING
+    lines = []
+    for c in claims:
+        cid = c["claim_id"]
+        title = c.get("title")
+        alias = _claim_alias(title) if title else ""
+        lines.append(f"- [[Claims/{cid}|{alias}]]" if alias else f"- [[Claims/{cid}]]")
+    return "\n".join(lines)
+
+
 def build_source_values(
     manifest: dict[str, Any], normalized_markdown: str, *,
     summary_max: int, summary_min: int,
     enrichment: dict[str, Any] | None = None,
+    claims: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     sid = manifest["source_id"]
     title = title_from_filename(manifest.get("original_filename", sid))
@@ -180,6 +209,7 @@ def build_source_values(
         "summary_label": summary_label,
         "summary_text": summary_text,
         "tags": tags,
+        "claims_block": _claims_block(claims),
         "notes": "",
     }
 
@@ -312,6 +342,7 @@ def render_source_page(
     template: str, manifest: dict[str, Any], normalized_markdown: str, *,
     summary_max: int, summary_min: int,
     enrichment: dict[str, Any] | None = None,
+    claims: list[dict[str, Any]] | None = None,
 ) -> str:
     """Render a Source page, stamping its input_fingerprint.
 
@@ -324,7 +355,7 @@ def render_source_page(
     """
     values = build_source_values(
         manifest, normalized_markdown, summary_max=summary_max, summary_min=summary_min,
-        enrichment=enrichment,
+        enrichment=enrichment, claims=claims,
     )
     draft = render_template(template, {**values, "input_fingerprint": ""})
     fingerprint = _fingerprint(_FP_LINE.sub("", draft))

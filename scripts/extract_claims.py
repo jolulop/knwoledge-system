@@ -35,7 +35,7 @@ import validate_wikilinks  # noqa: E402
 from app.backend.config import get_settings
 from app.llm.cache import ResponseCache
 from app.llm.client import build_client
-from app.workers import claims
+from app.workers import claims, wiki
 
 
 def main(argv: list[str]) -> int:
@@ -70,6 +70,21 @@ def main(argv: list[str]) -> int:
         print(f"  - {err['source_id']}: {err['error']}")
     print(f"Index rebuilt: {summary['index_rebuilt']}")
     print(f"Job: {summary['job_id']}")
+
+    # Refresh Source pages so their Claims section reflects the new/superseded claims
+    # (slice 3b): generate_wiki is the single writer and projects the graph's active edges.
+    gen = wiki.generate_wiki(
+        settings.root,
+        manifests_dir=settings.manifests_dir,
+        jobs_db=settings.jobs_db_path,
+        wiki_dir=settings.wiki_dir,
+        templates_dir=settings.templates_dir,
+        markdown_dir=settings.markdown_dir,
+        summary_max=settings.wiki_summary_max_chars,
+        summary_min=settings.wiki_summary_min_chars,
+    )
+    print(f"Source pages refreshed: generated {gen['generated']}, "
+          f"skipped_unchanged {gen['skipped_unchanged']}.")
 
     # Wiki content changed -> run the citation/graph/wikilink validators (AGENTS / Build Spec).
     root = str(settings.root)

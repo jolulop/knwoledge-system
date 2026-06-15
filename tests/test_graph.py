@@ -104,6 +104,21 @@ def test_count_independent_sources(tmp_path):
     assert graph.count_independent_sources(conn, CPT) == 2
 
 
+def test_claims_for_source_returns_only_active(tmp_path):
+    _, conn = _db(tmp_path)
+    clm = "clm_0123456789abcdef"
+    clm2 = "clm_fedcba9876543210"
+    graph.upsert_node(conn, node_id=clm, node_type="claim", status="active")
+    graph.upsert_node(conn, node_id=clm2, node_type="claim", status="active")
+    graph.upsert_assertion(conn, src_id=clm, dst_id=SRC, edge_type="derived_from",
+                           asserted_by="llm", status="active")
+    proposed = graph.upsert_assertion(conn, src_id=clm2, dst_id=SRC, edge_type="derived_from",
+                                      asserted_by="llm", status="proposed")
+    assert graph.claims_for_source(conn, SRC) == [clm]  # only the active claim
+    graph.set_status(conn, proposed, "active")
+    assert graph.claims_for_source(conn, SRC) == sorted([clm, clm2])
+
+
 def test_vocabulary_guards(tmp_path):
     _, conn = _db(tmp_path)
     with pytest.raises(ValueError):

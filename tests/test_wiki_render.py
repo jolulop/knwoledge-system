@@ -91,6 +91,26 @@ def test_render_source_page_is_clean_and_complete():
     assert len(fm["input_fingerprint"]) == 16
 
 
+def test_claims_block_renders_links_titles_and_fallback():
+    block = wiki_render._claims_block([
+        {"claim_id": "clm_aaaaaaaaaaaaaaaa", "title": "The sky is blue and clear."},
+        {"claim_id": "clm_bbbbbbbbbbbbbbbb", "title": None},  # no label -> bare link
+        {"claim_id": "clm_cccccccccccccccc", "title": "Pipes | and [[links]] are unsafe"},
+    ])
+    assert "- [[Claims/clm_aaaaaaaaaaaaaaaa|The sky is blue and clear.]]" in block
+    assert "- [[Claims/clm_bbbbbbbbbbbbbbbb]]" in block  # bare fallback
+    # The alias is sanitised: no pipe and no nested wikilink brackets.
+    prefix = "- [[Claims/clm_cccccccccccccccc|"
+    unsafe = next(ln for ln in block.splitlines() if ln.startswith(prefix))
+    alias = unsafe[len(prefix):-2]  # strip trailing ]]
+    assert "|" not in alias and "[" not in alias and "]" not in alias
+
+
+def test_claims_block_empty_is_pending_placeholder():
+    assert wiki_render._claims_block(None) == "_Pending semantic enrichment._"
+    assert wiki_render._claims_block([]) == "_Pending semantic enrichment._"
+
+
 def test_render_is_deterministic():
     template = (ROOT / "templates" / "source.md").read_text(encoding="utf-8")
     md = "# T\n\nStable body paragraph long enough for an extractive summary stub.\n"

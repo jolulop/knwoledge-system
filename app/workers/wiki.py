@@ -13,15 +13,31 @@ db/jobs.sqlite, never under raw/ or normalized/.
 """
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 import uuid
 from pathlib import Path
 from typing import Any
 
-from app.backend import db
+from app.backend import db, graph
 from app.backend.manifests import iso_now, list_manifests
 from app.workers import enrichment_artifact, wiki_render
+
+_CLAIM_TEXT_RE = re.compile(r'(?m)^claim_text:\s*"(.*)"\s*$')
+
+
+def _claim_label(claims_dir: Path, claim_id: str) -> str | None:
+    """Resolve a claim's display label from its durable Claim page (claim_text frontmatter).
+
+    Worker-side IO so the renderer stays pure; returns None (-> bare link) if the page or
+    field is unavailable, never the gitignored enrichment record.
+    """
+    page = claims_dir / f"{claim_id}.md"
+    if not page.exists():
+        return None
+    match = _CLAIM_TEXT_RE.search(page.read_text(encoding="utf-8", errors="replace"))
+    return re.sub(r"\\(.)", r"\1", match.group(1)) if match else None
 
 _GENERATED_STATUSES = {"extracted", "partial"}
 
@@ -65,6 +81,7 @@ def generate_wiki(
     templates_dir: Path | None = None,
     markdown_dir: Path | None = None,
     enrichment_dir: Path | None = None,
+    graph_db: Path | None = None,
     summary_max: int = 320,
     summary_min: int = 40,
     rebuild_index: bool = True,
@@ -80,8 +97,13 @@ def generate_wiki(
     enrichment_dir = (
         Path(enrichment_dir) if enrichment_dir else root / "normalized" / "enrichment"
     )
+    graph_db = Path(graph_db) if graph_db else root / "db" / "graph.sqlite"
     sources_dir = wiki_dir / "Sources"
+    claims_dir = wiki_dir / "Claims"
     sources_dir.mkdir(parents=True, exist_ok=True)
+    # Read-only graph connection for the Source-page Claims projection (slice 3b). Absent
+    # before any claim extraction -> no claim links, just the pending placeholder.
+    gconn = graph.connect(graph_db) if graph_db.exists() else None
 
     template = (templates_dir / "source.md").read_text(encoding="utf-8")
     now = iso_now()
@@ -123,10 +145,18 @@ def generate_wiki(
                 enrichment = enrichment_artifact.load_fresh(
                     enrichment_dir, source_id, normalized_markdown
                 )
+                # Project the source's active claims from the graph; resolve each label
+                # (worker-side IO) and pass plain data to the pure renderer (slice 3b).
+                claims = None
+                if gconn is not None:
+                    claims = [
+                        {"claim_id": cid, "title": _claim_label(claims_dir, cid)}
+                        for cid in graph.claims_for_source(gconn, source_id)
+                    ]
                 candidate = wiki_render.render_source_page(
                     template, manifest, normalized_markdown,
                     summary_max=summary_max, summary_min=summary_min,
-                    enrichment=enrichment,
+                    enrichment=enrichment, claims=claims,
                 )
             except Exception as exc:  # one page's failure must not abort the run
                 errors.append({"source_id": source_id, "error": f"{type(exc).__name__}: {exc}"})
@@ -173,5 +203,7 @@ def generate_wiki(
             )
         raise
     finally:
+        if gconn is not None:
+            gconn.close()
         if conn is not None:
             conn.close()

@@ -46,7 +46,7 @@ _Pending semantic enrichment._
 
 ## Claims
 
-_Pending semantic enrichment._
+{{claims_block}}
 
 ## Concepts Mentioned
 

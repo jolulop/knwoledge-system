@@ -277,6 +277,17 @@ def incoming_active(conn: sqlite3.Connection, dst_id: str) -> list[dict[str, Any
     ))
 
 
+def claims_for_source(conn: sqlite3.Connection, source_id: str) -> list[str]:
+    """Active claim ids derived from a source (for the Source-page Claims projection)."""
+    return [
+        r["src_id"] for r in conn.execute(
+            "SELECT DISTINCT src_id FROM edges WHERE dst_id = ? AND edge_type = 'derived_from' "
+            "AND status = 'active' ORDER BY src_id",
+            (source_id,),
+        )
+    ]
+
+
 def count_independent_sources(conn: sqlite3.Connection, dst_id: str, *, edge_type: str = "mentions") -> int:
     """Distinct source_ids among a node's active assertions of the given type (promotion).
 
