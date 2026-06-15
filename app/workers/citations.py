@@ -76,6 +76,24 @@ def is_grounded(citation: dict[str, Any], normalized_markdown: str, **kwargs: An
     return not ground_citation(citation, normalized_markdown, **kwargs)
 
 
+def locate_quote(normalized_markdown: str, quote: str) -> tuple[int, int] | None:
+    """Find a model-supplied verbatim quote in the normalized Markdown; return its span.
+
+    The LLM supplies the evidence *quote*, not char offsets (it cannot produce reliable
+    offsets); the harness derives `(char_start, char_end)` mechanically here, matching
+    whitespace-flexibly (a run of whitespace in the quote matches any run in the source).
+    Returns the first match's span into the actual Markdown, or None if the quote does not
+    occur — in which case the claim is dropped (ADR-0026). The returned span grounds cleanly:
+    its text is, by construction, a whitespace-normalized match of the quote.
+    """
+    tokens = quote.split()
+    if not tokens:
+        return None
+    pattern = r"\s+".join(re.escape(tok) for tok in tokens)
+    match = re.search(pattern, normalized_markdown)
+    return (match.start(), match.end()) if match else None
+
+
 def _parse_scalar(raw: str) -> Any:
     raw = raw.split("  #", 1)[0].strip()
     if raw in ("", "null", "None", "~", "[]"):

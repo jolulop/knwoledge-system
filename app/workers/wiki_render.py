@@ -190,6 +190,91 @@ def _fingerprint(page_without_fp: str) -> str:
     return h.hexdigest()[:16]
 
 
+def _claim_title(claim_text: str) -> str:
+    """A short, single-line title from the claim text (no invented content)."""
+    flat = _WS.sub(" ", claim_text).strip()
+    head = _SENTENCE.split(flat, 1)[0].strip() if _SENTENCE.search(flat) else flat
+    head = head if head else flat
+    return (head[:77].rstrip() + "…") if len(head) > 78 else head
+
+
+def _quote_cell(text: str) -> str:
+    """Single-line, table- and frontmatter-safe rendering of an evidence quote.
+
+    Collapses whitespace, neutralises table pipes, and downgrades embedded double quotes to
+    single quotes so the value is safe inside a `quote: "…"` frontmatter line too.
+    """
+    return _WS.sub(" ", str(text)).strip().replace("|", "\\|").replace('"', "'")
+
+
+def render_claim_page(claim: dict[str, Any]) -> str:
+    """Render a deterministic Claim page from a grounded claim record (ADR-0019/0020/0022).
+
+    The frontmatter `citations:` list is the machine-readable record (validated by
+    scripts/validate_citations.py); the Evidence table is a rendered view of it. Sources are
+    linked as `[[Sources/<source_id>]]` (backed by the active derived_from edge). No
+    wall-clock value is embedded — enriched but idempotent: freshness lives in the
+    input_fingerprint, so a cache-replay re-run is byte-stable. Empty supporting/contradicting
+    sections are omitted (no placeholder links, ADR-0016/0029).
+    """
+    claim_id = claim["claim_id"]
+    claim_text = _WS.sub(" ", str(claim["claim_text"])).strip()
+    confidence = claim.get("confidence", "low")
+    citations = claim.get("citations", [])
+
+    fm_lines = [
+        "---",
+        "type: claim",
+        f'claim_id: "{claim_id}"',
+        "status: active",
+        "review_status: none",
+        "generation_status: enriched",
+        f"confidence: {confidence}",
+        "citations:",
+    ]
+    evidence_rows = []
+    for c in citations:
+        fm_lines.extend([
+            f'  - source_id: "{c["source_id"]}"',
+            f'    char_start: {c["char_start"]}',
+            f'    char_end: {c["char_end"]}',
+            f'    page: {c.get("page") if c.get("page") is not None else "null"}',
+            '    section: null',
+            '    chunk_id: null',
+            f'    quote: "{_delink(_quote_cell(c.get("quote", "")))}"',
+        ])
+        evidence_rows.append(
+            f'| [[Sources/{c["source_id"]}]] | {c["char_start"]}–{c["char_end"]} | '
+            f'{_delink(_quote_cell(c.get("quote", "")))} |'
+        )
+    fm_lines.append('input_fingerprint: ""')
+    fm_lines.append("---")
+
+    body = [
+        "",
+        f"# Claim: {_delink(_claim_title(claim_text))}",
+        "",
+        "> [!summary] Generated claim (unverified)",
+        f"> {_delink(claim_text)}",
+        "",
+        "## Claim",
+        "",
+        _delink(claim_text),
+        "",
+        "## Evidence",
+        "",
+        "| Source | Char range | Quote |",
+        "|---|---|---|",
+        *evidence_rows,
+        "",
+        "## Notes",
+        "",
+    ]
+    draft = "\n".join(fm_lines + body) + "\n"
+    fingerprint = _fingerprint(_FP_LINE.sub("", draft))
+    return draft.replace('input_fingerprint: ""', f'input_fingerprint: "{fingerprint}"', 1)
+
+
 def render_source_page(
     template: str, manifest: dict[str, Any], normalized_markdown: str, *,
     summary_max: int, summary_min: int,

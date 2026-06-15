@@ -98,10 +98,19 @@ run {claim, synthesis} ↔ {claim, synthesis}; `supersedes`/`duplicates` require
 **Review-gated assertions live in one table, distinguished by `status`.** There is no
 separate candidate table: proposed, active, rejected, and superseded assertions are all
 rows in `edges`, separated by `status` and tagged with `asserted_by` provenance. The
-**projector renders only `status=active` assertions**, so a model-proposed assertion or an
-authored wikilink enters as `status=proposed` (with `asserted_by` and a `review_id`) and
-never appears as a backlink until a human approves it — keeping semantic relationship
-changes human-reviewed (ADR-0018, CLAUDE.md rule 9). The mapping from a review item's
+**projector renders only `status=active` assertions**.
+
+What enters `active` versus `proposed` depends on the *kind* of assertion, not merely on
+who asserted it. **Mechanical, grounded provenance** is asserted `active` on creation: a
+grounded claim's `derived_from`→source edge and a source→concept `mentions` edge are
+*evidence*, as solid as the grounded claim or the mention itself (ADR-0026 writes grounded
+claims as content, not proposals). **Semantic judgments and untrusted input** are
+`proposed` and review-gated: `supports`/`contradicts`/`supersedes`/`duplicates` between
+claims, concept **promotion** (candidate→active), entity merge/split, and `authored_wikilink`
+edges parsed from prose. So a semantic judgment or a prose wikilink enters as
+`status=proposed` (with `asserted_by` and a `review_id`) and never appears as a backlink
+until a human approves it — keeping every semantic/destructive decision human-reviewed
+(ADR-0018, CLAUDE.md rule 9) without making grounded evidence invisible until reviewed. The mapping from a review item's
 outcome is explicit: an assertion stays `proposed` while its review item is pending **or
 deferred** (deferred never activates and never deletes); only an *approved* review flips it
 to `active`, and a *rejected* one to `rejected`. So a deferred decision leaves the

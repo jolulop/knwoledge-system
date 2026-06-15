@@ -45,7 +45,7 @@ retrieval/answering (Phase 4/5); autonomous scheduling (Phase 7).
 |---|-------|-----------|--------|
 | 1 | **Citation grounding gate + structured-citation validator** | ADR-0019/0020/0026 | **DONE** (`app/workers/citations.py`, `scripts/validate_citations.py`) |
 | 2 | **SQLite graph store + validator** (`db/graph.sqlite`, per-assertion edges, active-edge projection primitives, `validate_graph`) | ADR-0029/0030 | **store + validator DONE** (`app/backend/graph.py`, `scripts/validate_graph.py`); page-level backlink rendering wires in with producers (3/4) |
-| 3 | **LLM claim-extraction pass** (tier-2; gated by slice 1; Claim pages; compose into Source pages) | 1, 2, ADR-0021/0022 | planned |
+| 3 | **LLM claim-extraction pass** (tier-2; gated by slice 1; Claim pages; compose into Source pages) | 1, 2, ADR-0021/0022 | **3a DONE** (`app/workers/claims.py`: extract→ground→Claim pages + active `derived_from` edges); 3b = Source-page `Claims` projection from the graph |
 | 4 | **Candidate concepts & entities** (pages, ids, slugs, aliases; edges into the graph) | 2, ADR-0017 | planned |
 | 5 | **Promotion lifecycle** (≥2 independent sources; review-gated early promotion) | 2, 4, ADR-0018 | planned |
 
@@ -115,14 +115,18 @@ edges(edge_id PK, src_id, dst_id, edge_type,             -- one row per ASSERTIO
 
 - Tier-2 (`ENRICH_MODEL_STANDARD`, default `anthropic:claude-sonnet-4-6`) via the 3.5a
   `LLMClient`. Untrusted-data framing as in 3.5a (ADR-0026).
-- The model proposes candidate claims, each with a structured citation. **Every citation
-  is run through `ground_citation` (slice 1); a claim with no resolvable, quoted citation
-  is dropped and logged** — never written.
-- Surviving claims are written as Claim pages (`templates/claim.md`) with a stable
-  `claim_id` (ADR-0021), `generation_status: enriched`, `confidence`, `review_status`.
-- A `derived_from` edge (claim → source, Build Spec §6.2) is written to the graph; the
-  Source page's `Claims` placeholder is recomposed to list the claims (deterministic
-  projection, like 3.5a).
+- The model proposes claims, each with a **verbatim evidence quote** — it does *not* emit
+  char offsets (it cannot reliably). The harness **locates** the quote in the normalized
+  Markdown (whitespace-flexible) to derive `(char_start, char_end)` mechanically, then
+  **every citation is run through `ground_citation` (slice 1); a claim whose quote cannot be
+  located is dropped and logged** — never written.
+- Surviving claims are written as Claim pages with a stable `claim_id` = `clm_` +
+  sha256(normalized claim_text), **source-agnostic** (ADR-0021): the same statement from two
+  sources resolves to one page with multiple `citations` + `derived_from` edges. Pages carry
+  `generation_status: enriched`, `confidence`, `review_status`.
+- A `derived_from` edge (claim → source, §6.2) is written **`active`** — grounded provenance,
+  not a semantic judgment (ADR-0030 edge-status policy); the Source page's `Claims`
+  placeholder is recomposed to list the claims (deterministic projection, like 3.5a).
 - **Only graph-backed links are rendered.** Claim/Source pages emit links only for
   `active` graph edges; the template's placeholder `[[Claims/{{...}}]]` /
   `[[Sources/{{...}}]]` are omitted when empty (as the Phase 3 backbone did, ADR-0016), so
@@ -178,10 +182,12 @@ edges(edge_id PK, src_id, dst_id, edge_type,             -- one row per ASSERTIO
 **Still open, resolved when each slice starts:**
 - **Graph schema** (slice 2): formalized in **ADR-0030**; only the final column *types*
   remain to tune during implementation.
-- **`claim_id` generation + dedup** (slice 3): hash inputs for the creation-time id
-  (ADR-0021); how re-runs dedup claims (same text + same citation → same claim?).
+- **`claim_id` + edge status** (slice 3): **decided** — `clm_` + sha256(normalized
+  claim_text), source-agnostic; grounded `derived_from`/`mentions` edges are `active`,
+  semantic judgments + prose wikilinks are `proposed` (ADR-0030).
 - **Source-page composition** (slices 3/4): claims/concepts rendered from artifacts +
-  graph, preserving the 3.5a single-writer / fingerprint-idempotent property.
+  graph, preserving the 3.5a single-writer / fingerprint-idempotent property. (Producer
+  in 3a; Source-page `Claims` projection in 3b.)
 - **Independence heuristic** (slice 5): how `report_family`/`publisher`/`canonical_url`
   are derived and the confidence weighting.
 

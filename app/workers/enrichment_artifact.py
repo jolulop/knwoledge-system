@@ -19,18 +19,19 @@ from typing import Any
 
 SCHEMA_VERSION = "enrich-summary-tags-v1"
 PROMPT_VERSION = "enrich-summary-tags-prompt-v1"
+# Phase 3.5b claim-extraction pass (separate artifact + versions, tier-2).
+CLAIM_SCHEMA_VERSION = "enrich-claims-v1"
+CLAIM_PROMPT_VERSION = "enrich-claims-prompt-v1"
 
 
-def artifact_path(enrichment_dir: Path, source_id: str) -> Path:
-    return Path(enrichment_dir) / f"{source_id}.json"
-
-
-def artifact_fingerprint(normalized_markdown: str, model_ref: str) -> str:
+def _fingerprint(
+    normalized_markdown: str, model_ref: str, schema_version: str, prompt_version: str
+) -> str:
     """Hash every input that should force re-enrichment (ADR-0027)."""
     h = hashlib.sha256()
     for part in (
-        SCHEMA_VERSION.encode("utf-8"),
-        PROMPT_VERSION.encode("utf-8"),
+        schema_version.encode("utf-8"),
+        prompt_version.encode("utf-8"),
         model_ref.encode("utf-8"),
         normalized_markdown.encode("utf-8"),
     ):
@@ -39,19 +40,39 @@ def artifact_fingerprint(normalized_markdown: str, model_ref: str) -> str:
     return h.hexdigest()[:16]
 
 
-def load_fresh(
-    enrichment_dir: Path, source_id: str, normalized_markdown: str
-) -> dict[str, Any] | None:
-    """Return the enrichment artifact only if it is fresh for the current text; else None."""
-    path = artifact_path(enrichment_dir, source_id)
+def artifact_path(enrichment_dir: Path, source_id: str) -> Path:
+    return Path(enrichment_dir) / f"{source_id}.json"
+
+
+def artifact_fingerprint(normalized_markdown: str, model_ref: str) -> str:
+    return _fingerprint(normalized_markdown, model_ref, SCHEMA_VERSION, PROMPT_VERSION)
+
+
+def claims_artifact_path(enrichment_dir: Path, source_id: str) -> Path:
+    return Path(enrichment_dir) / f"{source_id}.claims.json"
+
+
+def claims_fingerprint(normalized_markdown: str, model_ref: str) -> str:
+    return _fingerprint(normalized_markdown, model_ref, CLAIM_SCHEMA_VERSION, CLAIM_PROMPT_VERSION)
+
+
+def _load_fresh(path: Path, normalized_markdown: str, fingerprint_fn) -> dict[str, Any] | None:
     if not path.exists():
         return None
     try:
         artifact = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    model_ref = artifact.get("model_ref", "")
-    expected = artifact_fingerprint(normalized_markdown, model_ref)
-    if artifact.get("input_fingerprint") != expected:
+    if artifact.get("input_fingerprint") != fingerprint_fn(normalized_markdown, artifact.get("model_ref", "")):
         return None  # stale: normalized text / prompt / model changed since enrichment
     return artifact
+
+
+def load_fresh(enrichment_dir: Path, source_id: str, normalized_markdown: str) -> dict[str, Any] | None:
+    """Return the summary/tags artifact only if fresh for the current text; else None."""
+    return _load_fresh(artifact_path(enrichment_dir, source_id), normalized_markdown, artifact_fingerprint)
+
+
+def load_fresh_claims(enrichment_dir: Path, source_id: str, normalized_markdown: str) -> dict[str, Any] | None:
+    """Return the claims artifact only if fresh for the current text; else None."""
+    return _load_fresh(claims_artifact_path(enrichment_dir, source_id), normalized_markdown, claims_fingerprint)
