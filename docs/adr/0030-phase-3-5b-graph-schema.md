@@ -47,10 +47,14 @@ edges(                                   -- AUTHORITATIVE; one row per relations
     job_id             TEXT,
     created_at         TEXT NOT NULL,
     updated_at         TEXT,
-    -- assertion identity: distinct spans / asserters coexist; a re-run upserts the same
-    -- assertion rather than duplicating it. Edges are id-keyed, never slug-keyed.
-    UNIQUE(src_id, dst_id, edge_type, asserted_by,
-           evidence_source_id, evidence_char_start, evidence_char_end)
+    -- assertion identity — a NULL-SAFE unique index over COALESCE(evidence_*), because a
+    -- plain UNIQUE treats NULL anchors as distinct and would let duplicates through. So
+    -- distinct spans/asserters coexist, a re-run upserts in place, and a raw insert/import
+    -- cannot duplicate an assertion. Edges are id-keyed, never slug-keyed.
+    UNIQUE INDEX over (src_id, dst_id, edge_type, asserted_by,
+                       COALESCE(evidence_source_id, ''),
+                       COALESCE(evidence_char_start, -1),
+                       COALESCE(evidence_char_end, -1))
 )
 ```
 
@@ -63,8 +67,13 @@ The `UNIQUE` key is therefore the *assertion* identity (who asserted it, over wh
 span), not the bare `(src, dst, edge_type)` triple, so re-running a pass upserts the same
 assertion idempotently while genuinely distinct spans/asserters remain separate rows.
 Promotion (slice 5) counts the distinct *independent sources* among a concept's `active`
-`mentions` assertions, and the projector renders a backlink once any `active` assertion
-exists.
+`mentions` assertions — counting only `source`-typed srcs, so a stray non-source assertion
+cannot inflate it — and the projector renders a backlink once any `active` assertion
+exists. **No dangling edges:** both endpoints must be indexed nodes before an assertion is
+written (`upsert_assertion` raises on an unknown `src_id`/`dst_id`; producers call
+`upsert_node` first), and the null-safe unique index enforces the assertion identity at the
+*database* level, not just the write API — `validate_graph` is the backstop for anything
+that reaches the file directly.
 
 **Governed vocabulary.** `node_type` is restricted to Build Spec §6.1 (`source`, `entity`,
 `concept`, `claim`, `project`, `person`, `organization`, `tag`, `query`, `synthesis`) and
@@ -72,12 +81,19 @@ exists.
 `contradicts`, `supersedes`, `duplicates`, `derived_from`, `related_to`. A `validate_graph`
 check rejects anything outside these sets (including a literal `needs_review` edge), so the
 source of truth never starts with an ungoverned vocabulary; a new type requires an ADR and a
-Build Spec §6.2 update. This is one intentional, recorded deviation from §6.2:
-`needs_review` is a review *state*, not a semantic relationship, so it is carried by an
-assertion's `status=proposed`, never as an edge type. The Phase-3.5b producers map onto the
-governed set: source→concept/entity is `mentions`, claim→source is `derived_from`, and
+Build Spec §6.2 update. This is one intentional, **permanent**, recorded deviation from
+§6.2: `needs_review` is a review *state*, not a semantic relationship, so it is carried by
+an assertion's `status=proposed`, never as an edge type. The Phase-3.5b producers map onto
+the governed set: source→concept/entity is `mentions`, claim→source is `derived_from`, and
 aliases are frontmatter (ADR-0017), not an edge. (`supersedes` the edge type — node A
 supersedes node B — is distinct from `status=superseded`, which marks a stale assertion.)
+
+**Endpoint-type contract.** Each edge type constrains its endpoints' node types, enforced
+by `validate_graph` (at validation, not blocked at write time, so producer ordering stays
+free): `mentions` and `related_to` are unconstrained; `derived_from` runs
+{claim, synthesis, concept, entity} → {source, claim, synthesis}; `supports`/`contradicts`
+run {claim, synthesis} ↔ {claim, synthesis}; `supersedes`/`duplicates` require `src` and
+`dst` to share a `node_type`. The contract is extended only by ADR.
 
 **Review-gated assertions live in one table, distinguished by `status`.** There is no
 separate candidate table: proposed, active, rejected, and superseded assertions are all
@@ -103,9 +119,11 @@ rows; promotion and backlink display are computations over the graph with a sing
 each; and review state, provenance, and evidence are first-class on every edge, so the
 "authored wikilinks become reviewed edge candidates" rule (ADR-0029) is actually
 enforceable. The graph holds durable human judgment (approve/reject decisions) and so is
-backed up under `db/`, while the `nodes` index is regenerable from frontmatter. The costs
-are a richer edges schema than a bare adjacency list, a projector and `validate_graph` to
-keep pages and graph in lockstep, and the discipline of re-indexing node rows whenever
-frontmatter metadata changes. The concrete column types may be tuned during slice-2
+backed up under `db/`, while the `nodes` index is regenerable from frontmatter. Node `status` is validated against
+the lifecycle vocabulary on index, `set_status` raises rather than silently no-op on an
+unknown edge, and the schema carries a `PRAGMA user_version` (SCHEMA_VERSION) for future
+migration. The costs are a richer edges schema than a bare adjacency list, a projector and
+`validate_graph` to keep pages and graph in lockstep, and the discipline of re-indexing
+node rows whenever frontmatter metadata changes. The concrete column types may be tuned during slice-2
 implementation; the authority split, the governed vocabulary, the per-assertion single-table
 review-gated `status` model, and the active-only projector are the load-bearing commitments.

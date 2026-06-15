@@ -105,7 +105,9 @@ edges(edge_id PK, src_id, dst_id, edge_type,             -- one row per ASSERTIO
   rules 6, 10), a pure function of the graph + page set (no wall-clock).
 - **Authored wikilinks** in prose are validated edge candidates absorbed as `proposed`
   edges under review, never trusted as edges (ADR-0029).
-- Idempotency: edge upserts keyed on `(src_id, dst_id, edge_type)`.
+- Idempotency: assertion upserts keyed on the full assertion identity — `(src_id, dst_id,
+  edge_type, asserted_by, evidence anchor)` — via a null-safe unique index, so distinct
+  spans/asserters coexist. Both endpoints must be indexed nodes first (no dangling edges).
 
 ---
 
@@ -211,9 +213,13 @@ LLM passes are tested with the fake-adapter `LLMClient` (as in 3.5a).
   `validate_graph` (a literal `needs_review` edge is rejected), each allowed type maps to
   its §6.2 semantics; **node authority** — a rename/status change has exactly one source of
   truth (frontmatter/manifest) and a deterministic projection, and rebuilding the `nodes`
-  index does not mutate any edge; **projector round-trips** — a graph `active` assertion
-  with no page link fails, and a page link with no `active` assertion fails unless it is a
-  `proposed` candidate.
+  index does not mutate any edge; **write integrity** — `upsert_assertion` rejects an
+  unknown `src_id`/`dst_id`, a raw duplicate is rejected by the null-safe unique index, and
+  `set_status` raises on an unknown edge; **endpoint types** — a `derived_from` with a
+  `source` src (or any matrix violation) fails `validate_graph`. *(The page-level projector
+  round-trip — page links match `active` assertions — is a slice 3/4 acceptance item, once
+  producers wire the projector into pages; slice 2 ships the store, the active-edge
+  projection primitives, and the integrity validator.)*
 - Slice 3 (claims): a claim whose citation fails grounding is dropped; a grounded claim
   writes a page + `derived_from` edge; re-run is idempotent and the Source page does not
   churn; **no placeholder `[[Claims/{{...}}]]`/`[[Sources/{{...}}]]` survives rendering**.

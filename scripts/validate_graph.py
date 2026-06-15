@@ -36,16 +36,47 @@ def _check(db_path: Path) -> list[str]:
         known = set(node_types)
         for e in conn.execute("SELECT * FROM edges"):
             ref = e["edge_id"]
-            if e["edge_type"] not in graph.EDGE_TYPES:
-                errors.append(f"edge {ref}: invalid edge_type {e['edge_type']!r} (needs_review is a status)")
+            edge_type = e["edge_type"]
+            if edge_type not in graph.EDGE_TYPES:
+                errors.append(f"edge {ref}: invalid edge_type {edge_type!r} (needs_review is a status)")
             if e["status"] not in graph.EDGE_STATUSES:
                 errors.append(f"edge {ref}: invalid status {e['status']!r}")
             if e["asserted_by"] not in graph.ASSERTED_BY:
                 errors.append(f"edge {ref}: invalid asserted_by {e['asserted_by']!r}")
-            if e["src_id"] not in known:
+
+            src_in = e["src_id"] in known
+            dst_in = e["dst_id"] in known
+            if not src_in:
                 errors.append(f"edge {ref}: src_id {e['src_id']!r} is not an indexed node")
-            if e["dst_id"] not in known:
+            if not dst_in:
                 errors.append(f"edge {ref}: dst_id {e['dst_id']!r} is not an indexed node")
+
+            # Endpoint-type contract (ADR-0030), checked only when both nodes resolve.
+            if src_in and dst_in and edge_type in graph.EDGE_TYPES:
+                src_t, dst_t = node_types[e["src_id"]], node_types[e["dst_id"]]
+                if edge_type in graph.SAME_TYPE_EDGES:
+                    if src_t != dst_t:
+                        errors.append(f"edge {ref}: {edge_type} requires same node_type "
+                                      f"(got {src_t} -> {dst_t})")
+                else:
+                    allowed_src, allowed_dst = graph.EDGE_ENDPOINTS[edge_type]
+                    if allowed_src is not None and src_t not in allowed_src:
+                        errors.append(f"edge {ref}: {edge_type} src must be one of "
+                                      f"{sorted(allowed_src)}, got {src_t}")
+                    if allowed_dst is not None and dst_t not in allowed_dst:
+                        errors.append(f"edge {ref}: {edge_type} dst must be one of "
+                                      f"{sorted(allowed_dst)}, got {dst_t}")
+
+            # Evidence-anchor structural integrity (resolvability vs normalized text is the
+            # citation gate's job once claims wire in; here we check the anchor is well-formed).
+            start, end, ev_src = e["evidence_char_start"], e["evidence_char_end"], e["evidence_source_id"]
+            if (start is None) != (end is None):
+                errors.append(f"edge {ref}: evidence char range half-specified")
+            elif start is not None:
+                if start < 0 or end <= start:
+                    errors.append(f"edge {ref}: evidence char range [{start}, {end}) is invalid")
+                if not ev_src:
+                    errors.append(f"edge {ref}: evidence char range without an evidence_source_id")
     finally:
         conn.close()
     return errors

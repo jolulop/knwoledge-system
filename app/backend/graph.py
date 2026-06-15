@@ -31,6 +31,27 @@ EDGE_TYPES = frozenset(
 )
 EDGE_STATUSES = frozenset({"proposed", "active", "rejected", "superseded"})
 ASSERTED_BY = frozenset({"deterministic", "llm", "human", "authored_wikilink"})
+# Node lifecycle statuses (ADR-0022 / policies/retention.yaml); the derived nodes index
+# mirrors the page/manifest status and is validated against this set.
+NODE_STATUSES = frozenset(
+    {"active", "candidate", "stale_candidate", "deprecated_candidate",
+     "archive_candidate", "archived", "delete_candidate", "deleted"}
+)
+# Endpoint-type contract per edge type (ADR-0030). `None` = unconstrained on that side;
+# SAME_TYPE_EDGES require src and dst to share a node_type. Enforced by validate_graph (not
+# at write time, to leave producer ordering free); extendable only by ADR.
+EDGE_ENDPOINTS: dict[str, tuple[frozenset[str] | None, frozenset[str] | None]] = {
+    "mentions": (None, None),
+    "derived_from": (frozenset({"claim", "synthesis", "concept", "entity"}),
+                     frozenset({"source", "claim", "synthesis"})),
+    "supports": (frozenset({"claim", "synthesis"}), frozenset({"claim", "synthesis"})),
+    "contradicts": (frozenset({"claim", "synthesis"}), frozenset({"claim", "synthesis"})),
+    "related_to": (None, None),
+}
+SAME_TYPE_EDGES = frozenset({"supersedes", "duplicates"})
+
+# Bump when the graph schema changes; recorded via PRAGMA user_version for migration.
+SCHEMA_VERSION = 1
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS nodes (
@@ -58,6 +79,15 @@ CREATE TABLE IF NOT EXISTS edges (
 );
 CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges(dst_id, status);
 CREATE INDEX IF NOT EXISTS idx_edges_src ON edges(src_id, status);
+-- Assertion identity (ADR-0030). COALESCE makes it null-safe — a plain UNIQUE would treat
+-- NULL evidence anchors as distinct and let duplicates through; this rejects them even via
+-- raw SQL or a future import path, not just the write API.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_edges_assertion ON edges(
+    src_id, dst_id, edge_type, asserted_by,
+    COALESCE(evidence_source_id, ''),
+    COALESCE(evidence_char_start, -1),
+    COALESCE(evidence_char_end, -1)
+);
 """
 
 
@@ -73,9 +103,40 @@ def init_db(db_path: Path) -> None:
     conn = connect(db_path)
     try:
         conn.executescript(_SCHEMA)
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         conn.commit()
     finally:
         conn.close()
+
+
+def schema_version(conn: sqlite3.Connection) -> int:
+    return int(conn.execute("PRAGMA user_version").fetchone()[0])
+
+
+def _has_node(conn: sqlite3.Connection, node_id: str) -> bool:
+    return conn.execute("SELECT 1 FROM nodes WHERE node_id = ?", (node_id,)).fetchone() is not None
+
+
+def upsert_node(
+    conn: sqlite3.Connection,
+    *,
+    node_id: str,
+    node_type: str,
+    slug: str | None = None,
+    status: str | None = None,
+    now: str | None = None,
+) -> None:
+    """Index one node (producers call this before asserting edges, ADR-0030)."""
+    if node_type not in NODE_TYPES:
+        raise ValueError(f"unknown node_type {node_type!r}; allowed: {sorted(NODE_TYPES)}")
+    if status is not None and status not in NODE_STATUSES:
+        raise ValueError(f"unknown node status {status!r}; allowed: {sorted(NODE_STATUSES)}")
+    conn.execute(
+        "INSERT OR REPLACE INTO nodes (node_id, node_type, slug, status, indexed_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (node_id, node_type, slug, status, now or iso_now()),
+    )
+    conn.commit()
 
 
 # --- edges (assertions) -----------------------------------------------------
@@ -110,6 +171,12 @@ def upsert_assertion(
         raise ValueError(f"unknown edge status {status!r}; allowed: {sorted(EDGE_STATUSES)}")
     if asserted_by not in ASSERTED_BY:
         raise ValueError(f"unknown asserted_by {asserted_by!r}; allowed: {sorted(ASSERTED_BY)}")
+    # No dangling edges: both endpoints must be indexed nodes first (ADR-0030). Producers
+    # call upsert_node before asserting; validate_graph is the backstop for raw SQL.
+    if not _has_node(conn, src_id):
+        raise ValueError(f"src_id {src_id!r} is not an indexed node; index it first")
+    if not _has_node(conn, dst_id):
+        raise ValueError(f"dst_id {dst_id!r} is not an indexed node; index it first")
     now = now or iso_now()
 
     row = conn.execute(
@@ -147,10 +214,12 @@ def set_status(conn: sqlite3.Connection, edge_id: str, status: str, *, now: str 
     """Transition one assertion's review status (approve/reject/supersede)."""
     if status not in EDGE_STATUSES:
         raise ValueError(f"unknown edge status {status!r}; allowed: {sorted(EDGE_STATUSES)}")
-    conn.execute(
+    cur = conn.execute(
         "UPDATE edges SET status = ?, updated_at = ? WHERE edge_id = ?",
         (status, now or iso_now(), edge_id),
     )
+    if cur.rowcount == 0:
+        raise ValueError(f"no edge {edge_id!r}; status transition would be a silent no-op")
     conn.commit()
 
 
@@ -183,8 +252,9 @@ def count_independent_sources(conn: sqlite3.Connection, dst_id: str, *, edge_typ
     same-family independence (ADR-0018) is a slice-5 concern layered on top of this count.
     """
     row = conn.execute(
-        "SELECT COUNT(DISTINCT src_id) AS n FROM edges "
-        "WHERE dst_id = ? AND edge_type = ? AND status = 'active'",
+        "SELECT COUNT(DISTINCT e.src_id) AS n FROM edges e "
+        "JOIN nodes n ON n.node_id = e.src_id AND n.node_type = 'source' "
+        "WHERE e.dst_id = ? AND e.edge_type = ? AND e.status = 'active'",
         (dst_id, edge_type),
     ).fetchone()
     return int(row["n"])
@@ -218,6 +288,9 @@ def reindex_nodes(
         node_type = node.get("node_type")
         if node_type not in NODE_TYPES:
             raise ValueError(f"unknown node_type {node_type!r}; allowed: {sorted(NODE_TYPES)}")
+        status = node.get("status")
+        if status is not None and status not in NODE_STATUSES:
+            raise ValueError(f"unknown node status {status!r}; allowed: {sorted(NODE_STATUSES)}")
         conn.execute(
             "INSERT OR REPLACE INTO nodes (node_id, node_type, slug, status, indexed_at) "
             "VALUES (?, ?, ?, ?, ?)",
