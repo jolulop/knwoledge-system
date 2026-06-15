@@ -70,31 +70,35 @@ to the page (the authority, review-gated for early promotion), then re-indexed.
 Location: `db/graph.sqlite` (separate from `jobs.sqlite`/`llm_cache.sqlite`; covered by
 backup, ADR-0014). Schema to be finalized in the slice-2 ADR; shape:
 
+Finalized in **ADR-0030**. Shape:
+
 ```text
-nodes(node_id PK, node_type, slug, status, indexed_at)         -- DERIVED from frontmatter
-      node_type ∈ Build Spec §6.1 (source|entity|concept|claim|project|person|
-                  organization|tag|query|synthesis)
-edges(edge_id PK, src_id, dst_id, edge_type,
+nodes(node_id PK, node_type, slug, status, indexed_at)   -- DERIVED index
+      node_type ∈ Build Spec §6.1; concept/entity/claim/synthesis indexed from page
+      frontmatter, source nodes from manifests (ADR-0008)
+edges(edge_id PK, src_id, dst_id, edge_type,             -- one row per ASSERTION
       status,            -- proposed | active | rejected | superseded
-      asserted_by,       -- deterministic | llm | human | authored_wikilink  (provenance)
-      confidence,
-      evidence_source_id, evidence_char_start, evidence_char_end,  -- for evidence-bearing edges
-      review_id,         -- link to the review item when proposed
-      job_id, created_at)
-      edge_type ∈ Build Spec §6.2 ONLY (mentions|supports|contradicts|supersedes|
-                  duplicates|derived_from|related_to|needs_review)
+      asserted_by,       -- deterministic | llm | human | authored_wikilink
+      confidence, evidence_source_id, evidence_char_start, evidence_char_end,
+      review_id, job_id, created_at, updated_at,
+      UNIQUE(src_id, dst_id, edge_type, asserted_by,
+             evidence_source_id, evidence_char_start, evidence_char_end))
+      edge_type ∈ Build Spec §6.2 MINUS needs_review (review = status)
 ```
 
-- **Governed vocabulary (decided).** `edge_type` is restricted to Build Spec §6.2; a
-  `validate_graph` check rejects anything outside it. Earlier sketch types map onto it:
-  `about→mentions`, `evidences→derived_from`, `alias_of→` frontmatter `aliases` (not an
-  edge). New types require an ADR + Build Spec §6.2 update.
-- **Review-gated candidates in one table (decided).** Proposed/rejected edges live in the
-  same `edges` table distinguished by `status`; there is no separate candidate table. The
-  **projector renders only `status=active`** edges, so a model- or prose-authored edge
-  enters as `proposed` (with `asserted_by` + a `review_id`) and never appears as a backlink
-  until a human approves it (ADR-0018). `needs_review` intent is carried by
-  `status=proposed`, not a parallel edge type.
+- **One row per assertion (decided).** A relationship is the *set* of its assertion rows
+  and exists/projects iff it has an `active` assertion — so distinct evidence spans and
+  coexisting LLM/human assertions never overwrite each other. The `UNIQUE` key is the
+  assertion identity, so re-runs upsert idempotently without collapsing distinct spans.
+- **Governed vocabulary (decided).** `edge_type` ∈ Build Spec §6.2 **minus `needs_review`**
+  (review is `status`, not a relationship); `validate_graph` rejects anything else,
+  including a literal `needs_review` edge. Earlier sketch types map on: `about→mentions`,
+  `evidences→derived_from`, `alias_of→` frontmatter `aliases`.
+- **Review-gated candidates in one table (decided).** Proposed/rejected assertions live in
+  `edges` distinguished by `status`; no separate table. The **projector renders only
+  `status=active`**, so a model- or prose-authored assertion enters as `proposed` (with
+  `asserted_by` + `review_id`) and is invisible until approved (ADR-0018). A *deferred*
+  review item leaves the assertion `proposed` (never activates or deletes it).
 - **Edges are id-keyed**, so rename/merge is an id-level redirect, not graph surgery.
 - The **backlink projector** is a deterministic script that renders each page's `active`
   inbound/outbound edges into its link sections — synchronized by construction (CLAUDE.md
@@ -198,14 +202,18 @@ edges(edge_id PK, src_id, dst_id, edge_type,
 Mirrors the ADR-0028 acceptance contract; all deterministic pieces are tested offline,
 LLM passes are tested with the fake-adapter `LLMClient` (as in 3.5a).
 
-- Slice 2 (graph): edge upsert idempotency; rename = id-level redirect preserves edges;
-  **review-gated edges** — a `proposed` edge is not projected, an `active` one is, a
-  `rejected` one is not; **edge vocabulary** — an `edge_type` outside Build Spec §6.2
-  fails `validate_graph`, each allowed type maps to its §6.2 semantics; **node authority**
-  — a rename/status change has exactly one source of truth (frontmatter) and a
-  deterministic projection; **projector round-trips** — a graph `active` edge with no page
-  link fails, and a page link with no `active` graph edge fails unless it is a `proposed`
-  candidate.
+- Slice 2 (graph): assertion upsert idempotency; **multiple evidence spans / asserters**
+  for the same `(src, dst, edge_type)` coexist as separate rows and do not overwrite each
+  other; rename = id-level redirect preserves assertions; **review-gated** — `proposed`,
+  `rejected`, and `superseded` assertions never project, an `active` one does, and a
+  **deferred** review item leaves the assertion `proposed` (neither activated nor deleted);
+  **edge vocabulary** — an `edge_type` outside §6.2-minus-`needs_review` fails
+  `validate_graph` (a literal `needs_review` edge is rejected), each allowed type maps to
+  its §6.2 semantics; **node authority** — a rename/status change has exactly one source of
+  truth (frontmatter/manifest) and a deterministic projection, and rebuilding the `nodes`
+  index does not mutate any edge; **projector round-trips** — a graph `active` assertion
+  with no page link fails, and a page link with no `active` assertion fails unless it is a
+  `proposed` candidate.
 - Slice 3 (claims): a claim whose citation fails grounding is dropped; a grounded claim
   writes a page + `derived_from` edge; re-run is idempotent and the Source page does not
   churn; **no placeholder `[[Claims/{{...}}]]`/`[[Sources/{{...}}]]` survives rendering**.
