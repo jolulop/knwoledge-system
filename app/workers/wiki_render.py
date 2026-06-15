@@ -25,6 +25,13 @@ _WIKILINK_SUB = re.compile(r"\[\[([^\]]+)\]\]")
 # Bump to force a global Source-page rebuild even when rendered bytes are unchanged.
 SOURCE_SCHEMA_VERSION = "wiki-source-v1"
 
+# Node type -> wiki subdirectory (page routing / link targets), Build Spec §6.1.
+NODE_DIR = {
+    "source": "Sources", "concept": "Concepts", "entity": "Entities", "person": "People",
+    "organization": "Organizations", "project": "Projects", "claim": "Claims",
+    "synthesis": "Synthesis", "query": "Queries", "tag": "Tags",
+}
+
 
 # --- frontmatter (dependency-free, project subset) --------------------------
 
@@ -141,22 +148,29 @@ def _claim_alias(title: str) -> str:
     return (safe[:77].rstrip() + "…") if len(safe) > 78 else safe
 
 
-def _claims_block(claims: list[dict[str, Any]] | None) -> str:
-    """Render the Source page's Claims section from passed-in claim data (no IO).
+def _link_list(items: list[dict[str, Any]] | None) -> str:
+    """Render a Source-page section as graph-backed wikilinks from passed-in data (no IO).
 
-    Each item is {claim_id, title|None}: a linked short title when a label is available,
-    else a bare id link. Empty/None -> the deterministic placeholder (byte-identical to the
-    Phase-3 backbone, so unenriched Source pages do not churn).
+    Each item is {target, title|None}: a linked short title when a label is available, else
+    a bare link. Empty/None -> the deterministic placeholder, byte-identical to the Phase-3
+    backbone so unenriched Source pages do not churn.
     """
-    if not claims:
+    if not items:
         return _PENDING
     lines = []
-    for c in claims:
-        cid = c["claim_id"]
-        title = c.get("title")
-        alias = _claim_alias(title) if title else ""
-        lines.append(f"- [[Claims/{cid}|{alias}]]" if alias else f"- [[Claims/{cid}]]")
+    for it in items:
+        target = it["target"]
+        alias = _claim_alias(it.get("title")) if it.get("title") else ""
+        lines.append(f"- [[{target}|{alias}]]" if alias else f"- [[{target}]]")
     return "\n".join(lines)
+
+
+def _claims_block(claims: list[dict[str, Any]] | None) -> str:
+    """Source page Claims section from claim data ({claim_id, title|None})."""
+    items = None if claims is None else [
+        {"target": f"Claims/{c['claim_id']}", "title": c.get("title")} for c in claims
+    ]
+    return _link_list(items)
 
 
 def build_source_values(
@@ -164,6 +178,11 @@ def build_source_values(
     summary_max: int, summary_min: int,
     enrichment: dict[str, Any] | None = None,
     claims: list[dict[str, Any]] | None = None,
+    concepts: list[dict[str, Any]] | None = None,
+    entities: list[dict[str, Any]] | None = None,
+    people: list[dict[str, Any]] | None = None,
+    organizations: list[dict[str, Any]] | None = None,
+    projects: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     sid = manifest["source_id"]
     title = title_from_filename(manifest.get("original_filename", sid))
@@ -210,6 +229,11 @@ def build_source_values(
         "summary_text": summary_text,
         "tags": tags,
         "claims_block": _claims_block(claims),
+        "concepts_block": _link_list(concepts),
+        "entities_block": _link_list(entities),
+        "people_block": _link_list(people),
+        "organizations_block": _link_list(organizations),
+        "projects_block": _link_list(projects),
         "notes": "",
     }
 
@@ -338,11 +362,75 @@ def render_claim_page(claim: dict[str, Any]) -> str:
     return draft.replace('input_fingerprint: ""', f'input_fingerprint: "{fingerprint}"', 1)
 
 
+def render_concept_page(node: dict[str, Any]) -> str:
+    """Render a deterministic candidate concept/entity stub page (slice 4, ADR-0017/0018).
+
+    No LLM-authored prose: frontmatter (id, type, title, aliases, status, confidence) plus a
+    deterministic summary and a Mentioned-by section projected from the node's active
+    `mentions` sources (passed in — no IO). With no active mentions it is a tombstone
+    (`deprecated_candidate`, pending review), kept page-backed and never hard-deleted.
+    """
+    node_type = node["node_type"]
+    title = _WS.sub(" ", str(node["title"])).strip()
+    aliases = node.get("aliases") or []
+    confidence = node.get("confidence", "low")
+    source_ids = node.get("source_ids") or []
+    active = bool(source_ids)
+    status = "candidate" if active else "deprecated_candidate"
+
+    fm_lines = [
+        "---",
+        f"type: {node_type}",
+        f'{node["id_field"]}: "{node["node_id"]}"',
+        f'title: "{_fm_quote(title)}"',
+        f"status: {status}",
+        f"review_status: {'none' if active else 'pending'}",
+        "generation_status: deterministic",
+        f"confidence: {confidence}",
+        f"aliases: {_render_tag_list(aliases)}",
+        'input_fingerprint: ""',
+        "---",
+    ]
+    if active:
+        summary = f"Candidate {node_type} mentioned by {len(source_ids)} source(s)."
+        mentioned = [f"- [[Sources/{s}]]" for s in source_ids]
+    else:
+        summary = f"{node_type.capitalize()} with no active mentions — pending review."
+        mentioned = ["_No active source mentions; pending review._"]
+    alias_lines = [f"- {_delink(a)}" for a in aliases] if aliases else ["_None._"]
+    body = [
+        "",
+        f"# {_delink(title)}",
+        "",
+        f"> [!summary] Candidate {node_type}",
+        f"> {summary}",
+        "",
+        "## Aliases",
+        "",
+        *alias_lines,
+        "",
+        "## Mentioned By",
+        "",
+        *mentioned,
+        "",
+        "## Notes",
+        "",
+    ]
+    draft = "\n".join(fm_lines + body) + "\n"
+    fingerprint = _fingerprint(_FP_LINE.sub("", draft))
+    return draft.replace('input_fingerprint: ""', f'input_fingerprint: "{fingerprint}"', 1)
+
+
 def render_source_page(
     template: str, manifest: dict[str, Any], normalized_markdown: str, *,
     summary_max: int, summary_min: int,
     enrichment: dict[str, Any] | None = None,
     claims: list[dict[str, Any]] | None = None,
+    concepts: list[dict[str, Any]] | None = None,
+    entities: list[dict[str, Any]] | None = None,
+    people: list[dict[str, Any]] | None = None,
+    organizations: list[dict[str, Any]] | None = None,
+    projects: list[dict[str, Any]] | None = None,
 ) -> str:
     """Render a Source page, stamping its input_fingerprint.
 
@@ -355,7 +443,8 @@ def render_source_page(
     """
     values = build_source_values(
         manifest, normalized_markdown, summary_max=summary_max, summary_min=summary_min,
-        enrichment=enrichment, claims=claims,
+        enrichment=enrichment, claims=claims, concepts=concepts, entities=entities,
+        people=people, organizations=organizations, projects=projects,
     )
     draft = render_template(template, {**values, "input_fingerprint": ""})
     fingerprint = _fingerprint(_FP_LINE.sub("", draft))

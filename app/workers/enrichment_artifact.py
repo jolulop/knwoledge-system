@@ -22,6 +22,9 @@ PROMPT_VERSION = "enrich-summary-tags-prompt-v1"
 # Phase 3.5b claim-extraction pass (separate artifact + versions, tier-2).
 CLAIM_SCHEMA_VERSION = "enrich-claims-v1"
 CLAIM_PROMPT_VERSION = "enrich-claims-prompt-v1"
+# Phase 3.5b concept/entity extraction pass.
+CONCEPT_SCHEMA_VERSION = "enrich-concepts-v1"
+CONCEPT_PROMPT_VERSION = "enrich-concepts-prompt-v1"
 
 
 def _fingerprint(
@@ -54,6 +57,14 @@ def claims_artifact_path(enrichment_dir: Path, source_id: str) -> Path:
 
 def claims_fingerprint(normalized_markdown: str, model_ref: str) -> str:
     return _fingerprint(normalized_markdown, model_ref, CLAIM_SCHEMA_VERSION, CLAIM_PROMPT_VERSION)
+
+
+def concepts_artifact_path(enrichment_dir: Path, source_id: str) -> Path:
+    return Path(enrichment_dir) / f"{source_id}.concepts.json"
+
+
+def concepts_fingerprint(normalized_markdown: str, model_ref: str) -> str:
+    return _fingerprint(normalized_markdown, model_ref, CONCEPT_SCHEMA_VERSION, CONCEPT_PROMPT_VERSION)
 
 
 def _load_fresh(path: Path, normalized_markdown: str, fingerprint_fn) -> dict[str, Any] | None:

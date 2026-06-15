@@ -8,10 +8,20 @@ identity string fixed **at creation**:
 
 ```text
 concept_id   = cpt_<sha256(normalized_canonical_name)[:16]>
-entity_id    = ent_<sha256(normalized_canonical_name)[:16]>
+entity_id    = ent_<sha256(normalized_canonical_name)[:16]>      # generic entity
+person_id    = per_<sha256(normalized_canonical_name)[:16]>
+org_id       = org_<sha256(normalized_canonical_name)[:16]>      # organization
+project_id   = prj_<sha256(normalized_canonical_name)[:16]>
 claim_id     = clm_<sha256(normalized_claim_text)[:16]>          # source-agnostic (ADR-0030, Phase 3.5b)
 synthesis_id = syn_<sha256(normalized_title)[:16]>
 ```
+
+The `entity` family is **subtyped** (Build Spec §6.1): extraction classifies each entity as
+`entity` (generic), `person`, `organization`, or `project`, and the **subtype selects the id
+prefix and page directory** (`per_`/`org_`/`prj_` → `wiki/People|Organizations|Projects`),
+so a subtyped entity never gets an ad-hoc id. When the classifier is uncertain it defaults
+to generic `entity` (`ent_`); a later **subtype change is review-gated**, like a merge/split,
+because it re-keys the node's id (ADR-0018, Phase 3.5b slice 4).
 
 Generation is **deterministic at creation**: the same canonical name / claim text yields
 the same id, so re-running extraction over an unchanged corpus is idempotent and does not

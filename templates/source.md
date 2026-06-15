@@ -50,11 +50,23 @@ _Pending semantic enrichment._
 
 ## Concepts Mentioned
 
-_Pending semantic enrichment._
+{{concepts_block}}
 
 ## Entities Mentioned
 
-_Pending semantic enrichment._
+{{entities_block}}
+
+## People Mentioned
+
+{{people_block}}
+
+## Organizations Mentioned
+
+{{organizations_block}}
+
+## Projects Mentioned
+
+{{projects_block}}
 
 ## Notes
 

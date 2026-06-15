@@ -39,6 +39,18 @@ def _claim_label(claims_dir: Path, claim_id: str) -> str | None:
     match = _CLAIM_TEXT_RE.search(page.read_text(encoding="utf-8", errors="replace"))
     return re.sub(r"\\(.)", r"\1", match.group(1)) if match else None
 
+
+_TITLE_RE = re.compile(r'(?m)^title:\s*"(.*)"\s*$')
+
+
+def _node_title(wiki_dir: Path, node_type: str, slug: str) -> str | None:
+    """Resolve a concept/entity node's display title from its page (worker-side IO)."""
+    page = wiki_dir / wiki_render.NODE_DIR[node_type] / f"{slug}.md"
+    if not page.exists():
+        return None
+    match = _TITLE_RE.search(page.read_text(encoding="utf-8", errors="replace"))
+    return re.sub(r"\\(.)", r"\1", match.group(1)) if match else None
+
 _GENERATED_STATUSES = {"extracted", "partial"}
 
 
@@ -145,18 +157,31 @@ def generate_wiki(
                 enrichment = enrichment_artifact.load_fresh(
                     enrichment_dir, source_id, normalized_markdown
                 )
-                # Project the source's active claims from the graph; resolve each label
-                # (worker-side IO) and pass plain data to the pure renderer (slice 3b).
+                # Project the source's active claims (3b) and concept/entity mentions
+                # (slice 4) from the graph; resolve labels worker-side, pass plain data to
+                # the pure renderer.
                 claims = None
+                buckets: dict[str, list] = {k: [] for k in
+                                            ("concept", "entity", "person", "organization", "project")}
                 if gconn is not None:
                     claims = [
                         {"claim_id": cid, "title": _claim_label(claims_dir, cid)}
                         for cid in graph.claims_for_source(gconn, source_id)
                     ]
+                    for m in graph.mentions_for_source(gconn, source_id):
+                        nt, slug = m["node_type"], m["slug"]
+                        item = {"target": f"{wiki_render.NODE_DIR[nt]}/{slug}",
+                                "title": _node_title(wiki_dir, nt, slug)}
+                        buckets.get(nt, buckets["entity"]).append(item)
                 candidate = wiki_render.render_source_page(
                     template, manifest, normalized_markdown,
                     summary_max=summary_max, summary_min=summary_min,
                     enrichment=enrichment, claims=claims,
+                    concepts=buckets["concept"] if gconn else None,
+                    entities=buckets["entity"] if gconn else None,
+                    people=buckets["person"] if gconn else None,
+                    organizations=buckets["organization"] if gconn else None,
+                    projects=buckets["project"] if gconn else None,
                 )
             except Exception as exc:  # one page's failure must not abort the run
                 errors.append({"source_id": source_id, "error": f"{type(exc).__name__}: {exc}"})

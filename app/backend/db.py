@@ -13,7 +13,7 @@ from typing import Any
 
 JOB_TYPES = frozenset(
     {"intake_scan", "manifest_create", "duplicate_check", "extract", "generate_wiki",
-     "enrich", "extract_claims"}
+     "enrich", "extract_claims", "extract_concepts"}
 )
 JOB_STATUSES = frozenset(
     {"pending", "running", "succeeded", "failed", "partial", "skipped"}

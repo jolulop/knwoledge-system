@@ -46,7 +46,7 @@ retrieval/answering (Phase 4/5); autonomous scheduling (Phase 7).
 | 1 | **Citation grounding gate + structured-citation validator** | ADR-0019/0020/0026 | **DONE** (`app/workers/citations.py`, `scripts/validate_citations.py`) |
 | 2 | **SQLite graph store + validator** (`db/graph.sqlite`, per-assertion edges, active-edge projection primitives, `validate_graph`) | ADR-0029/0030 | **store + validator DONE** (`app/backend/graph.py`, `scripts/validate_graph.py`); page-level backlink rendering wires in with producers (3/4) |
 | 3 | **LLM claim-extraction pass** (tier-2; gated by slice 1; Claim pages; compose into Source pages) | 1, 2, ADR-0021/0022 | **3a DONE** (`app/workers/claims.py`: extract→ground→Claim pages **rendered from the graph**; active `derived_from` edges; re-extraction **supersedes** stale edges + recomposes/**tombstones** orphan pages; CLI rebuilds index + runs validators); **3b DONE** (§5b — `graph.claims_for_source`; worker resolves labels + passes data to the pure `render_source_page`; Source `Claims` section projects active `derived_from` links, byte-stable; CLI refreshes via `generate_wiki`) |
-| 4 | **Candidate concepts & entities** (pages, ids, slugs, aliases; edges into the graph) | 2, ADR-0017 | planned |
+| 4 | **Candidate concepts & entities** (pages, ids, slugs, aliases; edges into the graph) | 2, ADR-0017/0021 | **DONE** (`app/workers/concepts.py`: typed nodes w/ entity_type enum + per-type ids/routing; `active` `mentions` edges, optional anchor, no verbatim grounding; deterministic stub pages rendered from the graph; Source-page Concepts/Entities projection; supersede + tombstone on re-extraction; CLI + validators). |
 | 5 | **Promotion lifecycle** (≥2 independent sources; review-gated early promotion) | 2, 4, ADR-0018 | planned |
 
 Rationale for ordering: slice 1 (deterministic, done) is the grounding foundation. The
@@ -163,15 +163,35 @@ page's source link). Decisions:
 
 ---
 
-## 6. Concepts & entities (slice 4)
+## 6. Concepts & entities (slice 4 — designed)
 
-- Candidate concept/entity extraction (tier-2). Pages are slug-keyed by canonical name
-  with a stable `concept_id`/`entity_id` in frontmatter and an `aliases` list (ADR-0017).
-- Created as `candidate`/`stub` (low confidence), kept out of promoted navigation/synthesis
-  until promotion (ADR-0018).
-- `mentions` edges (source → concept/entity, Build Spec §6.2) written to the graph; the
-  same graph-backed-links-only rule applies to the Source page's `Concepts/Entities
-  Mentioned` sections.
+Mirrors the claim pipeline (tier-2, fingerprint-idempotent, supersede-on-re-extraction,
+pure renderer + worker-reads-graph), with concepts/entities as the nodes. Decisions:
+
+- **Typed nodes (decided).** Extraction returns two families: **concepts** and **entities**,
+  where each entity carries an `entity_type` enum `entity | person | organization | project`.
+  The final type selects the **id prefix and page directory** (`cpt_`→`Concepts/`,
+  `ent_`→`Entities/`, `per_`→`People/`, `org_`→`Organizations/`, `prj_`→`Projects/`;
+  ADR-0021). Uncertain → default generic `entity`; a later subtype change is review-gated
+  (re-keys the id). Ids are source-agnostic `<prefix>_sha256(normalized canonical name)`
+  with an `aliases` list (ADR-0017); same name → one page aggregating sources; alias-merge
+  is review-gated/deferred.
+- **Mentions are active provenance, not approval (decided, ADR-0030/0026).** A `mentions`
+  edge (source → node, §6.2) is written **`active`** with `asserted_by=llm` + confidence;
+  concepts/entities are **interpretive labels and are NOT verbatim-grounded** the way claims
+  are — quality comes from **≥2-source recurrence/promotion** (slice 5), not a span. An
+  optional evidence anchor is stored only when a name/alias is mechanically locatable. An
+  ungrounded mention is never usable as a citation for a factual claim.
+- **Pages are deterministic stubs (decided).** Frontmatter: stable id, type, title,
+  `aliases`, `status: candidate`, `confidence`, `generation_status: deterministic`. Body: a
+  deterministic `> [!summary]` (e.g. *"Candidate concept mentioned by N source(s)."*) and a
+  **Mentioned-by** section projected from the node's `active` incoming `mentions` edges
+  (graph), no placeholder wikilinks. **No LLM-authored description this slice** — generated
+  descriptions are deferred to a later node-id-keyed enrichment artifact (labelled
+  generated/unverified, with merge rules), after promotion exists.
+- **Source-page projection.** The Source page's `Concepts/Entities Mentioned` sections
+  project the source's `active` outgoing `mentions` edges — same pure-renderer +
+  worker-reads-graph pattern as 3b (graph-backed links only).
 
 ---
 

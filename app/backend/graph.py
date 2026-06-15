@@ -255,6 +255,70 @@ def supersede_source_edges(
     return affected
 
 
+def supersede_mentions_for_source(
+    conn: sqlite3.Connection, source_id: str, *, now: str | None = None
+) -> list[str]:
+    """Supersede a source's active `mentions` before it is re-extracted; return the affected
+    node ids (concepts/entities) to recompose. The mirror of `supersede_source_edges`, but
+    `mentions` runs source→node (the source is the `src_id`)."""
+    now = now or iso_now()
+    affected = [
+        r["dst_id"] for r in conn.execute(
+            "SELECT DISTINCT dst_id FROM edges WHERE src_id = ? AND edge_type = 'mentions' "
+            "AND asserted_by = 'llm' AND status = 'active'",
+            (source_id,),
+        )
+    ]
+    conn.execute(
+        "UPDATE edges SET status = 'superseded', updated_at = ? WHERE src_id = ? "
+        "AND edge_type = 'mentions' AND asserted_by = 'llm' AND status = 'active'",
+        (now, source_id),
+    )
+    conn.commit()
+    return affected
+
+
+def mentions_for_source(conn: sqlite3.Connection, source_id: str) -> list[dict[str, Any]]:
+    """Active nodes a source mentions, with their type and slug (Source-page projection)."""
+    return _rows(conn.execute(
+        "SELECT DISTINCT e.dst_id, n.node_type, n.slug FROM edges e "
+        "JOIN nodes n ON n.node_id = e.dst_id "
+        "WHERE e.src_id = ? AND e.edge_type = 'mentions' AND e.status = 'active' "
+        "ORDER BY n.node_type, n.slug, e.dst_id",
+        (source_id,),
+    ))
+
+
+def sources_for_node(conn: sqlite3.Connection, node_id: str) -> list[str]:
+    """Active sources that mention a node (the node page's Mentioned-by projection)."""
+    return [
+        r["src_id"] for r in conn.execute(
+            "SELECT DISTINCT src_id FROM edges WHERE dst_id = ? AND edge_type = 'mentions' "
+            "AND status = 'active' ORDER BY src_id",
+            (node_id,),
+        )
+    ]
+
+
+def get_node(conn: sqlite3.Connection, node_id: str) -> dict[str, Any] | None:
+    row = conn.execute(
+        "SELECT node_id, node_type, slug, status FROM nodes WHERE node_id = ?", (node_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def find_node_by_candidate_ids(
+    conn: sqlite3.Connection, candidate_ids: list[str]
+) -> dict[str, Any] | None:
+    """Return the first existing node among candidate ids (used to detect a same-name node
+    under a different type prefix — an entity subtype conflict, ADR-0021/0030)."""
+    for node_id in candidate_ids:
+        node = get_node(conn, node_id)
+        if node is not None:
+            return node
+    return None
+
+
 def _rows(cursor: sqlite3.Cursor) -> list[dict[str, Any]]:
     return [dict(r) for r in cursor.fetchall()]
 

@@ -20,6 +20,9 @@ REQUIRED_BY_TYPE = {
     "concept": ["type", "concept_id", "title", "status", "confidence"],
     "claim": ["type", "claim_id", "status", "confidence"],
     "entity": ["type", "entity_id", "title", "status", "confidence"],
+    "person": ["type", "person_id", "title", "status", "confidence"],
+    "organization": ["type", "organization_id", "title", "status", "confidence"],
+    "project": ["type", "project_id", "title", "status", "confidence"],
     "synthesis": ["type", "synthesis_id", "title", "status"],
     "query": ["type", "query_id", "title", "question", "created"],
 }
