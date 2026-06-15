@@ -56,29 +56,52 @@ write nodes/edges; promotion (5) is a graph computation over them.
 
 ---
 
-## 4. The SQLite graph (slice 2) — source of truth
+## 4. The SQLite graph (slice 2)
 
-Per ADR-0029 the graph in `db/` is authoritative; wiki backlinks are a derived projection.
-Edges key on the stable typed ids (ADR-0021), never slugs.
+**Authority split (decided).** The graph is authoritative for **relationships (edges)**;
+the **wiki page frontmatter is authoritative for node metadata** — `id` (ADR-0021),
+`title`/`slug`, lifecycle `status` (ADR-0022), and `aliases` (ADR-0017). The graph's
+`nodes` table is a **derived index** rebuilt from frontmatter (id/type plus a mirrored
+slug/status for edge queries and promotion), not a second authority. So ADR-0029's
+"graph is source of truth" means edges; one fact has one owner, and rename/status/promotion
+cannot diverge. Promotion computes over edges, *proposes* a status change that is written
+to the page (the authority, review-gated for early promotion), then re-indexed.
 
-Proposed location: `db/graph.sqlite` (separate from `jobs.sqlite` and `llm_cache.sqlite`;
-covered by backup, ADR-0014). Proposed tables (to be fixed in the slice-2 ADR):
+Location: `db/graph.sqlite` (separate from `jobs.sqlite`/`llm_cache.sqlite`; covered by
+backup, ADR-0014). Schema to be finalized in the slice-2 ADR; shape:
 
 ```text
-nodes(node_id PK, node_type, slug, title, status, created_at)
-      node_type ∈ source|concept|entity|claim|synthesis
-edges(edge_id PK, src_id, dst_id, edge_type, confidence, source_id, created_at)
-      edge_type ∈ mentions|evidences|about|supports|contradicts|alias_of|...
+nodes(node_id PK, node_type, slug, status, indexed_at)         -- DERIVED from frontmatter
+      node_type ∈ Build Spec §6.1 (source|entity|concept|claim|project|person|
+                  organization|tag|query|synthesis)
+edges(edge_id PK, src_id, dst_id, edge_type,
+      status,            -- proposed | active | rejected | superseded
+      asserted_by,       -- deterministic | llm | human | authored_wikilink  (provenance)
+      confidence,
+      evidence_source_id, evidence_char_start, evidence_char_end,  -- for evidence-bearing edges
+      review_id,         -- link to the review item when proposed
+      job_id, created_at)
+      edge_type ∈ Build Spec §6.2 ONLY (mentions|supports|contradicts|supersedes|
+                  duplicates|derived_from|related_to|needs_review)
 ```
 
+- **Governed vocabulary (decided).** `edge_type` is restricted to Build Spec §6.2; a
+  `validate_graph` check rejects anything outside it. Earlier sketch types map onto it:
+  `about→mentions`, `evidences→derived_from`, `alias_of→` frontmatter `aliases` (not an
+  edge). New types require an ADR + Build Spec §6.2 update.
+- **Review-gated candidates in one table (decided).** Proposed/rejected edges live in the
+  same `edges` table distinguished by `status`; there is no separate candidate table. The
+  **projector renders only `status=active`** edges, so a model- or prose-authored edge
+  enters as `proposed` (with `asserted_by` + a `review_id`) and never appears as a backlink
+  until a human approves it (ADR-0018). `needs_review` intent is carried by
+  `status=proposed`, not a parallel edge type.
 - **Edges are id-keyed**, so rename/merge is an id-level redirect, not graph surgery.
-- The **backlink projector** is a deterministic script that, for each page, renders the
-  inbound/outbound edges from the graph into the page's link sections — backlinks are
-  synchronized by construction (CLAUDE.md rules 6, 10), never hand-maintained.
-- **Authored wikilinks** found in prose are *validated edge candidates* absorbed under
-  review, not trusted as edges (ADR-0029).
-- Idempotency: edge upserts keyed on `(src_id, dst_id, edge_type)`; the projector is a
-  pure function of the graph + page set (no wall-clock).
+- The **backlink projector** is a deterministic script that renders each page's `active`
+  inbound/outbound edges into its link sections — synchronized by construction (CLAUDE.md
+  rules 6, 10), a pure function of the graph + page set (no wall-clock).
+- **Authored wikilinks** in prose are validated edge candidates absorbed as `proposed`
+  edges under review, never trusted as edges (ADR-0029).
+- Idempotency: edge upserts keyed on `(src_id, dst_id, edge_type)`.
 
 ---
 
@@ -91,8 +114,13 @@ edges(edge_id PK, src_id, dst_id, edge_type, confidence, source_id, created_at)
   is dropped and logged** — never written.
 - Surviving claims are written as Claim pages (`templates/claim.md`) with a stable
   `claim_id` (ADR-0021), `generation_status: enriched`, `confidence`, `review_status`.
-- A `evidences` edge (claim → source) is written to the graph; the Source page's `Claims`
-  placeholder is recomposed to list the claims (deterministic projection, like 3.5a).
+- A `derived_from` edge (claim → source, Build Spec §6.2) is written to the graph; the
+  Source page's `Claims` placeholder is recomposed to list the claims (deterministic
+  projection, like 3.5a).
+- **Only graph-backed links are rendered.** Claim/Source pages emit links only for
+  `active` graph edges; the template's placeholder `[[Claims/{{...}}]]` /
+  `[[Sources/{{...}}]]` are omitted when empty (as the Phase 3 backbone did, ADR-0016), so
+  no invented-but-valid-looking link can slip past the dangling-link check.
 - Like 3.5a, claim output lands first as a per-source artifact / cache entry; the page is
   the composed view, so re-runs are idempotent and a deterministic rebuild does not churn.
 
@@ -104,45 +132,62 @@ edges(edge_id PK, src_id, dst_id, edge_type, confidence, source_id, created_at)
   with a stable `concept_id`/`entity_id` in frontmatter and an `aliases` list (ADR-0017).
 - Created as `candidate`/`stub` (low confidence), kept out of promoted navigation/synthesis
   until promotion (ADR-0018).
-- `mentions`/`about` edges (source ↔ concept/entity) written to the graph.
+- `mentions` edges (source → concept/entity, Build Spec §6.2) written to the graph; the
+  same graph-backed-links-only rule applies to the Source page's `Concepts/Entities
+  Mentioned` sections.
 
 ---
 
 ## 7. Promotion lifecycle (slice 5)
 
 - A candidate concept promotes to `active` once **≥2 independent sources** evidence it
-  (ADR-0018), computed from the graph's `mentions` edges.
+  (ADR-0018), computed from the graph's `active` `mentions` edges.
 - **Independence**: exact (SHA256) duplicates share one `source_id` and count once;
   same-author/publication/report-family sources are flagged for review rather than
   auto-promoting; promotion also weighs confidence, not raw count.
+- **Provenance-metadata prerequisite (decided).** Independence detection needs source
+  provenance the manifest does not carry today. Slice 5 first models optional manifest
+  fields — `author`, `publisher`, `report_family`, `canonical_url` (all null when unknown)
+  — and **until they are populated, promotion only *proposes* (human-reviewed), it never
+  auto-activates**, so same-family sources can never silently auto-promote. Auto-promotion
+  on recurrence turns on only where independence can actually be established.
 - Early promotion and all entity merge/split, contradiction resolution, and deprecation
   are **human-reviewed** (ADR-0018, `policies/review.yaml`) — the LLM proposes, never
   executes.
 
 ---
 
-## 8. Open decisions to resolve per slice
+## 8. Decisions and remaining open items
 
-These are framed but not fully pinned by existing ADRs; each gets an ADR or plan update
-when its slice starts:
+**Decided (this review):**
+- **Node authority** — graph owns edges; wiki frontmatter owns node metadata (id/title/
+  slug/status/aliases); graph `nodes` is a derived index (§4).
+- **Edge vocabulary** — Build Spec §6.2 only, enforced by `validate_graph` (§4).
+- **Candidate edges** — one `edges` table with `status`+provenance; projector renders only
+  `status=active` (§4).
+- **Promotion independence** — model optional provenance manifest fields; review-gate
+  promotion until populated (§7).
+- **Graph-backed links only** — renderers omit placeholder/non-`active`-edge links (§5/§6).
 
-- **Graph schema** (slice 2): concrete `nodes`/`edges` columns, edge-type vocabulary,
-  upsert keys, and whether synthesis/claim nodes live in the same tables. *(new ADR)*
+**Still open, resolved when each slice starts:**
+- **Graph schema** (slice 2): final `nodes`/`edges` column list + the slice-2 ADR
+  formalizing §4.
 - **`claim_id` generation + dedup** (slice 3): hash inputs for the creation-time id
-  (ADR-0021), and how re-runs dedup claims (same text + same citation → same claim?).
+  (ADR-0021); how re-runs dedup claims (same text + same citation → same claim?).
 - **Source-page composition** (slices 3/4): claims/concepts rendered from artifacts +
   graph, preserving the 3.5a single-writer / fingerprint-idempotent property.
-- **Independence heuristic** (slice 5): how "same author/publication/report family" is
-  detected from manifest metadata, and the confidence weighting.
+- **Independence heuristic** (slice 5): how `report_family`/`publisher`/`canonical_url`
+  are derived and the confidence weighting.
 
 ---
 
 ## 9. Validators (extend the lint suite)
 
 - `validate_citations.py` — **done** (slice 1): structured grounding of claim citations.
-- New `validate_graph.py` (slice 2): every edge references existing node ids; backlink
-  projection in pages matches the graph (round-trips without divergence); no slug-keyed
-  edges.
+- New `validate_graph.py` (slice 2): every edge references existing node ids; `edge_type`
+  is within Build Spec §6.2 and `status` within the allowed set; the backlink projection
+  in pages matches the graph's `active` edges (round-trips without divergence); no
+  slug-keyed edges; `proposed`/`rejected` edges are never projected.
 - `validate_wiki.py` extensions (slices 3/4): claim/concept/entity pages carry required
   frontmatter and stable ids; candidate concepts stay out of promoted navigation.
 
@@ -153,13 +198,23 @@ when its slice starts:
 Mirrors the ADR-0028 acceptance contract; all deterministic pieces are tested offline,
 LLM passes are tested with the fake-adapter `LLMClient` (as in 3.5a).
 
-- Slice 2: edge upsert idempotency; projector round-trips (Source↔Concept, tombstone/
-  redirect) without divergence; rename = id-level redirect preserves edges.
-- Slice 3: a claim whose citation fails grounding is dropped; a grounded claim writes a
-  page + `evidences` edge; re-run is idempotent and the Source page does not churn.
-- Slice 4: concept/entity pages get stable ids + aliases; `mentions` edges written.
-- Slice 5: 1 source → `candidate`; 2nd independent source → `active`; same-family 2nd
-  source → review item, not auto-promotion.
+- Slice 2 (graph): edge upsert idempotency; rename = id-level redirect preserves edges;
+  **review-gated edges** — a `proposed` edge is not projected, an `active` one is, a
+  `rejected` one is not; **edge vocabulary** — an `edge_type` outside Build Spec §6.2
+  fails `validate_graph`, each allowed type maps to its §6.2 semantics; **node authority**
+  — a rename/status change has exactly one source of truth (frontmatter) and a
+  deterministic projection; **projector round-trips** — a graph `active` edge with no page
+  link fails, and a page link with no `active` graph edge fails unless it is a `proposed`
+  candidate.
+- Slice 3 (claims): a claim whose citation fails grounding is dropped; a grounded claim
+  writes a page + `derived_from` edge; re-run is idempotent and the Source page does not
+  churn; **no placeholder `[[Claims/{{...}}]]`/`[[Sources/{{...}}]]` survives rendering**.
+- Slice 4 (concepts/entities): pages get stable ids + aliases; `mentions` edges written;
+  only graph-backed links rendered.
+- Slice 5 (promotion): same source, duplicate (same-`source_id`) source, same-family
+  source, and two independent sources each behave correctly — 1 source → `candidate`,
+  2 independent → `active`, same-family 2nd → review item (never auto-promotion), and
+  promotion only proposes while provenance fields are unpopulated.
 
 ---
 
