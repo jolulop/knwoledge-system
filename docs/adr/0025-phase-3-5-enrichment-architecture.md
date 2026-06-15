@@ -42,12 +42,15 @@ local tier additionally needs a base URL (e.g. `ENRICH_LOCAL_BASE_URL`). Citatio
 
 The concrete default model ids named above are **config examples, not normative
 architecture** — model catalogs churn faster than ADRs. The contract is the `model_ref`
-shape and the tier→`model_ref` indirection, not any particular id. So the adapter
-**validates at startup** rather than trusting docs: it resolves each configured
-`model_ref`, fails fast on an unknown provider or a missing API key/base URL for the
-selected provider, and checks that any capability a pass relies on (e.g. `supports_batch`
-for the backfill fast-path) is actually advertised — degrading or erroring explicitly
-instead of discovering the mismatch mid-run.
+shape and the tier→`model_ref` indirection, not any particular id. So configuration is
+validated rather than trusted: a malformed `model_ref` or an unknown provider fails fast
+(a `ConfigError` at resolve time), and a capability a pass relies on (e.g. `supports_batch`
+for the backfill fast-path) is checked against what the adapter advertises rather than
+assumed. A **missing credential** for the selected provider is deliberately *not* a hard
+error — it is the documented graceful path: enrichment is skipped and sources stay
+`summary_status: stub` (the worker queries `provider_available` and skips). A strict
+opt-in check (`LLMClient.validate_tiers`, which *does* fail on a missing credential) is
+available for deployments that require enrichment to actually run.
 
 **Execution is a supervised backend worker, synchronous by default.** Calls run from
 `app/workers/enrich.py`, the same supervised, synchronous shape as the extract and wiki
@@ -63,8 +66,10 @@ adapter seam is what Phase 3.5 fixes now.
 **Enriched output lands in a separate artifact; the Source page stays a single-writer
 derived view.** Enrichment passes never write `wiki/Sources/<source_id>.md` directly. Each
 pass writes its validated, schema-conformant output to a per-source, content-keyed
-**enrichment artifact** (e.g. `normalized/enrichment/<source_id>.json`), which is the
-artifact of record (ADR-0027). The deterministic Source-page renderer remains the **sole
+**enrichment artifact** (e.g. `normalized/enrichment/<source_id>.json`). The response
+cache is the durable record of LLM output; this artifact is **derived state** the renderer
+composes — regenerable by replaying the cache (free, no provider call), so it lives in the
+not-backed-up `normalized/` layer rather than being durable state itself (ADR-0027). The deterministic Source-page renderer remains the **sole
 writer** of the `.md`: it composes the enrichment artifact into the page, filling the
 `_Pending semantic enrichment._` placeholders when an artifact exists and falling back to
 the placeholder when it does not. This preserves the Phase-3 invariant that a Source page

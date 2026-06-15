@@ -9,6 +9,7 @@ once a storage policy is decided).
 """
 from __future__ import annotations
 
+import os
 import sys
 import zipfile
 from datetime import datetime, timezone
@@ -22,12 +23,17 @@ INCLUDE_DIRS = [
 ]
 INCLUDE_FILES = ["CLAUDE.md", "AGENTS.md", "README.md", "pyproject.toml", "docker-compose.yml"]
 
+# The response cache is backed up by default (ADR-0027); set BACKUP_EXCLUDE_LLM_CACHE to a
+# truthy value to opt out (trading reproducibility for a smaller backup footprint).
+_CACHE_FILENAME = "llm_cache.sqlite"
+
 
 def create_backup(root: Path) -> Path:
     """Write a timestamped zip of critical state under <root>/backups and return it."""
     root = Path(root).resolve()
     backup_dir = root / "backups"
     backup_dir.mkdir(exist_ok=True)
+    exclude_cache = bool(os.environ.get("BACKUP_EXCLUDE_LLM_CACHE"))
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out = backup_dir / f"knowledge-system-backup-{stamp}.zip"
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -41,8 +47,11 @@ def create_backup(root: Path) -> Path:
                 continue
             for path in folder.rglob("*"):
                 # Don't recurse the backups dir into itself.
-                if path.is_file() and backup_dir not in path.parents:
-                    zf.write(path, path.relative_to(root))
+                if not path.is_file() or backup_dir in path.parents:
+                    continue
+                if exclude_cache and path.name == _CACHE_FILENAME:
+                    continue  # opt-out: skip the LLM response cache
+                zf.write(path, path.relative_to(root))
     return out
 
 

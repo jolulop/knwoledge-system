@@ -21,7 +21,7 @@ from typing import Any
 
 from app.backend import db
 from app.backend.manifests import iso_now, list_manifests
-from app.workers import wiki_render
+from app.workers import enrichment_artifact, wiki_render
 
 _GENERATED_STATUSES = {"extracted", "partial"}
 
@@ -64,6 +64,7 @@ def generate_wiki(
     wiki_dir: Path | None = None,
     templates_dir: Path | None = None,
     markdown_dir: Path | None = None,
+    enrichment_dir: Path | None = None,
     summary_max: int = 320,
     summary_min: int = 40,
     rebuild_index: bool = True,
@@ -76,6 +77,9 @@ def generate_wiki(
     wiki_dir = Path(wiki_dir) if wiki_dir else root / "wiki"
     templates_dir = Path(templates_dir) if templates_dir else root / "templates"
     markdown_dir = Path(markdown_dir) if markdown_dir else root / "normalized" / "markdown"
+    enrichment_dir = (
+        Path(enrichment_dir) if enrichment_dir else root / "normalized" / "enrichment"
+    )
     sources_dir = wiki_dir / "Sources"
     sources_dir.mkdir(parents=True, exist_ok=True)
 
@@ -115,9 +119,14 @@ def generate_wiki(
                 normalized_markdown = (
                     md_path.read_text(encoding="utf-8") if md_path.exists() else ""
                 )
+                # Compose a *fresh* enrichment artifact, if any; stale or absent -> stub.
+                enrichment = enrichment_artifact.load_fresh(
+                    enrichment_dir, source_id, normalized_markdown
+                )
                 candidate = wiki_render.render_source_page(
                     template, manifest, normalized_markdown,
                     summary_max=summary_max, summary_min=summary_min,
+                    enrichment=enrichment,
                 )
             except Exception as exc:  # one page's failure must not abort the run
                 errors.append({"source_id": source_id, "error": f"{type(exc).__name__}: {exc}"})

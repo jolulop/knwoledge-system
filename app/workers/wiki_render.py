@@ -20,6 +20,7 @@ _FRONTMATTER = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 _WS = re.compile(r"\s+")
 _SENTENCE = re.compile(r"[.!?]")
 _FP_LINE = re.compile(r"(?m)^input_fingerprint:.*\n?")
+_WIKILINK_SUB = re.compile(r"\[\[([^\]]+)\]\]")
 
 # Bump to force a global Source-page rebuild even when rendered bytes are unchanged.
 SOURCE_SCHEMA_VERSION = "wiki-source-v1"
@@ -105,15 +106,60 @@ def summary_excerpt(
     return f"Source: {title}. {pages} pages, {chunk_count} chunks."
 
 
+def _delink(text: str) -> str:
+    """Neutralise any `[[wikilink]]` to plain text (ADR-0016/0029, CLAUDE.md rule 4).
+
+    3.5a generated content may not assert links: the SQLite graph and its backlink
+    projector do not exist until 3.5b, so a model-emitted wikilink would be either a
+    dangling link or an unreviewed phantom edge. Render `[[a|b]]` as `b`, `[[a]]` as `a`.
+    """
+    return _WIKILINK_SUB.sub(
+        lambda m: m.group(1).split("|", 1)[-1].strip(), text
+    )
+
+
+def _render_tag_list(tags: list[Any]) -> str:
+    """Render a tag list as an inline YAML array, sanitised and deduplicated."""
+    seen: list[str] = []
+    for tag in tags:
+        cleaned = str(tag).replace('"', "").replace("[", "").replace("]", "").replace("\n", " ")
+        cleaned = _WS.sub(" ", cleaned).strip()
+        if cleaned and cleaned not in seen:
+            seen.append(cleaned)
+    if not seen:
+        return "[]"
+    return "[" + ", ".join(f'"{t}"' for t in seen) + "]"
+
+
 def build_source_values(
     manifest: dict[str, Any], normalized_markdown: str, *,
     summary_max: int, summary_min: int,
+    enrichment: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     sid = manifest["source_id"]
     title = title_from_filename(manifest.get("original_filename", sid))
     page_count = manifest.get("page_count")
     chunk_count = int(manifest.get("chunk_count") or 0)
     normalized = manifest.get("normalized") or {}
+
+    if enrichment:
+        # Composed LLM summary/tags: model-authored, labelled generated/unverified, with
+        # page-level provenance to this one source (ADR-0026). Span-grounded claims are 3.5b.
+        summary_status = "enriched"
+        generation_status = "enriched"
+        summary_label = "Generated summary (unverified)"
+        summary_text = _delink(_WS.sub(" ", str(enrichment.get("summary", "")).strip())) or "(no summary)"
+        tags = _render_tag_list(enrichment.get("tags") or [])
+    else:
+        summary_status = "stub"
+        generation_status = "deterministic"
+        summary_label = "Extractive excerpt (auto-generated, unverified)"
+        summary_text = summary_excerpt(
+            normalized_markdown, title, page_count, chunk_count,
+            max_chars=summary_max, min_chars=summary_min,
+        )
+        tags = "[]"
+
     return {
         "source_id": sid,
         "title": title,
@@ -127,10 +173,11 @@ def build_source_values(
         "ingestion_status": manifest.get("ingestion_status", ""),
         "created_at": manifest.get("created_at", ""),
         "ingested_at": manifest.get("discovered_at", ""),
-        "extractive_excerpt": summary_excerpt(
-            normalized_markdown, title, page_count, chunk_count,
-            max_chars=summary_max, min_chars=summary_min,
-        ),
+        "summary_status": summary_status,
+        "generation_status": generation_status,
+        "summary_label": summary_label,
+        "summary_text": summary_text,
+        "tags": tags,
         "notes": "",
     }
 
@@ -146,16 +193,20 @@ def _fingerprint(page_without_fp: str) -> str:
 def render_source_page(
     template: str, manifest: dict[str, Any], normalized_markdown: str, *,
     summary_max: int, summary_min: int,
+    enrichment: dict[str, Any] | None = None,
 ) -> str:
-    """Render a deterministic Source page, stamping its input_fingerprint.
+    """Render a Source page, stamping its input_fingerprint.
 
     The fingerprint hashes the page's own rendered content (with the fingerprint line
     excluded) plus a schema version, so it transitively covers the template, the
-    normalized text, the manifest fields, and the summary config — every input that
-    determines the bytes (ADR-0023). No wall-clock value is embedded.
+    normalized text, the manifest fields, the summary config, and — when present — the
+    composed enrichment artifact (summary/tags), every input that determines the bytes
+    (ADR-0023/0025). No wall-clock value is embedded; enrichment freshness is the
+    artifact's own fingerprint, checked before composition (ADR-0027).
     """
     values = build_source_values(
         manifest, normalized_markdown, summary_max=summary_max, summary_min=summary_min,
+        enrichment=enrichment,
     )
     draft = render_template(template, {**values, "input_fingerprint": ""})
     fingerprint = _fingerprint(_FP_LINE.sub("", draft))

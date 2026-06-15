@@ -17,10 +17,13 @@ ephemeral:
 response_cache:                 # raw LLM responses under db/ (ADR-0027)
   enabled: true
   location: db/
-  cache_ttl_days: 365           # entries older than this are purge candidates
+  # cache_ttl_days / cache_max_mb are read by the maintenance purge (not implemented in
+  # 3.5a; planned for the maintenance pass). Declared now so the bound is recorded.
+  cache_ttl_days: 365           # entries older than this become purge candidates
   cache_max_mb: 2048            # soft cap; oldest entries become purge candidates beyond it
   purge_requires_review: true   # bulk purge forfeits reproducibility -> review-gated
-  backup: true                  # included by scripts/backup.py by default; set false to opt out
+  backup: true                  # included by scripts/backup.py by default (enforced)
+  backup_opt_out_env: BACKUP_EXCLUDE_LLM_CACHE  # set truthy to exclude the cache (enforced)
 statuses:
   - active
   - stale_candidate

@@ -12,12 +12,12 @@ page_count: {{page_count}}
 chunk_count: {{chunk_count}}
 status: active
 ingestion_status: "{{ingestion_status}}"
-summary_status: stub
-generation_status: deterministic
+summary_status: {{summary_status}}
+generation_status: {{generation_status}}
 created: "{{created_at}}"
 ingested: "{{ingested_at}}"
 input_fingerprint: "{{input_fingerprint}}"
-tags: []
+tags: {{tags}}
 concepts: []
 entities: []
 people: []
@@ -27,8 +27,8 @@ projects: []
 
 # {{title}}
 
-> [!summary] Extractive excerpt (auto-generated, unverified)
-> {{extractive_excerpt}}
+> [!summary] {{summary_label}}
+> {{summary_text}}
 
 ## Source Details
 

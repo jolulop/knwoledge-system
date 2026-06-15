@@ -100,12 +100,16 @@ def _check_page(root: Path, path: Path, manifests: dict[str, dict]) -> list[str]
             errors.append(f"{sid}: leaks an absolute path: {line.strip()[:60]}")
             break
 
-    # Summary callout present and, when a stub, labelled as an extractive excerpt.
+    # Summary callout present and labelled for what it is: an extractive stub, or a
+    # generated/unverified LLM summary (ADR-0016/0026). The linter enforces the label so an
+    # enriched summary can never silently claim authority it has not earned.
     summary_line = next((ln for ln in text.splitlines() if ln.strip().startswith("> [!summary]")), None)
     if summary_line is None:
         errors.append(f"{sid}: missing > [!summary] callout")
     elif fm.get("summary_status") == "stub" and "Extractive excerpt" not in summary_line:
         errors.append(f"{sid}: stub summary is not labelled as an extractive excerpt")
+    elif fm.get("summary_status") == "enriched" and "unverified" not in summary_line.lower():
+        errors.append(f"{sid}: enriched summary is not labelled as generated/unverified")
 
     # No dangling wikilinks.
     for target in _WIKILINK.findall(body):

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 JOB_TYPES = frozenset(
-    {"intake_scan", "manifest_create", "duplicate_check", "extract", "generate_wiki"}
+    {"intake_scan", "manifest_create", "duplicate_check", "extract", "generate_wiki", "enrich"}
 )
 JOB_STATUSES = frozenset(
     {"pending", "running", "succeeded", "failed", "partial", "skipped"}

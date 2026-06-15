@@ -65,6 +65,17 @@ class Settings:
     templates_dir: Path
     wiki_summary_max_chars: int
     wiki_summary_min_chars: int
+    # Phase 3.5 enrichment (ADR-0025/0027). Model defaults are config examples, not
+    # normative — the contract is the tier -> model_ref indirection (provider:model_id).
+    enrich_model_light: str
+    enrich_model_standard: str
+    enrich_model_heavy: str
+    enrich_max_tokens: int
+    enrich_local_base_url: str | None
+    anthropic_api_key: str | None
+    openai_api_key: str | None
+    openai_base_url: str | None
+    response_cache_path: Path
     app_host: str
     app_port: int
     app_name: str = "knowledge-system"
@@ -99,6 +110,15 @@ def get_settings(root: Path | None = None) -> Settings:
         templates_dir=resolved / "templates",
         wiki_summary_max_chars=int(cfg("WIKI_SUMMARY_MAX_CHARS", "320")),
         wiki_summary_min_chars=int(cfg("WIKI_SUMMARY_MIN_CHARS", "40")),
+        enrich_model_light=cfg("ENRICH_MODEL_LIGHT", "anthropic:claude-haiku-4-5"),
+        enrich_model_standard=cfg("ENRICH_MODEL_STANDARD", "anthropic:claude-sonnet-4-6"),
+        enrich_model_heavy=cfg("ENRICH_MODEL_HEAVY", "anthropic:claude-opus-4-8"),
+        enrich_max_tokens=int(cfg("ENRICH_MAX_TOKENS", "1024")),
+        enrich_local_base_url=(cfg("ENRICH_LOCAL_BASE_URL", "") or None),
+        anthropic_api_key=(cfg("ANTHROPIC_API_KEY", "") or None),
+        openai_api_key=(cfg("OPENAI_API_KEY", "") or None),
+        openai_base_url=(cfg("OPENAI_BASE_URL", "") or None),
+        response_cache_path=resolved / "db" / "llm_cache.sqlite",
         app_host=cfg("APP_HOST", "127.0.0.1"),
         app_port=int(cfg("APP_PORT", "18000")),
     )
