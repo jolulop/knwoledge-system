@@ -170,8 +170,8 @@ edges(edge_id PK, src_id, dst_id, edge_type,
 - **Graph-backed links only** — renderers omit placeholder/non-`active`-edge links (§5/§6).
 
 **Still open, resolved when each slice starts:**
-- **Graph schema** (slice 2): final `nodes`/`edges` column list + the slice-2 ADR
-  formalizing §4.
+- **Graph schema** (slice 2): formalized in **ADR-0030**; only the final column *types*
+  remain to tune during implementation.
 - **`claim_id` generation + dedup** (slice 3): hash inputs for the creation-time id
   (ADR-0021); how re-runs dedup claims (same text + same citation → same claim?).
 - **Source-page composition** (slices 3/4): claims/concepts rendered from artifacts +
