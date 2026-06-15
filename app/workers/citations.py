@@ -95,11 +95,16 @@ def locate_quote(normalized_markdown: str, quote: str) -> tuple[int, int] | None
 
 
 def _parse_scalar(raw: str) -> Any:
-    raw = raw.split("  #", 1)[0].strip()
+    raw = raw.strip()
+    # Double-quoted: unescape backslash escapes (\\, \", \[, \]) — the inverse of the
+    # frontmatter-quote escaping, so a citation quote round-trips to the exact source span.
+    if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"':
+        return re.sub(r"\\(.)", r"\1", raw[1:-1])
+    if len(raw) >= 2 and raw[0] == "'" and raw[-1] == "'":
+        return raw[1:-1]
+    raw = raw.split("  #", 1)[0].strip()  # inline comment only on bare (unquoted) scalars
     if raw in ("", "null", "None", "~", "[]"):
         return None
-    if len(raw) >= 2 and raw[0] in "\"'" and raw[-1] == raw[0]:
-        return raw[1:-1]
     if _INT.match(raw):
         return int(raw)
     return raw

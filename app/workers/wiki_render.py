@@ -154,10 +154,12 @@ def build_source_values(
         summary_status = "stub"
         generation_status = "deterministic"
         summary_label = "Extractive excerpt (auto-generated, unverified)"
-        summary_text = summary_excerpt(
+        # De-link too: source text in the excerpt may contain [[..]] that would otherwise
+        # render as a dangling wikilink on the Source page (ADR-0016, CLAUDE.md rule 4).
+        summary_text = _delink(summary_excerpt(
             normalized_markdown, title, page_count, chunk_count,
             max_chars=summary_max, min_chars=summary_min,
-        )
+        ))
         tags = "[]"
 
     return {
@@ -199,12 +201,23 @@ def _claim_title(claim_text: str) -> str:
 
 
 def _quote_cell(text: str) -> str:
-    """Single-line, table- and frontmatter-safe rendering of an evidence quote.
+    """Display rendering of an evidence quote for a Markdown table cell (a view, not the
+    record): collapse whitespace and neutralise table pipes. Callers also de-link it."""
+    return _WS.sub(" ", str(text)).strip().replace("|", "\\|")
 
-    Collapses whitespace, neutralises table pipes, and downgrades embedded double quotes to
-    single quotes so the value is safe inside a `quote: "…"` frontmatter line too.
+
+def _fm_quote(text: str) -> str:
+    """Faithful, round-trippable rendering of an evidence quote for the frontmatter
+    `citations[].quote` (the machine-readable record validate_citations grounds).
+
+    Whitespace is collapsed (grounding normalises whitespace on both sides, so this is
+    span-faithful), then `\\`, `"`, and `[`/`]` are backslash-escaped — so the value parses
+    back to the exact span (citations._parse_scalar unescapes) and contains no literal
+    `[[` for validate_wikilinks to flag.
     """
-    return _WS.sub(" ", str(text)).strip().replace("|", "\\|").replace('"', "'")
+    collapsed = _WS.sub(" ", str(text)).strip()
+    return (collapsed.replace("\\", "\\\\").replace('"', '\\"')
+            .replace("[", "\\[").replace("]", "\\]"))
 
 
 def render_claim_page(claim: dict[str, Any]) -> str:
@@ -241,7 +254,7 @@ def render_claim_page(claim: dict[str, Any]) -> str:
             f'    page: {c.get("page") if c.get("page") is not None else "null"}',
             '    section: null',
             '    chunk_id: null',
-            f'    quote: "{_delink(_quote_cell(c.get("quote", "")))}"',
+            f'    quote: "{_fm_quote(c.get("quote", ""))}"',
         ])
         evidence_rows.append(
             f'| [[Sources/{c["source_id"]}]] | {c["char_start"]}–{c["char_end"]} | '

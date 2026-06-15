@@ -162,8 +162,9 @@ def upsert_assertion(
 
     The assertion identity is (src, dst, edge_type, asserted_by, evidence anchor) — distinct
     spans/asserters are distinct rows, while a re-run of the same assertion updates it in
-    place rather than duplicating. NULL evidence fields are matched null-safely (`IS`), which
-    a table-level UNIQUE would not do, so idempotency is enforced here, not by the schema.
+    place rather than duplicating. Idempotency is enforced both by the null-safe unique index
+    (`uq_edges_assertion`, which uses `COALESCE` so NULL anchors don't slip past it) and by
+    this upsert's `IS`-based lookup, which updates the existing row in place.
     """
     if edge_type not in EDGE_TYPES:
         raise ValueError(f"unknown edge_type {edge_type!r}; allowed: {sorted(EDGE_TYPES)}")
@@ -221,6 +222,37 @@ def set_status(conn: sqlite3.Connection, edge_id: str, status: str, *, now: str 
     if cur.rowcount == 0:
         raise ValueError(f"no edge {edge_id!r}; status transition would be a silent no-op")
     conn.commit()
+
+
+def supersede_source_edges(
+    conn: sqlite3.Connection,
+    source_id: str,
+    *,
+    edge_type: str = "derived_from",
+    asserted_by: str = "llm",
+    now: str | None = None,
+) -> list[str]:
+    """Mark a source's active assertions `superseded` before it is re-extracted (ADR-0030).
+
+    Used on re-extraction so stale evidence (old char ranges into changed text) stops being
+    authoritative without losing the audit trail. Returns the affected `src_id`s (the claim
+    nodes) so the caller can recompose their pages from the surviving `active` assertions.
+    """
+    now = now or iso_now()
+    affected = [
+        r["src_id"] for r in conn.execute(
+            "SELECT DISTINCT src_id FROM edges WHERE dst_id = ? AND edge_type = ? "
+            "AND asserted_by = ? AND status = 'active'",
+            (source_id, edge_type, asserted_by),
+        )
+    ]
+    conn.execute(
+        "UPDATE edges SET status = 'superseded', updated_at = ? WHERE dst_id = ? "
+        "AND edge_type = ? AND asserted_by = ? AND status = 'active'",
+        (now, source_id, edge_type, asserted_by),
+    )
+    conn.commit()
+    return affected
 
 
 def _rows(cursor: sqlite3.Cursor) -> list[dict[str, Any]]:

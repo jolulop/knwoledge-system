@@ -24,6 +24,9 @@ normalized/markdown/*.md
 normalized/chunks/*.jsonl
 normalized/tables/*/
 normalized/extraction_logs/*.json
+# Phase 3.5 enrichment artifacts (summary/tags, claims, per-claim records) are derived
+# state regenerated from the response cache (ADR-0025/0027), never committed.
+normalized/enrichment/
 # Phase 3 wiki layer is mutable local data, not code (ADR-0014): generated Source
 # pages, the regenerated index.md, and the append-only log.md are reproduced by the
 # pipeline and made durable by the backup mechanism, never committed. Keep .gitkeeps.

@@ -35,8 +35,9 @@ def resolve_link(target: str, wiki_root: Path, stem_index: dict[str, list[Path]]
     return target in stem_index and len(stem_index[target]) >= 1
 
 
-def main() -> int:
-    root = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path.cwd()
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    root = Path(argv[0]).resolve() if argv else Path.cwd()
     wiki_root = root / "wiki"
     stem_index = build_stem_index(wiki_root)
     errors: list[str] = []
