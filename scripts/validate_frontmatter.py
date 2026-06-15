@@ -43,8 +43,9 @@ def has_summary(text: str) -> bool:
     return any(line.strip().startswith("> [!summary]") for line in text.splitlines())
 
 
-def main() -> int:
-    root = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path.cwd()
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    root = Path(argv[0]).resolve() if argv else Path.cwd()
     wiki = root / "wiki"
     errors: list[str] = []
     for subdir in WIKI_SUBDIRS:

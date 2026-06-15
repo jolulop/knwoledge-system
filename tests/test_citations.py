@@ -106,6 +106,10 @@ def _setup(tmp_path, citations_lines, *, md=MD, evidence=True, claim_id="clm_012
         p = tmp_path / "normalized" / "markdown" / f"{SID}.md"
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(md, encoding="utf-8")
+        # The citation must resolve to a real source (manifest), not just a normalized file.
+        man = tmp_path / "raw" / "manifests" / f"{SID}.json"
+        man.parent.mkdir(parents=True, exist_ok=True)
+        man.write_text("{}", encoding="utf-8")
     body = "\n## Evidence\n\n| Source | ... |\n" if evidence else "\n"
     text = f"---\ntype: claim\nclaim_id: {claim_id}\n{citations_lines}\n---\n\n# Claim{body}"
     cp = tmp_path / "wiki" / "Claims" / f"{claim_id}.md"

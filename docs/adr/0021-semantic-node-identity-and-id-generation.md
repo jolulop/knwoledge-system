@@ -9,13 +9,17 @@ identity string fixed **at creation**:
 ```text
 concept_id   = cpt_<sha256(normalized_canonical_name)[:16]>
 entity_id    = ent_<sha256(normalized_canonical_name)[:16]>
-claim_id     = clm_<sha256(normalized_claim_text + "|" + primary_source_id)[:16]>
+claim_id     = clm_<sha256(normalized_claim_text)[:16]>          # source-agnostic (ADR-0030, Phase 3.5b)
 synthesis_id = syn_<sha256(normalized_title)[:16]>
 ```
 
 Generation is **deterministic at creation**: the same canonical name / claim text yields
 the same id, so re-running extraction over an unchanged corpus is idempotent and does not
-mint duplicate nodes. The id is then **frozen** in the page's frontmatter — it is the
+mint duplicate nodes. For claims this id is **source-agnostic** (the claim text alone, not
+the source): the same statement extracted from two sources resolves to one Claim page that
+aggregates both sources' citations and `derived_from` edges (ADR-0030, Phase 3.5b). An
+earlier draft of this ADR keyed `claim_id` on `claim_text + primary_source_id`; that was
+superseded by the source-agnostic form when the multi-source aggregation model was fixed. The id is then **frozen** in the page's frontmatter — it is the
 node's permanent identity even though the human-facing slug, title, or wording may later
 change. (The id is derived from the creation-time string, not recomputed on every run;
 recomputation is only a dedup aid when deciding whether a *new* node already exists.)

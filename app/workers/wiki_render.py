@@ -234,40 +234,62 @@ def render_claim_page(claim: dict[str, Any]) -> str:
     claim_text = _WS.sub(" ", str(claim["claim_text"])).strip()
     confidence = claim.get("confidence", "low")
     citations = claim.get("citations", [])
+    active = bool(citations)
+    # No active evidence -> a tombstone: kept page-backed for audit and node authority
+    # (ADR-0030), marked deprecated_candidate pending human-reviewed deletion (ADR-0018);
+    # never hard-deleted (CLAUDE.md rule 9).
+    status = "active" if active else "deprecated_candidate"
+    review_status = "none" if active else "pending"
 
     fm_lines = [
         "---",
         "type: claim",
         f'claim_id: "{claim_id}"',
-        "status: active",
-        "review_status: none",
+        f"status: {status}",
+        f"review_status: {review_status}",
         "generation_status: enriched",
         f"confidence: {confidence}",
-        "citations:",
+        # claim_text is the durable authority for the claim's wording (ADR-0030 node
+        # metadata lives in frontmatter); escaped so it round-trips and carries no [[.
+        f'claim_text: "{_fm_quote(claim_text)}"',
     ]
     evidence_rows = []
-    for c in citations:
-        fm_lines.extend([
-            f'  - source_id: "{c["source_id"]}"',
-            f'    char_start: {c["char_start"]}',
-            f'    char_end: {c["char_end"]}',
-            f'    page: {c.get("page") if c.get("page") is not None else "null"}',
-            '    section: null',
-            '    chunk_id: null',
-            f'    quote: "{_fm_quote(c.get("quote", ""))}"',
-        ])
-        evidence_rows.append(
-            f'| [[Sources/{c["source_id"]}]] | {c["char_start"]}–{c["char_end"]} | '
-            f'{_delink(_quote_cell(c.get("quote", "")))} |'
-        )
+    if active:
+        fm_lines.append("citations:")
+        for c in citations:
+            fm_lines.extend([
+                f'  - source_id: "{c["source_id"]}"',
+                f'    char_start: {c["char_start"]}',
+                f'    char_end: {c["char_end"]}',
+                f'    page: {c.get("page") if c.get("page") is not None else "null"}',
+                '    section: null',
+                '    chunk_id: null',
+                f'    quote: "{_fm_quote(c.get("quote", ""))}"',
+            ])
+            evidence_rows.append(
+                f'| [[Sources/{c["source_id"]}]] | {c["char_start"]}–{c["char_end"]} | '
+                f'{_delink(_quote_cell(c.get("quote", "")))} |'
+            )
+    else:
+        fm_lines.append("citations: []")
     fm_lines.append('input_fingerprint: ""')
     fm_lines.append("---")
+
+    if active:
+        label = "Generated claim (unverified)"
+        evidence_section = ["| Source | Char range | Quote |", "|---|---|---|", *evidence_rows]
+    else:
+        label = "Claim evidence superseded — pending review"
+        evidence_section = [
+            "_Evidence superseded; this claim is retained for audit and is pending "
+            "human review (ADR-0018). It has no active source._"
+        ]
 
     body = [
         "",
         f"# Claim: {_delink(_claim_title(claim_text))}",
         "",
-        "> [!summary] Generated claim (unverified)",
+        f"> [!summary] {label}",
         f"> {_delink(claim_text)}",
         "",
         "## Claim",
@@ -276,9 +298,7 @@ def render_claim_page(claim: dict[str, Any]) -> str:
         "",
         "## Evidence",
         "",
-        "| Source | Char range | Quote |",
-        "|---|---|---|",
-        *evidence_rows,
+        *evidence_section,
         "",
         "## Notes",
         "",

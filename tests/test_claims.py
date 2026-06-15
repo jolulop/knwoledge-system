@@ -12,6 +12,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 import validate_citations  # noqa: E402
+import validate_frontmatter  # noqa: E402
 import validate_graph  # noqa: E402
 import validate_wikilinks  # noqa: E402
 
@@ -119,6 +120,7 @@ def test_extracts_grounds_writes_pages_and_edges(tmp_path):
     assert all(e["edge_type"] == "derived_from" and e["status"] == "active"
                and e["dst_id"] == sid for e in edges)
 
+    assert validate_frontmatter.main([str(tmp_path)]) == 0
     assert validate_citations.main([str(tmp_path)]) == 0
     assert validate_graph.main([str(tmp_path)]) == 0
     assert validate_wikilinks.main([str(tmp_path)]) == 0
@@ -177,31 +179,96 @@ def test_claim_pages_are_idempotent_byte_stable(tmp_path):
     assert page.read_text(encoding="utf-8") == first  # no wall-clock churn
 
 
-def test_reextraction_supersedes_stale_edges_and_removes_orphan_pages(tmp_path):
-    _build(tmp_path)
-    _extract(tmp_path, FakeAdapter(claims_payload=[{"claim": "Old claim about paragraphs.", "quote": Q1}]))
-    old_id = claims.claim_id("Old claim about paragraphs.")
-    assert (tmp_path / "wiki" / "Claims" / f"{old_id}.md").exists()
+def _set_md(tmp_path, sid, text):
+    (tmp_path / "normalized" / "markdown" / f"{sid}.md").write_text(text, encoding="utf-8")
 
-    sid = _sids(tmp_path)["doc.md"]
-    # Change the normalized text so the old quote is gone and a new one is present.
-    (tmp_path / "normalized" / "markdown" / f"{sid}.md").write_text(
-        "# T\n\nA brand new sentence about widgets.\n", encoding="utf-8")
-    summary = _extract(tmp_path, FakeAdapter(claims_payload=[
-        {"claim": "New claim about widgets.", "quote": "A brand new sentence about widgets."}]))
 
-    new_id = claims.claim_id("New claim about widgets.")
-    assert summary["claim_pages_deleted"] >= 1
-    assert not (tmp_path / "wiki" / "Claims" / f"{old_id}.md").exists()  # orphan removed
-    assert (tmp_path / "wiki" / "Claims" / f"{new_id}.md").exists()
-
-    # The old edge is superseded (audit-preserving), the new one active.
+def _edge_statuses(tmp_path):
     conn = graph.connect(tmp_path / "db" / "graph.sqlite")
     try:
-        statuses = {r["src_id"]: r["status"] for r in conn.execute("SELECT src_id, status FROM edges")}
+        return {r["src_id"]: r["status"] for r in conn.execute("SELECT src_id, status FROM edges")}
     finally:
         conn.close()
+
+
+def test_reextraction_tombstones_orphan_and_supersedes_edges(tmp_path):
+    _build(tmp_path)
+    _gen_wiki(tmp_path)
+    _extract(tmp_path, FakeAdapter(claims_payload=[{"claim": "Old claim about paragraphs.", "quote": Q1}]))
+    old_id = claims.claim_id("Old claim about paragraphs.")
+    sid = _sids(tmp_path)["doc.md"]
+
+    _set_md(tmp_path, sid, "# T\n\nA brand new sentence about widgets.\n")
+    summary = _extract(tmp_path, FakeAdapter(claims_payload=[
+        {"claim": "New claim about widgets.", "quote": "A brand new sentence about widgets."}]))
+    new_id = claims.claim_id("New claim about widgets.")
+
+    # Orphan claim is tombstoned (not deleted — rule 9): page kept, status deprecated.
+    assert summary["claim_pages_tombstoned"] >= 1
+    old_page = tmp_path / "wiki" / "Claims" / f"{old_id}.md"
+    assert old_page.exists()
+    assert parse_frontmatter(old_page.read_text(encoding="utf-8"))["status"] == "deprecated_candidate"
+    assert (tmp_path / "wiki" / "Claims" / f"{new_id}.md").exists()
+
+    statuses = _edge_statuses(tmp_path)
     assert statuses[old_id] == "superseded" and statuses[new_id] == "active"
+    assert validate_citations.main([str(tmp_path)]) == 0  # tombstone exempt from citation req
+    assert validate_frontmatter.main([str(tmp_path)]) == 0
+
+
+def test_reextraction_without_key_retracts_stale_claims(tmp_path):
+    _build(tmp_path)
+    _gen_wiki(tmp_path)
+    _extract(tmp_path, FakeAdapter(claims_payload=[{"claim": "Claim X.", "quote": Q1}]))
+    cid = claims.claim_id("Claim X.")
+    sid = _sids(tmp_path)["doc.md"]
+
+    # Text changes, but no API key on the re-run: the stale claim must not stay active.
+    _set_md(tmp_path, sid, "# T\n\nUnrelated replacement text here now.\n")
+    _extract(tmp_path, FakeAdapter(available=False))
+    assert _edge_statuses(tmp_path)[cid] == "superseded"
+    page = tmp_path / "wiki" / "Claims" / f"{cid}.md"
+    assert parse_frontmatter(page.read_text(encoding="utf-8"))["status"] == "deprecated_candidate"
+
+
+def test_reextraction_parse_failure_retracts_stale_claims(tmp_path):
+    _build(tmp_path)
+    _gen_wiki(tmp_path)
+    _extract(tmp_path, FakeAdapter(claims_payload=[{"claim": "Claim Y.", "quote": Q1}]))
+    cid = claims.claim_id("Claim Y.")
+    sid = _sids(tmp_path)["doc.md"]
+
+    class BrokenAdapter(FakeAdapter):
+        def parse(self, messages, schema, model_id, *, max_tokens):
+            return {"wrong": "shape"}  # fails the schema -> ParseError after retries
+
+    _set_md(tmp_path, sid, "# T\n\nReplacement body that no longer supports Claim Y.\n")
+    summary = _extract(tmp_path, BrokenAdapter())
+    assert summary["errors"] == 1
+    assert _edge_statuses(tmp_path)[cid] == "superseded"  # retracted despite the failure
+
+
+def test_claim_text_authority_is_the_page(tmp_path):
+    _build(tmp_path)
+    _extract(tmp_path, FakeAdapter(claims_payload=[{"claim": "A durable claim.", "quote": Q1}]))
+    cid = claims.claim_id("A durable claim.")
+    page = tmp_path / "wiki" / "Claims" / f"{cid}.md"
+    # Page frontmatter is the authority for the wording; reconstruct it from the page alone.
+    assert claims._read_claim_text(page) == "A durable claim."
+
+
+def test_validate_citations_requires_a_manifest(tmp_path):
+    # A claim page citing a source whose manifest is absent must fail (ADR-0020).
+    (tmp_path / "normalized" / "markdown").mkdir(parents=True)
+    (tmp_path / "normalized" / "markdown" / "src_0123456789abcdef.md").write_text(
+        "Alpha beta gamma.", encoding="utf-8")
+    cp = tmp_path / "wiki" / "Claims" / "clm_x.md"
+    cp.parent.mkdir(parents=True, exist_ok=True)
+    cp.write_text(
+        '---\ntype: claim\nclaim_id: clm_x\nstatus: active\ncitations:\n'
+        '  - source_id: "src_0123456789abcdef"\n    char_start: 0\n    char_end: 5\n'
+        '    quote: "Alpha"\n---\n\n## Evidence\n', encoding="utf-8")
+    assert validate_citations.main([str(tmp_path)]) == 1  # no manifest for that source
 
 
 def test_cross_run_aggregation_into_one_claim_page(tmp_path):

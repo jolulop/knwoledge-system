@@ -22,9 +22,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.workers.citations import ground_citation, parse_citations
+from app.workers.wiki_render import parse_frontmatter
 
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 NO_SOURCE = "No source found in vault."
+# A claim with these lifecycle statuses is a tombstone (evidence superseded, pending
+# review) and legitimately carries no active citations (ADR-0030).
+_TOMBSTONE_STATUSES = {"deprecated_candidate", "archived"}
 
 
 def _frontmatter(text: str) -> str:
@@ -36,19 +40,27 @@ def _check_claim(root: Path, path: Path) -> list[str]:
     sid = path.stem
     errors: list[str] = []
     text = path.read_text(encoding="utf-8", errors="replace")
+    status = parse_frontmatter(text).get("status")
     citations = parse_citations(_frontmatter(text))
 
     if not citations:
-        if NO_SOURCE not in text:
+        # A tombstone (deprecated/archived) legitimately has no active citations.
+        if status not in _TOMBSTONE_STATUSES and NO_SOURCE not in text:
             errors.append(f"{sid}: claim has no citations and no '{NO_SOURCE}' marker")
         return errors
 
     markdown_dir = root / "normalized" / "markdown"
+    manifests_dir = root / "raw" / "manifests"
     for i, citation in enumerate(citations):
         source_id = citation.get("source_id")
         md_path = markdown_dir / f"{source_id}.md"
-        if not isinstance(source_id, str) or not md_path.exists():
-            errors.append(f"{sid}: citation[{i}] cites missing normalized source {source_id!r}")
+        # The citation must resolve to a real source (a manifest, ADR-0020), not just an
+        # orphan normalized file.
+        if not isinstance(source_id, str) or not (manifests_dir / f"{source_id}.json").exists():
+            errors.append(f"{sid}: citation[{i}] cites source with no manifest: {source_id!r}")
+            continue
+        if not md_path.exists():
+            errors.append(f"{sid}: citation[{i}] source {source_id} has no normalized Markdown")
             continue
         normalized = md_path.read_text(encoding="utf-8", errors="replace")
         for problem in ground_citation(citation, normalized, require_quote=True):

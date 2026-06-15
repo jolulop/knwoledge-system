@@ -28,6 +28,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 import validate_citations  # noqa: E402
+import validate_frontmatter  # noqa: E402
 import validate_graph  # noqa: E402
 import validate_wikilinks  # noqa: E402
 
@@ -59,7 +60,8 @@ def main(argv: list[str]) -> int:
     print(f"Sources considered: {summary['sources_considered']}")
     print(f"Sources with claims: {summary['sources_with_claims']}")
     print(f"Claims written: {summary['claims_written']} "
-          f"(pages: +{summary['claim_pages_written']} / -{summary['claim_pages_deleted']})")
+          f"(pages: {summary['claim_pages_written']} active / "
+          f"{summary['claim_pages_tombstoned']} tombstoned)")
     print(f"Claims dropped (unlocatable quote): {summary['claims_dropped']}")
     print(f"Skipped (fresh): {summary['skipped_fresh']}")
     print(f"Skipped (no API key): {summary['skipped_no_key']}")
@@ -72,10 +74,13 @@ def main(argv: list[str]) -> int:
     # Wiki content changed -> run the citation/graph/wikilink validators (AGENTS / Build Spec).
     root = str(settings.root)
     print("\nValidators:")
-    rc_cit = validate_citations.main([root])
-    rc_graph = validate_graph.main([root])
-    rc_links = validate_wikilinks.main([root])
-    validators_ok = (rc_cit == 0 and rc_graph == 0 and rc_links == 0)
+    rcs = [
+        validate_frontmatter.main([root]),
+        validate_citations.main([root]),
+        validate_graph.main([root]),
+        validate_wikilinks.main([root]),
+    ]
+    validators_ok = all(rc == 0 for rc in rcs)
 
     return 0 if (not summary["errors"] and validators_ok) else 1
 
