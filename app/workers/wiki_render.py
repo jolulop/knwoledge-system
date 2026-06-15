@@ -381,16 +381,19 @@ def render_concept_page(node: dict[str, Any]) -> str:
 
     No LLM-authored prose: frontmatter (id, type, title, aliases, status, confidence) plus a
     deterministic summary and a Mentioned-by section projected from the node's active
-    `mentions` sources (passed in — no IO). With no active mentions it is a tombstone
-    (`deprecated_candidate`, pending review), kept page-backed and never hard-deleted.
+    `mentions` sources (passed in — no IO). `status` is supplied by the caller (it is
+    page-authoritative, ADR-0030): `candidate` until promoted to `active` by recurrence
+    (slice 5), or `deprecated_candidate` when no active mention remains (a tombstone, kept
+    page-backed and never hard-deleted).
     """
     node_type = node["node_type"]
     title = _WS.sub(" ", str(node["title"])).strip()
     aliases = node.get("aliases") or []
     confidence = node.get("confidence", "low")
     source_ids = node.get("source_ids") or []
-    active = bool(source_ids)
-    status = "candidate" if active else "deprecated_candidate"
+    active_mentions = bool(source_ids)
+    status = node.get("status") or ("candidate" if active_mentions else "deprecated_candidate")
+    review_status = "none" if status == "active" else ("none" if active_mentions else "pending")
 
     fm_lines = [
         "---",
@@ -398,15 +401,16 @@ def render_concept_page(node: dict[str, Any]) -> str:
         f'{node["id_field"]}: "{node["node_id"]}"',
         f'title: "{_fm_quote(title)}"',
         f"status: {status}",
-        f"review_status: {'none' if active else 'pending'}",
+        f"review_status: {review_status}",
         "generation_status: deterministic",
         f"confidence: {confidence}",
         f"aliases: {_render_tag_list(aliases)}",
         'input_fingerprint: ""',
         "---",
     ]
-    if active:
-        summary = f"Candidate {node_type} mentioned by {len(source_ids)} source(s)."
+    label = status.replace("_", " ")
+    if active_mentions:
+        summary = f"{label.capitalize()} {node_type} mentioned by {len(source_ids)} source(s)."
         mentioned = [f"- [[Sources/{s}]]" for s in source_ids]
     else:
         summary = f"{node_type.capitalize()} with no active mentions — pending review."
@@ -416,7 +420,7 @@ def render_concept_page(node: dict[str, Any]) -> str:
         "",
         f"# {_delink(title)}",
         "",
-        f"> [!summary] Candidate {node_type}",
+        f"> [!summary] {label.capitalize()} {node_type}",
         f"> {summary}",
         "",
         "## Aliases",

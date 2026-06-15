@@ -68,3 +68,46 @@ def create_review_item(
         "context": context or {},
     }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return rid
+
+
+def resolve_review_item(
+    reviews_dir: Path,
+    review_id: str,
+    *,
+    decision: str,
+    decided_by: str = "auto",
+    note: str = "",
+    now: str | None = None,
+) -> bool:
+    """Resolve a pending review item to approved/rejected and append an audit-log entry.
+
+    Idempotent: if the item is already in `approved/`/`rejected/` (e.g. a promotion rerun),
+    it is a no-op and no duplicate audit entry is written. Returns True if it resolved this
+    call, False if it was already resolved or not pending.
+    """
+    if decision not in ("approved", "rejected"):
+        raise ValueError(f"decision must be approved|rejected, got {decision!r}")
+    reviews_dir = Path(reviews_dir)
+    # Already resolved -> idempotent no-op (no duplicate audit).
+    if (reviews_dir / "approved" / f"{review_id}.json").exists() or \
+       (reviews_dir / "rejected" / f"{review_id}.json").exists():
+        return False
+    src = reviews_dir / "pending" / f"{review_id}.json"
+    if not src.exists():
+        return False
+    now = now or iso_now()
+    item = json.loads(src.read_text(encoding="utf-8"))
+    item.update(status=decision, decided_by=decided_by, decided_at=now, decision_note=note)
+    dest_dir = reviews_dir / decision
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    (dest_dir / f"{review_id}.json").write_text(
+        json.dumps(item, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    src.unlink()
+    audit = reviews_dir / "audit_log"
+    audit.mkdir(parents=True, exist_ok=True)
+    (audit / f"{review_id}-{decision}.json").write_text(json.dumps({
+        "review_id": review_id, "type": item.get("type"), "decision": decision,
+        "decided_by": decided_by, "decided_at": now, "subject": item.get("subject"),
+        "note": note,
+    }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return True

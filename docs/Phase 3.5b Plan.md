@@ -47,7 +47,7 @@ retrieval/answering (Phase 4/5); autonomous scheduling (Phase 7).
 | 2 | **SQLite graph store + validator** (`db/graph.sqlite`, per-assertion edges, active-edge projection primitives, `validate_graph`) | ADR-0029/0030 | **store + validator DONE** (`app/backend/graph.py`, `scripts/validate_graph.py`); page-level backlink rendering wires in with producers (3/4) |
 | 3 | **LLM claim-extraction pass** (tier-2; gated by slice 1; Claim pages; compose into Source pages) | 1, 2, ADR-0021/0022 | **3a DONE** (`app/workers/claims.py`: extract→ground→Claim pages **rendered from the graph**; active `derived_from` edges; re-extraction **supersedes** stale edges + recomposes/**tombstones** orphan pages; CLI rebuilds index + runs validators); **3b DONE** (§5b — `graph.claims_for_source`; worker resolves labels + passes data to the pure `render_source_page`; Source `Claims` section projects active `derived_from` links, byte-stable; CLI refreshes via `generate_wiki`) |
 | 4 | **Candidate concepts & entities** (pages, ids, slugs, aliases; edges into the graph) | 2, ADR-0017/0021 | **DONE** (`app/workers/concepts.py`: typed nodes w/ entity_type enum + per-type ids/routing; `active` `mentions` edges, optional anchor, no verbatim grounding; deterministic stub pages rendered from the graph; Source-page Concepts/Entities projection; supersede + tombstone on re-extraction; CLI + validators). |
-| 5 | **Promotion lifecycle** (≥2 independent sources; review-gated early promotion) | 2, 4, ADR-0018 | planned |
+| 5 | **Promotion lifecycle** (≥2 independent sources; review-gated early promotion) | 2, 4, ADR-0018 | **DONE** (`app/workers/promote.py` + `scripts/promote.py`: deterministic candidate→active on ≥2 mutually-independent sources; independence from manifest provenance — comparable-key-differs / none-equal; conservative until provenance populated; auto-approves the `promote_candidate_node` item → approved + audit_log, idempotent; page status authority preserved across re-extraction). `manifests.set_provenance`. |
 
 Rationale for ordering: slice 1 (deterministic, done) is the grounding foundation. The
 **graph (slice 2) moves up front** because claims, concepts, promotion, and backlinks all
@@ -195,13 +195,34 @@ pure renderer + worker-reads-graph), with concepts/entities as the nodes. Decisi
 
 ---
 
-## 7. Promotion lifecycle (slice 5)
+## 7. Promotion lifecycle (slice 5 — DONE)
 
-- A candidate concept promotes to `active` once **≥2 independent sources** evidence it
-  (ADR-0018), computed from the graph's `active` `mentions` edges.
-- **Independence**: exact (SHA256) duplicates share one `source_id` and count once;
-  same-author/publication/report-family sources are flagged for review rather than
-  auto-promoting; promotion also weighs confidence, not raw count.
+- A candidate concept/entity promotes to `active` once **≥2 mutually-independent sources**
+  mention it (ADR-0018), computed from the graph's `active` `mentions` edges. Promotable
+  types: concept + the entity family (entity/person/organization/project).
+- **Independence (tightened, implemented).** Exact (SHA256) duplicates share one `source_id`
+  and count once. Two sources are independent iff there is **≥1 *comparable* provenance key
+  (known on both) whose values differ AND no comparable key is equal**; non-comparable or
+  unknown keys never prove independence (so `author=Alice` vs `publisher=Acme` is *not*
+  independent, but `author=Alice` vs `author=Bob` is). A candidate promotes on any
+  independent pair among its mentioners.
+- **Values are canonicalized before comparison** so trivial variants don't read as
+  independent: text keys are whitespace-collapsed + case-folded; `canonical_url` is
+  additionally stripped of a `#fragment` and trailing slashes (no `www.`/scheme rewriting —
+  that would risk false *merges*). `set_provenance(field=None)` clears a field back to
+  unknown so a bad value can be corrected away (and may withdraw a promotion's basis).
+- **Early promotion (review).** If a node's `promote_candidate_node` item is already
+  *approved* when the worker runs, it promotes regardless of source count — the human
+  early-promotion path (ADR-0018). No recurrence audit entry is added (the loop is closed).
+- **Auto-resolve + idempotent.** A recurrence promotion flips the page `status` (the
+  authority) to `active`, mirrors `nodes.status`, and closes the loop deterministically —
+  it **creates** the `promote_candidate_node` item if missing (legacy/hand-deleted state),
+  then **approves** it (pending → approved + one `audit_log`); a rerun skips already-active
+  nodes and writes no duplicate audit. The promoted status is **preserved across
+  re-extraction** (page is the status authority). The `validate_projection` validator
+  enforces page-frontmatter status == graph `nodes.status` on Claim and node pages; on an
+  unhandled error the `promote` job is recorded `failed`. A separate, rerunnable
+  `scripts/promote.py` (no LLM).
 - **Provenance-metadata prerequisite (decided).** Independence detection needs source
   provenance the manifest does not carry today. Slice 5 first models optional manifest
   fields — `author`, `publisher`, `report_family`, `canonical_url` (all null when unknown)

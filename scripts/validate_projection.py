@@ -66,6 +66,14 @@ def _sources_links(targets: set[str]) -> set[str]:
     return {t.split("/", 1)[1] for t in targets if t.startswith("Sources/")}
 
 
+def _check_status_mirror(errors: list[str], node_id: str, text: str, node_status: dict[str, str]) -> None:
+    """Page frontmatter is the status authority; the graph nodes index must mirror it."""
+    page_status = parse_frontmatter(text).get("status")
+    graph_status = node_status.get(node_id)
+    if page_status != graph_status:
+        errors.append(f"{node_id}: page status {page_status!r} != graph node status {graph_status!r}")
+
+
 def _check(root: Path, db_path: Path) -> list[str]:
     errors: list[str] = []
     conn = graph.connect(db_path)
@@ -74,6 +82,8 @@ def _check(root: Path, db_path: Path) -> list[str]:
             (r["node_type"], r["slug"]): r["node_id"]
             for r in conn.execute("SELECT node_id, node_type, slug FROM nodes")
         }
+        node_status = {r["node_id"]: r["status"]
+                       for r in conn.execute("SELECT node_id, status FROM nodes")}
 
         # --- Source pages: claims + mentions both directions ---
         sources_dir = root / "wiki" / "Sources"
@@ -109,7 +119,9 @@ def _check(root: Path, db_path: Path) -> list[str]:
         claims_dir = root / "wiki" / "Claims"
         for page in sorted(claims_dir.glob("*.md")) if claims_dir.exists() else []:
             cid = page.stem
-            linked = _sources_links(_targets(page.read_text(encoding="utf-8", errors="replace")))
+            text = page.read_text(encoding="utf-8", errors="replace")
+            _check_status_mirror(errors, cid, text, node_status)
+            linked = _sources_links(_targets(text))
             active = {e["dst_id"] for e in graph.outgoing_active(conn, cid) if e["edge_type"] == "derived_from"}
             for sid in active - linked:
                 errors.append(f"{cid}: active derived_from source {sid} not linked on Claim page")
@@ -124,7 +136,9 @@ def _check(root: Path, db_path: Path) -> list[str]:
                 if node_id is None:
                     errors.append(f"{subdir}/{page.stem}: page has no matching graph node")
                     continue
-                linked = _sources_links(_targets(page.read_text(encoding="utf-8", errors="replace")))
+                text = page.read_text(encoding="utf-8", errors="replace")
+                _check_status_mirror(errors, node_id, text, node_status)
+                linked = _sources_links(_targets(text))
                 active = set(graph.sources_for_node(conn, node_id))
                 for sid in active - linked:
                     errors.append(f"{node_id}: active mention from {sid} not linked on page")

@@ -111,3 +111,34 @@ def save_manifest(manifests_dir: Path, manifest: dict[str, Any]) -> Path:
         json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
     return path
+
+
+# Optional source-provenance fields (manifest-owned) that the promotion lifecycle uses to
+# judge source independence (ADR-0018, Phase 3.5b slice 5). All null/absent by default; not
+# auto-derived — populated manually or by a future extractor. The graph never owns these.
+PROVENANCE_FIELDS = ("author", "publisher", "report_family", "canonical_url")
+
+
+def get_provenance(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Read a manifest's provenance sub-dict (missing keys -> absent)."""
+    prov = manifest.get("provenance") or {}
+    return {k: prov.get(k) for k in PROVENANCE_FIELDS if prov.get(k) is not None}
+
+
+def set_provenance(manifests_dir: Path, source_id: str, **fields: Any) -> dict[str, Any] | None:
+    """Set provenance fields on a manifest (the single write path); returns it or None."""
+    unknown = set(fields) - set(PROVENANCE_FIELDS)
+    if unknown:
+        raise ValueError(f"unknown provenance field(s) {sorted(unknown)}; allowed: {PROVENANCE_FIELDS}")
+    manifest = load_manifest(manifests_dir, source_id)
+    if manifest is None:
+        return None
+    prov = dict(manifest.get("provenance") or {})
+    for key, value in fields.items():
+        if value is None:
+            prov.pop(key, None)   # explicit None clears the field back to unknown
+        else:
+            prov[key] = value
+    manifest["provenance"] = prov
+    save_manifest(manifests_dir, manifest)
+    return manifest

@@ -100,9 +100,11 @@ def _read_node_meta(page_path: Path) -> dict[str, Any] | None:
     m = _TITLE_RE.search(text)
     if not m:
         return None
-    aliases = parse_frontmatter(text).get("aliases")
+    fm = parse_frontmatter(text)
+    aliases = fm.get("aliases")
     return {"title": re.sub(r"\\(.)", r"\1", m.group(1)),
-            "aliases": aliases if isinstance(aliases, list) else []}
+            "aliases": aliases if isinstance(aliases, list) else [],
+            "status": fm.get("status")}
 
 
 def _rebuild_index(root: Path) -> bool:
@@ -136,13 +138,22 @@ def _recompose_node(gconn, *, node_id, wiki_dir, reviews_dir, now, text_hint=Non
     aliases = _union(existing["aliases"] if existing else [], new_aliases)
 
     sources = graph.sources_for_node(gconn, node_id)
+    # Status is page-authoritative: a promotion to `active` (slice 5) is preserved across
+    # re-extraction; otherwise candidate while mentioned, deprecated_candidate when not.
+    if not sources:
+        status = "deprecated_candidate"
+    elif (existing or {}).get("status") == "active":
+        status = "active"
+    else:
+        status = "candidate"
     page_dir.mkdir(parents=True, exist_ok=True)
     page_path.write_text(render_concept_page({
         "node_type": node_type, "node_id": node_id, "id_field": ID_FIELD[node_type],
         "title": title, "aliases": aliases, "confidence": "low", "source_ids": sources,
+        "status": status,
     }), encoding="utf-8")
     graph.upsert_node(gconn, node_id=node_id, node_type=node_type, slug=slug,
-                      status="candidate" if sources else "deprecated_candidate", now=now)
+                      status=status, now=now)
     if not sources:
         reviews.create_review_item(
             reviews_dir, review_type="deprecate_wiki_page",

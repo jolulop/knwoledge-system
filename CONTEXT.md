@@ -70,11 +70,11 @@ A deterministic, extractive `> [!summary]` callout written without an LLM — ty
 **Concept Page**
 A wiki page representing a durable recurring idea. Concept and Entity pages are slug-keyed by their canonical name (e.g. `wiki/Concepts/post-merger-integration.md`) but also carry a stable `concept_id`/`entity_id` in frontmatter that the graph keys edges on, plus an `aliases` list for synonyms — so renames/merges rewrite slugs and wikilinks without breaking edges (ADR-0017).
 
-**Candidate Concept**
-A concept evidenced by only one source. It is created as a `candidate`/`stub` (low confidence) and kept out of promoted navigation and synthesis. It is promoted to `active` automatically once a second source evidences it (recurrence), or early by human review (ADR-0018).
+**Candidate Node**
+A promotable node — a concept or an entity-family node (entity/person/organization/project) — evidenced by too few independent sources to be first-class. It is created as a `candidate`/`stub` (low confidence) and kept out of promoted navigation and synthesis. It promotes to `active` automatically once ≥2 *independent* sources evidence it (recurrence), or early by human review; both paths run through the single `promote_candidate_node` review action and the deterministic `promote` worker (ADR-0018, Phase 3.5b slice 5).
 
 **Independent Source**
-A source that counts toward a concept's promotion threshold. Exact (SHA256) duplicates share one `source_id` and count once; sources from the same author, publication, or report family are not independent corroboration and are flagged for review rather than auto-promoting; promotion also weighs evidence confidence, not just count (ADR-0018).
+A source that counts toward a node's promotion threshold. Exact (SHA256) duplicates share one `source_id` and count once. Independence is judged from manifest provenance (`author`/`publisher`/`report_family`/`canonical_url`): two sources are independent iff ≥1 *comparable* key (present on both) differs and no comparable key is equal, after canonicalization (whitespace/case; URLs also drop fragment + trailing slash). Manifests carry no provenance by default, so the gate is conservative — nothing auto-promotes until provenance is populated (ADR-0018).
 
 **Claim**
 An atomic factual statement derived from one or more sources. A claim cites its evidence as a Source page plus a stable mechanical anchor (page / section / character range into the normalized Markdown), never a chunk ordinal; a `chunk_id` may be kept only as a non-authoritative pointer (ADR-0019). Claims require citations where possible.
