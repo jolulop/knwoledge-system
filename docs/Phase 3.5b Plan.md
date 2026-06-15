@@ -45,7 +45,7 @@ retrieval/answering (Phase 4/5); autonomous scheduling (Phase 7).
 |---|-------|-----------|--------|
 | 1 | **Citation grounding gate + structured-citation validator** | ADR-0019/0020/0026 | **DONE** (`app/workers/citations.py`, `scripts/validate_citations.py`) |
 | 2 | **SQLite graph store + validator** (`db/graph.sqlite`, per-assertion edges, active-edge projection primitives, `validate_graph`) | ADR-0029/0030 | **store + validator DONE** (`app/backend/graph.py`, `scripts/validate_graph.py`); page-level backlink rendering wires in with producers (3/4) |
-| 3 | **LLM claim-extraction pass** (tier-2; gated by slice 1; Claim pages; compose into Source pages) | 1, 2, ADR-0021/0022 | **3a DONE** (`app/workers/claims.py`: extract→ground→Claim pages **rendered from the graph**; active `derived_from` edges; re-extraction **supersedes** stale edges + recomposes/deletes orphan pages; CLI rebuilds index + runs validators); 3b = Source-page `Claims` section projection |
+| 3 | **LLM claim-extraction pass** (tier-2; gated by slice 1; Claim pages; compose into Source pages) | 1, 2, ADR-0021/0022 | **3a DONE** (`app/workers/claims.py`: extract→ground→Claim pages **rendered from the graph**; active `derived_from` edges; re-extraction **supersedes** stale edges + recomposes/**tombstones** orphan pages; CLI rebuilds index + runs validators); **3b designed** (§5b — pure renderer + worker-reads-graph; linked-title labels w/ fallback; CLI refresh), ready to implement |
 | 4 | **Candidate concepts & entities** (pages, ids, slugs, aliases; edges into the graph) | 2, ADR-0017 | planned |
 | 5 | **Promotion lifecycle** (≥2 independent sources; review-gated early promotion) | 2, 4, ADR-0018 | planned |
 
@@ -133,6 +133,33 @@ edges(edge_id PK, src_id, dst_id, edge_type,             -- one row per ASSERTIO
   no invented-but-valid-looking link can slip past the dangling-link check.
 - Like 3.5a, claim output lands first as a per-source artifact / cache entry; the page is
   the composed view, so re-runs are idempotent and a deterministic rebuild does not churn.
+
+### 5b. Source-page Claims projection (slice 3b — decided)
+
+The Source page's `Claims` section becomes a projection of the graph's `active`
+`derived_from` edges pointing at it (source→claims navigation; the inverse of the claim
+page's source link). Decisions:
+
+- **Renderer stays pure; the wiki worker reads the graph.** `generate_wiki` (the single
+  writer of `wiki/Sources/<id>.md`) calls `graph.claims_for_source(gconn, source_id)` for
+  the active claim ids, resolves a label per claim, and passes plain data
+  `claims=[{claim_id, title|None}]` to `render_source_page(..., claims=claims)`.
+  `render_source_page` does **no SQLite/IO** — it composes the passed-in data into the
+  `Claims` section. The page's `input_fingerprint` covers the rendered claim links, so a
+  source whose claims change regenerates and an unchanged one does not churn. (A separate
+  in-place projector was rejected — it reintroduces the two-writers/clobber problem 3.5a
+  closed.)
+- **Labels: linked short titles, graceful fallback.** The worker reads the label from the
+  generated **Claim page** `claim_text` frontmatter (durable, backed up — *not* the
+  gitignored enrichment record), truncates to a short title, and emits
+  `[[Claims/<id>|<title>]]`; if the page or label is unavailable it falls back to a bare
+  `[[Claims/<id>]]`. Edges carry no display metadata; the renderer never reads pages.
+- **Refresh: the `extract_claims` CLI runs `generate_wiki` afterward**, so Source `Claims`
+  sections reflect newly written / superseded claims. The claim worker stays focused on
+  claims+edges; the wiki worker stays the single writer. `generate_wiki` gains a read-only
+  `graph_db` param.
+- **Scope: Claims only.** `Concepts/Entities Mentioned` stay `_Pending semantic enrichment._`
+  until slice 4.
 
 ---
 
