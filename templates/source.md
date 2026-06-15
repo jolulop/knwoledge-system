@@ -18,11 +18,11 @@ created: "{{created_at}}"
 ingested: "{{ingested_at}}"
 input_fingerprint: "{{input_fingerprint}}"
 tags: {{tags}}
-concepts: []
-entities: []
-people: []
-organizations: []
-projects: []
+concepts: {{concepts_fm}}
+entities: {{entities_fm}}
+people: {{people_fm}}
+organizations: {{organizations_fm}}
+projects: {{projects_fm}}
 ---
 
 # {{title}}

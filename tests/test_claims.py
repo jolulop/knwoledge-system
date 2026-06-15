@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -212,6 +213,11 @@ def test_reextraction_tombstones_orphan_and_supersedes_edges(tmp_path):
 
     statuses = _edge_statuses(tmp_path)
     assert statuses[old_id] == "superseded" and statuses[new_id] == "active"
+
+    # Tombstoning a Claim page files a deprecate_wiki_page review item (B1, like concepts).
+    pending = tmp_path / "reviews" / "pending"
+    items = [json.loads(p.read_text(encoding="utf-8")) for p in pending.glob("*.json")]
+    assert any(r["type"] == "deprecate_wiki_page" and r["subject"]["node_id"] == old_id for r in items)
     assert validate_citations.main([str(tmp_path)]) == 0  # tombstone exempt from citation req
     assert validate_frontmatter.main([str(tmp_path)]) == 0
 

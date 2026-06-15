@@ -30,6 +30,15 @@ subject to the same review gates as other low-confidence semantic changes (ADR-0
 treated as a fact the moment it appears in text. The graph remains the place edges are
 asserted, confirmed, and counted (e.g. toward concept promotion, ADR-0018).
 
+**Deferred for generated wiki pages (Phase 3.5b).** This authored-wikilink → candidate-edge
+absorption applies to surfaces a human edits. The Phase-3.5b wiki pages are machine-owned,
+gitignored, and regenerated each render (ADR-0014), so a hand-added link there would be
+overwritten on the next projection — there is no durable place for it to live. For now the
+projection validator (`scripts/validate_projection.py`) therefore **forbids** body links
+that lack an active edge on generated pages, rather than absorbing them as candidates. The
+candidate-absorption path is deferred to a future phase that supports durable human editing
+of wiki content (e.g. an authored-links surface or a notes file that is *not* regenerated).
+
 Consequences: rename/merge/split stay cheap and safe (id-level redirect + re-projection),
 backlinks cannot drift out of sync because there is one writer of the relationship truth,
 and the wiki stays a disposable view consistent with ADR-0014. The cost is that the graph

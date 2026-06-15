@@ -36,7 +36,7 @@ from app.backend import db, graph
 from app.backend.manifests import iso_now, list_manifests
 from app.llm import prompts
 from app.llm.client import LLMClient, ParseError
-from app.workers import citations
+from app.workers import citations, reviews
 from app.workers import enrichment_artifact as art
 from app.workers.wiki_render import render_claim_page, title_from_filename
 
@@ -76,7 +76,7 @@ def _write_source_artifact(apath, sid, fingerprint, source_claims, model_ref, no
     }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def _recompose_claim(gconn, *, cid, claims_dir, markdown_dir, now, text_hint=None) -> str:
+def _recompose_claim(gconn, *, cid, claims_dir, reviews_dir, now, markdown_dir, text_hint=None) -> str:
     """Render a Claim page from its `active` derived_from edges (tombstone if none)."""
     edges = [e for e in graph.outgoing_active(gconn, cid) if e["edge_type"] == "derived_from"]
     page_path = claims_dir / f"{cid}.md"
@@ -100,7 +100,16 @@ def _recompose_claim(gconn, *, cid, claims_dir, markdown_dir, now, text_hint=Non
     # Mirror the page's status into the derived node index (active vs tombstone).
     graph.upsert_node(gconn, node_id=cid, node_type="claim", slug=cid,
                       status="active" if cites else "deprecated_candidate", now=now)
-    return "written" if cites else "tombstoned"
+    if not cites:
+        # Tombstone -> review-gated deprecation, same as concept/entity tombstones (B1).
+        reviews.create_review_item(
+            reviews_dir, review_type="deprecate_wiki_page",
+            subject={"node_id": cid, "page": f"Claims/{cid}.md"},
+            proposal={"to_status": "deprecated_candidate",
+                      "reason": "no active source evidence remains"},
+            context={"node_type": "claim"}, now=now)
+        return "tombstoned"
+    return "written"
 
 
 def extract_claims(
@@ -116,6 +125,7 @@ def extract_claims(
     markdown_dir: Path | None = None,
     enrichment_dir: Path | None = None,
     wiki_dir: Path | None = None,
+    reviews_dir: Path | None = None,
     rebuild_index: bool = True,
     record_job: bool = True,
 ) -> dict[str, Any]:
@@ -126,6 +136,7 @@ def extract_claims(
     graph_db = Path(graph_db) if graph_db else root / "db" / "graph.sqlite"
     markdown_dir = Path(markdown_dir) if markdown_dir else root / "normalized" / "markdown"
     enrichment_dir = Path(enrichment_dir) if enrichment_dir else root / "normalized" / "enrichment"
+    reviews_dir = Path(reviews_dir) if reviews_dir else root / "reviews"
     claims_dir = (Path(wiki_dir) if wiki_dir else root / "wiki") / "Claims"
 
     now = iso_now()
@@ -234,7 +245,7 @@ def extract_claims(
 
         pages_written = pages_tombstoned = 0
         for cid in touched | affected:
-            outcome = _recompose_claim(gconn, cid=cid, claims_dir=claims_dir,
+            outcome = _recompose_claim(gconn, cid=cid, claims_dir=claims_dir, reviews_dir=reviews_dir,
                                        markdown_dir=markdown_dir, now=now, text_hint=texts.get(cid))
             pages_written += outcome == "written"
             pages_tombstoned += outcome == "tombstoned"

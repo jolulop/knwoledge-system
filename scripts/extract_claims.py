@@ -30,6 +30,7 @@ if str(SCRIPTS) not in sys.path:
 import validate_citations  # noqa: E402
 import validate_frontmatter  # noqa: E402
 import validate_graph  # noqa: E402
+import validate_projection  # noqa: E402
 import validate_wikilinks  # noqa: E402
 
 from app.backend.config import get_settings
@@ -94,6 +95,7 @@ def main(argv: list[str]) -> int:
         validate_citations.main([root]),
         validate_graph.main([root]),
         validate_wikilinks.main([root]),
+        validate_projection.main([root]),
     ]
     validators_ok = all(rc == 0 for rc in rcs)
 

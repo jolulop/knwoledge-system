@@ -165,6 +165,11 @@ def _link_list(items: list[dict[str, Any]] | None) -> str:
     return "\n".join(lines)
 
 
+def _mention_slugs(items: list[dict[str, Any]] | None) -> list[str]:
+    """Slugs from projected mention items (for the machine-readable frontmatter arrays)."""
+    return [it["target"].rsplit("/", 1)[-1] for it in (items or [])]
+
+
 def _claims_block(claims: list[dict[str, Any]] | None) -> str:
     """Source page Claims section from claim data ({claim_id, title|None})."""
     items = None if claims is None else [
@@ -234,6 +239,15 @@ def build_source_values(
         "people_block": _link_list(people),
         "organizations_block": _link_list(organizations),
         "projects_block": _link_list(projects),
+        # Frontmatter arrays mirror the projected body links as an **advisory** slug
+        # projection — NOT relationship authority. The id-keyed graph is the source of truth
+        # for mentions (ADR-0029/0030); on rename/re-slug these re-project from the graph.
+        # validate_projection enforces frontmatter == body so they never drift.
+        "concepts_fm": _render_tag_list(_mention_slugs(concepts)),
+        "entities_fm": _render_tag_list(_mention_slugs(entities)),
+        "people_fm": _render_tag_list(_mention_slugs(people)),
+        "organizations_fm": _render_tag_list(_mention_slugs(organizations)),
+        "projects_fm": _render_tag_list(_mention_slugs(projects)),
         "notes": "",
     }
 

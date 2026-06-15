@@ -13,6 +13,7 @@ if str(SCRIPTS) not in sys.path:
 
 import validate_frontmatter  # noqa: E402
 import validate_graph  # noqa: E402
+import validate_projection  # noqa: E402
 import validate_wikilinks  # noqa: E402
 
 from app.backend import graph, manifests
@@ -275,6 +276,62 @@ def test_source_sections_route_by_type(tmp_path):
     assert "[[People/jane-doe" in _section(text, "People Mentioned")
     # Subtyped nodes are not collapsed into Entities Mentioned.
     assert "acme-corp" not in _section(text, "Entities Mentioned")
+
+
+def test_source_frontmatter_arrays_mirror_body(tmp_path):
+    _build(tmp_path)
+    _gen_wiki(tmp_path)
+    _extract(tmp_path, FakeAdapter())
+    _gen_wiki(tmp_path)
+    fm = parse_frontmatter((tmp_path / "wiki" / "Sources" / f"{_sids(tmp_path)['doc.md']}.md").read_text(encoding="utf-8"))
+    assert fm["concepts"] == ["post-merger-integration"]
+    assert fm["organizations"] == ["acme-corp"] and fm["people"] == ["jane-doe"]
+
+
+def test_projection_validator_passes_on_consistent_projection(tmp_path):
+    _build(tmp_path)
+    _gen_wiki(tmp_path)
+    _extract(tmp_path, FakeAdapter())
+    _gen_wiki(tmp_path)
+    assert validate_projection.main([str(tmp_path)]) == 0
+
+
+def test_projection_validator_fails_on_missing_link(tmp_path):
+    _build(tmp_path)
+    _gen_wiki(tmp_path)
+    _extract(tmp_path, FakeAdapter())
+    _gen_wiki(tmp_path)
+    page = tmp_path / "wiki" / "Sources" / f"{_sids(tmp_path)['doc.md']}.md"
+    # Drop a projected mention link the graph still has active -> forward check fails.
+    page.write_text(page.read_text(encoding="utf-8").replace("[[Concepts/post-merger-integration", "Concepts/x"),
+                    encoding="utf-8")
+    assert validate_projection.main([str(tmp_path)]) == 1
+
+
+def test_projection_validator_fails_on_extra_link(tmp_path):
+    _build(tmp_path)
+    _gen_wiki(tmp_path)
+    _extract(tmp_path, FakeAdapter())
+    _gen_wiki(tmp_path)
+    page = tmp_path / "wiki" / "Sources" / f"{_sids(tmp_path)['doc.md']}.md"
+    # Inject a projected mention link with no active edge -> reverse check fails.
+    page.write_text(page.read_text(encoding="utf-8") + "\n- [[Concepts/ghost-concept|Ghost]]\n", encoding="utf-8")
+    assert validate_projection.main([str(tmp_path)]) == 1
+
+
+def test_projection_validator_fails_on_frontmatter_drift(tmp_path):
+    _build(tmp_path)
+    _gen_wiki(tmp_path)
+    _extract(tmp_path, FakeAdapter())
+    _gen_wiki(tmp_path)
+    page = tmp_path / "wiki" / "Sources" / f"{_sids(tmp_path)['doc.md']}.md"
+    # Add a slug to the frontmatter concepts array that the body does not link -> drift.
+    page.write_text(
+        page.read_text(encoding="utf-8").replace(
+            'concepts: ["post-merger-integration"]',
+            'concepts: ["post-merger-integration", "ghost-concept"]'),
+        encoding="utf-8")
+    assert validate_projection.main([str(tmp_path)]) == 1
 
 
 def test_concept_aggregates_mentions_across_sources(tmp_path):

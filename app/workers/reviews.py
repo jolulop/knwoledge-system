@@ -5,7 +5,10 @@ Semantic and destructive changes are proposed, never executed (CLAUDE.md rule 9)
 files a pending review item; a human later approves/rejects it. Items are JSON, one file per
 item at `reviews/pending/<review_id>.json`, with `review_id` derived from `(type, subject)`
 so re-runs are idempotent (an item already filed — pending, approved, or rejected — is not
-re-created, so a rejected proposal does not keep reappearing). Dependency-free.
+re-created, so a rejected proposal does not keep reappearing). A *deferred* decision keeps
+the item in `pending/` with `status: deferred` (the review dirs are
+pending/approved/rejected/audit_log — there is no `deferred/`), so the same `pending/` check
+makes deferred items idempotent too. Dependency-free.
 
 The allowed `type`s mirror `policies/review.yaml` `requires_human_approval` and must stay in
 sync with it.
