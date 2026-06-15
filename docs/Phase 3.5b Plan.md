@@ -44,7 +44,7 @@ retrieval/answering (Phase 4/5); autonomous scheduling (Phase 7).
 | # | Slice | Depends on | Status |
 |---|-------|-----------|--------|
 | 1 | **Citation grounding gate + structured-citation validator** | ADR-0019/0020/0026 | **DONE** (`app/workers/citations.py`, `scripts/validate_citations.py`) |
-| 2 | **SQLite graph schema + backlink projector** (SoT, id-keyed edges; deterministic projection into pages) | ADR-0029/0021 | planned |
+| 2 | **SQLite graph store + validator** (`db/graph.sqlite`, per-assertion edges, active-edge projection primitives, `validate_graph`) | ADR-0029/0030 | **store + validator DONE** (`app/backend/graph.py`, `scripts/validate_graph.py`); page-level backlink rendering wires in with producers (3/4) |
 | 3 | **LLM claim-extraction pass** (tier-2; gated by slice 1; Claim pages; compose into Source pages) | 1, 2, ADR-0021/0022 | planned |
 | 4 | **Candidate concepts & entities** (pages, ids, slugs, aliases; edges into the graph) | 2, ADR-0017 | planned |
 | 5 | **Promotion lifecycle** (≥2 independent sources; review-gated early promotion) | 2, 4, ADR-0018 | planned |
