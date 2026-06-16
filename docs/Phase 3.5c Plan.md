@@ -46,7 +46,7 @@ local-model deployment (only the adapter seam is fixed, ADR-0025).
 | # | Slice | Depends on | Status |
 |---|-------|-----------|--------|
 | 1 | **Contradiction detection** (graph-neighborhood blocking; sorted-pair `contradicts` assertions; `resolve_contradiction` three-outcome reviews; `acknowledge`/`reject` activation; Claim-page projection) | 3.5b graph, ADR-0018/0030/0031 | **DONE** (`app/workers/contradictions.py`, `scripts/detect_contradictions.py`; deterministic `candidate_pairs` blocking; sorted-pair `proposed` `contradicts` edges; per-pair cache-replayed verdicts with **full anchors + shared node ids embedded in the prompt** for a faithful fingerprint; confidence clamped to [0,1]; `apply_resolved_contradictions` acknowledge/reject **+ Claim-page backlink re-projection** via `render_claim_page`/`validate_projection`; **endpoint-gone supersession** enforced in the **claim lifecycle** (shared public `recompose_claim` + `graph.supersede_contradictions_for_claim` — `extract_claims` stays valid on its own; detect keeps it as a backstop) vs provenance-survival; two-sided-evidence guard before any verdict; `rebuild_index` contract (rebuild iff pages re-projected); stale supersession + `reviews.withdraw_review_item` with per-event audit; independence rule moved to `manifests.independent_sources`; `validate_graph` canonical-ordering check) |
-| 1b | **`supersede` resolution executor** (thin reviews-worker action: `supersedes` edge + `deprecated_candidate`) | 1 | not started (approved `supersede` decisions surface as `supersede_pending_1b`, never silently applied) |
+| 1b | **`supersede` resolution executor** (`supersedes` edge + loser `deprecated_candidate` via `deprecate_wiki_page` audit path) | 1 | **DONE** (`_execute_supersede` in `contradictions.apply_resolved_contradictions`; reviewer names `winner`; `recompose_claim(deprecate=True)` keeps loser evidence + backlink, flips status; audited; idempotent; endpoint validity made **evidence-based** via `graph.claims_with_active_evidence` so the deprecated loser's `contradicts` edge stays active) |
 | 2 | **Cross-source synthesis** (per active concept/entity; grounded synthesis pages; `propose_synthesis` review type; review-only promotion) | 1, ADR-0031 | not started |
 
 Rationale for ordering: 3.5c-1 reuses existing schema and review vocab and is the contained
@@ -118,17 +118,29 @@ last on a proven base.
 
 ---
 
-## 5. `supersede` resolution executor (slice 1b)
+## 5. `supersede` resolution executor (slice 1b — DONE)
 
-A thin action in the reviews worker, run when a `resolve_contradiction` item is approved with
-outcome `supersede` and a named winner: write an `active` `supersedes` edge (winner → loser),
-deprecate the losing claim page to `deprecated_candidate` through the **`deprecate_wiki_page`
-audit path** — the `resolve_contradiction` approval authorizes it (no second human gate), and
-the `audit_log` records that the status change was part of an approved contradiction resolution
-(never a silent mutation) — re-index `nodes.status`, and leave the `contradicts` edge `active`.
-The page is the status authority (ADR-0022). Reuses existing edge/status/deprecation
-primitives — no new schema. The loser becomes a tombstone-style deprecated claim, never
-hard-deleted (CLAUDE.md rule 9).
+`_execute_supersede` in `contradictions.apply_resolved_contradictions`, run when a
+`resolve_contradiction` item is approved with a named `winner`: it writes an `active`
+`supersedes` edge (winner → loser, `asserted_by: human`), deprecates the losing claim to
+`deprecated_candidate` through the **`deprecate_wiki_page` audit path** — the
+`resolve_contradiction` approval authorizes it (no second human gate), and a
+`deprecate_wiki_page` item is filed and immediately approved (`decided_by:
+contradiction_resolution`) so the `audit_log` records the cause (never a silent mutation) —
+and leaves the `contradicts` edge `active` (the historical conflict stays recorded). Decisions:
+
+- **The loser keeps its evidence.** Unlike a tombstone, a supersede-deprecated claim still has
+  active `derived_from` edges; `recompose_claim(deprecate=True)` renders it `deprecated_candidate`
+  with its evidence table and contradiction backlink intact, and the status is **page-authoritative
+  and preserved across re-extraction** (ADR-0022) — a later claim re-extraction never resurrects
+  it to `active`.
+- **Endpoint validity is evidence-based, not status-based.** A contradiction endpoint is "gone"
+  only when a claim stops *standing* (no active evidence — a tombstone), computed by
+  `graph.claims_with_active_evidence`. So the deprecated-but-evidenced loser is **not** treated as
+  a stale endpoint, and its `contradicts` edge survives both the claim lifecycle and the detect
+  backstop. (This refined the committed 3.5c-1 endpoint-gone rule from node-status to evidence.)
+- Idempotent (a re-run applies the effects once); reuses existing edge/status/deprecation
+  primitives — no new schema; the loser is never hard-deleted (CLAUDE.md rule 9).
 
 ---
 
@@ -210,12 +222,10 @@ hard-deleted (CLAUDE.md rule 9).
 - Tuning of **blocking recall** (whether vector blocking is needed) — observed after 3.5c-1.
 - **Known deferred (non-blocking, post-review):** (a) candidate generation is
   O(active_claims²) before blocking — fine at local-first scale, but a large corpus may want
-  deterministic pre-indexing by mentioned node; (b) a `resolve_contradiction` item has no
-  durable explicit-outcome field beyond approved/rejected + optional `winner` — slice 1b adds
-  the `supersede` winner→loser executor and can formalize the outcome field then; (c) an
-  acknowledged edge's *advisory* anchor is not refreshed if a claim's span moves while its text
-  (and id) is unchanged — acceptable since the anchor is advisory and the authoritative
-  evidence is the Claim pages.
+  deterministic pre-indexing by mentioned node; (b) an acknowledged edge's *advisory* anchor is
+  not refreshed if a claim's span moves while its text (and id) is unchanged — acceptable since
+  the anchor is advisory and the authoritative evidence is the Claim pages. (The supersede
+  outcome is carried by the approved item's `winner` field, implemented in slice 1b.)
 
 ---
 
@@ -257,11 +267,12 @@ tested with the fake-adapter `LLMClient` (as in 3.5a/b).
   two-sided evidence**; out-of-range **confidence is clamped**; re-projection **rebuilds the
   index** iff pages changed; **no API key → `skipped`** but stale supersession + resolution
   application still run. Withdraw audit history is covered in `tests/test_reviews.py`.
-- **Slice 1b (`supersede` executor):** approving `supersede` writes an `active` `supersedes`
-  edge (winner → loser), deprecates the loser to `deprecated_candidate` via the
-  `deprecate_wiki_page` audit path with an `audit_log` entry naming the contradiction
-  resolution as the cause, re-indexes, leaves the `contradicts` edge `active`; idempotent;
-  loser never hard-deleted.
+- **Slice 1b (`supersede` executor) — implemented (4 tests):** approving with a `winner` writes
+  an `active` human `supersedes` edge (winner → loser), deprecates the loser to
+  `deprecated_candidate` (evidence + backlink retained), leaves the `contradicts` edge `active`,
+  and audits the deprecation (`decided_by: contradiction_resolution`); the deprecation
+  **persists across claim re-extraction**; the detect backstop **does not** re-supersede the
+  evidence-retaining loser's edge; idempotent (applied once).
 - **Slice 3.5c-2 (synthesis):** an active concept with ≥2 active claims over ≥2 independent
   sources gets one candidate synthesis page under `wiki/Synthesis/`; a candidate concept or a
   single-source concept gets none; the page is written to disk but absent from

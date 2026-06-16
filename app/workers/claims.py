@@ -43,6 +43,15 @@ from app.workers.wiki_render import render_claim_page, title_from_filename
 _ENRICHABLE_STATUSES = {"extracted", "partial"}
 _WS = re.compile(r"\s+")
 _CLAIM_TEXT_RE = re.compile(r'(?m)^claim_text:\s*"(.*)"\s*$')
+_STATUS_RE = re.compile(r"(?m)^status:\s*(\S+)\s*$")
+
+
+def _read_status(page_path: Path) -> str | None:
+    """Read the lifecycle `status` from an existing Claim page (the status authority, ADR-0022)."""
+    if not page_path.exists():
+        return None
+    m = _STATUS_RE.search(page_path.read_text(encoding="utf-8", errors="replace"))
+    return m.group(1) if m else None
 
 
 def claim_id(claim_text: str) -> str:
@@ -77,7 +86,7 @@ def _write_source_artifact(apath, sid, fingerprint, source_claims, model_ref, no
 
 
 def recompose_claim(gconn, *, cid, claims_dir, reviews_dir, now, markdown_dir, text_hint=None,
-                    contradiction_affected=None) -> str:
+                    contradiction_affected=None, deprecate=False) -> str:
     """Render a Claim page from its `active` derived_from edges (tombstone if none).
 
     The single, shared claim renderer (used by the claim worker and the contradiction worker):
@@ -103,15 +112,19 @@ def recompose_claim(gconn, *, cid, claims_dir, reviews_dir, now, markdown_dir, t
     # Active contradiction backlinks (ADR-0031) project onto the Claim page; the graph holds the
     # relationship authority, so the single claim renderer reads them here for any caller.
     contradicts = graph.active_contradictions_for_claim(gconn, cid) if cites else []
+    # A claim with evidence is deprecated only by a human supersede decision (slice 1b): set on
+    # request, and *preserved* across re-extraction since the page is the status authority
+    # (ADR-0022) — a re-extraction must not silently resurrect a deprecated loser to `active`.
+    deprecated = bool(cites) and (deprecate or _read_status(page_path) == "deprecated_candidate")
     claims_dir.mkdir(parents=True, exist_ok=True)
     page_path.write_text(
         render_claim_page({"claim_id": cid, "claim_text": claim_text, "confidence": "low",
-                           "citations": cites, "contradicts": contradicts}),
+                           "citations": cites, "contradicts": contradicts, "deprecated": deprecated}),
         encoding="utf-8",
     )
-    # Mirror the page's status into the derived node index (active vs tombstone).
-    graph.upsert_node(gconn, node_id=cid, node_type="claim", slug=cid,
-                      status="active" if cites else "deprecated_candidate", now=now)
+    # Mirror the page's status into the derived node index (active / deprecated / tombstone).
+    node_status = "deprecated_candidate" if (deprecated or not cites) else "active"
+    graph.upsert_node(gconn, node_id=cid, node_type="claim", slug=cid, status=node_status, now=now)
     if not cites:
         # Endpoint invariant (ADR-0031): a tombstoned claim can no longer anchor a contradiction,
         # so supersede any contradicts assertions touching it (even an acknowledged/active one)

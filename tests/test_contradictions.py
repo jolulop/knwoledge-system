@@ -392,6 +392,134 @@ def test_tombstoned_claim_retracts_contradiction_in_claim_worker(tmp_path):
                 if json.loads(p.read_text())["type"] == "resolve_contradiction"]
 
 
+def _approve_with_winner(tmp_path, winner):
+    """Approve the pending resolve_contradiction review and name a supersede winner."""
+    pending = tmp_path / "reviews" / "pending"
+    path = next(p for p in pending.glob("*.json")
+                if json.loads(p.read_text())["type"] == "resolve_contradiction")
+    item = json.loads(path.read_text())
+    item["winner"] = winner
+    path.write_text(json.dumps(item), encoding="utf-8")
+    reviews.resolve_review_item(tmp_path / "reviews", item["review_id"],
+                                decision="approved", decided_by="human")
+    return item["review_id"]
+
+
+def test_supersede_executes_winner_loser_effects(tmp_path):
+    # Slice 1b: an approved supersede writes an active supersedes edge winner->loser, deprecates
+    # the loser (with evidence retained), keeps the contradicts edge active, and audits the cause.
+    jobs = _build_graph(tmp_path)
+    _detect(tmp_path, ContradictionAdapter(verdict=True), jobs)
+    conn = _gconn(tmp_path)
+    try:
+        a, b = (lambda r: (r["src_id"], r["dst_id"]))(
+            conn.execute("SELECT src_id, dst_id FROM edges WHERE edge_type='contradicts'").fetchone())
+    finally:
+        conn.close()
+    winner, loser = a, b
+    _approve_with_winner(tmp_path, winner)
+    summary = _detect(tmp_path, ContradictionAdapter(verdict=True), jobs)
+    assert summary["supersede_executed"] == 1
+
+    conn = _gconn(tmp_path)
+    try:
+        sup = conn.execute("SELECT * FROM edges WHERE edge_type='supersedes'").fetchall()
+        contra = conn.execute("SELECT status FROM edges WHERE edge_type='contradicts'").fetchone()
+        winner_status = conn.execute("SELECT status FROM nodes WHERE node_id=?", (winner,)).fetchone()["status"]
+        loser_status = conn.execute("SELECT status FROM nodes WHERE node_id=?", (loser,)).fetchone()["status"]
+    finally:
+        conn.close()
+    assert len(sup) == 1
+    assert sup[0]["src_id"] == winner and sup[0]["dst_id"] == loser
+    assert sup[0]["status"] == "active" and sup[0]["asserted_by"] == "human"
+    assert contra["status"] == "active"             # historical conflict stays recorded
+    assert winner_status == "active"                # winner unaffected
+    assert loser_status == "deprecated_candidate"   # loser deprecated, but still evidenced
+
+    # Loser page: deprecated, yet keeps its evidence row and the contradiction backlink.
+    loser_page = (tmp_path / "wiki" / "Claims" / f"{loser}.md").read_text(encoding="utf-8")
+    assert "status: deprecated_candidate" in loser_page
+    assert "## Evidence" in loser_page and "[[Sources/" in loser_page
+    assert _claim_page_contradictions(tmp_path, loser) == {winner}
+    # Audit trail: a deprecate_wiki_page item was approved naming the contradiction resolution.
+    audit = [json.loads(p.read_text()) for p in (tmp_path / "reviews" / "audit_log").glob("*.json")]
+    assert any(e["type"] == "deprecate_wiki_page" and e["decision"] == "approved"
+               and e["decided_by"] == "contradiction_resolution" for e in audit)
+    assert validate_projection.main([str(tmp_path)]) == 0
+    assert validate_graph.main([str(tmp_path)]) == 0
+
+
+def test_supersede_is_idempotent(tmp_path):
+    jobs = _build_graph(tmp_path)
+    _detect(tmp_path, ContradictionAdapter(verdict=True), jobs)
+    conn = _gconn(tmp_path)
+    try:
+        winner = conn.execute("SELECT src_id FROM edges WHERE edge_type='contradicts'").fetchone()["src_id"]
+    finally:
+        conn.close()
+    _approve_with_winner(tmp_path, winner)
+    s1 = _detect(tmp_path, ContradictionAdapter(verdict=True), jobs)
+    s2 = _detect(tmp_path, ContradictionAdapter(verdict=True), jobs)
+    assert s1["supersede_executed"] == 1 and s2["supersede_executed"] == 0  # applied once
+    conn = _gconn(tmp_path)
+    try:
+        n = conn.execute("SELECT COUNT(*) AS n FROM edges WHERE edge_type='supersedes'").fetchone()["n"]
+    finally:
+        conn.close()
+    assert n == 1
+
+
+def test_supersede_deprecation_persists_across_reextraction(tmp_path):
+    # The loser's deprecated_candidate status is page-authoritative and survives a claim
+    # re-extraction (its evidence is unchanged) — it is never resurrected to active.
+    jobs = _build_graph(tmp_path)
+    _detect(tmp_path, ContradictionAdapter(verdict=True), jobs)
+    conn = _gconn(tmp_path)
+    try:
+        a, b = (lambda r: (r["src_id"], r["dst_id"]))(
+            conn.execute("SELECT src_id, dst_id FROM edges WHERE edge_type='contradicts'").fetchone())
+    finally:
+        conn.close()
+    _approve_with_winner(tmp_path, a)
+    _detect(tmp_path, ContradictionAdapter(verdict=True), jobs)  # b deprecated
+
+    # Re-extract both sources' claims (evidence unchanged) — the loser must stay deprecated, and
+    # the contradicts edge must stay active (evidence-based endpoint validity, not status-based).
+    claims.extract_claims(tmp_path, client=_client(tmp_path, ClaimAdapter()), model_ref=CLAIM_MODEL,
+                          jobs_db=jobs, force=True, rebuild_index=False)
+    conn = _gconn(tmp_path)
+    try:
+        loser_status = conn.execute("SELECT status FROM nodes WHERE node_id=?", (b,)).fetchone()["status"]
+        contra = conn.execute("SELECT status FROM edges WHERE edge_type='contradicts'").fetchone()["status"]
+    finally:
+        conn.close()
+    assert loser_status == "deprecated_candidate"  # preserved, not resurrected
+    assert contra == "active"                       # endpoint still stands (has evidence)
+    assert "status: deprecated_candidate" in (tmp_path / "wiki" / "Claims" / f"{b}.md").read_text()
+
+
+def test_superseded_contradiction_survives_detect_backstop(tmp_path):
+    # The detect backstop must NOT re-supersede the contradicts edge of a supersede-deprecated
+    # pair: endpoint validity is evidence-based, and the deprecated loser still has evidence.
+    jobs = _build_graph(tmp_path)
+    _detect(tmp_path, ContradictionAdapter(verdict=True), jobs)
+    conn = _gconn(tmp_path)
+    try:
+        a = conn.execute("SELECT src_id FROM edges WHERE edge_type='contradicts'").fetchone()["src_id"]
+    finally:
+        conn.close()
+    _approve_with_winner(tmp_path, a)
+    _detect(tmp_path, ContradictionAdapter(verdict=True), jobs)
+    summary = _detect(tmp_path, ContradictionAdapter(verdict=True), jobs)  # backstop pass
+    assert summary["superseded_stale"] == 0
+    conn = _gconn(tmp_path)
+    try:
+        contra = conn.execute("SELECT status FROM edges WHERE edge_type='contradicts'").fetchone()["status"]
+    finally:
+        conn.close()
+    assert contra == "active"
+
+
 def test_two_sided_evidence_required_before_verdict(tmp_path):
     # A verdict is never requested without grounded evidence on BOTH sides: if claim B's wording
     # is unavailable, the pair is skipped and no model call is made.

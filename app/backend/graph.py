@@ -403,6 +403,20 @@ def contradiction_assertions(
     ))
 
 
+def claims_with_active_evidence(conn: sqlite3.Connection) -> set[str]:
+    """Claim ids that still *stand* — have ≥1 `active` `derived_from` edge. A contradiction
+    endpoint is "gone" (its `contradicts` edges should be superseded) only when a claim stops
+    standing, i.e. tombstones — NOT when it is merely deprecated by a human supersede decision
+    while keeping its evidence (ADR-0031). So endpoint validity is evidence-based, not
+    node-status-based."""
+    return {
+        r["src_id"] for r in conn.execute(
+            "SELECT DISTINCT e.src_id FROM edges e JOIN nodes n ON n.node_id = e.src_id "
+            "AND n.node_type = 'claim' WHERE e.edge_type = 'derived_from' AND e.status = 'active'"
+        )
+    }
+
+
 def supersede_contradictions_for_claim(
     conn: sqlite3.Connection, claim_id: str, *, now: str | None = None
 ) -> list[dict[str, Any]]:

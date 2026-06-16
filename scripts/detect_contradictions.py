@@ -57,12 +57,9 @@ def main(argv: list[str]) -> int:
           f"(not a contradiction: {summary['not_contradiction']})")
     print(f"Stale assertions superseded: {summary['superseded_stale']}")
     print(f"Resolutions applied: {summary['resolutions_acknowledged']} acknowledged, "
-          f"{summary['resolutions_rejected']} rejected "
+          f"{summary['resolutions_rejected']} rejected, {summary['supersede_executed']} superseded "
           f"(claim pages re-projected: {summary['claim_pages_reprojected']})")
     print(f"Index rebuilt: {summary['index_rebuilt']}")
-    if summary["supersede_pending_1b"]:
-        print(f"  NOTE: {summary['supersede_pending_1b']} approved supersede decision(s) await "
-              f"slice 1b (winner→loser + deprecation not yet applied).")
     print(f"Errors: {summary['errors']}")
     for err in summary["error_details"]:
         print(f"  - {err['pair']}: {err['error']}")

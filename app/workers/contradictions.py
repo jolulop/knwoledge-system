@@ -137,21 +137,24 @@ def _resolved_items(reviews_dir: Path, state: str) -> list[dict[str, Any]]:
 
 
 def apply_resolved_contradictions(
-    gconn, reviews_dir: Path, *, affected: set[str] | None = None, now: str | None = None
+    gconn, reviews_dir: Path, *, claims_dir: Path, markdown_dir: Path,
+    affected: set[str] | None = None, now: str | None = None,
 ) -> dict[str, int]:
     """Apply human decisions to the graph (deterministic; runs every pass, key or not).
 
     `approved` → the pair's `contradicts` edge flips to `active` (acknowledge — a standing
     disagreement; both claims stay live). `rejected` → the edge flips to `rejected`. A
-    `supersede` decision (an approved item naming a `winner`) activates the edge here too, but
-    its winner→loser `supersedes` + deprecation is **slice 1b** — surfaced as `supersede_pending`,
-    never silently applied (ADR-0031). Idempotent: only transitions a row whose status differs.
-    Both endpoint claims of any transitioned edge are added to `affected` so the caller
-    re-projects their Claim pages (a backlink appears on acknowledge, disappears on reject).
+    `supersede` decision (an approved item naming a `winner`) activates the edge **and** executes
+    the winner→loser effects (slice 1b, ADR-0031): an `active` `supersedes` edge plus the loser
+    deprecated to `deprecated_candidate` through the `deprecate_wiki_page` audit path (the
+    `contradicts` edge stays active so the historical conflict is recorded). Idempotent: only
+    transitions a row whose status differs, and the supersede effects are applied once. Both
+    endpoint claims of any transition are added to `affected` so the caller re-projects their
+    Claim pages (a backlink appears on acknowledge, disappears on reject).
     """
     now = now or iso_now()
     affected = affected if affected is not None else set()
-    acknowledged = rejected = supersede_pending = 0
+    acknowledged = rejected = superseded_executed = 0
 
     def _set(a: str, b: str, rows: list[dict[str, Any]], target: str, statuses: tuple[str, ...]) -> int:
         n = 0
@@ -168,8 +171,14 @@ def apply_resolved_contradictions(
         if not a or not b:
             continue
         acknowledged += _set(a, b, graph.contradiction_between(gconn, a, b), "active", ("proposed",))
-        if item.get("winner"):  # supersede decision: edge activates; winner→loser is slice 1b
-            supersede_pending += 1
+        winner = item.get("winner")
+        if winner in (a, b):  # supersede decision: execute winner→loser effects (slice 1b)
+            loser = b if winner == a else a
+            if _execute_supersede(gconn, reviews_dir, winner=winner, loser=loser,
+                                  source_review_id=item.get("review_id", ""), now=now,
+                                  claims_dir=claims_dir, markdown_dir=markdown_dir):
+                superseded_executed += 1
+            affected.update((a, b))
     for item in _resolved_items(reviews_dir, "rejected"):
         subj = item.get("subject") or {}
         a, b = subj.get("claim_a"), subj.get("claim_b")
@@ -177,7 +186,45 @@ def apply_resolved_contradictions(
             continue
         rejected += _set(a, b, graph.contradiction_between(gconn, a, b), "rejected", ("proposed", "active"))
 
-    return {"acknowledged": acknowledged, "rejected": rejected, "supersede_pending": supersede_pending}
+    return {"acknowledged": acknowledged, "rejected": rejected,
+            "superseded_executed": superseded_executed}
+
+
+def _execute_supersede(
+    gconn, reviews_dir: Path, *, winner: str, loser: str, source_review_id: str, now: str,
+    claims_dir: Path, markdown_dir: Path,
+) -> bool:
+    """Execute an approved `supersede` resolution (slice 1b, ADR-0031): an `active` `supersedes`
+    edge winner→loser, and the loser deprecated to `deprecated_candidate` via the
+    `deprecate_wiki_page` audit path — authorized by the contradiction approval (no second human
+    gate), with the cause recorded. The `contradicts` edge is left active by the caller. Returns
+    True if it applied effects this call; idempotent (a no-op once already executed)."""
+    already_edge = any(e["dst_id"] == loser and e["edge_type"] == "supersedes"
+                       for e in graph.outgoing_active(gconn, winner))
+    loser_node = graph.get_node(gconn, loser)
+    already_dep = bool(loser_node) and loser_node["status"] == "deprecated_candidate"
+    if already_edge and already_dep:
+        return False
+    # supersedes is a same-node-type edge (claim -> claim); both endpoints are indexed.
+    graph.upsert_assertion(gconn, src_id=winner, dst_id=loser, edge_type="supersedes",
+                           asserted_by="human", status="active", review_id=source_review_id, now=now)
+    # Deprecate the loser (page is the status authority); its evidence + contradiction backlink
+    # stay rendered, status flips to deprecated_candidate.
+    claims.recompose_claim(gconn, cid=loser, claims_dir=claims_dir, reviews_dir=reviews_dir,
+                           markdown_dir=markdown_dir, now=now, deprecate=True)
+    # Audit trail: the deprecation is authorized by the approved contradiction resolution, so we
+    # file a deprecate_wiki_page item and immediately resolve it approved (records the cause).
+    dep_rid = reviews.create_review_item(
+        reviews_dir, review_type="deprecate_wiki_page",
+        subject={"node_id": loser, "page": f"Claims/{loser}.md"},
+        proposal={"to_status": "deprecated_candidate",
+                  "reason": "superseded via approved contradiction resolution"},
+        context={"resolved_by_review": source_review_id, "winner": winner}, now=now)
+    reviews.resolve_review_item(
+        reviews_dir, dep_rid, decision="approved", decided_by="contradiction_resolution",
+        note=f"deprecated as loser of approved contradiction {source_review_id}; winner {winner}",
+        now=now)
+    return True
 
 
 # --- the worker ------------------------------------------------------------
@@ -224,20 +271,25 @@ def detect_contradictions(
         affected: set[str] = set()  # claim ids whose page projection must be re-rendered
 
         # 1. Apply human decisions made since the last run (deterministic; runs without a key).
-        resolution = apply_resolved_contradictions(gconn, reviews_dir, affected=affected, now=now)
+        resolution = apply_resolved_contradictions(
+            gconn, reviews_dir, claims_dir=claims_dir, markdown_dir=markdown_dir,
+            affected=affected, now=now)
 
         # 2. Recompute candidate pairs from the current active graph.
         prov = {m["source_id"]: get_provenance(m) for m in list_manifests(manifests_dir)}
         pairs = candidate_pairs(gconn, prov)
         pair_keys = {(p["claim_a"], p["claim_b"]) for p in pairs}
         active_claims = set(graph.active_node_ids_of_type(gconn, "claim"))
+        standing_claims = graph.claims_with_active_evidence(gconn)  # evidence-based endpoint validity
 
         # 3. Supersede stale llm assertions and withdraw their pending reviews (runs without a
         #    key — like claim retraction). Two distinct conditions (ADR-0031):
-        #    - **endpoint gone** (a claim is no longer `active`): supersede whether proposed OR
-        #      active, because the relationship has lost an endpoint. The CLAIM worker is the
-        #      *primary* enforcer of this (it retracts on tombstone so its own CLI stays valid);
-        #      this is a backstop for any endpoint that became inactive by another path.
+        #    - **endpoint gone** (a claim no longer *stands* — has no `active` evidence, i.e. a
+        #      tombstone): supersede whether proposed OR active. Endpoint validity is
+        #      **evidence-based, not node-status-based**, so a claim that is `deprecated_candidate`
+        #      by a human supersede decision but *keeps* its evidence is NOT "gone" — its
+        #      `contradicts` edge stays active (the historical conflict is recorded). The CLAIM
+        #      worker is the *primary* enforcer on tombstone; this is a backstop.
         #    - **pair left the candidate set** but both endpoints stand (e.g. a provenance edit
         #      removed independence): supersede only a *proposed* assertion. Independence is the
         #      blocking criterion for *finding* candidates, not a validity condition, so it must
@@ -245,15 +297,15 @@ def detect_contradictions(
         stale = 0
         for row in graph.contradiction_assertions(gconn, statuses=("proposed", "active")):
             a, b = row["src_id"], row["dst_id"]
-            endpoint_gone = a not in active_claims or b not in active_claims
+            endpoint_gone = a not in standing_claims or b not in standing_claims
             left_candidate = (a, b) not in pair_keys
             if endpoint_gone or (row["status"] == "proposed" and left_candidate):
                 graph.set_status(gconn, row["edge_id"], "superseded", now=now)
                 rid = reviews.review_id("resolve_contradiction", {"claim_a": a, "claim_b": b})
-                reason = "an endpoint claim is no longer active" if endpoint_gone \
+                reason = "an endpoint claim no longer stands" if endpoint_gone \
                     else "pair no longer a candidate"
                 reviews.withdraw_review_item(reviews_dir, rid, reason=reason, now=now)
-                affected.update({a, b} & active_claims)  # re-project the surviving claim(s)
+                affected.update({a, b} & standing_claims)  # re-project the surviving claim(s)
                 stale += 1
 
         considered = len(pairs)
@@ -346,7 +398,7 @@ def detect_contradictions(
             "claim_pages_reprojected": pages_reprojected, "index_rebuilt": index_rebuilt,
             "resolutions_acknowledged": resolution["acknowledged"],
             "resolutions_rejected": resolution["rejected"],
-            "supersede_pending_1b": resolution["supersede_pending"],
+            "supersede_executed": resolution["superseded_executed"],
             "errors": len(errors), "error_details": errors, "detected_at": now,
         }
         if conn is not None:

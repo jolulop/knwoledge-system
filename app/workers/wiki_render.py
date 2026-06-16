@@ -303,11 +303,20 @@ def render_claim_page(claim: dict[str, Any]) -> str:
     confidence = claim.get("confidence", "low")
     citations = claim.get("citations", [])
     active = bool(citations)
-    # No active evidence -> a tombstone: kept page-backed for audit and node authority
-    # (ADR-0030), marked deprecated_candidate pending human-reviewed deletion (ADR-0018);
-    # never hard-deleted (CLAUDE.md rule 9).
-    status = "active" if active else "deprecated_candidate"
-    review_status = "none" if active else "pending"
+    # Three lifecycle outcomes (ADR-0018/0030/0031):
+    #  - no evidence -> a tombstone (deprecated_candidate, pending review), kept page-backed for
+    #    audit and node authority, never hard-deleted (CLAUDE.md rule 9);
+    #  - `deprecated` with evidence -> a human supersede decision: the claim still has evidence
+    #    but lost a contradiction review, so it is deprecated_candidate (already decided), with
+    #    its evidence and active contradiction backlink still shown;
+    #  - otherwise active.
+    deprecated = bool(claim.get("deprecated"))
+    if not active:
+        status, review_status = "deprecated_candidate", "pending"
+    elif deprecated:
+        status, review_status = "deprecated_candidate", "approved"
+    else:
+        status, review_status = "active", "none"
 
     fm_lines = [
         "---",
@@ -352,7 +361,8 @@ def render_claim_page(claim: dict[str, Any]) -> str:
     fm_lines.append("---")
 
     if active:
-        label = "Generated claim (unverified)"
+        label = ("Claim deprecated — superseded by contradiction review" if deprecated
+                 else "Generated claim (unverified)")
         evidence_section = ["| Source | Char range | Quote |", "|---|---|---|", *evidence_rows]
     else:
         label = "Claim evidence superseded — pending review"

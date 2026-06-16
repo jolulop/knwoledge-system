@@ -20,11 +20,12 @@ critical rules and `CONTEXT.md` for the glossary.
   - `f3f3515` Fix Phase 3.5 status (3.5a was already complete)
   - `84d819b` Phase 3.5b (5): promotion lifecycle — candidate→active by recurrence or review
   - `e4cb633` Phase 3.5b (4) closeout: projection validator, claim tombstone reviews
-- **Tests/lint green:** `227 passed`, ruff clean (was 209; +18 for slice 3.5c-1 incl. two
-  review-driven hardening passes: Claim-page contradiction projection, faithful cache
-  fingerprint, confidence clamp, withdraw audit history; then the endpoint-gone retraction moved
-  into the **claim lifecycle** (shared public `recompose_claim` + `graph.supersede_contradictions_for_claim`)
-  so `extract_claims` stays valid on its own, plus two-sided-evidence guard + `rebuild_index`).
+- **Tests/lint green:** `231 passed`, ruff clean (was 209; +22 for slices 3.5c-1 + 1b). 3.5c-1
+  hardening: Claim-page contradiction projection, faithful cache fingerprint, confidence clamp,
+  withdraw audit history, claim-lifecycle endpoint retraction (shared public `recompose_claim` +
+  `graph.supersede_contradictions_for_claim`), two-sided-evidence guard, `rebuild_index`. 1b:
+  `supersede` executor (winner→loser edge + loser deprecation, evidence + backlink retained,
+  audited, persists across re-extraction) + **evidence-based endpoint validity**.
 
 ## Phase status
 
@@ -33,7 +34,7 @@ critical rules and `CONTEXT.md` for the glossary.
 | Phase 3 (deterministic Source-page backbone) | **Complete** |
 | Phase 3.5a (per-source LLM summary + tags → enrichment artifact) | **Complete** (`app/workers/enrich.py`, `enrichment_artifact.py`; commit `df45a0e`) |
 | Phase 3.5b (semantic nodes + grounding + promotion) | **Complete** — all 5 slices |
-| Phase 3.5c (cross-source synthesis + contradiction detection) | **In progress** — design locked (ADR-0031). **Slice 3.5c-1 (contradiction detection) DONE** (`app/workers/contradictions.py`). Slices 1b (supersede executor) and 2 (synthesis) not started. |
+| Phase 3.5c (cross-source synthesis + contradiction detection) | **In progress** — design locked (ADR-0031). **Slices 3.5c-1 (contradiction detection) + 1b (supersede executor) DONE** (`app/workers/contradictions.py`). Slice 2 (synthesis) not started. |
 
 ### Phase 3.5b slices (all done)
 1. Mechanical citation grounding gate + validator (`app/workers/citations.py`, `scripts/validate_citations.py`)
@@ -45,28 +46,26 @@ critical rules and `CONTEXT.md` for the glossary.
 ## Next step
 
 Phase 3.5c design is locked in **ADR-0031** + **`docs/Phase 3.5c Plan.md`** (read those
-first). **Slice 3.5c-1 (contradiction detection) is implemented and green.** Remaining:
+first). **Slices 3.5c-1 (contradiction detection) + 1b (supersede executor) are implemented
+and green.** Remaining:
 
-- **3.5c-1b — `supersede` resolution executor (NEXT, small).** When a `resolve_contradiction`
-  review is approved naming a `winner`, write an `active` `supersedes` edge (winner→loser) and
-  deprecate the loser to `deprecated_candidate` via the `deprecate_wiki_page` audit path
-  (cause recorded). Today `detect_contradictions` surfaces such decisions as
-  `supersede_pending_1b` (count in the summary) and activates the `contradicts` edge but does
-  **not** apply winner→loser — deliberately not silent. Hook point:
-  `contradictions.apply_resolved_contradictions` (the `item.get("winner")` branch).
-- **3.5c-2 — synthesis.** Per active concept/entity (≥2 active claims, ≥2 independent
+- **3.5c-2 — synthesis (NEXT).** Per active concept/entity (≥2 active claims, ≥2 independent
   sources); grounded on claim nodes; born `candidate` under `wiki/Synthesis/`; review-only
   promotion via a **new `propose_synthesis` review type** (no recurrence path). Will add
   `propose_synthesis` to `policies/review.yaml` + `reviews.py` `REVIEW_TYPES`.
 
-What 3.5c-1 shipped (all on the proven graph; LLM proposes, human disposes): deterministic
+What 3.5c-1 + 1b shipped (all on the proven graph; LLM proposes, human disposes): deterministic
 graph-neighborhood `candidate_pairs` blocking (shared concept via `claim→source→concept` +
 ADR-0018 independence, now in `manifests.independent_sources`); tier-3 verdict pass writing
 sorted-pair (`src_id < dst_id`) `proposed` `contradicts` edges with an advisory src-claim
 anchor; `resolve_contradiction` reviews carrying both sides; per-pair idempotency via the
-response cache (claim texts + evidence quotes + shared topics in the prompt); stale-pair
-supersession + `reviews.withdraw_review_item`; `apply_resolved_contradictions` (approve→active,
-reject→rejected); `validate_graph` canonical-ordering check. Run: `uv run python
+response cache (claim texts + full anchors + shared node ids in the prompt); stale-pair
+supersession + `reviews.withdraw_review_item`; `apply_resolved_contradictions` —
+approve→active, reject→rejected, and **`supersede` (winner→loser `supersedes` edge + loser
+`deprecated_candidate` via `deprecate_wiki_page` audit, contradicts stays active)**; Claim-page
+contradiction projection (`render_claim_page` + `validate_projection`); **endpoint validity is
+evidence-based** (`graph.claims_with_active_evidence`) so a supersede-deprecated loser keeps its
+edge; `validate_graph` canonical-ordering check. Run: `uv run python
 scripts/detect_contradictions.py` (tier-3; no key → `skipped` but resolutions + stale
 supersession still run).
 

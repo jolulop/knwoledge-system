@@ -97,13 +97,17 @@ rule 9):
 - **`reject`** → not a real contradiction (model error); the edge → `rejected`, nothing else
   changes.
 
-3.5c-1 itself only builds the `contradicts` proposal plus the `acknowledge`/`reject`
-activation path; `supersede` *execution* is a thin follow-on reviews-worker action reusing the
-existing `supersedes` edge and `deprecated_candidate`/`deprecate_wiki_page` primitives. The
-fixed three-outcome vocabulary is present in the proposal from 3.5c-1, but a `supersede`
-decision must **never be silently recorded without applying its graph/page effects**: 3.5c-1
-either applies the small deterministic action immediately or explicitly returns "not
-implemented" until slice 1b — it does not accept and drop the decision.
+3.5c-1 builds the `contradicts` proposal plus the `acknowledge`/`reject` activation path;
+`supersede` *execution* lands in **slice 1b** (now implemented) as a deterministic action in
+`apply_resolved_contradictions`, reusing the existing `supersedes` edge and
+`deprecated_candidate`/`deprecate_wiki_page` primitives — no new schema. The reviewer names the
+`winner` on the approved item; the executor writes the `supersedes` edge, deprecates the loser
+(via `recompose_claim(deprecate=True)`, which keeps the loser's evidence + contradiction
+backlink rendered and flips only its lifecycle status), and files+approves a
+`deprecate_wiki_page` item so the deprecation carries an `audit_log` cause. It is idempotent and
+never silently records a `supersede` without effects. Because the deprecated loser **retains its
+evidence**, endpoint validity is **evidence-based, not status-based** (decision 2): the
+`contradicts` edge stays active rather than being re-superseded as a stale endpoint.
 
 **4. Idempotency is per sorted-pair, cache-replayed, fingerprinted over evidence not just
 text.** `claims.py` is fingerprint-idempotent per source, but contradiction detection is
