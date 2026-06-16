@@ -578,7 +578,7 @@ prompt-injection surface is introduced.
 | Phase 1 | File Intake and Raw Repository. | Complete |
 | Phase 2 | Extraction and Normalization. | Complete |
 | Phase 3 | Filing-Cabinet Wiki Layer — deterministic Source-page backbone. | Complete |
-| Phase 3.5 | LLM semantic layer: enriched summaries, tags, concepts, entities, claims, synthesis, and bidirectional backlinks. Sub-phased 3.5a/3.5b/3.5c (ADR-0028). | In progress — 3.5a complete (per-source LLM summary + tags) and 3.5b complete (grounding gate, graph store, claim/concept-entity extraction, promotion lifecycle); 3.5c complete — contradiction detection + supersede executor + cross-source synthesis. **Phase 3.5 complete.** |
+| Phase 3.5 | LLM semantic layer: enriched summaries, tags, concepts, entities, claims, synthesis, and bidirectional backlinks. Sub-phased 3.5a/3.5b/3.5c (ADR-0028). | **Complete** — 3.5a (per-source LLM summary + tags), 3.5b (grounding gate, graph store, claim/concept-entity extraction, promotion lifecycle), 3.5c (contradiction detection + supersede executor + cross-source synthesis). |
 | Phase 4 | Search and Graph. | Planned |
 | Phase 5 | Query and Cited Answering. | Planned |
 | Phase 6 | Human Review UI. | Planned |
