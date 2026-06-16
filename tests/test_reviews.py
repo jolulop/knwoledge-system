@@ -51,3 +51,18 @@ def test_unknown_review_type_rejected(tmp_path):
     with pytest.raises(ValueError):
         reviews.create_review_item(tmp_path / "reviews", review_type="bogus",
                                    subject={}, proposal={})
+
+
+def test_withdraw_only_touches_pending_and_preserves_audit_history(tmp_path):
+    rdir = tmp_path / "reviews"
+    subj = {"claim_a": "clm_a", "claim_b": "clm_b"}
+    # A withdraw/re-file/withdraw cycle keeps a distinct audit entry per withdrawal.
+    for i in range(2):
+        rid = reviews.create_review_item(rdir, review_type="resolve_contradiction",
+                                         subject=subj, proposal={}, now=f"t{i}")
+        assert reviews.withdraw_review_item(rdir, rid, reason="r", now=f"t{i}") is True
+        assert not (rdir / "pending" / f"{rid}.json").exists()  # removed from pending
+    audit = list((rdir / "audit_log").glob(f"{rid}-withdrawn-*.json"))
+    assert len(audit) == 2  # both withdrawals recorded, neither overwritten
+    # A withdraw is a no-op once nothing is pending (terminal human decisions are untouched).
+    assert reviews.withdraw_review_item(rdir, rid) is False

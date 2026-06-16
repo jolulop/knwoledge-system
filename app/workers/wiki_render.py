@@ -340,6 +340,14 @@ def render_claim_page(claim: dict[str, Any]) -> str:
             )
     else:
         fm_lines.append("citations: []")
+    # Active `contradicts` backlinks (ADR-0031): symmetric, projected on both Claim pages once
+    # a human acknowledges the contradiction (the graph holds the relationship authority).
+    contradicts = sorted(claim.get("contradicts", []) or []) if active else []
+    if contradicts:
+        fm_lines.append("contradicts:")
+        fm_lines.extend(f"  - {cid}" for cid in contradicts)
+    else:
+        fm_lines.append("contradicts: []")
     fm_lines.append('input_fingerprint: ""')
     fm_lines.append("---")
 
@@ -368,6 +376,17 @@ def render_claim_page(claim: dict[str, Any]) -> str:
         "",
         *evidence_section,
         "",
+    ]
+    # Contradicting-claims projection: only active backlinks render, no placeholder link when
+    # empty (the same "no dangling/invented links" discipline as the rest, ADR-0016/0029/0031).
+    if contradicts:
+        body += [
+            "## Contradicting Claims",
+            "",
+            *(f"- [[Claims/{cid}]]" for cid in contradicts),
+            "",
+        ]
+    body += [
         "## Notes",
         "",
     ]

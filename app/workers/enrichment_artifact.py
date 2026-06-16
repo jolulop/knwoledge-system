@@ -25,6 +25,9 @@ CLAIM_PROMPT_VERSION = "enrich-claims-prompt-v1"
 # Phase 3.5b concept/entity extraction pass.
 CONCEPT_SCHEMA_VERSION = "enrich-concepts-v1"
 CONCEPT_PROMPT_VERSION = "enrich-concepts-prompt-v1"
+# Phase 3.5c contradiction-detection pass (tier-3; per claim pair, response-cache replayed).
+CONTRADICTION_SCHEMA_VERSION = "enrich-contradiction-v1"
+CONTRADICTION_PROMPT_VERSION = "enrich-contradiction-prompt-v1"
 
 
 def _fingerprint(

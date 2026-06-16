@@ -125,6 +125,29 @@ def get_provenance(manifest: dict[str, Any]) -> dict[str, Any]:
     return {k: prov.get(k) for k in PROVENANCE_FIELDS if prov.get(k) is not None}
 
 
+def _canon_provenance(key: str, value: Any) -> Any:
+    """Canonicalize a provenance value before comparison so trivial variants don't read as
+    independent — a conservative gate (ADR-0018). Text: casefold + whitespace-collapse;
+    `canonical_url` also drops a #fragment and trailing slashes."""
+    if not isinstance(value, str):
+        return value
+    v = " ".join(value.split()).strip().casefold()
+    if key == "canonical_url":
+        v = v.split("#", 1)[0].rstrip("/")
+    return v
+
+
+def independent_sources(p1: dict[str, Any], p2: dict[str, Any]) -> bool:
+    """Two sources are independent iff >=1 *comparable* provenance key (known on both) differs
+    and no comparable key is equal (ADR-0018). Non-comparable/unknown keys never prove
+    independence, so the gate stays conservative until provenance is populated. The single home
+    for the independence rule, shared by the promotion lifecycle and contradiction detection."""
+    comparable = [k for k in PROVENANCE_FIELDS if p1.get(k) and p2.get(k)]
+    return bool(comparable) and all(
+        _canon_provenance(k, p1[k]) != _canon_provenance(k, p2[k]) for k in comparable
+    )
+
+
 def set_provenance(manifests_dir: Path, source_id: str, **fields: Any) -> dict[str, Any] | None:
     """Set provenance fields on a manifest (the single write path); returns it or None."""
     unknown = set(fields) - set(PROVENANCE_FIELDS)

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -68,6 +69,39 @@ def create_review_item(
         "context": context or {},
     }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return rid
+
+
+def withdraw_review_item(
+    reviews_dir: Path, review_id: str, *, reason: str = "", now: str | None = None
+) -> bool:
+    """Withdraw a still-**pending** machine-proposed item (it never reached a human).
+
+    Removes the pending file and writes an audit entry, so a later re-detection can re-file the
+    same `review_id` (unlike a rejected item, which stays and blocks re-filing). Only touches
+    `pending/` — an already-decided item (approved/rejected) is a human record and is left
+    intact. Used when a proposed contradiction stops being a candidate or is no longer judged a
+    contradiction (Phase 3.5c). Returns True if it withdrew this call, False otherwise.
+    """
+    reviews_dir = Path(reviews_dir)
+    src = reviews_dir / "pending" / f"{review_id}.json"
+    if not src.exists():
+        return False
+    now = now or iso_now()
+    try:
+        item = json.loads(src.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        item = {"review_id": review_id}
+    src.unlink()
+    audit = reviews_dir / "audit_log"
+    audit.mkdir(parents=True, exist_ok=True)
+    # Unique suffix: a withdraw/re-file/withdraw cycle for the same review_id must not overwrite
+    # earlier audit entries (unlike a terminal approve/reject, a withdrawal can recur).
+    (audit / f"{review_id}-withdrawn-{uuid.uuid4().hex[:8]}.json").write_text(json.dumps({
+        "review_id": review_id, "type": item.get("type"), "decision": "withdrawn",
+        "decided_by": "system", "decided_at": now, "subject": item.get("subject"),
+        "note": reason,
+    }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return True
 
 
 def resolve_review_item(

@@ -352,6 +352,108 @@ def claims_for_source(conn: sqlite3.Connection, source_id: str) -> list[str]:
     ]
 
 
+def active_node_ids_of_type(conn: sqlite3.Connection, node_type: str) -> list[str]:
+    """Active node ids of a given type (e.g. the active claims to compare, Phase 3.5c)."""
+    return [
+        r["node_id"] for r in conn.execute(
+            "SELECT node_id FROM nodes WHERE node_type = ? AND status = 'active' "
+            "ORDER BY node_id",
+            (node_type,),
+        )
+    ]
+
+
+def sources_for_claim(conn: sqlite3.Connection, claim_id: str) -> list[str]:
+    """Active sources a claim is derived from (claim → source `derived_from`; the inverse of
+    `claims_for_source`). Used to find a claim's blocking neighborhood and primary citation."""
+    return [
+        r["dst_id"] for r in conn.execute(
+            "SELECT DISTINCT e.dst_id FROM edges e JOIN nodes n ON n.node_id = e.dst_id "
+            "AND n.node_type = 'source' WHERE e.src_id = ? AND e.edge_type = 'derived_from' "
+            "AND e.status = 'active' ORDER BY e.dst_id",
+            (claim_id,),
+        )
+    ]
+
+
+def concept_ids_for_source(conn: sqlite3.Connection, source_id: str) -> set[str]:
+    """Active concept/entity-family nodes a source mentions (its blocking neighborhood)."""
+    return {
+        r["dst_id"] for r in conn.execute(
+            "SELECT DISTINCT e.dst_id FROM edges e JOIN nodes n ON n.node_id = e.dst_id "
+            "WHERE e.src_id = ? AND e.edge_type = 'mentions' AND e.status = 'active' "
+            "AND n.node_type IN ('concept', 'entity', 'person', 'organization', 'project')",
+            (source_id,),
+        )
+    }
+
+
+def contradiction_assertions(
+    conn: sqlite3.Connection,
+    *,
+    statuses: tuple[str, ...] = ("proposed", "active"),
+    asserted_by: str = "llm",
+) -> list[dict[str, Any]]:
+    """`contradicts` assertion rows in the given statuses (Phase 3.5c stale detection)."""
+    placeholders = ",".join("?" for _ in statuses)
+    return _rows(conn.execute(
+        f"SELECT * FROM edges WHERE edge_type = 'contradicts' AND asserted_by = ? "
+        f"AND status IN ({placeholders}) ORDER BY src_id, dst_id, edge_id",
+        (asserted_by, *statuses),
+    ))
+
+
+def supersede_contradictions_for_claim(
+    conn: sqlite3.Connection, claim_id: str, *, now: str | None = None
+) -> list[dict[str, Any]]:
+    """Supersede every `proposed`/`active` `contradicts` assertion touching a claim that has
+    stopped being an active node (tombstone / identity change). Keeps the endpoint invariant
+    **local**: a relationship that needs an active claim endpoint stops being active the moment
+    the endpoint does — so the claim-lifecycle path leaves the graph valid without waiting for a
+    contradiction pass. Returns the affected rows so the caller can withdraw their pending
+    reviews and re-render the surviving endpoints (ADR-0031)."""
+    now = now or iso_now()
+    rows = _rows(conn.execute(
+        "SELECT * FROM edges WHERE edge_type = 'contradicts' AND status IN ('proposed', 'active') "
+        "AND (src_id = ? OR dst_id = ?)",
+        (claim_id, claim_id),
+    ))
+    conn.execute(
+        "UPDATE edges SET status = 'superseded', updated_at = ? WHERE edge_type = 'contradicts' "
+        "AND status IN ('proposed', 'active') AND (src_id = ? OR dst_id = ?)",
+        (now, claim_id, claim_id),
+    )
+    conn.commit()
+    return rows
+
+
+def active_contradictions_for_claim(conn: sqlite3.Connection, claim_id: str) -> list[str]:
+    """The other claim in each `active` `contradicts` assertion involving this claim.
+
+    `contradicts` is symmetric and stored once with `src_id < dst_id`, so a claim can be on
+    either endpoint — this returns the opposite endpoint for the Claim-page projection."""
+    out: set[str] = set()
+    for r in conn.execute(
+        "SELECT src_id, dst_id FROM edges WHERE edge_type = 'contradicts' AND status = 'active' "
+        "AND (src_id = ? OR dst_id = ?)",
+        (claim_id, claim_id),
+    ):
+        out.add(r["dst_id"] if r["src_id"] == claim_id else r["src_id"])
+    return sorted(out)
+
+
+def contradiction_between(
+    conn: sqlite3.Connection, claim_a: str, claim_b: str, *, asserted_by: str = "llm"
+) -> list[dict[str, Any]]:
+    """All `contradicts` assertion rows for a (sorted) claim pair, any status."""
+    src, dst = sorted((claim_a, claim_b))
+    return _rows(conn.execute(
+        "SELECT * FROM edges WHERE edge_type = 'contradicts' AND asserted_by = ? "
+        "AND src_id = ? AND dst_id = ? ORDER BY edge_id",
+        (asserted_by, src, dst),
+    ))
+
+
 def count_independent_sources(conn: sqlite3.Connection, dst_id: str, *, edge_type: str = "mentions") -> int:
     """Distinct source_ids among a node's active assertions of the given type (promotion).
 

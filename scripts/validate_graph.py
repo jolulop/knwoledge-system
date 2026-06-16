@@ -44,6 +44,12 @@ def _check(db_path: Path) -> list[str]:
             if e["asserted_by"] not in graph.ASSERTED_BY:
                 errors.append(f"edge {ref}: invalid asserted_by {e['asserted_by']!r}")
 
+            # Canonical ordering for the symmetric `contradicts` relation (ADR-0031): the pair
+            # is stored once with src_id < dst_id, so A-vs-B and B-vs-A cannot become two rows.
+            if edge_type == "contradicts" and e["src_id"] >= e["dst_id"]:
+                errors.append(f"edge {ref}: contradicts must be canonically ordered "
+                              f"(src_id < dst_id), got {e['src_id']} >= {e['dst_id']}")
+
             src_in = e["src_id"] in known
             dst_in = e["dst_id"] in known
             if not src_in:

@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from app.backend import db, graph
-from app.backend.manifests import PROVENANCE_FIELDS, get_provenance, iso_now, list_manifests
+from app.backend.manifests import get_provenance, independent_sources, iso_now, list_manifests
 from app.workers import reviews
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter, render_concept_page
 
@@ -34,30 +34,12 @@ PROMOTABLE = ("concept", "entity", "person", "organization", "project")
 _ID_FIELD = {"concept": "concept_id", "entity": "entity_id", "person": "person_id",
              "organization": "organization_id", "project": "project_id"}
 _TITLE_RE = re.compile(r'(?m)^title:\s*"(.*)"\s*$')
-_WS = re.compile(r"\s+")
-
-
-def _canon(key: str, value: Any) -> Any:
-    """Canonicalize a provenance value before comparison so trivial variants don't read as
-    independent (a conservative gate). Text: casefold + whitespace-collapse; canonical_url
-    also drops a #fragment and trailing slashes."""
-    if not isinstance(value, str):
-        return value
-    v = _WS.sub(" ", value).strip().casefold()
-    if key == "canonical_url":
-        v = v.split("#", 1)[0].rstrip("/")
-    return v
-
-
-def _independent(p1: dict[str, Any], p2: dict[str, Any]) -> bool:
-    """Two sources independent iff >=1 comparable key differs and none is equal (ADR-0018)."""
-    comparable = [k for k in PROVENANCE_FIELDS if p1.get(k) and p2.get(k)]
-    return bool(comparable) and all(_canon(k, p1[k]) != _canon(k, p2[k]) for k in comparable)
 
 
 def _has_independent_pair(sources: list[str], prov: dict[str, dict[str, Any]]) -> bool:
+    """Any mutually-independent pair among a node's mentioning sources (ADR-0018)."""
     provs = [prov.get(s, {}) for s in sources]
-    return any(_independent(provs[i], provs[j])
+    return any(independent_sources(provs[i], provs[j])
                for i in range(len(provs)) for j in range(i + 1, len(provs)))
 
 

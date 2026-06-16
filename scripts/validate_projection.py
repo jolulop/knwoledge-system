@@ -128,6 +128,14 @@ def _check(root: Path, db_path: Path) -> list[str]:
             for sid in linked - active:
                 errors.append(f"{cid}: linked source {sid} has no active derived_from edge")
 
+            # Contradicting-claims projection matches active `contradicts` edges (ADR-0031).
+            linked_contra = _section_link_slugs(text, "Contradicting Claims", "Claims")
+            active_contra = set(graph.active_contradictions_for_claim(conn, cid))
+            for other in active_contra - linked_contra:
+                errors.append(f"{cid}: active contradiction with {other} not projected on Claim page")
+            for other in linked_contra - active_contra:
+                errors.append(f"{cid}: projected contradiction link [[Claims/{other}]] has no active edge")
+
         # --- Concept/entity/... pages: Mentioned-by links match active mentions ---
         for node_type, subdir in ((t, NODE_DIR[t]) for t in _DIR_TYPE.values()):
             folder = root / "wiki" / subdir

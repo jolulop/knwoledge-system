@@ -131,13 +131,15 @@ def test_promotion_is_idempotent(tmp_path):
 
 
 def test_independence_canonicalization():
+    # The independence rule now lives in manifests (its single home, shared by promotion and
+    # contradiction detection); behaviour is unchanged.
     # Whitespace/case variants of the same author are NOT independent (conservative gate).
-    assert promote._independent({"author": "Alice"}, {"author": "alice "}) is False
+    assert manifests.independent_sources({"author": "Alice"}, {"author": "alice "}) is False
     # URL trailing-slash / case variants collapse too.
-    assert promote._independent({"canonical_url": "http://X.com/a/"},
-                                {"canonical_url": "http://x.com/a"}) is False
+    assert manifests.independent_sources({"canonical_url": "http://X.com/a/"},
+                                         {"canonical_url": "http://x.com/a"}) is False
     # Genuinely distinct values are independent.
-    assert promote._independent({"author": "Alice"}, {"author": "Bob"}) is True
+    assert manifests.independent_sources({"author": "Alice"}, {"author": "Bob"}) is True
 
 
 def test_canonicalization_blocks_false_promotion(tmp_path):

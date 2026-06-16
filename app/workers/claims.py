@@ -76,8 +76,17 @@ def _write_source_artifact(apath, sid, fingerprint, source_claims, model_ref, no
     }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def _recompose_claim(gconn, *, cid, claims_dir, reviews_dir, now, markdown_dir, text_hint=None) -> str:
-    """Render a Claim page from its `active` derived_from edges (tombstone if none)."""
+def recompose_claim(gconn, *, cid, claims_dir, reviews_dir, now, markdown_dir, text_hint=None,
+                    contradiction_affected=None) -> str:
+    """Render a Claim page from its `active` derived_from edges (tombstone if none).
+
+    The single, shared claim renderer (used by the claim worker and the contradiction worker):
+    it composes the page's citations and active `contradicts` backlinks from the graph. When a
+    claim tombstones (loses all active evidence), it also retracts the relationships that need an
+    active endpoint — superseding `contradicts` assertions touching it and withdrawing their
+    pending reviews — and records the surviving endpoints in `contradiction_affected` so the
+    caller re-renders their pages to drop the dead backlink (ADR-0031). This keeps the endpoint
+    invariant local, so the claim CLI stays valid without a separate contradiction pass."""
     edges = [e for e in graph.outgoing_active(gconn, cid) if e["edge_type"] == "derived_from"]
     page_path = claims_dir / f"{cid}.md"
     claim_text = text_hint or _read_claim_text(page_path)
@@ -91,16 +100,30 @@ def _recompose_claim(gconn, *, cid, claims_dir, reviews_dir, now, markdown_dir, 
         quote = md[start:end] if start is not None and end is not None and end <= len(md) else ""
         cites.append({"source_id": src, "char_start": start, "char_end": end, "quote": quote})
     cites.sort(key=lambda c: (c["source_id"], c["char_start"] if c["char_start"] is not None else -1))
+    # Active contradiction backlinks (ADR-0031) project onto the Claim page; the graph holds the
+    # relationship authority, so the single claim renderer reads them here for any caller.
+    contradicts = graph.active_contradictions_for_claim(gconn, cid) if cites else []
     claims_dir.mkdir(parents=True, exist_ok=True)
     page_path.write_text(
         render_claim_page({"claim_id": cid, "claim_text": claim_text, "confidence": "low",
-                           "citations": cites}),
+                           "citations": cites, "contradicts": contradicts}),
         encoding="utf-8",
     )
     # Mirror the page's status into the derived node index (active vs tombstone).
     graph.upsert_node(gconn, node_id=cid, node_type="claim", slug=cid,
                       status="active" if cites else "deprecated_candidate", now=now)
     if not cites:
+        # Endpoint invariant (ADR-0031): a tombstoned claim can no longer anchor a contradiction,
+        # so supersede any contradicts assertions touching it (even an acknowledged/active one)
+        # and withdraw their pending reviews. Surviving endpoints are recorded so the caller
+        # re-renders their pages and drops the now-dead backlink.
+        for row in graph.supersede_contradictions_for_claim(gconn, cid, now=now):
+            other = row["dst_id"] if row["src_id"] == cid else row["src_id"]
+            rid = reviews.review_id(
+                "resolve_contradiction", {"claim_a": row["src_id"], "claim_b": row["dst_id"]})
+            reviews.withdraw_review_item(reviews_dir, rid, reason="endpoint claim retracted", now=now)
+            if contradiction_affected is not None:
+                contradiction_affected.add(other)
         # Tombstone -> review-gated deprecation, same as concept/entity tombstones (B1).
         reviews.create_review_item(
             reviews_dir, review_type="deprecate_wiki_page",
@@ -244,13 +267,24 @@ def extract_claims(
                 sources_with_claims += 1
 
         pages_written = pages_tombstoned = 0
+        contradiction_affected: set[str] = set()  # surviving endpoints of superseded contradictions
         for cid in touched | affected:
-            outcome = _recompose_claim(gconn, cid=cid, claims_dir=claims_dir, reviews_dir=reviews_dir,
-                                       markdown_dir=markdown_dir, now=now, text_hint=texts.get(cid))
+            outcome = recompose_claim(gconn, cid=cid, claims_dir=claims_dir, reviews_dir=reviews_dir,
+                                      markdown_dir=markdown_dir, now=now, text_hint=texts.get(cid),
+                                      contradiction_affected=contradiction_affected)
             pages_written += outcome == "written"
             pages_tombstoned += outcome == "tombstoned"
 
-        index_rebuilt = _rebuild_index(root) if (rebuild_index and (touched or affected)) else False
+        # Re-render the surviving endpoints of any contradiction superseded above so their pages
+        # drop the now-dead backlink (the claim CLI stays valid without a contradiction pass).
+        for cid in sorted(contradiction_affected):
+            node = graph.get_node(gconn, cid)
+            if node and node["status"] == "active":
+                recompose_claim(gconn, cid=cid, claims_dir=claims_dir, reviews_dir=reviews_dir,
+                                markdown_dir=markdown_dir, now=now)
+
+        index_rebuilt = _rebuild_index(root) if (
+            rebuild_index and (touched or affected or contradiction_affected)) else False
 
         if errors:
             status = "partial"
