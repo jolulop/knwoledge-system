@@ -66,6 +66,23 @@ def _sources_links(targets: set[str]) -> set[str]:
     return {t.split("/", 1)[1] for t in targets if t.startswith("Sources/")}
 
 
+def _fm_list(text: str, key: str) -> set[str]:
+    """Parse a YAML block-list frontmatter field (`key:` then `  - item` lines) into a set."""
+    fm = text.split("\n---\n", 1)[0]
+    lines = fm.splitlines()
+    out: set[str] = set()
+    try:
+        start = next(i for i, ln in enumerate(lines) if ln.strip() == f"{key}:")
+    except StopIteration:
+        return out
+    for ln in lines[start + 1:]:
+        if ln.startswith((" ", "\t")) and ln.strip().startswith("- "):
+            out.add(ln.strip()[2:].strip().strip('"\''))
+        elif ln.strip() and not ln.startswith((" ", "\t")):
+            break
+    return out
+
+
 def _check_status_mirror(errors: list[str], node_id: str, text: str, node_status: dict[str, str]) -> None:
     """Page frontmatter is the status authority; the graph nodes index must mirror it."""
     page_status = parse_frontmatter(text).get("status")
@@ -135,6 +152,28 @@ def _check(root: Path, db_path: Path) -> list[str]:
                 errors.append(f"{cid}: active contradiction with {other} not projected on Claim page")
             for other in linked_contra - active_contra:
                 errors.append(f"{cid}: projected contradiction link [[Claims/{other}]] has no active edge")
+
+        # --- Synthesis pages: Supporting-Evidence links AND the derived_from frontmatter list
+        # both match active derived_from edges (the frontmatter is the machine-readable record) ---
+        synthesis_dir = root / "wiki" / "Synthesis"
+        for page in sorted(synthesis_dir.glob("*.md")) if synthesis_dir.exists() else []:
+            text = page.read_text(encoding="utf-8", errors="replace")
+            syn_id = slug_to_node.get(("synthesis", page.stem))
+            if syn_id is None:
+                errors.append(f"Synthesis/{page.stem}: page has no matching graph node")
+                continue
+            _check_status_mirror(errors, syn_id, text, node_status)
+            linked = {t.split("/", 1)[1] for t in _targets(text) if t.startswith("Claims/")}
+            fm_list = _fm_list(text, "derived_from")
+            active = {e["dst_id"] for e in graph.outgoing_active(conn, syn_id)
+                      if e["edge_type"] == "derived_from"}
+            for cid in active - linked:
+                errors.append(f"{syn_id}: active derived_from claim {cid} not linked on Synthesis page")
+            for cid in linked - active:
+                errors.append(f"{syn_id}: linked claim {cid} has no active derived_from edge")
+            if fm_list != active:
+                errors.append(f"{syn_id}: derived_from frontmatter {sorted(fm_list)} != active "
+                              f"derived_from edges {sorted(active)}")
 
         # --- Concept/entity/... pages: Mentioned-by links match active mentions ---
         for node_type, subdir in ((t, NODE_DIR[t]) for t in _DIR_TYPE.values()):

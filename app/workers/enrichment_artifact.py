@@ -28,6 +28,13 @@ CONCEPT_PROMPT_VERSION = "enrich-concepts-prompt-v1"
 # Phase 3.5c contradiction-detection pass (tier-3; per claim pair, response-cache replayed).
 CONTRADICTION_SCHEMA_VERSION = "enrich-contradiction-v1"
 CONTRADICTION_PROMPT_VERSION = "enrich-contradiction-prompt-v1"
+# Phase 3.5c cross-source synthesis pass (tier-3; per active concept/entity).
+SYNTHESIS_SCHEMA_VERSION = "enrich-synthesis-v1"
+SYNTHESIS_PROMPT_VERSION = "enrich-synthesis-prompt-v1"
+
+
+def synthesis_artifact_path(enrichment_dir: Path, node_id: str) -> Path:
+    return Path(enrichment_dir) / f"{node_id}.synthesis.json"
 
 
 def _fingerprint(

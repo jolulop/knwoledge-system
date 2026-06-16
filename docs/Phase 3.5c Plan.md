@@ -47,7 +47,7 @@ local-model deployment (only the adapter seam is fixed, ADR-0025).
 |---|-------|-----------|--------|
 | 1 | **Contradiction detection** (graph-neighborhood blocking; sorted-pair `contradicts` assertions; `resolve_contradiction` three-outcome reviews; `acknowledge`/`reject` activation; Claim-page projection) | 3.5b graph, ADR-0018/0030/0031 | **DONE** (`app/workers/contradictions.py`, `scripts/detect_contradictions.py`; deterministic `candidate_pairs` blocking; sorted-pair `proposed` `contradicts` edges; per-pair cache-replayed verdicts with **full anchors + shared node ids embedded in the prompt** for a faithful fingerprint; confidence clamped to [0,1]; `apply_resolved_contradictions` acknowledge/reject **+ Claim-page backlink re-projection** via `render_claim_page`/`validate_projection`; **endpoint-gone supersession** enforced in the **claim lifecycle** (shared public `recompose_claim` + `graph.supersede_contradictions_for_claim` — `extract_claims` stays valid on its own; detect keeps it as a backstop) vs provenance-survival; two-sided-evidence guard before any verdict; `rebuild_index` contract (rebuild iff pages re-projected); stale supersession + `reviews.withdraw_review_item` with per-event audit; independence rule moved to `manifests.independent_sources`; `validate_graph` canonical-ordering check) |
 | 1b | **`supersede` resolution executor** (`supersedes` edge + loser `deprecated_candidate` via `deprecate_wiki_page` audit path) | 1 | **DONE** (`_execute_supersede` in `contradictions.apply_resolved_contradictions`; reviewer names `winner`; `recompose_claim(deprecate=True)` keeps loser evidence + backlink, flips status; audited; idempotent; endpoint validity made **evidence-based** via `graph.claims_with_active_evidence` so the deprecated loser's `contradicts` edge stays active) |
-| 2 | **Cross-source synthesis** (per active concept/entity; grounded synthesis pages; `propose_synthesis` review type; review-only promotion) | 1, ADR-0031 | not started |
+| 2 | **Cross-source synthesis** (per active concept/entity; grounded synthesis pages; `propose_synthesis` review type; review-only promotion) | 1, ADR-0031 | **DONE** (`app/workers/synthesis.py`, `scripts/generate_synthesis.py`; `eligible_topics` = active concept/entity with ≥2 active claims from ≥2 independent sources; tier-3 prose grounded on claim nodes via `active` `derived_from` edges + `related_to` topic edge; born `candidate` under `wiki/Synthesis/`; new `propose_synthesis` review type, review-only promotion (no recurrence); `apply_resolved_syntheses` approve→active / reject→`deprecated_candidate`; per-topic artifact fingerprint idempotency; retraction when a topic drops below threshold; confidence clamped; `validate_projection` synthesis evidence + status-mirror checks) |
 
 Rationale for ordering: 3.5c-1 reuses existing schema and review vocab and is the contained
 surface on which the tier-3 pairing/cost question is first exercised; 3.5c-2 reuses 3.5c-1's
@@ -144,7 +144,27 @@ and leaves the `contradicts` edge `active` (the historical conflict stays record
 
 ---
 
-## 6. Cross-source synthesis (slice 3.5c-2)
+## 6. Cross-source synthesis (slice 3.5c-2 — DONE)
+
+Implemented in `app/workers/synthesis.py` + `scripts/generate_synthesis.py`, mirroring the
+decisions below. `eligible_topics` selects active concept/entity nodes with ≥2 active
+contributing claims (`claim → source → mentions → concept`) from ≥2 independent sources — checked
+over the **surviving, grounded** claim contexts (a claim missing its page/citations is dropped,
+then the trigger is re-verified). The tier-3 pass writes a `candidate` synthesis page per topic at
+**`wiki/Synthesis/<syn_id>.md`** (keyed by node id, no cross-topic slug collision), grounded on
+the claim nodes via `active` `derived_from` (synthesis → claim) edges plus a `related_to` topic
+edge. Promotion is review-only via the new **`propose_synthesis`** type whose id is
+**fingerprint-scoped** (`apply_resolved_syntheses`: approve → `active`, reject →
+`deprecated_candidate`). **Governance (review-driven):** the normal pass never rewrites a reviewed
+synthesis — an approved one stays active (stale fingerprint surfaced, regenerated only with
+`--force`), a rejected one is not re-nagged for the same evidence but is re-fileable on a new
+fingerprint; a topic dropping below threshold is **retracted via the audited deprecation path**
+(`deprecate_wiki_page` filed, coherent `review_status`). A guard rejects prose that copies a long
+**verbatim source run**. **v1 deferrals (both permitted by ADR-0031 §6):** no direct source
+quotes in the prose; the concept→synthesis backlink is a `related_to` edge but **not yet
+projected** onto the concept page. Original design detail follows.
+
+
 
 - **Tier-3**, untrusted-data framing (ADR-0026).
 - **Trigger (decided, ADR-0031 §5).** One synthesis node/page per **`active`**
@@ -226,6 +246,13 @@ and leaves the `contradicts` edge `active` (the historical conflict stays record
   not refreshed if a claim's span moves while its text (and id) is unchanged — acceptable since
   the anchor is advisory and the authoritative evidence is the Claim pages. (The supersede
   outcome is carried by the approved item's `winner` field, implemented in slice 1b.)
+- **Synthesis v1 deferrals (ADR-0031 §6 permits both):** (c) synthesis prose stands on claim
+  nodes and emits no **direct source quotes** (so the `citations.py` quote-gate is not exercised
+  by synthesis — a summarizing sentence needs no raw span); (d) the **concept→synthesis backlink
+  is written as a `related_to` edge but not projected** onto the concept page (navigation via the
+  index + synthesis title); (e) candidate syntheses are **listed in `index.md` marked
+  `candidate`** (like candidate concepts) rather than excluded — the enforceable invariant
+  (uncitable as evidence until active) holds because synthesis inputs are active claims only.
 
 ---
 
@@ -273,25 +300,29 @@ tested with the fake-adapter `LLMClient` (as in 3.5a/b).
   and audits the deprecation (`decided_by: contradiction_resolution`); the deprecation
   **persists across claim re-extraction**; the detect backstop **does not** re-supersede the
   evidence-retaining loser's edge; idempotent (applied once).
-- **Slice 3.5c-2 (synthesis):** an active concept with ≥2 active claims over ≥2 independent
-  sources gets one candidate synthesis page under `wiki/Synthesis/`; a candidate concept or a
-  single-source concept gets none; the page is written to disk but absent from
-  `index.md`/promoted nav and unusable as evidence for another synthesis until promoted; a
-  direct source quote that fails grounding is dropped (or generation marked `partial`);
-  `derived_from` edges are `active` and resolve while the node stays `candidate`; **a synthesis
-  never auto-promotes** (no recurrence path) — only an approved `propose_synthesis` flips it
-  `active` (mirror + audit); **rejection** sets `review_status: rejected` + `status:
-  deprecated_candidate` (never a `rejected` node status); re-run with unchanged evidence **and
-  unchanged surfaced contradictions** replays from cache and the page does not churn, but a
-  changed contributing-claim citation anchor or a new/removed active contradiction edge
-  re-derives it.
+- **Slice 3.5c-2 (synthesis) — implemented in `tests/test_synthesis.py` (15 tests):** an active
+  concept with ≥2 grounded active claims over ≥2 independent sources gets one candidate synthesis
+  page; a single-source concept, or a topic where a side's claim context is **missing/uncited**,
+  gets none; `derived_from` edges are `active` (provenance) while the node stays `candidate`; the
+  page's body links **and `derived_from` frontmatter** match active edges (tampering either fails
+  `validate_projection`); **a synthesis never auto-promotes** — only an approved
+  `propose_synthesis` flips it `active`, **rejection** → `review_status: rejected` + `status:
+  deprecated_candidate`. **Governance:** an approved synthesis is **not silently demoted** when
+  evidence changes (surfaced as `stale_active`); **`--force` re-opens** it with a fresh
+  fingerprint-scoped pending review; a rejection is **re-fileable on a new fingerprint** but not
+  re-nagged for the same evidence; **retraction of an approved synthesis is coherent + audited**
+  (`deprecated_candidate` + `review_status: pending` + a `deprecate_wiki_page` item). Synthesis
+  pages are **node-id-keyed** (`syn_<hash>.md`, no slug collision); confidence is clamped; **no
+  API key → `skipped`** but resolution + retraction still run.
 
 ---
 
-## 10. Completion
+## 10. Completion — DONE
 
-3.5c is complete when, over the 3.5b graph: independent sources' conflicting claims surface as
-review-gated `contradicts` assertions with a working three-outcome resolution; recurring active
-concepts carry grounded, review-gated synthesis pages that cannot silently auto-promote; and
-the full validator suite (citations + graph + projection + wiki) passes. This closes Phase 3.5;
-retrieval and cited answering (Phase 4/5) follow on the completed semantic layer.
+3.5c is **complete**: over the 3.5b graph, independent sources' conflicting claims surface as
+review-gated `contradicts` assertions with a working three-outcome resolution (slice 1) and a
+`supersede` executor (slice 1b); recurring active concepts carry grounded, review-gated synthesis
+pages that cannot silently auto-promote (slice 2); and the full validator suite (citations +
+graph + projection + frontmatter + wikilinks) passes (`239 passed`, ruff clean). This **closes
+Phase 3.5** (the semantic LLM layer). Retrieval and cited answering (Phase 4/5) follow on the
+completed semantic layer.

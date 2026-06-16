@@ -11,21 +11,18 @@ critical rules and `CONTEXT.md` for the glossary.
 
 ## Where we are
 
-- **Branch:** `main`. **Uncommitted:** Phase 3.5c planning docs (ADR-0031,
-  `docs/Phase 3.5c Plan.md`, `CONTEXT.md` terms) **and slice 3.5c-1 implementation**
-  (`app/workers/contradictions.py`, `scripts/detect_contradictions.py`, graph/manifests/
-  reviews/prompts/db additions, `tests/test_contradictions.py`). Not yet committed (standing
-  rule: never commit unless told).
+- **Branch:** `main`. 3.5c-1 (`c2dd5e0`) + 1b (`e3d9c24`) committed. **Uncommitted:** slice
+  3.5c-2 synthesis (`app/workers/synthesis.py`, `scripts/generate_synthesis.py`,
+  `tests/test_synthesis.py`, prompts/artifact/graph/review.yaml/validate_projection additions,
+  docs). Not yet committed (standing rule: never commit unless told).
 - **Recent commits:**
   - `f3f3515` Fix Phase 3.5 status (3.5a was already complete)
   - `84d819b` Phase 3.5b (5): promotion lifecycle — candidate→active by recurrence or review
   - `e4cb633` Phase 3.5b (4) closeout: projection validator, claim tombstone reviews
-- **Tests/lint green:** `231 passed`, ruff clean (was 209; +22 for slices 3.5c-1 + 1b). 3.5c-1
-  hardening: Claim-page contradiction projection, faithful cache fingerprint, confidence clamp,
-  withdraw audit history, claim-lifecycle endpoint retraction (shared public `recompose_claim` +
-  `graph.supersede_contradictions_for_claim`), two-sided-evidence guard, `rebuild_index`. 1b:
-  `supersede` executor (winner→loser edge + loser deprecation, evidence + backlink retained,
-  audited, persists across re-extraction) + **evidence-based endpoint validity**.
+- **Tests/lint green:** `246 passed`, ruff clean (was 209; +37 across 3.5c-1/1b/2).
+  `tests/test_synthesis.py` (15) covers eligibility (incl. uncited-side rejection), grounded
+  generation, governance (approved-not-demoted, force-reopen, rejected-refileable), node-id-keyed
+  pages, audited retraction, frontmatter projection, confidence clamp, no-key skip.
 
 ## Phase status
 
@@ -34,7 +31,8 @@ critical rules and `CONTEXT.md` for the glossary.
 | Phase 3 (deterministic Source-page backbone) | **Complete** |
 | Phase 3.5a (per-source LLM summary + tags → enrichment artifact) | **Complete** (`app/workers/enrich.py`, `enrichment_artifact.py`; commit `df45a0e`) |
 | Phase 3.5b (semantic nodes + grounding + promotion) | **Complete** — all 5 slices |
-| Phase 3.5c (cross-source synthesis + contradiction detection) | **In progress** — design locked (ADR-0031). **Slices 3.5c-1 (contradiction detection) + 1b (supersede executor) DONE** (`app/workers/contradictions.py`). Slice 2 (synthesis) not started. |
+| Phase 3.5c (cross-source synthesis + contradiction detection) | **Complete** — slices 3.5c-1 (contradiction detection, `app/workers/contradictions.py`) + 1b (supersede executor) + 2 (cross-source synthesis, `app/workers/synthesis.py`) all done |
+| **Phase 3.5 overall (semantic LLM layer)** | **Complete** — 3.5a + 3.5b + 3.5c |
 
 ### Phase 3.5b slices (all done)
 1. Mechanical citation grounding gate + validator (`app/workers/citations.py`, `scripts/validate_citations.py`)
@@ -45,14 +43,23 @@ critical rules and `CONTEXT.md` for the glossary.
 
 ## Next step
 
-Phase 3.5c design is locked in **ADR-0031** + **`docs/Phase 3.5c Plan.md`** (read those
-first). **Slices 3.5c-1 (contradiction detection) + 1b (supersede executor) are implemented
-and green.** Remaining:
+**Phase 3.5 is complete** (3.5a summaries/tags, 3.5b semantic nodes/graph/promotion, 3.5c
+contradiction + supersede + synthesis). The semantic LLM layer is done; the next phase is
+**retrieval / cited answering (Phase 4/5)** — no design plan written yet, would start with a
+`/grill-with-docs` planning pass (planning only — no code until "implement now"). Run the 3.5c
+producers: `scripts/detect_contradictions.py`, `scripts/generate_synthesis.py` (both tier-3;
+no key → `skipped` but resolutions/retraction still run).
 
-- **3.5c-2 — synthesis (NEXT).** Per active concept/entity (≥2 active claims, ≥2 independent
-  sources); grounded on claim nodes; born `candidate` under `wiki/Synthesis/`; review-only
-  promotion via a **new `propose_synthesis` review type** (no recurrence path). Will add
-  `propose_synthesis` to `policies/review.yaml` + `reviews.py` `REVIEW_TYPES`.
+3.5c-2 synthesis (`app/workers/synthesis.py`): `eligible_topics` = active concept/entity with
+≥2 grounded active claims from ≥2 independent sources (re-checked over surviving contexts);
+tier-3 prose grounded on claim nodes (`active` `derived_from` synthesis→claim + `related_to`
+topic edge); pages **node-id-keyed** `wiki/Synthesis/<syn_id>.md`; **new `propose_synthesis`
+review type** (in `policies/review.yaml` + `reviews.py`), **fingerprint-scoped** review id,
+review-only promotion (no recurrence). Governance: normal pass never rewrites a reviewed
+synthesis — approved stays active (stale surfaced, `--force` re-opens), rejected re-fileable on
+new evidence; retraction via audited `deprecate_wiki_page` path; verbatim-source-quote guard.
+**v1 deferrals** (ADR-0031 §6): no direct-source quotes in prose; concept→synthesis backlink
+written (`related_to`) but not projected on the concept page.
 
 What 3.5c-1 + 1b shipped (all on the proven graph; LLM proposes, human disposes): deterministic
 graph-neighborhood `candidate_pairs` blocking (shared concept via `claim→source→concept` +

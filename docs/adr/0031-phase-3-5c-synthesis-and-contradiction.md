@@ -190,9 +190,13 @@ with no recurrence path.** Two coupled points:
   "invisible until approved" model that works for an edge does not work for synthesis.
   Frontmatter: `type: synthesis`, `synthesis_id`, `status: candidate`,
   `review_status: pending`, `generation_status: enriched`, `confidence`, `input_fingerprint`.
-  It is readable/reviewable but **excluded from `index.md` / promoted navigation and not usable
-  as evidence for any later synthesis or query answer** until promoted to `active`. Its node
-  status mirrors `candidate`; its `derived_from` edges are `active` (provenance, not approval).
+  It is readable/reviewable; like a candidate concept it is **listed in `index.md` marked
+  `candidate`** (the index is the full page listing, not a promoted-only view) but is **not
+  usable as evidence for any later synthesis or query answer** until promoted to `active` — the
+  load-bearing exclusion, which holds because synthesis inputs are active claims/concepts only.
+  Its node status mirrors `candidate`; its `derived_from` edges are `active` (provenance, not
+  approval). The page filename is the `synthesis_id` (`wiki/Synthesis/<syn_id>.md`, like
+  `wiki/Claims/<clm_id>.md`), so syntheses of different topics never collide on a shared slug.
 - **The review gate, and the trap it must avoid:** `promote_candidate_node` (ADR-0018) has a
   **recurrence auto-promote path** — ≥2 independent sources → auto-`active`, no human. But a
   synthesis is *born from ≥2 independent sources by construction* (that is its trigger), so
@@ -210,6 +214,20 @@ with no recurrence path.** Two coupled points:
   (ADR-0022: `active | candidate | deprecated_candidate | archive_candidate | archived`) does
   **not** admit. A new node status would require an explicit ADR-0022 extension; we reuse the
   existing vocabulary instead.
+- **Re-generation never overrides a human decision (review-driven refinement).** The
+  `propose_synthesis` review id is **fingerprint-scoped** — `subject = {topic_node_id,
+  fingerprint}`, where the fingerprint covers the contributing claims + anchors + their active
+  contradictions — so each distinct evidence set is a distinct, re-fileable decision. The normal
+  generation pass therefore **never rewrites a reviewed synthesis**: an `active` (approved)
+  synthesis whose evidence later changes **stays active** (the stale fingerprint is surfaced, not
+  silently demoted), and a synthesis whose *current evidence* was rejected is left alone (no
+  re-nag). Changed evidence (a new fingerprint) re-opens a topic — automatically for an
+  un-reviewed/retracted one, and only under explicit **`--force`** for an approved one (which
+  demotes it to `candidate` with a fresh fingerprint-scoped pending review). A topic that drops
+  below the eligibility threshold is **retracted through the audited deprecation path** (a
+  `deprecate_wiki_page` item is filed, the page re-rendered `deprecated_candidate` with a coherent
+  `review_status`, pending proposals withdrawn) — the same governance the claim/concept tombstones
+  use, never a bare status rewrite.
 
 ## Consequences
 

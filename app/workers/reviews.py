@@ -27,7 +27,7 @@ REVIEW_TYPES = frozenset({
     "delete_raw_file", "archive_raw_file", "deprecate_wiki_page", "resolve_contradiction",
     "merge_entities", "split_entity", "merge_concepts", "mark_semantic_duplicate",
     "promote_single_source_claim_to_concept", "hide_content",
-    "promote_candidate_node", "change_entity_subtype",
+    "promote_candidate_node", "change_entity_subtype", "propose_synthesis",
 })
 REVIEW_STATUSES = frozenset({"pending", "approved", "rejected", "deferred"})
 PRIORITIES = frozenset({"low", "medium", "high"})

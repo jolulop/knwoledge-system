@@ -363,6 +363,15 @@ def active_node_ids_of_type(conn: sqlite3.Connection, node_type: str) -> list[st
     ]
 
 
+def nodes_of_type(conn: sqlite3.Connection, node_type: str) -> list[dict[str, Any]]:
+    """All nodes of a type with id/slug/status, any status (e.g. to enumerate syntheses for
+    retraction, Phase 3.5c)."""
+    return _rows(conn.execute(
+        "SELECT node_id, slug, status FROM nodes WHERE node_type = ? ORDER BY node_id",
+        (node_type,),
+    ))
+
+
 def sources_for_claim(conn: sqlite3.Connection, claim_id: str) -> list[str]:
     """Active sources a claim is derived from (claim → source `derived_from`; the inverse of
     `claims_for_source`). Used to find a claim's blocking neighborhood and primary citation."""

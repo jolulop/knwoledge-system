@@ -468,6 +468,76 @@ def render_concept_page(node: dict[str, Any]) -> str:
     return draft.replace('input_fingerprint: ""', f'input_fingerprint: "{fingerprint}"', 1)
 
 
+def render_synthesis_page(node: dict[str, Any]) -> str:
+    """Render a deterministic cross-source Synthesis page (Phase 3.5c slice 2, ADR-0031).
+
+    The LLM supplies only the `summary`/`synthesis` prose; the renderer composes it with the
+    graph-backed grounding — a Supporting Evidence section of `[[Claims/…]]` links matching the
+    synthesis's active `derived_from` edges, and a Disagreements section listing the active
+    `contradicts` pairs among those claims. Born `status: candidate` (review-gated, no recurrence
+    auto-promote — ADR-0031); `active` once a `propose_synthesis` review is approved, or
+    `deprecated_candidate` on rejection / when the topic is no longer eligible. No wall-clock —
+    freshness lives in `input_fingerprint` (ADR-0023), so a cache-replay re-run is byte-stable."""
+    syn_id = node["synthesis_id"]
+    title = _WS.sub(" ", str(node["title"])).strip()
+    status = node["status"]
+    review_status = node.get("review_status", "pending")
+    confidence = node.get("confidence", "low")
+    topic_node = node.get("topic_node", "")
+    summary = _WS.sub(" ", str(node.get("summary", ""))).strip() or "Candidate cross-source synthesis."
+    synthesis_text = str(node.get("synthesis_text", "")).strip()
+    claim_ids = sorted(node.get("claim_ids", []) or [])
+    disagreements = node.get("disagreements", []) or []  # list of (claim_a, claim_b) tuples
+
+    fm_lines = [
+        "---",
+        "type: synthesis",
+        f'synthesis_id: "{syn_id}"',
+        f'title: "{_fm_quote(title)}"',
+        f"status: {status}",
+        f"review_status: {review_status}",
+        "generation_status: enriched",
+        f"confidence: {confidence}",
+        f'topic_node: "{topic_node}"',
+    ]
+    if claim_ids:
+        fm_lines.append("derived_from:")
+        fm_lines.extend(f"  - {cid}" for cid in claim_ids)
+    else:
+        fm_lines.append("derived_from: []")
+    fm_lines += ['input_fingerprint: ""', "---"]
+
+    label = {"candidate": "Candidate synthesis", "active": "Synthesis",
+             "deprecated_candidate": "Synthesis deprecated — pending review"}.get(status, "Synthesis")
+    body = [
+        "",
+        f"# {_delink(title)}",
+        "",
+        f"> [!summary] {label}",
+        f"> {_delink(summary)}",
+        "",
+        "## Synthesis",
+        "",
+        _delink(synthesis_text) if synthesis_text else "_No synthesis text._",
+        "",
+        "## Supporting Evidence",
+        "",
+        *([f"- [[Claims/{cid}]]" for cid in claim_ids] or ["_No supporting claims._"]),
+        "",
+    ]
+    if disagreements:
+        body += [
+            "## Disagreements or Contradictions",
+            "",
+            *(f"- [[Claims/{a}]] contradicts [[Claims/{b}]]" for a, b in disagreements),
+            "",
+        ]
+    body += ["## Review Notes", ""]
+    draft = "\n".join(fm_lines + body) + "\n"
+    fingerprint = _fingerprint(_FP_LINE.sub("", draft))
+    return draft.replace('input_fingerprint: ""', f'input_fingerprint: "{fingerprint}"', 1)
+
+
 def render_source_page(
     template: str, manifest: dict[str, Any], normalized_markdown: str, *,
     summary_max: int, summary_min: int,
