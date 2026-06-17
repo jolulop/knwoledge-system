@@ -10,13 +10,17 @@ backups/*.zip
 *:Zone.Identifier
 # Distributable docs archive (docs are tracked under docs/)
 knowledge-system-docs-*.zip
-indexes/vector/qdrant/
+# Derived retrieval indexes are regenerable local runtime state (ADR-0014/0032 §7), rebuilt
+# from chunks + wiki by scripts/reindex_keyword.py (keyword) and the vector reindexer. They are
+# never committed; the keyword index is not even backed up (cheap full rebuild). Keep .gitkeeps.
+indexes/keyword/keyword.sqlite*
+indexes/vector/*
+!indexes/vector/.gitkeep
 # All SQLite databases under db/ are durable local runtime state, never committed: the
-# job state (ADR-0008), the FTS keyword/metadata index, the LLM response cache (ADR-0027),
-# and the semantic graph (ADR-0030). They are made durable by the backup mechanism
-# (scripts/backup.py), not git. Keep db/.gitkeep tracked.
+# job state (ADR-0008), the LLM response cache (ADR-0027), and the authoritative semantic
+# graph (ADR-0030). They are made durable by the backup mechanism (scripts/backup.py), not
+# git. The keyword index moved to indexes/ (ADR-0032 §7). Keep db/.gitkeep tracked.
 db/*.sqlite
-normalized/chunks/chunks.jsonl
 # Phase 2 normalized layer is regenerable local runtime state (ADR-0011): the
 # per-source markdown, chunks, tables, and extraction logs are rebuilt from raw
 # sources by scripts/extract_sources.py and are not committed. Keep the .gitkeeps.
@@ -42,6 +46,7 @@ wiki/Projects/*.md
 wiki/Tags/*.md
 wiki/Synthesis/*.md
 wiki/Queries/*.md
+wiki/.obsidian/
 # Inbox is transient staging for scans; keep its contents out of git.
 raw/inbox/*
 !raw/inbox/.gitkeep

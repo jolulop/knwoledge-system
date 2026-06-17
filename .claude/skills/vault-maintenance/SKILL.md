@@ -35,7 +35,7 @@ Run the relevant scripts:
 ```bash
 python3 scripts/rebuild_index.py .
 python3 scripts/reindex_keyword.py .
-python3 scripts/reindex_vector.py .
+# Vector reindexing (LanceDB) lands in Phase 4d; no vector channel exists yet.
 # Runs every scripts/validate_*.py (frontmatter, wikilinks, citations, index
 # consistency) and exits non-zero on any failure. Run after reindexing so the
 # index-consistency check sees freshly generated indexes.

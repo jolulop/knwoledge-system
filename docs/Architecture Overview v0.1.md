@@ -176,14 +176,14 @@ Purpose:
 ### 4.4 Indexes and Databases
 
 ```text
-indexes/
-├─ keyword/
-├─ vector/
-└─ graph/
+indexes/                  # ADR-0032 §7: derived & gitignored
+├─ keyword/               #   keyword.sqlite (FTS5: evidence chunks + wiki navigation)
+├─ vector/                #   LanceDB (Phase 4d)
+└─ graph/                 #   reserved (graph authority is db/graph.sqlite)
 
-db/
-├─ metadata.sqlite
-└─ jobs.sqlite
+db/                       # ADR-0032 §7 supersedes metadata.sqlite below:
+├─ metadata.sqlite        #   keyword index moved to indexes/keyword/; db/ now holds
+└─ jobs.sqlite            #   jobs.sqlite, graph.sqlite, llm_cache.sqlite
 ```
 
 Purpose:

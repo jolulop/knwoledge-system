@@ -243,3 +243,32 @@ extracted concept — accepted for v1, with vector blocking as the recorded esca
 representation, blocking strategy, resolution vocabulary, synthesis trigger, and review-only
 synthesis promotion are the load-bearing commitments; the LLM verdict/synthesis output schemas
 and column-level details are tuned during implementation.
+
+## Addenda (post-ship refinements)
+
+Recorded during the Phase 4 planning gate (2026-06-17) after re-grounding the four shipped
+synthesis decisions against `app/workers/synthesis.py`. Three already matched the code
+(`topic_node_id` is the canonical key; retraction already runs the audited `deprecate_wiki_page`
+path; candidate syntheses are already listed in `index.md` marked `candidate`); the wording for
+the index/evidence split was sharpened in `CONTEXT.md` to match decision 7 above. Two items are
+**deferred to a Phase 3.5c-3 addendum slice** (no code in this gate):
+
+1. **Quote-pattern guard (extends decision 6).** The shipped guard `_contains_verbatim_quote`
+   rejects a *copied verbatim run* (≥12 consecutive words matching a contributing source). It does
+   **not** catch an *invented quotation* — quotation-mark-delimited prose that matches no source and
+   so reads as fabricated evidence. The addendum adds a complementary check: synthesis output whose
+   `summary`/`synthesis` contains multi-word quotation-delimited spans is **rejected or marked
+   `partial`** (single-word quoted terms are exempt to avoid false positives on emphasized terms);
+   the prompt already says "do not quote," and the worker enforces it. Strongest-integrity boundary,
+   consistent with ADR-0026 (the model produces synthesis prose, not faux evidence).
+2. **Self-describing review subject (extends decision 5/7).** The `propose_synthesis` review
+   subject is `{topic_node_id, fingerprint}`. The addendum additionally carries `topic_node_type`
+   and `topic_slug` so review/audit records for entity-family topics (person/organization/project)
+   are legible without re-resolving the node — the subject's identity contract (`{topic_node_id,
+   fingerprint}`) is unchanged.
+
+**Forward reference to Phase 4.** Decision 7's exclusion is also a **Phase 4 retrieval invariant**:
+keyword, vector, and graph retrieval must treat `candidate` and `deprecated_candidate` synthesis
+(and any non-`active` node) as *navigable but not citable* — discoverable in navigation/index
+results, never returned as evidence or fed to an answer. This is captured here so the Phase 4 plan
+inherits it rather than re-deriving it.

@@ -266,13 +266,13 @@ knowledge-system/
 │  ├─ approved/
 │  ├─ rejected/
 │  └─ audit_log/
-├─ indexes/
-│  ├─ keyword/
+├─ indexes/                     # ADR-0032 §7: derived & gitignored. keyword/keyword.sqlite
+│  ├─ keyword/                  #   (FTS5), vector/ (LanceDB, Phase 4d), graph/ reserved.
 │  ├─ vector/
 │  └─ graph/
-├─ db/
-│  ├─ metadata.sqlite
-│  └─ jobs.sqlite
+├─ db/                          # ADR-0032 §7 supersedes the line below: the keyword index
+│  ├─ metadata.sqlite           #   moved to indexes/keyword/; db/ now holds jobs.sqlite,
+│  └─ jobs.sqlite               #   graph.sqlite, llm_cache.sqlite (metadata.sqlite retired).
 ├─ app/
 │  ├─ backend/
 │  ├─ frontend/
@@ -408,7 +408,7 @@ Create review items when confidence is low or changes are semantic/destructive
 | Contradiction agent | Weekly | Detect conflicting claims and create review items. |
 | Stale-content agent | Monthly | Rank old documents and pages for archive/deprecation review. |
 | Retention agent | Monthly | Apply retention policy and propose archive/delete candidates. |
-| Backup agent | Daily/weekly | Snapshot raw manifests, DB, wiki, policies, and indexes. |
+| Backup agent | Daily/weekly | Snapshot raw manifests, DB (incl. graph), wiki, and policies. (ADR-0032 §7 supersedes "indexes": the keyword index is never backed up — cheap rebuild — and the vector index is opt-in only.) |
 | Evaluation agent | Weekly | Run golden questions and citation/graph tests. |
 
 ### 9.3 Agent State

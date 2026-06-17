@@ -39,7 +39,7 @@ Transform raw sources into normalized content, Source pages, Claims, Concepts, E
     - `python3 scripts/validate_wikilinks.py .`
     - `python3 scripts/validate_citations.py .`
     - `python3 scripts/reindex_keyword.py .`
-    - `python3 scripts/reindex_vector.py .`
+    - `python3 scripts/validate_index_consistency.py .`
 
 ## Output format
 

@@ -1,74 +1,101 @@
 #!/usr/bin/env python3
-"""Validate that generated retrieval indexes only reference paths that exist on disk.
+"""Validate that the derived keyword index is coherent with — and fresh against — disk.
 
-The keyword (FTS) index in ``db/metadata.sqlite`` and the chunk index in
-``normalized/chunks/chunks.jsonl`` are generated artifacts rebuilt from wiki and
-normalized content. When source pages are deleted but an index is not regenerated,
-the index points at evidence that no longer exists, which makes retrieval unsafe.
-This check fails when any indexed path is missing from the working tree.
+The keyword index (``indexes/keyword/keyword.sqlite``, ADR-0032 §7) is a generated artifact
+rebuilt from the per-source chunks and the typed wiki pages. It is unsafe to search a *stale*
+index, so this check compares the index against the live chunk/page sets **in both directions**
+using the index's own fingerprint tables, and fails when:
 
-Both indexes are optional local runtime state (gitignored). A missing index file is
-not an error: there is simply nothing to validate. The check only fails on a stale
-index that references deleted files.
+- the index schema version no longer matches the builder (a stale-schema index must be rebuilt);
+- the index is internally inconsistent (FTS rows vs fingerprint tables disagree);
+- a live chunk file / typed wiki page is **missing from the index** (added but not reindexed);
+- a live chunk file / wiki page **changed** since indexing (fingerprint drift, not reindexed);
+- the index references a source/page that **no longer exists** on disk (removed, not reindexed).
+
+The index is optional local runtime state (gitignored, regenerable). A missing index file is not
+an error: there is simply nothing to validate. Any failure is fixed by a reindex.
+
+Boundary (ADR-0032, decision recorded for Phase 4a): this validator checks index↔chunk/page
+coherence only. Whether a normalized chunk *should* exist (manifest present, ingestion succeeded)
+is the job of ``validate_normalized.py``, which runs in the same ``validate_all.py`` pass.
 """
 from __future__ import annotations
 
-import json
-import sqlite3
 import sys
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-def chunk_index_paths(root: Path) -> set[str]:
-    path = root / "normalized" / "chunks" / "chunks.jsonl"
-    if not path.exists():
-        return set()
-    paths: set[str] = set()
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        ref = record.get("path")
-        if ref:
-            paths.add(ref)
-    return paths
+from app.backend import keyword_index
 
 
-def keyword_index_paths(root: Path) -> set[str]:
-    db_path = root / "db" / "metadata.sqlite"
+def _check_freshness(
+    label: str,
+    live: dict[str, Path],
+    stored: dict[str, str],
+    indexed: set[str],
+    *,
+    reindex_hint: str,
+) -> list[str]:
+    """Compare a live disk set against the index's fingerprint table, both directions."""
+    errors: list[str] = []
+    if set(indexed) != set(stored):
+        errors.append(
+            f"{label} index internally inconsistent: FTS rows {sorted(indexed)} != "
+            f"fingerprint table {sorted(stored)}"
+        )
+    for key in sorted(set(stored) - set(live)):
+        errors.append(f"{label} index references {key}, which no longer exists on disk ({reindex_hint})")
+    for key, path in sorted(live.items()):
+        if key not in stored:
+            errors.append(f"{label} {key} exists on disk but is not indexed ({reindex_hint})")
+        elif stored[key] != keyword_index.file_fingerprint(path):
+            errors.append(f"{label} index is stale for {key}: it changed since indexing ({reindex_hint})")
+    return errors
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    root = Path(argv[0]).resolve() if argv else Path.cwd()
+    db_path = root / keyword_index.DB_RELPATH
+
     if not db_path.exists():
-        return set()
-    conn = sqlite3.connect(db_path)
+        print("Index consistency validation passed (no keyword index present).")
+        return 0
+
+    errors: list[str] = []
+    conn = keyword_index.connect(db_path)
     try:
-        rows = conn.execute("SELECT path FROM documents").fetchall()
-    except sqlite3.OperationalError:
-        return set()
+        version = keyword_index.index_version(conn)
+        if version != keyword_index.INDEX_VERSION:
+            errors.append(
+                f"keyword index schema version {version} != builder version "
+                f"{keyword_index.INDEX_VERSION} (stale schema)"
+            )
+        errors += _check_freshness(
+            "evidence",
+            keyword_index.chunk_files(root),
+            keyword_index.stored_source_fingerprints(conn),
+            keyword_index.indexed_source_ids(conn),
+            reindex_hint="reindex",
+        )
+        errors += _check_freshness(
+            "navigation",
+            keyword_index.navigation_pages(root),
+            keyword_index.stored_nav_fingerprints(conn),
+            keyword_index.indexed_navigation_paths(conn),
+            reindex_hint="reindex",
+        )
     finally:
         conn.close()
-    return {row[0] for row in rows if row[0]}
-
-
-def main() -> int:
-    root = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path.cwd()
-    errors: list[str] = []
-
-    for label, paths in (
-        ("chunk index (normalized/chunks/chunks.jsonl)", chunk_index_paths(root)),
-        ("keyword index (db/metadata.sqlite)", keyword_index_paths(root)),
-    ):
-        for rel in sorted(paths):
-            if not (root / rel).exists():
-                errors.append(f"{label}: references missing file {rel}")
 
     if errors:
         print("Index consistency validation failed:")
         for err in errors:
             print(f"- {err}")
-        print("Rebuild the affected index (reindex_keyword.py / reindex_vector.py).")
+        print("Rebuild the index: scripts/reindex_keyword.py [ROOT] --force")
         return 1
     print("Index consistency validation passed.")
     return 0

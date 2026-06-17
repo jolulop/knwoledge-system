@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Phase 1 jobs database (db/jobs.sqlite).
 
-Per ADR-0008, ingestion job state lives in a dedicated jobs database, separate from
-the FTS keyword index in db/metadata.sqlite. Dependency-free (stdlib sqlite3).
+Per ADR-0008, ingestion job state lives in a dedicated jobs database, separate from the
+other durable databases under db/ (the LLM cache and the authoritative graph). The keyword
+index is a derived product under indexes/ (ADR-0032 §7). Dependency-free (stdlib sqlite3).
 """
 from __future__ import annotations
 

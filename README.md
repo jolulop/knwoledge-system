@@ -38,8 +38,10 @@ python3 scripts/rebuild_index.py .
 python3 scripts/validate_frontmatter.py .
 python3 scripts/validate_wikilinks.py .
 python3 scripts/reindex_keyword.py .
-python3 scripts/reindex_vector.py .
+python3 scripts/validate_index_consistency.py .
 ```
+
+Vector reindexing (LanceDB) arrives in Phase 4d; there is no vector channel yet.
 
 The scaffold ships with one sample source, concept, claim, and synthesis page so the indexer and validators have something to inspect.
 

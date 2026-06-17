@@ -1,52 +1,50 @@
 #!/usr/bin/env python3
-"""Build a local SQLite FTS5 keyword index over wiki and normalized Markdown files."""
+"""Build the deterministic keyword index over chunk evidence + wiki navigation (Phase 4a).
+
+Thin CLI over ``app.backend.keyword_index``. Writes the derived FTS5 index to
+``indexes/keyword/keyword.sqlite`` (ADR-0032 §7) — the evidence index over
+``normalized/chunks/<source_id>.jsonl`` and the navigation index over typed ``wiki/**/*.md``.
+This **retires** the Phase-0 scaffold that wrote a whole-file ``documents_fts`` into
+``db/metadata.sqlite`` (it predates the chunk/anchor model and could not cite).
+
+Usage:
+    reindex_keyword.py [ROOT] [--force]
+
+``--force`` rebuilds from scratch; otherwise only changed/added/removed sources and pages are
+touched (fingerprinted incremental rebuild). The index is derived and gitignored: a missing index
+is simply rebuilt.
+"""
 from __future__ import annotations
 
-import sqlite3
 import sys
 from pathlib import Path
 
-INCLUDE_DIRS = ["wiki", "normalized/markdown"]
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from app.backend import keyword_index
 
 
-def iter_markdown(root: Path):
-    for rel in INCLUDE_DIRS:
-        folder = root / rel
-        if folder.exists():
-            yield from sorted(folder.rglob("*.md"))
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    force = "--force" in argv
+    positional = [a for a in argv if not a.startswith("-")]
+    root = Path(positional[0]).resolve() if positional else Path.cwd()
 
-
-def main() -> int:
-    root = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path.cwd()
-    db_dir = root / "db"
-    db_dir.mkdir(exist_ok=True)
-    db_path = db_dir / "metadata.sqlite"
-    conn = sqlite3.connect(db_path)
-    cur = conn.cursor()
-    cur.execute("CREATE TABLE IF NOT EXISTS documents (path TEXT PRIMARY KEY, title TEXT, body TEXT)")
-    try:
-        cur.execute("CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(path, title, body)")
-    except sqlite3.OperationalError as exc:
-        print(f"warning: SQLite FTS5 unavailable: {exc}", file=sys.stderr)
-        cur.execute("CREATE TABLE IF NOT EXISTS documents_fts (path TEXT PRIMARY KEY, title TEXT, body TEXT)")
-
-    cur.execute("DELETE FROM documents")
-    cur.execute("DELETE FROM documents_fts")
-    count = 0
-    for path in iter_markdown(root):
-        text = path.read_text(encoding="utf-8", errors="replace")
-        title = path.stem.replace("-", " ").title()
-        for line in text.splitlines():
-            if line.startswith("# "):
-                title = line[2:].strip()
-                break
-        rel = path.relative_to(root).as_posix()
-        cur.execute("INSERT OR REPLACE INTO documents(path, title, body) VALUES (?, ?, ?)", (rel, title, text))
-        cur.execute("INSERT INTO documents_fts(path, title, body) VALUES (?, ?, ?)", (rel, title, text))
-        count += 1
-    conn.commit()
-    conn.close()
-    print(f"indexed {count} markdown documents into {db_path}")
+    stats = keyword_index.reindex(root, force=force)
+    db_path = root / keyword_index.DB_RELPATH
+    mode = "full rebuild" if stats.full_rebuild else "incremental"
+    print(
+        f"keyword index ({mode}) -> {db_path}\n"
+        f"  evidence: {stats.evidence_sources_indexed} sources indexed "
+        f"({stats.evidence_chunks} chunks), {stats.evidence_sources_removed} removed\n"
+        f"  navigation: {stats.navigation_pages_indexed} pages indexed, "
+        f"{stats.navigation_pages_removed} removed\n"
+        f"  skipped (unchanged): {stats.skipped}"
+    )
+    for warning in stats.warnings:
+        print(f"  warning: {warning}", file=sys.stderr)
     return 0
 
 
