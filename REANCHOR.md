@@ -12,31 +12,35 @@ critical rules and `CONTEXT.md` for the glossary.
 
 ## Where we are
 
-- **Branch:** `main`, **in sync with `origin/main`** (both at `c1f2504` — Phase 3.5 work has
-  been pushed). **Phase 3.5 fully committed and complete.**
-- **Phase 4 is design-locked (2026-06-17)** via a grill-with-docs gate; **Slice 4a is now
-  implemented + green, not yet committed.** Uncommitted working tree:
-  - **Planning:** `docs/Phase 4 Plan.md` (new, slices 4a–4e), `docs/adr/0032-…` (new), small
-    `CONTEXT.md` / `docs/adr/0031-…` edits, `.gitignore`, this `REANCHOR.md`.
-  - **Slice 4a (keyword + navigation index):** `app/backend/keyword_index.py` (new core),
-    `tests/test_keyword_index.py` (new), `tests/test_operational_refs.py` (new drift guard);
-    rewrites of `scripts/reindex_keyword.py`, `scripts/validate_index_consistency.py`,
-    `scripts/backup.py`, `tests/test_backup.py`, the reindex hook + both vault skills + README +
-    `.env.example`; `app/backend/db.py` docstring; ADR-0032 §7 pointers in Build Spec + Arch
-    Overview; **deleted** `scripts/reindex_vector.py` + legacy `normalized/chunks/chunks.jsonl`
-    + stale `db/metadata.sqlite` (scaffolds retired).
-  - **Review round applied (2026-06-18):** removed all `reindex_vector.py` refs from operational
-    surfaces (vector is 4d); strengthened `validate_index_consistency.py` to bidirectional +
-    fingerprint-fresh (catches added/changed/removed chunks & pages, not just dangling refs);
-    indexer boundary documented (no manifest coupling — `validate_normalized` is the gate).
-  - All **not yet committed** (awaiting user go-ahead).
+- **Branch:** `main`, **1 commit ahead of `origin/main`** (4a committed locally, not pushed).
+  **Phase 3.5 complete + pushed. Phase 4 design-locked (2026-06-17); 4a committed, 4b implemented
+  + green but uncommitted.**
+- **Slice 4a — COMMITTED** (`2e7db7f`, includes the planning artifacts ADR-0032 + Phase 4 Plan):
+  keyword evidence + wiki navigation index in `indexes/keyword/keyword.sqlite`
+  (`app/backend/keyword_index.py`); scaffolds retired (`reindex_vector.py`, `chunks.jsonl`,
+  `db/metadata.sqlite`); bidirectional fingerprint-fresh `validate_index_consistency.py`; §7
+  coordination (backup posture, hook, skills, README, `.env.example`, doc pointers).
+- **Slice 4b — IMPLEMENTED, UNCOMMITTED** (graph read API, ADR-0032 decision 5):
+  - `app/backend/graph_read.py` (new) — read-only projection over `app/backend/graph.py`:
+    `node_view` (adjacent assertions grouped by edge_type, in/out, adjacent metadata inline) +
+    `neighborhood` (bounded BFS, depth default 1 / hard-max 2, node/edge caps, induced subgraph).
+  - Endpoints in `app/backend/main.py`: `GET /graph/node/{id}`, `GET /graph/neighborhood/{id}`;
+    response models in `models.py`; `graph_db_path` added to `config.py`.
+  - Active-by-edge-status default (candidate/archived/deleted nodes appear via active edges, flagged
+    not `answer_eligible`); evidence anchors advisory. Caps are code constants in 4b —
+    `retrieval.yaml` wiring deferred to the 4c router.
+  - **Review round applied (2026-06-18):** symmetric `other_node_id` is now a `node_view`-only
+    field (flat neighborhood edges are canonical `src/dst`+`symmetric`, ADR-0032 addendum 1);
+    `ANSWER_ELIGIBLE_TYPES` extracted to neutral `app/backend/eligibility.py` (shared by 4a+4b);
+    induced-edge fetch bounded by SQL `LIMIT edge_cap+1`; `_open_graph` schema-version check →
+    503 on drift; pinned edge-status-only traversal + slug-only metadata (ADR addenda 2–3).
+  - Tests: `tests/test_graph_read.py` (21) + 7 graph API tests in `tests/test_api.py`.
 - **Recent commits:**
+  - `2e7db7f` Phase 4a: keyword evidence + wiki navigation index, design-locked (ADR-0032)
   - `c1f2504` docs: mark Phase 3.5 Complete in Build Spec
   - `eebf11b` Phase 3.5c-2: cross-source synthesis — completes Phase 3.5
-  - `e3d9c24` Phase 3.5c-1b: supersede resolution executor
-  - `c2dd5e0` Phase 3.5c-1: cross-source contradiction detection
-- **Tests/lint green:** `268 passed` (was 246; +22 net from 4a + review round), ruff clean, all 9
-  validators pass. Newest test files: `tests/test_keyword_index.py` (17), `tests/test_operational_refs.py` (1).
+- **Tests/lint green:** `296 passed` (was 268; +28 from 4b + review round), ruff clean, all 9
+  validators pass. Newest test file: `tests/test_graph_read.py` (21).
 
 ## Viewing the vault (Obsidian)
 
@@ -69,21 +73,20 @@ critical rules and `CONTEXT.md` for the glossary.
 
 ## Next step
 
-**Phase 3.5 complete. Phase 4 (Search & Graph) design-locked; Slice 4a implemented + green
-(uncommitted).** **Next action: commit Slice 4a + the planning artifacts (when the user says
-so), then implement slice 4b.**
+**Phase 3.5 complete. Phase 4 design-locked; 4a committed (`2e7db7f`), 4b implemented + green
+(uncommitted).** **Next action: commit Slice 4b (when the user says so), then implement slice 4c.**
 
 **Phase 4 = deterministic, offline, key-free retrieval** returning ranked cited *evidence*
 (no LLM, no generated answers — that is Phase 5). Five committable slices:
-- **4a** ✅ **DONE (uncommitted)** — keyword evidence index (FTS5 over `normalized/chunks/
-  <source_id>.jsonl`) + wiki navigation index, both in `indexes/keyword/keyword.sqlite`
+- **4a** ✅ **DONE (committed `2e7db7f`)** — keyword evidence index (FTS5 over `normalized/chunks/
+  <source_id>.jsonl`) + wiki navigation index in `indexes/keyword/keyword.sqlite`
   (`app/backend/keyword_index.py`); fingerprinted incremental rebuild + `--force` + `user_version`
-  guard; `answer_eligible` only for active node-prose types. Scaffolds retired (`documents_fts`,
-  path-keyed `chunks.jsonl`). §7 coordination done: `.gitignore`, `backup.py` (keyword excluded,
-  vector opt-in via `BACKUP_INCLUDE_VECTOR_INDEX`, graph backed up via `db/`),
-  `validate_index_consistency.py`.
-- **4b** — graph read API: `GET /graph/node/{id}` + `GET /graph/neighborhood/{id}` (active-default,
-  depth-bounded projection over `app/backend/graph.py`).
+  guard; `answer_eligible` only for active node-prose types. Scaffolds retired; §7 coordination done.
+- **4b** ✅ **DONE (uncommitted)** — graph read API: `GET /graph/node/{id}` +
+  `GET /graph/neighborhood/{id}`, active-by-edge-status depth-bounded read projection
+  (`app/backend/graph_read.py`) over `app/backend/graph.py`. Caps are code constants (depth
+  default 1 / hard-max 2, node/edge caps); **the `retrieval.yaml` cap wiring is deferred to the
+  4c router** (per Plan §4 sequencing — a deliberate scoping line for the next slice).
 - **4c** — deterministic retrieval router + `GET /search` (keyword + navigation + graph groups;
   safe FTS query builder; retention filters; reads `policies/retrieval.yaml`).
 - **4d** — vector index (LanceDB + local embeddings, cloud-embedding seam opt-in); joins the same

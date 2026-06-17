@@ -34,19 +34,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+# Answer-eligibility is shared retrieval policy, not a keyword-index detail — it lives in a
+# neutral module (ADR-0032 decision 2). Re-exported here for backward compatibility.
+from app.backend.eligibility import ANSWER_ELIGIBLE_TYPES
+
 # Bump when the index schema or row shape changes; recorded via PRAGMA user_version so a stale
 # on-disk index is detected and fully rebuilt rather than silently mixed (ADR-0032 §7).
 INDEX_VERSION = 1
 
 # Path of the derived keyword index, relative to the project root (ADR-0032 §7).
 DB_RELPATH = Path("indexes") / "keyword" / "keyword.sqlite"
-
-# Wiki page types whose *active* node prose is eligible to back an answer (ADR-0032 decision 2).
-# Source/query/tag pages are navigation aids only and are never answer_eligible; their evidence
-# (for sources) flows through the chunk evidence index, not the page prose.
-ANSWER_ELIGIBLE_TYPES = frozenset(
-    {"concept", "entity", "person", "organization", "project", "synthesis", "claim"}
-)
 
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 

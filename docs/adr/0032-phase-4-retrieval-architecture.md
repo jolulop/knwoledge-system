@@ -192,3 +192,30 @@ the grouped `/search` contract, the deterministic router, the thin active-defaul
 and the `indexes/` vs `db/` storage split are the load-bearing commitments; the per-channel
 ranking constants, exact column layouts, and the embedding model id are tuned during
 implementation.
+
+## Addenda (Phase 4b implementation)
+
+Recorded while implementing the graph read endpoints, after a code review against decision 5.
+These refine — and do not overturn — the load-bearing commitments above:
+
+1. **`other_node_id` is a node-adjacency field, not a flat-edge field.** Decision 5 says symmetric
+   edges expose `src_id`/`dst_id` + `other_node_id` + `symmetric`. That holds for
+   `GET /graph/node/{id}`, where every adjacent assertion has a well-defined "other" endpoint
+   relative to the queried node. The **flat** `GET /graph/neighborhood/{id}` payload has no single
+   reference node (a depth-2 edge can join two non-root nodes), so its edges are **canonical-only**:
+   `src_id`/`dst_id` + `symmetric: true`, and **no `other_node_id`**. The canonical sorted direction
+   is still never erased.
+2. **Graph traversal filters by edge status only; retention/node-status filtering is `/search`'s
+   job.** Consistent with "a `candidate` node can still appear via an `active` edge," `/graph/*`
+   does **not** hide `archived`/`deleted`/`deprecated_candidate` nodes — they surface if an `active`
+   edge reaches them, always carrying their real `status` and `answer_eligible: false`. The
+   retention-aware defaults (decision 8) apply at the `/search` layer (Phase 4c), not the raw graph
+   projection.
+3. **Graph node metadata is `id`/`type`/`slug`/`status` (+ `answer_eligible`); `title` is deferred.**
+   The graph store (`db/graph.sqlite`) holds no title — titles live in wiki frontmatter. Resolving
+   them would couple the graph projection to the wiki/navigation layer, so title resolution is left
+   to the navigation/search layer rather than the thin graph read.
+4. **Graph endpoint caps stay code constants in 4b; the router owns the policy.** Depth (default 1,
+   hard max 2) and node/edge caps are constants with bounded query overrides. Moving them into
+   `policies/retrieval.yaml` happens in 4c, where the deterministic router (the component that reads
+   that policy) lands — avoiding a documented-but-unenforced policy file before a loader exists.

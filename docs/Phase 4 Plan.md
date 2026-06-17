@@ -1,7 +1,9 @@
 # Phase 4 Plan — Search and Graph (deterministic hybrid retrieval)
 
-**Status:** In progress (design-locked 2026-06-17 via grill gate). **Slice 4a implemented**
-(keyword evidence + wiki navigation index, scaffolds retired, §7 coordination done); 4b–4e pending.
+**Status:** In progress (design-locked 2026-06-17 via grill gate). **Slices 4a + 4b implemented**
+— 4a: keyword evidence + wiki navigation index (scaffolds retired, §7 coordination done); 4b:
+graph read API (`GET /graph/node/{id}` + `GET /graph/neighborhood/{id}`, read projection over
+`app/backend/graph.py`). 4c–4e pending.
 **Governing ADR:** [ADR-0032](adr/0032-phase-4-retrieval-architecture.md). Read it first — this
 plan is the operational breakdown of its decisions.
 **Predecessors:** Phase 3 (deterministic Source-page backbone), Phase 3.5a/b/c (semantic LLM
@@ -88,13 +90,18 @@ synthesis eligibility. Navigation surfaces candidates; evidence does not cite th
 
 ### 3.2 `GET /graph/node/{node_id}`
 - Node metadata + adjacent **active** assertions grouped by `edge_type` (incoming + outgoing) with
-  minimal adjacent-node metadata inline. `answer_eligible` flag per node.
+  minimal adjacent-node metadata inline. `answer_eligible` flag per node. Each assertion exposes
+  `src_id`/`dst_id` + `other_node_id` (relative to the queried node) + `symmetric` (ADR-0032
+  addendum 1). Node metadata is `id`/`type`/`slug`/`status` (+`answer_eligible`); `title` deferred
+  (addendum 3).
 
 ### 3.3 `GET /graph/neighborhood/{node_id}`
 - Flat payload `{root_id, depth, nodes[], edges[], truncated, cap}`. Default `depth=1`, hard max
-  `2`. `edge_types=`/`node_types=` filters. Edge-status `active` by default;
-  `include_status=proposed,active` for review tooling. Symmetric edges expose stored
-  `src_id`/`dst_id` + `other_node_id` + `symmetric: true`. Edge anchors labelled advisory.
+  `2`. `edge_types=`/`node_types=` filters (`node_types` is traversal-time). Edge-status `active`
+  by default; `include_status=proposed,active` for review tooling. Symmetric edges keep stored
+  `src_id`/`dst_id` + `symmetric: true` — **canonical-only, no `other_node_id`** in the flat edge
+  list (ADR-0032 addendum 1). Edge anchors labelled advisory. Traversal filters by edge status,
+  not node status — `archived`/`deleted` nodes can surface via active edges (addendum 2).
 
 ---
 

@@ -48,6 +48,8 @@ class Settings:
     manifests_dir: Path
     db_dir: Path
     jobs_db_path: Path
+    # Authoritative semantic graph (ADR-0030); read-only projection in Phase 4b.
+    graph_db_path: Path
     # Phase 2 normalized layer (ADR-0011): one set of files per source id.
     normalized_dir: Path
     markdown_dir: Path
@@ -96,6 +98,7 @@ def get_settings(root: Path | None = None) -> Settings:
         manifests_dir=resolved / "raw" / "manifests",
         db_dir=resolved / "db",
         jobs_db_path=resolved / "db" / "jobs.sqlite",
+        graph_db_path=resolved / "db" / "graph.sqlite",
         normalized_dir=normalized,
         markdown_dir=normalized / "markdown",
         chunks_dir=normalized / "chunks",

@@ -139,3 +139,69 @@ class Job(BaseModel):
 class JobsResponse(BaseModel):
     count: int
     jobs: list[Job]
+
+
+# --- Phase 4b graph read projection (ADR-0032 decision 5) --------------------
+
+
+class GraphNodeMeta(BaseModel):
+    node_id: str
+    node_type: str
+    slug: str | None = None
+    status: str | None = None
+    answer_eligible: bool
+
+
+class GraphEvidence(BaseModel):
+    # The edge's evidence anchor is advisory (ADR-0032): the authoritative evidence is the
+    # endpoint pages' structured citations, not the edge row.
+    advisory: bool = True
+    source_id: str | None = None
+    char_start: int | None = None
+    char_end: int | None = None
+
+
+class GraphAssertion(BaseModel):
+    edge_id: str
+    edge_type: str
+    status: str
+    asserted_by: str
+    confidence: float | None = None
+    symmetric: bool
+    src_id: str
+    dst_id: str
+    other_node_id: str
+    other: GraphNodeMeta
+    evidence: GraphEvidence
+
+
+class GraphNodeResponse(BaseModel):
+    node: GraphNodeMeta
+    outgoing: dict[str, list[GraphAssertion]]
+    incoming: dict[str, list[GraphAssertion]]
+    counts: dict[str, int]
+
+
+class GraphEdge(BaseModel):
+    edge_id: str
+    src_id: str
+    dst_id: str
+    edge_type: str
+    status: str
+    asserted_by: str
+    confidence: float | None = None
+    symmetric: bool
+    evidence: GraphEvidence
+
+
+class GraphNeighborhoodNode(GraphNodeMeta):
+    distance: int
+
+
+class GraphNeighborhoodResponse(BaseModel):
+    root_id: str
+    depth: int
+    nodes: list[GraphNeighborhoodNode]
+    edges: list[GraphEdge]
+    truncated: bool
+    cap: dict[str, int]

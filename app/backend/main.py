@@ -6,17 +6,19 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 
 # Ensure the repo root is importable when launched as `uvicorn app.backend.main:app`.
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.backend import db, manifests
+from app.backend import db, graph, graph_read, manifests
 from app.backend.config import get_settings
 from app.backend.models import (
     ChunksResponse,
+    GraphNeighborhoodResponse,
+    GraphNodeResponse,
     HealthResponse,
     Job,
     JobsResponse,
@@ -235,6 +237,78 @@ def get_wiki_page(source_id: str) -> dict[str, Any]:
         "frontmatter": parse_frontmatter(text),
         "content": text,
     }
+
+
+def _open_graph() -> Any:
+    """Open the authoritative graph for read, or ``None`` if it does not exist yet.
+
+    A missing ``db/graph.sqlite`` (no semantic graph built yet) is not an error — the graph
+    endpoints simply report the node as not found. A present-but-wrong-schema database is a
+    controlled 503 (rebuild required) rather than an uncontrolled 500 deeper in a query.
+    """
+    if not settings.graph_db_path.exists():
+        return None
+    conn = graph.connect(settings.graph_db_path)
+    version = graph.schema_version(conn)
+    if version != graph.SCHEMA_VERSION:
+        conn.close()
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"graph index unavailable: schema version {version} != expected "
+                f"{graph.SCHEMA_VERSION}; rebuild db/graph.sqlite"
+            ),
+        )
+    return conn
+
+
+@app.get("/graph/node/{node_id}", response_model=GraphNodeResponse)
+def get_graph_node(node_id: str, include_status: str | None = None) -> dict[str, Any]:
+    conn = _open_graph()
+    if conn is None:
+        raise HTTPException(status_code=404, detail=f"node not found: {node_id}")
+    try:
+        try:
+            statuses = graph_read.parse_edge_statuses(include_status)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        view = graph_read.node_view(conn, node_id, include_status=statuses)
+    finally:
+        conn.close()
+    if view is None:
+        raise HTTPException(status_code=404, detail=f"node not found: {node_id}")
+    return view
+
+
+@app.get("/graph/neighborhood/{node_id}", response_model=GraphNeighborhoodResponse)
+def get_graph_neighborhood(
+    node_id: str,
+    depth: int = Query(graph_read.DEFAULT_DEPTH, ge=0, le=graph_read.MAX_DEPTH),
+    edge_types: str | None = None,
+    node_types: str | None = None,
+    include_status: str | None = None,
+    node_limit: int = Query(graph_read.DEFAULT_MAX_NODES, ge=1, le=graph_read.HARD_MAX_NODES),
+    edge_limit: int = Query(graph_read.DEFAULT_MAX_EDGES, ge=1, le=graph_read.HARD_MAX_EDGES),
+) -> dict[str, Any]:
+    conn = _open_graph()
+    if conn is None:
+        raise HTTPException(status_code=404, detail=f"node not found: {node_id}")
+    try:
+        try:
+            statuses = graph_read.parse_edge_statuses(include_status)
+            et = graph_read.parse_edge_types(edge_types)
+            nt = graph_read.parse_node_types(node_types)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        result = graph_read.neighborhood(
+            conn, node_id, depth=depth, edge_types=et, node_types=nt,
+            include_status=statuses, node_cap=node_limit, edge_cap=edge_limit,
+        )
+    finally:
+        conn.close()
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"node not found: {node_id}")
+    return result
 
 
 @app.get("/wiki/index")
