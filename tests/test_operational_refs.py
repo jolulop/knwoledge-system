@@ -41,3 +41,9 @@ def test_per_file_hook_does_not_run_vector_reindex():
     # wired into the per-file change hook (which would make editing depend on the embedding server).
     hook = ROOT / ".claude" / "hooks" / "reindex_changed_file.sh"
     assert "reindex_vector" not in hook.read_text(encoding="utf-8")
+
+
+def test_env_example_documents_query_model():
+    # The POST /query 503 tells operators to set QUERY_MODEL — it must be documented in .env.example
+    # so that guidance isn't a dead end (ADR-0034 operational drift).
+    assert "QUERY_MODEL=" in (ROOT / ".env.example").read_text(encoding="utf-8")

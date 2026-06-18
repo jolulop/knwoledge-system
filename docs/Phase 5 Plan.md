@@ -27,7 +27,9 @@ multi-turn/conversational `/query`; LLM-based query classification (the 4c deter
 reused); LLM-judge evals (opt-in smoke only); auto-saving queries.
 
 **Invariants:** zero unsourced claims in the answer body; citations only from citable chunk evidence
-(never node prose); retrieved text is untrusted data; no absolute paths in the pack or response; the
+(never node prose); retrieved text is untrusted data; **no system/generated filesystem paths** in the
+pack or response (a path *inside a verbatim source quote* is source content and is preserved — only the
+repo root / `markdown_dir` / server paths are withheld; model claim text is path-leak-guarded); the
 deterministic Phase 4 stack stays key-free (only `/query` needs a model).
 
 ---
@@ -68,13 +70,18 @@ deterministic Phase 4 stack stays key-free (only `/query` needs a model).
 ---
 
 ## 4. Request contract (`POST /query`)
-- **Body/params:** `question` (required), `mode` (`/search` modes, default `auto`), `/search`
-  filters (`source_id`, `source_status`, `language`, …) to scope evidence, `save` (bool, default
-  `false`).
-- **Errors:** no model configured → **503** ("query answering requires a configured LLM: set
-  QUERY_MODEL / provider key"); empty question → 400; bad filters → 400 (reuse `/search` validation).
+- **JSON body `QueryRequest`** (distinct from `GET /search?q=` on purpose — `/query` is synthesis,
+  potentially long-form, later save-capable; `/search` stays unchanged): `question` (required), `mode`
+  (default `auto`), filters (`source_id`, `source_status`, `language`), `include_unsourced` (bool,
+  local/debug only), `save` (bool, default `false` — 5-3).
+- **Mode restricted to evidence-producing `{auto, keyword, vector}`**; `graph`/`navigation` → **400**
+  (discovery surfaces can't cite, so they'd only abstain — reject for a clean contract).
+- **Errors → controlled 503 (no detail leakage), the first key-requiring surface:** no model
+  configured → 503; malformed `QUERY_MODEL` / unknown provider (`ConfigError`) → 503 "misconfigured";
+  synthesis failure (`ParseError`, which wraps `AdapterError`; also caught directly) → 503 "temporarily
+  unavailable" — concrete exception **logged server-side only**. Empty question / bad filters → 400.
 - Retrieval degrades gracefully (4e): vector unavailable → answer from keyword evidence (no 503);
-  only a missing **model** 503s.
+  only a missing/failed **model** 503s.
 
 ---
 

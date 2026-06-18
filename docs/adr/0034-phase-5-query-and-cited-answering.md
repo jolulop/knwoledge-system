@@ -50,8 +50,14 @@ is passed as **clearly-delimited untrusted source material**, with a system inst
 delimited content is data to be analyzed, never commands to follow. The model returns only
 schema-valid claims (no bash/file/tool surface), and any output that fails the grounding gate is
 dropped — so a prompt-injection string inside a chunk cannot exfiltrate, act, or smuggle an
-ungrounded claim into the answer body. Absolute filesystem paths are never placed in the pack or the
-response (ADR-0009); citations expose only repository-relative source references + anchors.
+ungrounded claim into the answer body. **No *system/generated* filesystem paths** — the repo root,
+`markdown_dir`, or any server path — are ever placed in the pack or the response (ADR-0009), and
+model-authored claim *text* is additionally screened by a deterministic absolute-path guard (a leaked
+path → the claim is security-rejected by reason/count, never returned verbatim). A path that appears
+**inside a verbatim source quote**, by contrast, is the source's own content and is **preserved
+intact** — redacting it would break the verbatim grounding invariant (`ground_citation` checks the
+quote equals `markdown[start:end]`). The rule is "no system/generated paths in the response," not "no
+path-shaped substring."
 
 **5. `/query` is the first key-requiring surface; deterministic retrieval stays key-free; answers are
 cache-replayable.** Synthesis needs a model via `LLMClient` (ADR-0025) — a configurable `QUERY_MODEL`

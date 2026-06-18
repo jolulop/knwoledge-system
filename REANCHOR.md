@@ -59,7 +59,7 @@ critical rules and `CONTEXT.md` for the glossary.
   - `2e7db7f` Phase 4a: keyword evidence + wiki navigation index, design-locked (ADR-0032)
   - `c1f2504` docs: mark Phase 3.5 Complete in Build Spec
   - `eebf11b` Phase 3.5c-2: cross-source synthesis — completes Phase 3.5
-- **Tests/lint green:** `452 passed` (was 390; +45 Phase 4d/4e, +17 Phase 5-1), ruff clean, **10** validators
+- **Tests/lint green:** `464 passed` (was 390; +45 Phase 4d/4e, +17 5-1, +13 5-2 endpoint+review), ruff clean, **10** validators
   pass. Newest test file: `tests/test_retrieval_evals.py` (12, LanceDB-gated golden retrieval evals). **LanceDB installed in the venv** (`vector` extra; `uv.lock` updated) — the
   full vector suite runs; a bare `.[dev]` install skips it via `importorskip`.
 
@@ -197,7 +197,23 @@ slice 4d (vector — first slice with new deps).**
     `unsourced_claims`; compact `e1..eN`; `QUERY_PROMPT_VERSION`/`QUERY_SCHEMA_VERSION` passed to
     `parse`. `tests/test_query.py` (17, key-free `FakeLLMClient` + real grounding gate; sentinel-
     injection-safe, malformed-id-dropped, blank-text, path-leak-rejected, compact-ids, version-fields).
-  - **5-2** next — `POST /query` endpoint + `QueryResponse` + `QUERY_MODEL` + 503-when-unconfigured.
+  - **5-2** ✅ **DONE (uncommitted)** — `POST /query` endpoint (`main.run_query_endpoint`): validates
+    question/mode/filters → builds the LLM client (`_query_client`, indirected for test fakes) →
+    **503 if `not provider_available(query_model)`** → retrieves via shared `_run_search` (extracted
+    from `/search`; both surfaces share the channel/vector/retention wiring) → `query.answer_query`
+    over chunk evidence → `QueryResponse`. **Q2:** default exposes `unsourced_count` +
+    `security_rejected_count` only; full `unsourced_claims[]` text only under `include_unsourced=true`;
+    path-leak text never returned. `config.query_model` (`QUERY_MODEL` env, default standard tier);
+    abstention text sourced from `policies/citation.yaml` (`_no_source_text`). Models `QueryCitation`/
+    `QueryClaim`/`QueryResponse`. **Review round applied:** `QueryRequest` **JSON body** (`question`…;
+    `/search` left unchanged, contracts intentionally differ); modes restricted to `{auto,keyword,vector}`
+    (graph/nav → 400); **503 mapping** for `ConfigError`/`ParseError`/`AdapterError` (generic detail,
+    concrete exception logged server-side); `QUERY_MODEL` added to `.env.example` + operational-refs
+    test; ADR/Plan tightened to "no **system/generated** paths" (verbatim source-quote paths preserved —
+    redaction would break grounding). `tests/test_api.py` +12 query (grounded, abstain, 503-no-model,
+    503-malformed-model, 503-parse-raises, 400-empty, 400-graph-mode, count-only-vs-include_unsourced,
+    path-leak-not-leaked, source-quote-path-intact, no-server-path-leak).
+  - **5-3** next — explicit `save` → `wiki/Queries/<id>.md` render (template round-trip) + nodes-index.
 - **4e** — RRF hybrid fusion (keyword+vector) + per-group caps + retrieval eval harness
   (`evals/golden_retrieval.yaml`, kept separate from Phase-5 `golden_questions.yaml`).
 

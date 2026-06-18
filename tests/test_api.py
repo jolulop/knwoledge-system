@@ -527,3 +527,173 @@ def test_assert_safe_bind():
         assert_safe_bind("0.0.0.0", False)
     with pytest.raises(RuntimeError):
         assert_safe_bind("192.168.1.10", False)
+
+
+# --------------------------------------------------------------------------- POST /query (5-2)
+
+
+QSRC = "src_eeeeeeeeeeeeeeee"
+QTEXT = "Synergy capture is central to post-merger integration."
+
+
+def _build_query_corpus(tmp_path):
+    """Chunk + matching Markdown (for quote slicing) + an active source page + keyword index."""
+    ch = tmp_path / "normalized" / "chunks" / f"{QSRC}.jsonl"
+    ch.parent.mkdir(parents=True, exist_ok=True)
+    ch.write_text(json.dumps({
+        "chunk_id": f"{QSRC}::0000", "source_id": QSRC, "ordinal": 0, "kind": "prose",
+        "heading_path": [], "section": None, "text": QTEXT, "char_start": 0, "char_end": len(QTEXT),
+        "page": 1, "page_end": 1, "table_reference": None, "sheet_reference": None,
+    }) + "\n", encoding="utf-8")
+    md = tmp_path / "normalized" / "markdown"
+    md.mkdir(parents=True, exist_ok=True)
+    (md / f"{QSRC}.md").write_text(QTEXT, encoding="utf-8")  # md[0:len] == chunk text (groundable)
+    sp = tmp_path / "wiki" / "Sources" / f"{QSRC}.md"
+    sp.parent.mkdir(parents=True, exist_ok=True)
+    sp.write_text("---\ntype: source\nsource_id: " + QSRC + "\ntitle: Deck\nstatus: active\n"
+                  "language: en\n---\n\n# Deck\n\n> [!summary]\n> synergy\n", encoding="utf-8")
+    keyword_index.reindex(tmp_path, force=True)
+
+
+class _FakeQueryClient:
+    def __init__(self, response, *, available=True, raises=None):
+        self.response = response
+        self._available = available
+        self._raises = raises
+
+    def provider_available(self, model_ref):
+        return self._available
+
+    def parse(self, messages, schema, model_ref, **kwargs):
+        if self._raises is not None:
+            raise self._raises
+        return self.response
+
+
+def _use_client(monkeypatch, fake):
+    monkeypatch.setattr(main_module, "_query_client", lambda: fake)
+
+
+def _q(question, **extra):
+    return {"question": question, **extra}
+
+
+def test_query_returns_grounded_answer(client, tmp_path, monkeypatch):
+    _build_query_corpus(tmp_path)
+    _use_client(monkeypatch, _FakeQueryClient(
+        {"claims": [{"text": "Synergy capture is central to integration.", "evidence_ids": ["e1"]}]}))
+    body = client.post("/query", json=_q("synergy capture")).json()
+    assert body["abstained"] is False
+    assert len(body["claims"]) == 1 and len(body["citations"]) == 1
+    assert body["citations"][0]["source_id"] == QSRC and body["citations"][0]["char_start"] == 0
+    assert "[1]" in body["answer"]
+    assert body["unsourced_count"] == 0 and body["security_rejected_count"] == 0
+    assert "keyword" in body["retrieval_path"]
+
+
+def test_query_abstains_when_no_evidence(client, tmp_path, monkeypatch):
+    _build_query_corpus(tmp_path)
+    _use_client(monkeypatch, _FakeQueryClient({"claims": [{"text": "x", "evidence_ids": ["e1"]}]}))
+    body = client.post("/query", json=_q("nonexistentterm")).json()
+    assert body["abstained"] is True and body["answer"] == "No source found in vault."
+    assert body["evidence_count"] == 0 and body["claims"] == []
+
+
+def test_query_503_without_model(client, tmp_path, monkeypatch):
+    _build_query_corpus(tmp_path)
+    _use_client(monkeypatch, _FakeQueryClient({"claims": []}, available=False))
+    r = client.post("/query", json=_q("synergy"))
+    assert r.status_code == 503 and "configured LLM" in r.json()["detail"]
+
+
+def test_query_503_on_malformed_query_model(client, tmp_path, monkeypatch):
+    import dataclasses
+    _build_query_corpus(tmp_path)
+    # A real client whose provider_available() raises ConfigError on a malformed QUERY_MODEL.
+    monkeypatch.setattr(main_module, "settings",
+                        dataclasses.replace(main_module.settings, query_model="badref-no-colon"))
+    monkeypatch.setattr(main_module, "_query_client",
+                        lambda: main_module.build_client(main_module.settings))
+    r = client.post("/query", json=_q("synergy"))
+    assert r.status_code == 503 and "misconfigured" in r.json()["detail"]
+    assert "badref" not in r.text  # no internal/config detail leaks
+
+
+def test_query_503_when_parse_raises(client, tmp_path, monkeypatch):
+    _build_query_corpus(tmp_path)
+    _use_client(monkeypatch, _FakeQueryClient(
+        None, raises=main_module.ParseError("provider boom: secret-endpoint")))
+    r = client.post("/query", json=_q("synergy capture"))
+    assert r.status_code == 503 and r.json()["detail"] == "query answering is temporarily unavailable"
+    assert "secret-endpoint" not in r.text  # concrete exception stays server-side
+
+
+def test_query_400_on_empty_question(client, tmp_path, monkeypatch):
+    _use_client(monkeypatch, _FakeQueryClient({"claims": []}))
+    assert client.post("/query", json=_q("   ")).status_code == 400
+
+
+def test_query_400_on_non_evidence_mode(client, tmp_path, monkeypatch):
+    _build_query_corpus(tmp_path)
+    _use_client(monkeypatch, _FakeQueryClient({"claims": []}))
+    r = client.post("/query", json=_q("synergy", mode="graph"))
+    assert r.status_code == 400 and "discovery surfaces" in r.json()["detail"]
+
+
+def test_query_unsourced_count_only_by_default(client, tmp_path, monkeypatch):
+    _build_query_corpus(tmp_path)
+    _use_client(monkeypatch, _FakeQueryClient({"claims": [
+        {"text": "Synergy is captured.", "evidence_ids": ["e1"]},
+        {"text": "An unsupported aside.", "evidence_ids": ["e404"]},
+    ]}))
+    body = client.post("/query", json=_q("synergy capture")).json()
+    assert body["unsourced_count"] == 1 and body["unsourced_claims"] == []  # text withheld by default
+    full = client.post("/query", json=_q("synergy capture", include_unsourced=True)).json()
+    assert full["unsourced_claims"] == ["An unsupported aside."]
+
+
+def test_query_path_leak_rejected_and_not_leaked(client, tmp_path, monkeypatch):
+    _build_query_corpus(tmp_path)
+    _use_client(monkeypatch, _FakeQueryClient({"claims": [
+        {"text": "Synergy is captured.", "evidence_ids": ["e1"]},
+        {"text": "Stored at /home/jolulop/secret.txt.", "evidence_ids": ["e1"]},
+    ]}))
+    r = client.post("/query", json=_q("synergy capture", include_unsourced=True))
+    body = r.json()
+    assert body["security_rejected_count"] == 1
+    assert "/home/jolulop/secret.txt" not in r.text  # never returned verbatim, anywhere
+
+
+def test_query_source_quote_with_path_is_returned_intact(client, tmp_path, monkeypatch):
+    # A source document legitimately contains an absolute path. The verbatim quote MUST survive
+    # (grounding requires it); only system/generated paths are withheld (ADR-0034 Q2).
+    src, text = "src_ffffffffffffffff", "Logs live at /var/log/app per the runbook."
+    ch = tmp_path / "normalized" / "chunks" / f"{src}.jsonl"
+    ch.parent.mkdir(parents=True, exist_ok=True)
+    ch.write_text(json.dumps({
+        "chunk_id": f"{src}::0000", "source_id": src, "ordinal": 0, "kind": "prose",
+        "heading_path": [], "section": None, "text": text, "char_start": 0, "char_end": len(text),
+        "page": 1, "page_end": 1, "table_reference": None, "sheet_reference": None,
+    }) + "\n", encoding="utf-8")
+    md = tmp_path / "normalized" / "markdown"
+    md.mkdir(parents=True, exist_ok=True)
+    (md / f"{src}.md").write_text(text, encoding="utf-8")
+    sp = tmp_path / "wiki" / "Sources" / f"{src}.md"
+    sp.parent.mkdir(parents=True, exist_ok=True)
+    sp.write_text("---\ntype: source\nsource_id: " + src + "\ntitle: Run\nstatus: active\n"
+                  "language: en\n---\n\n# Run\n\n> [!summary]\n> logs\n", encoding="utf-8")
+    keyword_index.reindex(tmp_path, force=True)
+    _use_client(monkeypatch, _FakeQueryClient(
+        {"claims": [{"text": "The runbook documents the log location.", "evidence_ids": ["e1"]}]}))
+    r = client.post("/query", json=_q("where are logs"))
+    body = r.json()
+    assert body["citations"][0]["quote"] == text          # source path survives verbatim in the quote
+    assert str(tmp_path) not in r.text                     # but no server/generated path leaks
+
+
+def test_query_response_leaks_no_absolute_paths(client, tmp_path, monkeypatch):
+    _build_query_corpus(tmp_path)
+    _use_client(monkeypatch, _FakeQueryClient(
+        {"claims": [{"text": "Synergy is captured.", "evidence_ids": ["e1"]}]}))
+    r = client.post("/query", json=_q("synergy capture"))
+    assert str(tmp_path) not in r.text and r.status_code == 200

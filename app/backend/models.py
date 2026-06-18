@@ -278,3 +278,55 @@ class SearchResponse(BaseModel):
     # Diagnostic/degradation messages (Phase 4e) — e.g. auto degraded to keyword-only because the
     # embedder was unavailable. Empty in the normal case.
     notes: list[str] = []
+
+
+class QueryRequest(BaseModel):
+    # POST /query body (Phase 5, ADR-0034). Distinct from GET /search?q= on purpose — /query is
+    # synthesis (potentially long-form, later save-capable). `mode` is restricted to the
+    # evidence-producing modes at the endpoint (graph/navigation can't cite).
+    question: str
+    mode: str = "auto"
+    source_id: str | None = None
+    source_status: str | None = None
+    language: str | None = None
+    include_unsourced: bool = False  # LOCAL/DEBUG only: return ungrounded claim *text* (counts always present)
+
+
+class QueryCitation(BaseModel):
+    # Resolved answer citation — authoritative (source_id, char_start, char_end) + advisory locators
+    # and the verbatim source quote (Phase 5, ADR-0034). No filesystem paths are ever exposed.
+    source_id: str
+    char_start: int
+    char_end: int
+    page: int | None = None
+    page_end: int | None = None
+    section: str | None = None
+    table_reference: str | None = None
+    sheet_reference: str | None = None
+    chunk_id: str | None = None
+    quote: str
+
+
+class QueryClaim(BaseModel):
+    text: str
+    citations: list[QueryCitation]
+
+
+class QueryResponse(BaseModel):
+    # POST /query (Phase 5, ADR-0034). Every claim in `claims`/`answer` is mechanically grounded;
+    # `abstained` + the "No source found in vault." answer text mean nothing grounded.
+    query: str
+    mode: str
+    retrieval_path: list[str]
+    answer: str
+    abstained: bool
+    claims: list[QueryClaim] = []
+    citations: list[QueryCitation] = []
+    evidence_count: int
+    # Audit signals only (ADR-0034 Q2): the ordinary-unsourced and security-rejected counts are always
+    # present; the unsourced *text* is exposed only under include_unsourced (debug/review). Path-leak
+    # rejections are never returned verbatim — count only.
+    unsourced_count: int
+    security_rejected_count: int
+    unsourced_claims: list[str] = []
+    notes: list[str] = []

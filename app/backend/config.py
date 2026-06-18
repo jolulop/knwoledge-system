@@ -75,6 +75,8 @@ class Settings:
     enrich_model_light: str
     enrich_model_standard: str
     enrich_model_heavy: str
+    # Phase 5 query answering (ADR-0034). The synthesis model_ref; defaults to the standard tier.
+    query_model: str
     enrich_max_tokens: int
     enrich_local_base_url: str | None
     anthropic_api_key: str | None
@@ -131,6 +133,7 @@ def get_settings(root: Path | None = None) -> Settings:
         enrich_model_light=cfg("ENRICH_MODEL_LIGHT", "anthropic:claude-haiku-4-5"),
         enrich_model_standard=cfg("ENRICH_MODEL_STANDARD", "anthropic:claude-sonnet-4-6"),
         enrich_model_heavy=cfg("ENRICH_MODEL_HEAVY", "anthropic:claude-opus-4-8"),
+        query_model=cfg("QUERY_MODEL", cfg("ENRICH_MODEL_STANDARD", "anthropic:claude-sonnet-4-6")),
         enrich_max_tokens=int(cfg("ENRICH_MAX_TOKENS", "1024")),
         enrich_local_base_url=(cfg("ENRICH_LOCAL_BASE_URL", "") or None),
         anthropic_api_key=(cfg("ANTHROPIC_API_KEY", "") or None),
