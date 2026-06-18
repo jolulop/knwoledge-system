@@ -140,8 +140,17 @@ slice 4d (vector — first slice with new deps).**
     **strict serving posture** — 503 on *any* chunk drift (stale anchors unsafe) and when the
     keyword/nav index is absent (retention unverifiable); `chunk_id` added to the order tie-break.
     Tests: vector channel in `test_search.py` (6) + `/search?mode=vector` in `test_api.py` (6).
-- **Phase 4d COMPLETE** (4d-1 seam + 4d-2 index + 4d-3 `/search`). **Next: 4e** — RRF fusion of
-  keyword+vector, `mode=auto` blending vector, `evals/golden_retrieval.yaml` eval harness.
+- **Phase 4d COMPLETE + pushed** (4d-1 seam + 4d-2 index + 4d-3 `/search`).
+- **4e — DESIGN-LOCKED (2026-06-18 grill; no code yet)** — RRF hybrid fusion + retrieval evals.
+  Decisions in **ADR-0032 addenda 5–8** + **`docs/Phase 4e Plan.md`** (uncommitted): (1) `mode=auto`
+  blends vector by **conceptual-default + escalation** (embed only when vector will run; graph-only
+  shapes defer vector); (2) `auto` **degrades to keyword-only + top-level `notes`, never 503** (503
+  stays explicit `mode=vector`); (3) RRF `k=60` in `retrieval.yaml`, dedup by `(source_id,char_start,
+  char_end)`, fused hits add an additive **`channels`** field `{keyword/vector:{rank,score}}` (top
+  `score`=RRF, tie-break `(source_id,ordinal,char_start)`); (4) eval harness = **pytest + FakeEmbedder**
+  (`evals/golden_retrieval.yaml` + `tests/test_retrieval_evals.py`, 8 categories, structural not
+  semantic; CLI deferred). **Next: implement 4e when told "implement now"** (start 4e-1: RRF fuser +
+  model fields + `rrf_k`).
 - **4e** — RRF hybrid fusion (keyword+vector) + per-group caps + retrieval eval harness
   (`evals/golden_retrieval.yaml`, kept separate from Phase-5 `golden_questions.yaml`).
 
@@ -189,4 +198,6 @@ graph-blocked pairing, sorted-pair `contradicts`, per-concept synthesis, review 
 0032 (Phase 4 retrieval architecture — evidence vs. answer seam, citable chunks vs. node prose,
 deterministic router + RRF fusion, index storage/lifecycle relayout),
 0033 (Phase 4d vector retrieval — local `/embeddings` HTTP seam, LanceDB same-citation index,
-config-ref staleness key, explicit-only `mode=vector`, explicit non-hooked reindex).
+config-ref staleness key, explicit-only `mode=vector`, explicit non-hooked reindex). **0032 addenda
+5–8** = Phase 4e fusion (RRF `k`, `auto` conceptual-default+escalation, degrade-to-keyword, `channels`
+hit shape, pytest eval harness).

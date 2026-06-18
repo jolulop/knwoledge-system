@@ -5,7 +5,8 @@ implemented** — 4a: keyword evidence + wiki navigation index; 4b: graph read A
 router + `GET /search` (keyword/navigation/graph groups, safe FTS builder, retention filters,
 `retrieval.yaml` loader + caps); 4d: LanceDB vector channel (embedding seam + index + `mode=vector`,
 see [ADR-0033](adr/0033-phase-4d-vector-retrieval.md) + [Phase 4d Plan](Phase%204d%20Plan.md)). **4e
-(RRF fusion + `auto` blend + retrieval eval harness) pending.**
+(RRF fusion + `auto` blend + retrieval eval harness) design-locked — see ADR-0032 addenda 5–8 +
+[Phase 4e Plan](Phase%204e%20Plan.md); no code yet.**
 **Governing ADR:** [ADR-0032](adr/0032-phase-4-retrieval-architecture.md). Read it first — this
 plan is the operational breakdown of its decisions.
 **Predecessors:** Phase 3 (deterministic Source-page backbone), Phase 3.5a/b/c (semantic LLM
@@ -133,7 +134,7 @@ synthesis eligibility. Navigation surfaces candidates; evidence does not cite th
 | **4b** | Graph read API (`/graph/node`, `/graph/neighborhood`): active-default, depth-bounded projection over `graph.py`. | none |
 | **4c** | Retrieval router + `GET /search` (keyword + navigation + graph groups; safe FTS builder; retention filters). `mode=auto` covers keyword/navigation/graph only. | none |
 | **4d** | Vector index: LanceDB + local embeddings + embedding-provider seam (cloud opt-in). Vector joins the **same** `/search` contract without changing response shape. **Design-locked — see [ADR-0033](adr/0033-phase-4d-vector-retrieval.md) + [Phase 4d Plan](Phase%204d%20Plan.md).** | LanceDB, embedding model |
-| **4e** | RRF hybrid fusion over keyword+vector + per-group caps + retrieval eval harness. | none |
+| **4e** | RRF hybrid fusion over keyword+vector + `auto` conceptual-default+escalation blend + retrieval eval harness. **Design-locked: ADR-0032 addenda 5–8 + [Phase 4e Plan](Phase%204e%20Plan.md).** | none |
 
 Up through 4c the layer is fully offline/deterministic; 4d is the first slice introducing new
 dependencies.

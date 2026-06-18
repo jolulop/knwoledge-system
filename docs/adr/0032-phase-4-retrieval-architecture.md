@@ -223,3 +223,50 @@ These refine — and do not overturn — the load-bearing commitments above:
    hard max 2) and node/edge caps are constants with bounded query overrides. Moving them into
    `policies/retrieval.yaml` happens in 4c, where the deterministic router (the component that reads
    that policy) lands — avoiding a documented-but-unenforced policy file before a loader exists.
+
+## Addenda (Phase 4e — RRF hybrid fusion)
+
+Recorded at the Phase 4e grill gate (2026-06-18), refining decision 6 (RRF over the two chunk
+channels) and decision 9 (`auto` covers keyword/navigation/graph in 4c; vector joins in 4d/4e). 4e
+adds no new dependencies.
+
+5. **`mode=auto` blends vector via *conceptual-default + escalation*, not always.** The `auto`
+   classifier embeds the query and runs vector **only when routing decides vector will run**: the
+   `default`/broad-conceptual shape routes to `[keyword, vector]` (always fused via RRF); the
+   keyword-primary shapes (`exact`, `mention`) stay keyword/graph and **add vector only on
+   escalation** — when the keyword evidence count is `< escalation_primary_below_k`
+   (`retrieval.yaml`); `discovery`/`relationship`/`disagreement` keep navigation/graph primary and
+   only escalate the evidence-producing path (graph-only shapes defer vector unless a clear evidence
+   need is defined). This delivers semantic recall where it matters (free-text conceptual queries)
+   while keeping exact lookups cheap and not making every `auto` request depend on the embedder.
+
+6. **`auto` degrades gracefully; only explicit `mode=vector` 503s.** When the embedder or vector
+   index is unavailable/stale during an `auto` request that would have used vector, `/search`
+   **degrades to keyword-only** — never a 503 — and surfaces the degradation in a top-level
+   `notes: []` field (e.g. "vector unavailable: embedder down — degraded to keyword-only"), with
+   `retrieval_path` reflecting the channels that actually ran. The strict 503 posture (Phase 4d /
+   ADR-0033) stays reserved for **explicit** `mode=vector`, where the caller asked specifically for
+   vector and a silent fallback would be wrong.
+
+7. **RRF fuses by rank with `k` from policy; fused hits keep per-channel detail in `channels`.**
+   Reciprocal Rank Fusion scores each chunk `Σ 1/(k + rank_c)` over the channels that returned it,
+   `k` = `rrf_k` in `retrieval.yaml` (default **60**, the canonical value). **Dedup key = the chunk
+   citation `(source_id, char_start, char_end)`** (`chunk_id` is advisory); a hit returned by both
+   channels collapses to one evidence object. The base citation shape is unchanged; the response adds
+   one additive field per hit: **`channels`** — `{"keyword": {"rank", "score"}, "vector": {"rank",
+   "score"}}`, present for single-channel hits too. Rules: top-level `score` is the **RRF fused
+   score**; `retrieval_path` lists the contributing channels; `channels.*.rank` is 1-based
+   per-channel ordering; `channels.keyword.score` is BM25; `channels.vector.score` is vector distance
+   (lower = better). Deterministic: identical query + index ⇒ identical ranked `evidence[]`, with the
+   final tie-break `(source_id, ordinal, char_start)`. Weighted/score-normalized fusion and graph
+   boosts remain deferred.
+
+8. **The retrieval eval harness is pytest + a deterministic fake embedder — the correctness gate is
+   structural, not semantic.** `evals/golden_retrieval.yaml` holds the cases/predicates (the 8
+   categories of Plan §6.2); `tests/test_retrieval_evals.py` builds a small *programmatic* fixture
+   vault, builds the keyword + vector indexes with the deterministic `FakeEmbedder`, runs
+   `run_search()` directly (not the HTTP server), and asserts per category. RRF cases assert
+   **deterministic ordering + `retrieval_path`/`channels` shape**, not real semantic relevance (a
+   fake embedder has no semantics). Real-model determinism is pinned by index version +
+   `embedding_model_ref` and is a documented smoke/eval concern, **not** the CI gate. A standalone CLI
+   runner is deferred until repeated real-vault evaluation is an actual workflow.
