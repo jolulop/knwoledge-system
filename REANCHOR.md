@@ -170,10 +170,21 @@ slice 4d (vector — first slice with new deps).**
     fixture vault → keyword+vector indexes via `FakeEmbedder` → `run_search()` directly; 8 categories:
     exact-anchor, status-nav, graph-bounds, router-taxonomy, fts-safe, vector-carry, RRF
     shape/order-determinism, retention). Structural-not-semantic, LanceDB-gated, CI-gating.
-- **PHASE 4 (Search & Graph) COMPLETE** — 4a keyword/nav · 4b graph read · 4c router+/search · 4d
-  vector · 4e RRF fusion+evals. **Next: Phase 5 (Query & Cited Answering)** — `POST /query`, LLM
-  answer synthesis over retrieved evidence, saved `Queries/` pages, the `"No source found in vault."`
-  answer text. First LLM-in-the-loop retrieval surface → start with a `/grill-with-docs` planning pass.
+- **PHASE 4 (Search & Graph) COMPLETE + pushed** — 4a keyword/nav · 4b graph read · 4c router+/search
+  · 4d vector · 4e RRF fusion+evals.
+- **PHASE 5 (Query & Cited Answering) — DESIGN-LOCKED (2026-06-18 grill; no code yet).** Decisions in
+  **ADR-0034** + **`docs/Phase 5 Plan.md`** (uncommitted): (1) answer = grounded **claims that
+  reference evidence by id**; harness builds anchors from *retrieved* evidence + runs the verbatim
+  `ground_citation` gate (LLM never emits anchors); (2) `max_answer_unsourced_claims:0` on the answer
+  body — ungrounded → audit "Unsourced Claims" section, zero grounded → abstain
+  `"No source found in vault."`; (3) citations only from **citable chunks**, never node prose; (4)
+  untrusted evidence pack (ADR-0026 reuse); (5) `/query` is the **first key-requiring** surface →
+  **503 with no model** (retrieval stays key-free, degrades 4e-style); answers cache-replayable
+  (ADR-0027); (6) saved `wiki/Queries/` pages **explicit only**, navigable artifact, **no graph
+  edges / no review**; (7) CI gate = **fake `LLMClient` + structural assertions** (key-free), real-
+  model quality opt-in. Heavily scaffolded already (`templates/query.md`, `citation.yaml`,
+  `ground_citation`, `validate_citations::_check_query`, `app/llm`, `golden_questions.yaml`).
+  **Next: implement 5-1 when told "implement now"** (query worker core + answer schema + FakeLLMClient).
 - **4e** — RRF hybrid fusion (keyword+vector) + per-group caps + retrieval eval harness
   (`evals/golden_retrieval.yaml`, kept separate from Phase-5 `golden_questions.yaml`).
 
@@ -224,3 +235,6 @@ deterministic router + RRF fusion, index storage/lifecycle relayout),
 config-ref staleness key, explicit-only `mode=vector`, explicit non-hooked reindex). **0032 addenda
 5–8** = Phase 4e fusion (RRF `k`, `auto` conceptual-default+escalation, degrade-to-keyword, `channels`
 hit shape, pytest eval harness).
+0034 (Phase 5 Query & Cited Answering — evidence-id-referenced grounded claims, harness-built anchors
++ verbatim gate, abstain/Unsourced split, chunks-only citations, key-required 503, explicit non-graph
+saved Queries, fake-adapter structural eval gate).
