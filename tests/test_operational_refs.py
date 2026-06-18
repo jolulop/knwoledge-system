@@ -34,3 +34,10 @@ def test_operational_files_reference_only_existing_scripts():
                 missing.append(f"{surface.relative_to(ROOT)} references missing scripts/{match}")
     assert checked > 0, "expected to find script references to validate"
     assert not missing, "operational surfaces reference deleted scripts:\n" + "\n".join(missing)
+
+
+def test_per_file_hook_does_not_run_vector_reindex():
+    # ADR-0033 §5: vector re-embedding is GPU/latency-heavy and explicit-only — it must never be
+    # wired into the per-file change hook (which would make editing depend on the embedding server).
+    hook = ROOT / ".claude" / "hooks" / "reindex_changed_file.sh"
+    assert "reindex_vector" not in hook.read_text(encoding="utf-8")

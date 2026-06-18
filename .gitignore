@@ -16,6 +16,9 @@ knowledge-system-docs-*.zip
 indexes/keyword/keyword.sqlite*
 indexes/vector/*
 !indexes/vector/.gitkeep
+# Transient temp/backup dirs from the atomic vector-index swap (reindex_vector.py).
+indexes/vector.tmp/
+indexes/vector.bak/
 # All SQLite databases under db/ are durable local runtime state, never committed: the
 # job state (ADR-0008), the LLM response cache (ADR-0027), and the authoritative semantic
 # graph (ADR-0030). They are made durable by the backup mechanism (scripts/backup.py), not

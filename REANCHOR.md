@@ -59,8 +59,10 @@ critical rules and `CONTEXT.md` for the glossary.
   - `2e7db7f` Phase 4a: keyword evidence + wiki navigation index, design-locked (ADR-0032)
   - `c1f2504` docs: mark Phase 3.5 Complete in Build Spec
   - `eebf11b` Phase 3.5c-2: cross-source synthesis — completes Phase 3.5
-- **Tests/lint green:** `369 passed` (was 332; +37 from 4d-1 embedding seam + review hardening),
-  ruff clean, all 9 validators pass. Newest test file: `tests/test_embeddings.py` (37).
+- **Tests/lint green:** `390 passed` (was 369; +21 from 4d-2 vector index + review round), ruff
+  clean, **10** validators pass (added `validate_vector_index.py`). Newest test file:
+  `tests/test_vector_index.py` (20, LanceDB-gated via `importorskip`). **LanceDB installed in the
+  venv** (`vector` extra; `uv.lock` updated).
 
 ## Viewing the vault (Obsidian)
 
@@ -118,8 +120,17 @@ slice 4d (vector — first slice with new deps).**
     **finite-numeric** checks, model cross-check; **partial config → hard error**). 8 config keys in
     `config.py`/`.env.example`; shared `FakeEmbedder` in `tests/test_embeddings.py` (37 tests).
     Review round (2 reviewers) applied. No index yet.
-  - **4d-2** — LanceDB `vector_index.py` core + staleness manifest + `scripts/reindex_vector.py`.
-  - **4d-3** — `GET /search` `mode=vector` channel (standalone, 503-on-unavailable) + `vector` dep group.
+  - **4d-2** ✅ **DONE (uncommitted)** — LanceDB vector index: `app/backend/vector_index.py`
+    (embeds per-source chunks, full `EvidenceHit` citation + `kind` + text; **atomic temp-dir swap
+    with rollback**; incremental embeds **before** mutating, uses **`merge_insert`** atomic upsert +
+    separate delete; `_meta.json` index-level staleness → refuse incremental + `--force`).
+    `scripts/reindex_vector.py` (explicit, not hooked); `scripts/validate_vector_index.py` — **Q1
+    split:** hard-fail on incoherent/index-level-key mismatch (model/dim/metric vs config when
+    embedder set, else note), warn on chunk drift, pass on missing. `vector` optional dep group
+    (lancedb) + `uv.lock`; lazy import (isolated from app startup/`/search`).
+    Tests `tests/test_vector_index.py` (20, `importorskip`). **2-reviewer round applied** (guardrails
+    + Q1 validator key / Q2 swap rollback / Q3 merge_insert).
+  - **4d-3** — `GET /search` `mode=vector` channel (standalone, retention join, 503-on-unavailable).
 - **4e** — RRF hybrid fusion (keyword+vector) + per-group caps + retrieval eval harness
   (`evals/golden_retrieval.yaml`, kept separate from Phase-5 `golden_questions.yaml`).
 

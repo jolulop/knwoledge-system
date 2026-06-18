@@ -89,11 +89,16 @@ embedding-runtime-free (a deterministic fake embedder stands in).
   `(source_id, ordinal)`** — identical query + index ⇒ identical ranked `evidence[]`.
 
 ### 3.3 Index-level manifest (staleness key)
-- A manifest beside the index (e.g. `indexes/vector/_meta.json`): `embedding_model_ref`,
+- A manifest beside the index (`indexes/vector/_meta.json`): `embedding_model_ref`,
   `embedding_code_version`, `distance_metric`, `dimension`, `index_schema_version`.
 - **Rebuild rules:** any index-level field mismatch → **refuse incremental, require `--force`**; when
-  only chunk fingerprints differ → **re-embed only changed chunks** (delete+reinsert that chunk's
-  rows). `--force` always rebuilds from scratch.
+  only chunk fingerprints differ → **re-embed only changed chunks**. `--force` always rebuilds.
+- **Atomicity (implemented):** full rebuild builds into a temp dir then **rename-swaps with rollback**
+  (a failed `tmp→live` rename restores the previous index from `.bak`, then raises). Incremental uses
+  LanceDB **`merge_insert`** (atomic upsert keyed on `chunk_id`) for changed/new chunks — a failed
+  upsert leaves the old row intact, never missing — plus a separate `delete` for removed chunks (a
+  failed delete leaves benign stale rows the validator reports). Embedding always happens *before* any
+  mutation, so an embedder/server failure never alters the live index.
 
 ---
 
@@ -126,10 +131,13 @@ embedding-runtime-free (a deterministic fake embedder stands in).
 
 ## 6. Validators, backup, dependencies
 
-- **Validators (surface, don't fix):** extend the index-consistency check to **report** vector
-  staleness — chunks whose `chunk_fingerprint` changed since embed, source/chunk drift, and
-  index-level `embedding_model_ref`/`dimension` mismatch vs config. Missing vector index is **not** a
-  failure (optional, regenerable); a *stale* or *incoherent* one is reported for a deliberate reindex.
+- **Validator `validate_vector_index.py` (implemented):** missing index → **pass**; chunk-level
+  fingerprint drift → **non-fatal warning** (rebuildable-stale by design). **Hard fail (incoherent /
+  unsafe-to-query):** unreadable/missing `_meta.json` while files exist; `index_schema_version` or
+  `embedding_code_version` != current; `_meta` table missing; and — **when an embedder is configured**
+  — `embedding_model_ref` / `dimension` / `distance_metric` mismatch vs config (else a "vector identity
+  not checked — embedder disabled" **note**). Invariant: red ⇒ unsafe/incoherent; green-with-warnings ⇒
+  rebuildable-stale but structurally sound.
 - **Backup:** already wired — vector index is opt-in via `BACKUP_INCLUDE_VECTOR_INDEX` (ADR-0032 §7),
   not backed up by default.
 - **Dependencies & test posture (pinned):** new `vector` optional-dependency group in

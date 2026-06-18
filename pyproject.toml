@@ -17,6 +17,11 @@ extraction = ["pypdf>=4.0.0", "python-docx>=1.1.0", "beautifulsoup4>=4.12.0", "p
 # them, so the core install and the test suite stay dependency-light — ADR-0025).
 enrich = ["anthropic>=0.40.0"]
 enrich-openai = ["openai>=1.40.0"]
+# Phase 4d vector retrieval (ADR-0033). LanceDB is isolated to app/backend/vector_index.py and
+# scripts/reindex_vector.py and imported lazily, so the core install + default test suite stay light.
+# LanceDB-backed tests are skipped unless this extra is installed; the full suite runs under
+# `uv pip install '.[dev,vector]'`. The embedding adapter uses stdlib urllib (no HTTP dep).
+vector = ["lancedb>=0.33.0"]
 
 [tool.ruff]
 line-length = 100

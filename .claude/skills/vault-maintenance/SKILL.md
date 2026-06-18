@@ -35,7 +35,10 @@ Run the relevant scripts:
 ```bash
 python3 scripts/rebuild_index.py .
 python3 scripts/reindex_keyword.py .
-# Vector reindexing (LanceDB) lands in Phase 4d; no vector channel exists yet.
+# Vector reindex is EXPLICIT (ADR-0033) — never auto-run by the per-file hook. Run it deliberately
+# after ingest batches / before retrieval evals; it needs a configured local embedding server
+# (EMBEDDING_BASE_URL + EMBEDDING_MODEL_REF) and the `vector` extra (LanceDB) installed.
+python3 scripts/reindex_vector.py .          # optional; skip if no embedder configured
 # Runs every scripts/validate_*.py (frontmatter, wikilinks, citations, index
 # consistency) and exits non-zero on any failure. Run after reindexing so the
 # index-consistency check sees freshly generated indexes.

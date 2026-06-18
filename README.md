@@ -41,7 +41,15 @@ python3 scripts/reindex_keyword.py .
 python3 scripts/validate_index_consistency.py .
 ```
 
-Vector reindexing (LanceDB) arrives in Phase 4d; there is no vector channel yet.
+Vector search (Phase 4d) is opt-in and refreshed explicitly — install the extra and run the
+reindexer deliberately (it needs a local embedding server; it is **not** wired into the per-file
+hook):
+
+```bash
+uv pip install '.[vector]'
+python3 scripts/reindex_vector.py . --force   # needs EMBEDDING_BASE_URL + EMBEDDING_MODEL_REF
+python3 scripts/validate_vector_index.py .
+```
 
 The scaffold ships with one sample source, concept, claim, and synthesis page so the indexer and validators have something to inspect.
 
