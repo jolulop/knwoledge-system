@@ -80,6 +80,16 @@ class Settings:
     anthropic_api_key: str | None
     openai_api_key: str | None
     openai_base_url: str | None
+    # Phase 4d vector embeddings (ADR-0033). Default local_http, loopback/LAN-only; cloud is an
+    # explicit three-leg gate. embedding_model_ref is the staleness identity.
+    embedding_provider: str
+    embedding_base_url: str | None
+    embedding_model_ref: str | None
+    embedding_api_key: str | None
+    embedding_allow_cloud: bool
+    embedding_allow_model_mismatch: bool
+    embedding_dimension: int
+    embedding_distance_metric: str
     response_cache_path: Path
     app_host: str
     app_port: int
@@ -126,6 +136,15 @@ def get_settings(root: Path | None = None) -> Settings:
         anthropic_api_key=(cfg("ANTHROPIC_API_KEY", "") or None),
         openai_api_key=(cfg("OPENAI_API_KEY", "") or None),
         openai_base_url=(cfg("OPENAI_BASE_URL", "") or None),
+        embedding_provider=cfg("EMBEDDING_PROVIDER", "local_http"),
+        embedding_base_url=(cfg("EMBEDDING_BASE_URL", "") or None),
+        embedding_model_ref=(cfg("EMBEDDING_MODEL_REF", "") or None),
+        embedding_api_key=(cfg("EMBEDDING_API_KEY", "") or None),
+        embedding_allow_cloud=cfg("EMBEDDING_ALLOW_CLOUD", "").lower() in {"1", "true", "yes", "on"},
+        embedding_allow_model_mismatch=cfg("EMBEDDING_ALLOW_MODEL_MISMATCH", "").lower()
+        in {"1", "true", "yes", "on"},
+        embedding_dimension=int(cfg("EMBEDDING_DIMENSION", "1024")),
+        embedding_distance_metric=cfg("EMBEDDING_DISTANCE_METRIC", "cosine"),
         response_cache_path=resolved / "db" / "llm_cache.sqlite",
         app_host=cfg("APP_HOST", "127.0.0.1"),
         app_port=int(cfg("APP_PORT", "18000")),

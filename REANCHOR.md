@@ -59,8 +59,8 @@ critical rules and `CONTEXT.md` for the glossary.
   - `2e7db7f` Phase 4a: keyword evidence + wiki navigation index, design-locked (ADR-0032)
   - `c1f2504` docs: mark Phase 3.5 Complete in Build Spec
   - `eebf11b` Phase 3.5c-2: cross-source synthesis — completes Phase 3.5
-- **Tests/lint green:** `332 passed` (was 296; +36 from 4c + review round), ruff clean, all 9
-  validators pass. Newest test files: `tests/test_search.py` (27), `tests/test_policy.py` (6).
+- **Tests/lint green:** `369 passed` (was 332; +37 from 4d-1 embedding seam + review hardening),
+  ruff clean, all 9 validators pass. Newest test file: `tests/test_embeddings.py` (37).
 
 ## Viewing the vault (Obsidian)
 
@@ -109,13 +109,17 @@ slice 4d (vector — first slice with new deps).**
   orchestrator). Vector deferred to 4d (explicit `mode=vector`→400); evidence keyword-only until 4e
   RRF. Graph group seeded from navigation hits; `/search` graph caps come from `retrieval.yaml`
   (ADR addendum 4) while `/graph/*` endpoints keep their constants.
-- **4d** ✅ **DESIGN-LOCKED (2026-06-18 grill; no code yet)** — vector index (LanceDB + local
-  embeddings via an OpenAI-compatible `/embeddings` HTTP seam, no Torch in repo; cloud opt-in
-  security-gated). Decisions in **ADR-0033** + **`docs/Phase 4d Plan.md`**: config-ref staleness key
-  (`--force` on index-level change, re-embed changed chunks otherwise); `mode=vector` **explicit-only,
-  standalone** (RRF/auto-blend stay 4e); explicit `scripts/reindex_vector.py` (never the per-file
-  hook); validators surface vector staleness; fake embedder in tests (key-free). Slices 4d-1/2/3.
-  Next: implement 4d-1 when told "implement now".
+- **4d** — vector index, **design-locked** (ADR-0033 + `docs/Phase 4d Plan.md`, committed `e001b5f`).
+  Slices 4d-1/2/3:
+  - **4d-1** ✅ **DONE (uncommitted)** — embedding seam: `app/backend/embeddings.py`
+    (`EmbeddingClient` over stdlib `urllib`; **refuses 3xx redirects** + scheme guard; `local_http`
+    loopback/LAN host guard (lexical, documented); cloud three-leg gate + **https required**;
+    `encoding_format:float` + **base64 fallback**; **validated index permutation**, dimension +
+    **finite-numeric** checks, model cross-check; **partial config → hard error**). 8 config keys in
+    `config.py`/`.env.example`; shared `FakeEmbedder` in `tests/test_embeddings.py` (37 tests).
+    Review round (2 reviewers) applied. No index yet.
+  - **4d-2** — LanceDB `vector_index.py` core + staleness manifest + `scripts/reindex_vector.py`.
+  - **4d-3** — `GET /search` `mode=vector` channel (standalone, 503-on-unavailable) + `vector` dep group.
 - **4e** — RRF hybrid fusion (keyword+vector) + per-group caps + retrieval eval harness
   (`evals/golden_retrieval.yaml`, kept separate from Phase-5 `golden_questions.yaml`).
 

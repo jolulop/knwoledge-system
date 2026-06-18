@@ -39,18 +39,25 @@ embedding-runtime-free (a deterministic fake embedder stands in).
 - **`EmbeddingClient.embed(texts: list[str]) -> list[list[float]]`** — the only surface used by the
   indexer and the query path; mirrors the ADR-0025 `LLMClient.parse` seam. Implemented over **stdlib
   `urllib`** (timeout + bounded retry), so the seam (4d-1) adds **no** HTTP dependency to the core.
-- **Local adapter** speaks the OpenAI `/embeddings` wire to `embedding_base_url`. Owns: bounded
-  timeout + retry; **response-order preservation** (output vector *i* belongs to input text *i*);
-  **dimension validation** (every response vector length == `embedding_dimension`, else hard error);
-  **model cross-check** (response `model` vs `embedding_model_ref` → hard error unless
-  `EMBEDDING_ALLOW_MODEL_MISMATCH=true`).
-- **`local_http` URL guard:** `embedding_base_url` must be loopback or private/LAN (127.0.0.0/8, ::1,
-  `localhost`, RFC-1918, link-local, `.local`); a **public** URL under `local_http` is rejected
-  (mirrors `assert_safe_bind` in `main.py`). Off-network embedding requires the explicit cloud gate.
+- **Local adapter** speaks the OpenAI `/embeddings` wire to `embedding_base_url` (sends
+  `encoding_format: "float"`). Owns: bounded timeout + retry; **response-order preservation** via a
+  **validated `index` permutation** (all rows indexed → must equal `range(n)`, no dup/gap/negative/
+  oob; none indexed → response order; mixed → hard error); **base64 fallback** decode (servers that
+  ignore `encoding_format`); **dimension validation** + **finite-numeric values** (reject
+  NaN/Inf/non-numeric → `EmbeddingError`); **model cross-check** (`model` vs `embedding_model_ref` →
+  hard error unless `EMBEDDING_ALLOW_MODEL_MISMATCH=true`).
+- **`local_http` guards:** scheme ∈ `http`/`https`; host loopback or private/LAN (127.0.0.0/8, ::1,
+  `localhost`, RFC-1918, link-local, single-label, `.local|.lan|.internal|.home`) — public URL
+  rejected; the HTTP opener **refuses all 3xx redirects** (a gated host cannot bounce the payload
+  off-host). The host check is **lexical operator-trust, not DNS resolution** (a hostname resolving
+  to a public IP is not caught — documented limitation; redirect+scheme close the active exfil).
+  Off-network embedding requires the cloud gate. **Partial config** (one of base_url/model_ref set,
+  the other missing) is a hard error; fully blank → unavailable.
 - **Cloud adapter** (opt-in): same wire, gated by **all three** of `embedding_provider=cloud_*`,
   `EMBEDDING_ALLOW_CLOUD=true`, and a non-empty **dedicated** `embedding_api_key` (never the implicit
-  `OPENAI_API_KEY`). Any missing leg → refusal with a clear error. Exports source text → ships with a
-  security note (ADR-0026, `policies/security.yaml`); never default.
+  `OPENAI_API_KEY`), **and requires an `https://` base_url** (no plaintext key/text). Any missing leg
+  → refusal with a clear error. Stays the *same* HTTP adapter (no separate cloud SDK). Exports source
+  text → ships with a security note (ADR-0026, `policies/security.yaml`); never default.
 - **Config keys** (env/`.env`, dependency-free layer): `embedding_provider` (`local_http` default),
   `embedding_base_url`, `embedding_model_ref`, `embedding_api_key` (cloud only), `EMBEDDING_ALLOW_CLOUD`,
   `EMBEDDING_ALLOW_MODEL_MISMATCH`, `embedding_dimension`, `embedding_distance_metric` (default

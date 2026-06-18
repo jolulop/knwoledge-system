@@ -44,19 +44,24 @@ The cloud path runs **only** when **all three** hold: `embedding_provider` is a 
 is a refusal at startup/first embed with a clear error — there is no implicit cloud path. This
 mirrors the existing `assert_safe_bind` / `KS_ALLOW_INSECURE_BIND` acknowledgment pattern.
 
-**`local_http` is loopback/LAN-only.** Under `local_http`, `embedding_base_url` must resolve to a
-loopback or private/LAN address (127.0.0.0/8, ::1, `localhost`, RFC-1918, link-local, `.local`); a
-**public** URL under `local_http` is **rejected** — exporting source text off the local network is
-exactly what the cloud gate (with its explicit acknowledgment + security docs) exists to govern. The
-default install and the test suite stay key-free and embedding-runtime-free.
+**`local_http` is loopback/LAN-only, and the HTTP path refuses redirects + non-http(s) schemes.**
+Under `local_http`, `embedding_base_url` must be a loopback or private/LAN host (127.0.0.0/8, ::1,
+`localhost`, RFC-1918, link-local, single-label, `.local|.lan|.internal|.home`); a **public** URL
+under `local_http` is **rejected**, and the embedding HTTP opener **refuses all 3xx redirects** (so a
+gated host cannot bounce the source-text payload off-host) and only `http`/`https` schemes are
+allowed (cloud requires `https`). The host check is **lexical operator-trust, not DNS resolution** —
+a hostname that resolves to a public IP is not caught; operators pin a trusted local URL. Exporting
+source text off the local network is exactly what the cloud gate (with its explicit acknowledgment +
+security docs) exists to govern. The default install and the test suite stay key-free and
+embedding-runtime-free.
 
 **2. The vector store is LanceDB; vector hits are the *same* structured-citation object as keyword
 evidence.** LanceDB (embedded, serverless, file-based) fits the local-first posture (Build Spec
 allows "LanceDB or ChromaDB"). The index lives under `indexes/vector/` — derived, gitignored,
-regenerable (ADR-0032 §7). Each row stores the **vector** plus the full citation metadata mirroring
-the evidence chunk (`source_id`, advisory `chunk_id`, `ordinal`, `char_start`, `char_end`, `page`,
-`page_end`, `section`, `heading_path`, `table_reference`, `sheet_reference`) **and** the per-row
-staleness fields (decision 3). A vector hit therefore returns the identical evidence object as a
+regenerable (ADR-0032 §7). Each row stores the **vector** plus the **full `EvidenceHit` citation
+field set** mirroring the evidence chunk (`source_id`, advisory `chunk_id`, `ordinal`, `kind`,
+`char_start`, `char_end`, `page`, `page_end`, `section`, `heading_path`, `table_reference`,
+`sheet_reference`) **and** the per-row staleness fields (decision 3). A vector hit therefore returns the identical evidence object as a
 keyword hit — authoritative citation stays `(source_id, char_start, char_end)` — so vector "joins
 the same response contract without changing the shape" (ADR-0032 decision 9).
 

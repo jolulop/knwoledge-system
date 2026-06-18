@@ -429,7 +429,7 @@ Agents may propose and write content, but deterministic scripts must enforce str
 | Validate frontmatter | Any wiki page changed | Ensure required fields exist. |
 | Validate wikilinks | Any wiki page changed | Ensure wikilinks resolve to existing pages or create review item. |
 | Validate citations | Any generated claim or answer | Ensure cited source exists. |
-| Reindex changed file | Any normalized/wiki Markdown changed | Update keyword/vector/graph indexes. |
+| Reindex changed file | Any normalized/wiki Markdown changed | Update keyword indexes. (ADR-0032 §7 / ADR-0033 §5 supersede "vector/graph": the per-file hook reindexes only the cheap keyword index; the **vector** index is refreshed by an explicit `reindex_vector.py` — embedding is GPU/latency-heavy and must not depend on the embedding server being up on every edit.) |
 
 ---
 
