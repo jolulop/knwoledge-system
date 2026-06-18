@@ -17,19 +17,25 @@ share a relevance scale (ADR-0032 decision 6). The pieces:
   subgraph (multi-seed BFS at the policy depth budget), applies retention-aware status filters and
   per-group caps, and assembles the grouped response.
 
-Scope: keyword/navigation/graph only. **Vector is Phase 4d** (rejected at the endpoint), and **RRF
-fusion is Phase 4e** — evidence is keyword-only here, each hit carrying ``retrieval_path:
-["keyword"]`` so 4e can extend it.
+Scope: keyword/navigation/graph + **explicit `mode=vector`** (standalone vector evidence, Phase 4d).
+**RRF fusion and the `mode=auto` keyword+vector blend are Phase 4e** — so `auto` evidence is
+keyword-only here, each hit carrying ``retrieval_path: ["keyword"]`` (or ``["vector"]`` for explicit
+vector) so 4e can extend it.
 """
 from __future__ import annotations
 
 import json
 import re
 import sqlite3
-from typing import Any
+from typing import Any, Callable
 
 from app.backend import graph_read
 from app.backend.policy import RetrievalPolicy
+
+# Injected by the endpoint for mode=vector: returns LanceDB rows (citation fields + `_distance`).
+# Kept as a callable so search.py never imports vector_index/lancedb (the optional dependency stays
+# isolated to vector_index.py + reindex_vector.py).
+VectorSearchFn = Callable[..., list[dict[str, Any]]]
 
 VALID_MODES = frozenset({"keyword", "vector", "graph", "navigation", "auto"})
 # Default retention window (ADR-0032 decision 8): deprecated content stays searchable; everything
@@ -300,6 +306,67 @@ def search_navigation(
 # --------------------------------------------------------------------------- channel: graph
 
 
+def _vector_snippet(text: str, *, limit: int = 240) -> str:
+    text = " ".join((text or "").split())
+    return text if len(text) <= limit else text[:limit].rstrip() + "…"
+
+
+def _vector_hit(row: dict[str, Any], source_status: str | None) -> dict[str, Any]:
+    """Map a LanceDB row (full citation fields + `_distance`) to the keyword-identical evidence hit."""
+    return {
+        "source_id": row["source_id"],
+        "chunk_id": row.get("chunk_id"),
+        "ordinal": row.get("ordinal"),
+        "kind": row.get("kind", ""),
+        "section": row.get("section"),
+        "heading_path": json.loads(row["heading_path"]) if row.get("heading_path") else [],
+        "char_start": row["char_start"],
+        "char_end": row["char_end"],
+        "page": row.get("page"),
+        "page_end": row.get("page_end"),
+        "table_reference": row.get("table_reference"),
+        "sheet_reference": row.get("sheet_reference"),
+        "source_status": source_status,
+        "snippet": _vector_snippet(row.get("text", "")),
+        "score": float(row["_distance"]),
+        "retrieval_path": ["vector"],
+    }
+
+
+def search_vector(
+    vector_search: VectorSearchFn,
+    keyword_conn: sqlite3.Connection | None,
+    *,
+    source_id: str | None,
+    source_statuses: tuple[str, ...],
+    prefusion_limit: int,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Standalone vector evidence (Phase 4d): ANN rows → keyword-identical hits, retention-filtered.
+
+    Honors the same ``source_id`` filter and retention window as keyword evidence (ADR-0033): a hit
+    whose source is the wrong source, or archived/deleted/unknown, is excluded unless asked for.
+    Deterministic order: distance ascending, tie-break ``(source_id, ordinal, chunk_id)``.
+    """
+    rows = vector_search(limit=prefusion_limit)
+    status_map = (
+        _source_status_map(keyword_conn, sorted({r["source_id"] for r in rows}))
+        if keyword_conn is not None else {}
+    )
+    hits: list[dict[str, Any]] = []
+    for row in sorted(rows, key=lambda r: (r["_distance"], r["source_id"], r.get("ordinal") or 0,
+                                           r.get("chunk_id") or "")):
+        if source_id and row["source_id"] != source_id:  # defensive: honor the source_id filter
+            continue
+        sstatus = status_map.get(row["source_id"])
+        if not _status_allowed(sstatus, source_statuses):
+            continue
+        hits.append(_vector_hit(row, sstatus))
+        if len(hits) >= limit:
+            break
+    return hits
+
+
 def _empty_graph(depth: int) -> dict[str, Any]:
     return {"seeds": [], "nodes": [], "edges": [], "depth": depth, "truncated": False}
 
@@ -359,6 +426,7 @@ def run_search(
     evidence_limit: int | None = None,
     navigation_limit: int | None = None,
     graph_limit: int | None = None,
+    vector_search: VectorSearchFn | None = None,
 ) -> dict[str, Any]:
     """Run the routed channels and assemble the grouped ``/search`` response."""
     modes, shape = route(mode, q, policy)
@@ -400,6 +468,14 @@ def run_search(
         graph_result = graph_group(
             graph_conn, nav_hits, shape=shape, depth=depth, edge_statuses=edge_statuses,
             node_statuses=node_statuses, node_types=node_types, node_cap=node_cap, edge_cap=edge_cap,
+        )
+
+    # Vector evidence is explicit-only in 4d (standalone; RRF/auto-blend is 4e). The query is
+    # embedded from the raw NL text by the endpoint, which supplies `vector_search`.
+    if "vector" in modes and vector_search is not None:
+        evidence = search_vector(
+            vector_search, keyword_conn, source_id=source_id, source_statuses=source_statuses,
+            prefusion_limit=prefusion, limit=ev_limit,
         )
 
     counts = {

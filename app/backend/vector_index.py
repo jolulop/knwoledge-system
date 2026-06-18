@@ -362,15 +362,26 @@ def table_exists(root: Path) -> bool:
     return True
 
 
-def search(root: Path, query_vector: list[float], *, limit: int, metric: str) -> list[dict[str, Any]]:
+def search(
+    root: Path,
+    query_vector: list[float],
+    *,
+    limit: int,
+    metric: str,
+    source_id: str | None = None,
+) -> list[dict[str, Any]]:
     """ANN search the vector index; rows carry the full citation fields + `_distance` (4d-3 maps to
-    the evidence shape). Deterministic tie-break is applied by the caller (source_id, ordinal)."""
+    the evidence shape). ``source_id`` pre-filters at the LanceDB level so the limit is not spent on
+    other sources. Deterministic tie-break is applied by the caller (source_id, ordinal, chunk_id)."""
     import lancedb
 
     live = Path(root) / VECTOR_RELDIR
     db = lancedb.connect(str(live))
     tbl = db.open_table(TABLE_NAME)
-    return tbl.search(query_vector).metric(metric).limit(limit).to_list()
+    query = tbl.search(query_vector).metric(metric)
+    if source_id:
+        query = query.where("source_id = '" + source_id.replace("'", "''") + "'")
+    return query.limit(limit).to_list()
 
 
 @dataclass

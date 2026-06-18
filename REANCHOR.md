@@ -59,10 +59,9 @@ critical rules and `CONTEXT.md` for the glossary.
   - `2e7db7f` Phase 4a: keyword evidence + wiki navigation index, design-locked (ADR-0032)
   - `c1f2504` docs: mark Phase 3.5 Complete in Build Spec
   - `eebf11b` Phase 3.5c-2: cross-source synthesis — completes Phase 3.5
-- **Tests/lint green:** `390 passed` (was 369; +21 from 4d-2 vector index + review round), ruff
-  clean, **10** validators pass (added `validate_vector_index.py`). Newest test file:
-  `tests/test_vector_index.py` (20, LanceDB-gated via `importorskip`). **LanceDB installed in the
-  venv** (`vector` extra; `uv.lock` updated).
+- **Tests/lint green:** `402 passed` (was 390; +12 from 4d-3 `mode=vector` + review round), ruff
+  clean, **10** validators pass. **LanceDB installed in the venv** (`vector` extra; `uv.lock` updated) — the
+  full vector suite runs; a bare `.[dev]` install skips it via `importorskip`.
 
 ## Viewing the vault (Obsidian)
 
@@ -130,7 +129,19 @@ slice 4d (vector — first slice with new deps).**
     (lancedb) + `uv.lock`; lazy import (isolated from app startup/`/search`).
     Tests `tests/test_vector_index.py` (20, `importorskip`). **2-reviewer round applied** (guardrails
     + Q1 validator key / Q2 swap rollback / Q3 merge_insert).
-  - **4d-3** — `GET /search` `mode=vector` channel (standalone, retention join, 503-on-unavailable).
+  - **4d-3** ✅ **DONE (uncommitted)** — `GET /search` `mode=vector` channel: embeds the raw NL query
+    (bounded), ANN-searches LanceDB, returns **standalone** `evidence[]` (`retrieval_path:["vector"]`,
+    same `EvidenceHit` shape incl. `kind`+snippet), **same source-status retention** as keyword
+    (excludes archived/deleted/unknown by default), deterministic order (distance, tie-break
+    source_id+ordinal). **503** when embedder unconfigured/down or index missing/incoherent; `auto`
+    unchanged (vector joins `auto` via RRF in 4e). `search.py` stays lancedb-free (injected
+    `vector_search` callable); `_build_vector_search` in `main.py` owns the embed + 503 gating.
+    **Review round applied:** `mode=vector` honors `source_id` (LanceDB `where` pre-filter + guard);
+    **strict serving posture** — 503 on *any* chunk drift (stale anchors unsafe) and when the
+    keyword/nav index is absent (retention unverifiable); `chunk_id` added to the order tie-break.
+    Tests: vector channel in `test_search.py` (6) + `/search?mode=vector` in `test_api.py` (6).
+- **Phase 4d COMPLETE** (4d-1 seam + 4d-2 index + 4d-3 `/search`). **Next: 4e** — RRF fusion of
+  keyword+vector, `mode=auto` blending vector, `evals/golden_retrieval.yaml` eval harness.
 - **4e** — RRF hybrid fusion (keyword+vector) + per-group caps + retrieval eval harness
   (`evals/golden_retrieval.yaml`, kept separate from Phase-5 `golden_questions.yaml`).
 

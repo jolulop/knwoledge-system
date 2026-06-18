@@ -22,8 +22,9 @@ budgets:
   max_answer_unsourced_claims: 0
 # Phase 4c deterministic router (ADR-0032 decision 4). The query *shape* is detected in code
 # (deterministic signal matching against Build Spec §8.2); this maps a detected shape to a set of
-# retrieval modes. `mode=auto` uses these; an explicit `mode=` forces a single path. Vector is
-# deferred to Phase 4d, so no rule emits it yet.
+# retrieval modes. `mode=auto` uses these; an explicit `mode=` forces a single path. Explicit
+# `mode=vector` works (Phase 4d), but no `auto` rule emits vector yet — vector joins `auto` via RRF
+# fusion in Phase 4e.
 router:
   default_mode_set:          # conceptual default when no specific shape matches
     - keyword

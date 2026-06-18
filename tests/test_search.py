@@ -200,6 +200,75 @@ def test_no_graph_conn_yields_empty_graph_group(vault):
     assert res["graph"]["nodes"] == [] and res["no_results"] is True
 
 
+# --- mode=vector channel (4d): standalone evidence, retention-filtered, deterministic ---
+
+
+def _vector_rows():
+    # LanceDB-like rows: full citation fields + _distance. SRC_OK is active, SRC_ARCH archived.
+    def row(sid, dist, text):
+        return {"_distance": dist, "source_id": sid, "chunk_id": f"{sid}::0000", "ordinal": 0,
+                "kind": "prose", "section": None, "heading_path": json.dumps([]), "char_start": 0,
+                "char_end": len(text), "page": 1, "page_end": 1, "table_reference": None,
+                "sheet_reference": None, "text": text}
+    return [row(SRC_OK, 0.10, "synergy capture drives value"), row(SRC_ARCH, 0.20, "old synergy")]
+
+
+def _vrun(vault, *, source_statuses=search.RETENTION_DEFAULT_STATUSES, rows=None, searcher=None):
+    kconn, _ = vault
+    fn = searcher if searcher is not None else (lambda *, limit: rows if rows is not None else _vector_rows())
+    return search.run_search(q="synergy", mode="vector", keyword_conn=kconn, graph_conn=None,
+                             policy=RetrievalPolicy(), source_statuses=source_statuses, vector_search=fn)
+
+
+def test_vector_mode_returns_standalone_evidence(vault):
+    res = _vrun(vault)
+    assert res["retrieval_path"] == ["vector"]
+    hit = res["evidence"][0]
+    assert hit["retrieval_path"] == ["vector"]
+    assert hit["source_id"] == SRC_OK and hit["source_status"] == "active"
+    # Identical EvidenceHit shape (kind, anchors, snippet).
+    assert hit["kind"] == "prose" and hit["char_start"] == 0 and hit["snippet"]
+    assert hit["score"] == 0.10
+
+
+def test_vector_mode_retention_excludes_archived(vault):
+    sids = {h["source_id"] for h in _vrun(vault)["evidence"]}
+    assert SRC_OK in sids and SRC_ARCH not in sids  # archived excluded by default
+    sids2 = {h["source_id"] for h in _vrun(vault, source_statuses=("active", "archived"))["evidence"]}
+    assert SRC_ARCH in sids2
+
+
+def test_vector_mode_deterministic_distance_order(vault):
+    rows = list(reversed(_vector_rows()))  # hand it unsorted
+    scores = [h["score"] for h in _vrun(vault, source_statuses=("active", "archived"), rows=rows)["evidence"]]
+    assert scores == sorted(scores)  # distance ascending
+
+
+def test_vector_mode_no_searcher_is_empty(vault):
+    res = search.run_search(q="synergy", mode="vector", keyword_conn=vault[0], graph_conn=None,
+                            policy=RetrievalPolicy(), vector_search=None)
+    assert res["no_results"] is True and res["evidence"] == []
+
+
+def test_vector_mode_honors_source_id_filter(vault):
+    res = search.run_search(
+        q="synergy", mode="vector", keyword_conn=vault[0], graph_conn=None, policy=RetrievalPolicy(),
+        source_id=SRC_OK, source_statuses=("active", "archived"),
+        vector_search=lambda *, limit: _vector_rows(),
+    )
+    assert {h["source_id"] for h in res["evidence"]} == {SRC_OK}  # SRC_ARCH excluded by source_id
+
+
+def test_vector_mode_tiebreak_by_chunk_id(vault):
+    def row(cid):
+        return {"_distance": 0.1, "source_id": SRC_OK, "chunk_id": cid, "ordinal": 0, "kind": "prose",
+                "section": None, "heading_path": json.dumps([]), "char_start": 0, "char_end": 1,
+                "page": 1, "page_end": 1, "table_reference": None, "sheet_reference": None, "text": "t"}
+    res = search.run_search(q="x", mode="vector", keyword_conn=vault[0], graph_conn=None,
+                            policy=RetrievalPolicy(), vector_search=lambda *, limit: [row("z"), row("a")])
+    assert [h["chunk_id"] for h in res["evidence"]] == ["a", "z"]  # equal distance -> chunk_id tie-break
+
+
 # --- golden Build Spec §8.2 examples (topic extraction makes routed NL queries work) ---
 
 

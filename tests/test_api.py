@@ -343,7 +343,8 @@ def test_search_returns_grouped_evidence_and_graph(client, tmp_path):
 
 def test_search_errors(client, tmp_path):
     _build_search_corpus(tmp_path)
-    assert client.get("/search?q=x&mode=vector").status_code == 400
+    # mode=vector is valid now (4d) but unavailable with no embedder configured -> 503.
+    assert client.get("/search?q=x&mode=vector").status_code == 503
     assert client.get("/search?q=x&mode=bogus").status_code == 400
     assert client.get("/search?q=x&source_status=nope").status_code == 400
     assert client.get("/search?q=x&edge_status=nope").status_code == 400
@@ -358,6 +359,115 @@ def test_search_without_index_is_structural_empty(client):
     body = client.get("/search?q=synergy").json()
     assert body["no_results"] is True
     assert body["counts"] == {"evidence": 0, "navigation": 0, "graph": 0}
+
+
+class _FakeEmbedder:
+    dimension = 8
+
+    def embed(self, texts):
+        import hashlib
+        return [
+            [hashlib.sha256(t.encode("utf-8")).digest()[i % 32] / 255.0 for i in range(8)]
+            for t in texts
+        ]
+
+
+def _configure_vector(tmp_path, client, monkeypatch):
+    """Build keyword + vector indexes and point settings at a fake embedder. Returns the source id."""
+    import dataclasses
+
+    from app.backend import keyword_index, vector_index
+
+    src = "src_ffffffffffffffff"
+    text = "synergy capture is central to post-merger integration"
+    chunks = tmp_path / "normalized" / "chunks" / f"{src}.jsonl"
+    chunks.parent.mkdir(parents=True, exist_ok=True)
+    chunks.write_text(json.dumps({
+        "chunk_id": f"{src}::0000", "source_id": src, "ordinal": 0, "kind": "prose",
+        "heading_path": [], "section": None, "text": text, "char_start": 0, "char_end": len(text),
+        "page": 1, "page_end": 1, "table_reference": None, "sheet_reference": None,
+    }) + "\n", encoding="utf-8")
+    sp = tmp_path / "wiki" / "Sources" / f"{src}.md"
+    sp.parent.mkdir(parents=True, exist_ok=True)
+    sp.write_text(f"---\ntype: source\nsource_id: {src}\ntitle: Deck\nstatus: active\nlanguage: en\n"
+                  f"---\n\n# Deck\n\n> [!summary]\n> s\n", encoding="utf-8")
+    keyword_index.reindex(tmp_path, force=True)
+    vector_index.reindex(tmp_path, _FakeEmbedder(), embedding_model_ref="bge-m3",
+                         distance_metric="cosine", force=True)
+    monkeypatch.setattr(main_module, "settings", dataclasses.replace(
+        main_module.settings, embedding_base_url="http://127.0.0.1:8080/v1",
+        embedding_model_ref="bge-m3", embedding_dimension=8))
+    monkeypatch.setattr(main_module.embeddings, "client_from_settings", lambda s, **kw: _FakeEmbedder())
+    return src
+
+
+def test_search_vector_mode_returns_evidence(client, tmp_path, monkeypatch):
+    src = _configure_vector(tmp_path, client, monkeypatch)
+    body = client.get("/search?q=synergy%20capture&mode=vector").json()
+    assert body["retrieval_path"] == ["vector"]
+    assert body["counts"]["evidence"] >= 1
+    hit = body["evidence"][0]
+    assert hit["source_id"] == src and hit["retrieval_path"] == ["vector"]
+    assert "kind" in hit and hit["snippet"]
+
+
+def test_search_vector_503_without_index(client, tmp_path, monkeypatch):
+    # Embedder configured but no vector index built -> controlled 503.
+    import dataclasses
+    monkeypatch.setattr(main_module, "settings", dataclasses.replace(
+        main_module.settings, embedding_base_url="http://127.0.0.1:8080/v1",
+        embedding_model_ref="bge-m3", embedding_dimension=8))
+    monkeypatch.setattr(main_module.embeddings, "client_from_settings", lambda s, **kw: _FakeEmbedder())
+    assert client.get("/search?q=x&mode=vector").status_code == 503
+
+
+def test_search_auto_stays_keyword_only_with_vector_configured(client, tmp_path, monkeypatch):
+    _configure_vector(tmp_path, client, monkeypatch)
+    body = client.get("/search?q=synergy%20capture&mode=auto").json()
+    # 4d: auto never runs vector (RRF/auto-blend is 4e).
+    assert "vector" not in body["retrieval_path"]
+
+
+def test_search_vector_honors_source_id(client, tmp_path, monkeypatch):
+    src = _configure_vector(tmp_path, client, monkeypatch)
+    body = client.get(f"/search?q=synergy&mode=vector&source_id={src}").json()
+    assert body["evidence"] and all(h["source_id"] == src for h in body["evidence"])
+    other = client.get("/search?q=synergy&mode=vector&source_id=src_nonexistent00").json()
+    assert other["evidence"] == []  # no rows for a different source
+
+
+def test_search_vector_503_on_chunk_drift(client, tmp_path, monkeypatch):
+    src = _configure_vector(tmp_path, client, monkeypatch)
+    # Edit the chunk file after indexing -> the vector rows are stale -> refuse to serve.
+    chunks = tmp_path / "normalized" / "chunks" / f"{src}.jsonl"
+    chunks.write_text(json.dumps({
+        "chunk_id": f"{src}::0000", "source_id": src, "ordinal": 0, "kind": "prose",
+        "heading_path": [], "section": None, "text": "EDITED — anchors moved", "char_start": 0,
+        "char_end": 22, "page": 1, "page_end": 1, "table_reference": None, "sheet_reference": None,
+    }) + "\n", encoding="utf-8")
+    assert client.get("/search?q=synergy&mode=vector").status_code == 503
+
+
+def test_search_vector_503_when_keyword_index_missing(client, tmp_path, monkeypatch):
+    import dataclasses
+
+    from app.backend import vector_index
+    # A coherent vector index but NO keyword index -> source status unverifiable -> 503.
+    src = "src_gggggggggggggggg"
+    chunks = tmp_path / "normalized" / "chunks" / f"{src}.jsonl"
+    chunks.parent.mkdir(parents=True, exist_ok=True)
+    chunks.write_text(json.dumps({
+        "chunk_id": f"{src}::0000", "source_id": src, "ordinal": 0, "kind": "prose",
+        "heading_path": [], "section": None, "text": "t", "char_start": 0, "char_end": 1,
+        "page": 1, "page_end": 1, "table_reference": None, "sheet_reference": None,
+    }) + "\n", encoding="utf-8")
+    vector_index.reindex(tmp_path, _FakeEmbedder(), embedding_model_ref="bge-m3",
+                         distance_metric="cosine", force=True)
+    monkeypatch.setattr(main_module, "settings", dataclasses.replace(
+        main_module.settings, embedding_base_url="http://127.0.0.1:8080/v1",
+        embedding_model_ref="bge-m3", embedding_dimension=8))
+    monkeypatch.setattr(main_module.embeddings, "client_from_settings", lambda s, **kw: _FakeEmbedder())
+    assert client.get("/search?q=x&mode=vector").status_code == 503
 
 
 def test_assert_safe_bind():

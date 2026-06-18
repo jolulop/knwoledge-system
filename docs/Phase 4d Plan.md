@@ -1,6 +1,7 @@
 # Phase 4d Plan — Vector retrieval (local-embedding semantic channel)
 
-**Status:** Planned (design-locked 2026-06-18 via grill gate). No code yet.
+**Status:** ✅ **Implemented** (design-locked 2026-06-18; slices 4d-1/2/3 complete). RRF fusion +
+`mode=auto` blend remain Phase 4e.
 **Governing ADR:** [ADR-0033](adr/0033-phase-4d-vector-retrieval.md). Read it first — this plan is
 the operational breakdown of its decisions.
 **Predecessors:** 4a (keyword + navigation index), 4b (graph read API), 4c (router + `GET /search`).
@@ -117,13 +118,16 @@ embedding-runtime-free (a deterministic fake embedder stands in).
 ## 5. `GET /search` vector channel (ADR-0033 decision 4)
 
 - **`mode=vector` (explicit only):** embed the **raw NL query** (length-bounded; bypasses the 4c FTS
-  tokenizer), ANN-search LanceDB by `distance_metric`, apply the same **retention** filter
-  (`source_status` via the navigation join) and per-group `evidence_limit`/caps as keyword evidence,
-  and return **standalone** `evidence[]` with `retrieval_path: ["vector"]`. Response shape unchanged.
+  tokenizer), ANN-search LanceDB by `distance_metric`, apply the **same `source_id` filter +
+  retention** (`source_status` via the navigation join) and per-group `evidence_limit`/caps as keyword
+  evidence, and return **standalone** `evidence[]` with `retrieval_path: ["vector"]`. Response shape
+  unchanged. Deterministic order: distance, tie-break `(source_id, ordinal, chunk_id)`.
 - **`mode=auto` unchanged in 4d** — keyword-only evidence; vector joins `auto` via RRF in 4e.
-- **Unavailable/stale handling:** explicit `mode=vector` returns **503 / clear unavailable** when the
-  embedder is unconfigured or down, or the vector index is missing/stale (controlled, never a silent
-  empty). `mode=auto` is unaffected.
+- **Strict serving posture (503, never a silent empty):** explicit `mode=vector` returns **503** when
+  the `vector` extra is absent, the embedder is unconfigured/down, the vector index is
+  missing/incoherent, **any chunk-level drift exists** (stale anchors are unsafe to cite — stricter
+  than the maintenance validator, which only warns on drift), or **the keyword/navigation index is
+  absent** (source-status retention cannot be verified). `mode=auto` is unaffected.
 - Reuses the 4c retention/cap machinery; the vector row's citation fields make the hit identical in
   shape to a keyword hit.
 
