@@ -228,7 +228,9 @@ def test_vector_mode_returns_standalone_evidence(vault):
     assert hit["source_id"] == SRC_OK and hit["source_status"] == "active"
     # Identical EvidenceHit shape (kind, anchors, snippet).
     assert hit["kind"] == "prose" and hit["char_start"] == 0 and hit["snippet"]
-    assert hit["score"] == 0.10
+    # Single-channel hit still carries `channels` (native distance) + an RRF top-level score.
+    assert hit["channels"]["vector"] == {"rank": 1, "score": 0.10}
+    assert hit["score"] == pytest.approx(1.0 / (60 + 1))
 
 
 def test_vector_mode_retention_excludes_archived(vault):
@@ -238,10 +240,12 @@ def test_vector_mode_retention_excludes_archived(vault):
     assert SRC_ARCH in sids2
 
 
-def test_vector_mode_deterministic_distance_order(vault):
-    rows = list(reversed(_vector_rows()))  # hand it unsorted
-    scores = [h["score"] for h in _vrun(vault, source_statuses=("active", "archived"), rows=rows)["evidence"]]
-    assert scores == sorted(scores)  # distance ascending
+def test_vector_mode_closest_first_order(vault):
+    rows = list(reversed(_vector_rows()))  # hand it unsorted (farthest first)
+    ev = _vrun(vault, source_statuses=("active", "archived"), rows=rows)["evidence"]
+    dists = [h["channels"]["vector"]["score"] for h in ev]
+    assert dists == sorted(dists)  # closest (smallest distance) first
+    assert [h["channels"]["vector"]["rank"] for h in ev] == [1, 2]  # rank reflects channel order
 
 
 def test_vector_mode_no_searcher_is_empty(vault):
@@ -259,14 +263,86 @@ def test_vector_mode_honors_source_id_filter(vault):
     assert {h["source_id"] for h in res["evidence"]} == {SRC_OK}  # SRC_ARCH excluded by source_id
 
 
-def test_vector_mode_tiebreak_by_chunk_id(vault):
-    def row(cid):
-        return {"_distance": 0.1, "source_id": SRC_OK, "chunk_id": cid, "ordinal": 0, "kind": "prose",
-                "section": None, "heading_path": json.dumps([]), "char_start": 0, "char_end": 1,
-                "page": 1, "page_end": 1, "table_reference": None, "sheet_reference": None, "text": "t"}
+def test_vector_mode_equal_distance_deterministic_by_anchor(vault):
+    # Distinct chunks (different char ranges) with equal distance -> ordered by (ordinal, char_start).
+    def row(ordinal, start):
+        return {"_distance": 0.1, "source_id": SRC_OK, "chunk_id": f"{SRC_OK}::{ordinal:04d}",
+                "ordinal": ordinal, "kind": "prose", "section": None, "heading_path": json.dumps([]),
+                "char_start": start, "char_end": start + 5, "page": 1, "page_end": 1,
+                "table_reference": None, "sheet_reference": None, "text": "t"}
     res = search.run_search(q="x", mode="vector", keyword_conn=vault[0], graph_conn=None,
-                            policy=RetrievalPolicy(), vector_search=lambda *, limit: [row("z"), row("a")])
-    assert [h["chunk_id"] for h in res["evidence"]] == ["a", "z"]  # equal distance -> chunk_id tie-break
+                            policy=RetrievalPolicy(), vector_search=lambda *, limit: [row(2, 40), row(0, 0)])
+    assert [h["ordinal"] for h in res["evidence"]] == [0, 2]
+
+
+# --- RRF fusion (the fuser directly; the auto blend wiring is 4e-2) ---
+
+
+def test_rrf_fuses_both_channels_dedup_by_citation():
+    def kw(sid, start, bm25):
+        return {"source_id": sid, "chunk_id": f"{sid}::x", "ordinal": 0, "kind": "prose",
+                "section": None, "heading_path": "[]", "char_start": start, "char_end": start + 5,
+                "page": 1, "page_end": 1, "table_reference": None, "sheet_reference": None,
+                "source_status": "active", "snippet": "s", "score": bm25, "retrieval_path": ["keyword"]}
+    def vec(sid, start, dist):
+        h = kw(sid, start, dist)
+        h["retrieval_path"] = ["vector"]
+        return h
+    # SRC_A@0 is found by both channels (same citation key) -> merges; SRC_B@0 keyword-only.
+    fused = search.fuse_evidence(
+        {"keyword": [kw("src_a", 0, -4.0), kw("src_b", 0, -3.0)], "vector": [vec("src_a", 0, 0.2)]},
+        k=60, limit=10,
+    )
+    by_src = {h["source_id"]: h for h in fused}
+    a = by_src["src_a"]
+    assert a["retrieval_path"] == ["keyword", "vector"]
+    assert a["channels"] == {"keyword": {"rank": 1, "score": -4.0}, "vector": {"rank": 1, "score": 0.2}}
+    assert a["score"] == pytest.approx(1 / 61 + 1 / 61)        # found at rank 1 in both
+    assert by_src["src_b"]["channels"] == {"keyword": {"rank": 2, "score": -3.0}}
+    assert a["score"] > by_src["src_b"]["score"]                # dual-channel hit ranks above
+    assert [h["source_id"] for h in fused] == ["src_a", "src_b"]
+
+
+def test_rrf_is_deterministic():
+    ch = {"keyword": [_ehit("src_a", 0, -1.0)]}
+    assert search.fuse_evidence(ch, k=60, limit=5) == search.fuse_evidence(ch, k=60, limit=5)
+
+
+def _ehit(sid, start, score, *, channel="keyword", snippet="s", chunk_id="c", ordinal=0):
+    return {"source_id": sid, "chunk_id": chunk_id, "ordinal": ordinal, "kind": "prose",
+            "section": None, "heading_path": "[]", "char_start": start, "char_end": start + 5,
+            "page": 1, "page_end": 1, "table_reference": None, "sheet_reference": None,
+            "source_status": "active", "snippet": snippet, "score": score, "retrieval_path": [channel]}
+
+
+def test_rrf_dedups_same_channel_best_rank():
+    # The same citation key appears twice in ONE channel (corrupt index) -> counted once, best rank.
+    fused = search.fuse_evidence({"keyword": [_ehit("src_a", 0, -4.0), _ehit("src_a", 0, -3.0)]},
+                                 k=60, limit=10)
+    assert len(fused) == 1
+    assert fused[0]["channels"]["keyword"] == {"rank": 1, "score": -4.0}     # first/best rank kept
+    assert fused[0]["score"] == pytest.approx(1 / 61)                         # counted once, not twice
+
+
+def test_rrf_field_precedence_keyword_wins(vault):
+    kw = _ehit("src_a", 0, -4.0, snippet="KEYWORD snippet", chunk_id="kw_chunk")
+    vec = _ehit("src_a", 0, 0.2, channel="vector", snippet="vector text", chunk_id="vec_chunk")
+    fused = search.fuse_evidence({"keyword": [kw], "vector": [vec]}, k=60, limit=5)
+    h = fused[0]
+    assert h["snippet"] == "KEYWORD snippet" and h["chunk_id"] == "kw_chunk"  # keyword display wins
+    assert h["channels"]["keyword"]["score"] == -4.0 and h["channels"]["vector"]["score"] == 0.2
+
+
+def test_rrf_limit_truncates_after_ordering():
+    hits = [_ehit("src_a", 0, -1.0), _ehit("src_b", 0, -2.0), _ehit("src_c", 0, -3.0)]
+    fused = search.fuse_evidence({"keyword": hits}, k=60, limit=2)
+    assert [h["source_id"] for h in fused] == ["src_a", "src_b"]              # top-2 by RRF rank
+
+
+def test_rrf_k_clamped_never_divides_by_zero():
+    h = _ehit("src_a", 0, -1.0)
+    assert search.fuse_evidence({"keyword": [h]}, k=0, limit=5)               # no ZeroDivisionError
+    assert search.fuse_evidence({"keyword": [h]}, k=-5, limit=5)
 
 
 # --- golden Build Spec §8.2 examples (topic extraction makes routed NL queries work) ---

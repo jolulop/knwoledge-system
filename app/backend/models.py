@@ -210,6 +210,13 @@ class GraphNeighborhoodResponse(BaseModel):
 # --- Phase 4c GET /search grouped response (ADR-0032 decisions 4, 8) ---------
 
 
+class ChannelRank(BaseModel):
+    # Per-channel debug detail on a fused hit (ADR-0032 addendum 7). `rank` is 1-based within the
+    # channel; `score` is the channel-native score (keyword=BM25; vector=distance, lower is better).
+    rank: int
+    score: float
+
+
 class EvidenceHit(BaseModel):
     # Authoritative citation is (source_id, char_start, char_end) + optional page/section/table
     # (ADR-0019/0020); chunk_id is advisory.
@@ -227,8 +234,11 @@ class EvidenceHit(BaseModel):
     sheet_reference: str | None = None
     source_status: str | None = None
     snippet: str
+    # `score` is the RRF fused score (Phase 4e). `channels` carries each contributing channel's
+    # 1-based rank + native score; present for single-channel hits too (one entry).
     score: float
     retrieval_path: list[str]
+    channels: dict[str, ChannelRank] = {}
 
 
 class NavigationHit(BaseModel):
@@ -265,3 +275,6 @@ class SearchResponse(BaseModel):
     counts: dict[str, int]
     truncated: bool
     no_results: bool
+    # Diagnostic/degradation messages (Phase 4e) — e.g. auto degraded to keyword-only because the
+    # embedder was unavailable. Empty in the normal case.
+    notes: list[str] = []

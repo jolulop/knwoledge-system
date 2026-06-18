@@ -52,5 +52,6 @@ caps:
   per_channel_prefusion_limit: 50
   max_query_chars: 512
   max_query_terms: 32
+  rrf_k: 60                    # Phase 4e Reciprocal Rank Fusion constant (keyword+vector); larger = flatter
 fallbacks:
   no_source_found_text: "No source found in vault."

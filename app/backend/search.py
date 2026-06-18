@@ -17,10 +17,11 @@ share a relevance scale (ADR-0032 decision 6). The pieces:
   subgraph (multi-seed BFS at the policy depth budget), applies retention-aware status filters and
   per-group caps, and assembles the grouped response.
 
-Scope: keyword/navigation/graph + **explicit `mode=vector`** (standalone vector evidence, Phase 4d).
-**RRF fusion and the `mode=auto` keyword+vector blend are Phase 4e** — so `auto` evidence is
-keyword-only here, each hit carrying ``retrieval_path: ["keyword"]`` (or ``["vector"]`` for explicit
-vector) so 4e can extend it.
+Scope: keyword/navigation/graph + **explicit `mode=vector`**. All chunk evidence flows through
+:func:`fuse_evidence` (Reciprocal Rank Fusion, Phase 4e-1) — single-channel results fuse too, so every
+hit carries the `channels` detail and an RRF top-level `score`. The **`mode=auto` keyword+vector
+blend** (running both channels in auto) is **Phase 4e-2** — until then `auto` evidence stays
+keyword-only.
 """
 from __future__ import annotations
 
@@ -367,6 +368,57 @@ def search_vector(
     return hits
 
 
+# Channel precedence for fusion: citation fields (snippet etc.) come from the first channel to find a
+# chunk in this order (keyword's match-centered snippet wins over vector's), and retrieval_path is
+# emitted in this order.
+_CHANNEL_ORDER = ("keyword", "vector")
+
+
+def fuse_evidence(
+    channel_hits: dict[str, list[dict[str, Any]]], *, k: int, limit: int
+) -> list[dict[str, Any]]:
+    """Reciprocal Rank Fusion over the chunk-evidence channels (ADR-0032 addendum 7).
+
+    Each chunk scores ``Σ 1/(k + rank_c)`` over the channels that returned it; deduped by the citation
+    key ``(source_id, char_start, char_end)``. A fused hit's top-level ``score`` is the RRF value,
+    ``retrieval_path`` lists the contributing channels, and ``channels`` carries each channel's 1-based
+    rank + native score. Single-channel input fuses too (one entry, order-preserving). Deterministic:
+    RRF descending, tie-break ``(source_id, ordinal, char_start, char_end)``.
+
+    Each channel contributes **at most once** per citation key (best/first rank wins) — a same-channel
+    duplicate (only possible from a corrupt index; the index validators flag that) is ignored rather
+    than double-counted. ``k`` is clamped to ``>= 1`` so a malformed ``rrf_k`` can never divide by zero.
+    """
+    k = max(1, int(k))
+    fused: dict[tuple, dict[str, Any]] = {}
+    for channel in _CHANNEL_ORDER:
+        for rank, hit in enumerate(channel_hits.get(channel) or [], start=1):
+            key = (hit["source_id"], hit["char_start"], hit["char_end"])
+            entry = fused.get(key)
+            if entry is None:
+                entry = {kk: vv for kk, vv in hit.items() if kk not in ("score", "retrieval_path")}
+                entry["channels"] = {}
+                entry["_rrf"] = 0.0
+                fused[key] = entry
+            if channel in entry["channels"]:
+                continue  # count each channel once (best rank, already recorded)
+            entry["channels"][channel] = {"rank": rank, "score": float(hit["score"])}
+            entry["_rrf"] += 1.0 / (k + rank)
+
+    # Deterministic: RRF desc, then (source_id, ordinal, char_start, char_end) — the last completes
+    # the citation key so order is total even across equal-RRF same-source chunks.
+    ordered = sorted(
+        fused.values(),
+        key=lambda e: (-e["_rrf"], e["source_id"], e.get("ordinal") or 0, e["char_start"], e["char_end"]),
+    )
+    out: list[dict[str, Any]] = []
+    for entry in ordered[:limit]:
+        entry["score"] = entry.pop("_rrf")
+        entry["retrieval_path"] = [c for c in _CHANNEL_ORDER if c in entry["channels"]]
+        out.append(entry)
+    return out
+
+
 def _empty_graph(depth: int) -> dict[str, Any]:
     return {"seeds": [], "nodes": [], "edges": [], "depth": depth, "truncated": False}
 
@@ -443,17 +495,18 @@ def run_search(
     evidence_match = build_fts_match(terms, op="AND")   # exact-lookup precision
     nav_match = build_fts_match(terms, op="OR")          # entity recall for seeding
 
-    evidence: list[dict[str, Any]] = []
     navigation: list[dict[str, Any]] = []
     graph_result = _empty_graph(min(depth, graph_read.MAX_DEPTH))
+    notes: list[str] = []
 
-    # Keyword-backed channels need both an FTS match and the index.
+    # Per-channel chunk-evidence hit lists, fused at the end via RRF (one channel fuses too).
+    channel_hits: dict[str, list[dict[str, Any]]] = {}
     nav_hits: list[dict[str, Any]] = []
     if keyword_conn is not None:
         if "keyword" in modes and evidence_match is not None:
-            evidence = search_evidence(
+            channel_hits["keyword"] = search_evidence(
                 keyword_conn, evidence_match, source_id=source_id, source_statuses=source_statuses,
-                prefusion_limit=prefusion, limit=ev_limit,
+                prefusion_limit=prefusion, limit=prefusion,
             )
         if ("navigation" in modes or "graph" in modes) and nav_match is not None:
             nav_hits = search_navigation(
@@ -470,13 +523,16 @@ def run_search(
             node_statuses=node_statuses, node_types=node_types, node_cap=node_cap, edge_cap=edge_cap,
         )
 
-    # Vector evidence is explicit-only in 4d (standalone; RRF/auto-blend is 4e). The query is
-    # embedded from the raw NL text by the endpoint, which supplies `vector_search`.
+    # Vector evidence (explicit mode=vector in 4d; joins auto via the conceptual-default blend in 4e).
+    # The query is embedded from raw NL text by the endpoint, which supplies `vector_search`.
     if "vector" in modes and vector_search is not None:
-        evidence = search_vector(
+        channel_hits["vector"] = search_vector(
             vector_search, keyword_conn, source_id=source_id, source_statuses=source_statuses,
-            prefusion_limit=prefusion, limit=ev_limit,
+            prefusion_limit=prefusion, limit=prefusion,
         )
+
+    # RRF-fuse the chunk-evidence channels into one ranked evidence[] (ADR-0032 addendum 7).
+    evidence = fuse_evidence(channel_hits, k=policy.cap("rrf_k"), limit=ev_limit)
 
     counts = {
         "evidence": len(evidence),
@@ -494,4 +550,5 @@ def run_search(
         "counts": counts,
         "truncated": graph_result["truncated"],
         "no_results": sum(counts.values()) == 0,
+        "notes": notes,
     }

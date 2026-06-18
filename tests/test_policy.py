@@ -84,6 +84,12 @@ def test_invalid_policy_modes_are_filtered(tmp_path):
     assert p.default_mode_set == ["keyword"]                   # all-bogus default -> keyword fallback
 
 
+def test_invalid_rrf_k_falls_back_to_default(tmp_path):
+    f = tmp_path / "retrieval.yaml"
+    f.write_text("caps:\n  rrf_k: -1\n", encoding="utf-8")
+    assert policy.load_retrieval_policy(f).cap("rrf_k") == 60  # <1 -> default, never a divisor of 0
+
+
 def test_malformed_policy_values_do_not_crash(tmp_path):
     f = tmp_path / "retrieval.yaml"
     f.write_text("router: not-a-mapping\ncaps:\n  max_graph_nodes: not-an-int\n", encoding="utf-8")

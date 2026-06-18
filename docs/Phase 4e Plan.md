@@ -1,6 +1,8 @@
 # Phase 4e Plan — RRF hybrid fusion + retrieval eval harness (final Phase 4 slice)
 
-**Status:** Planned (design-locked 2026-06-18 via grill gate). No code yet.
+**Status:** In progress (design-locked 2026-06-18 via grill gate). **4e-1 done** (RRF fuser +
+`channels`/`notes` model fields + `rrf_k`); 4e-2 (`auto` blend + degradation) and 4e-3 (eval harness)
+pending.
 **Governing ADR:** [ADR-0032](adr/0032-phase-4-retrieval-architecture.md) decision 6 + **addenda 5–8**.
 **Predecessors:** 4a (keyword/nav index), 4b (graph read), 4c (router + `/search`), 4d (vector channel).
 Phase 4e is the **last** Phase 4 slice; it adds **no new dependencies**.

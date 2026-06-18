@@ -331,9 +331,11 @@ def test_search_returns_grouped_evidence_and_graph(client, tmp_path):
     body = client.get("/search?q=synergy").json()
     assert body["mode"] == "auto"
     assert body["counts"]["evidence"] >= 1
+    assert body["notes"] == []  # 4e response shape: notes present (empty in the normal case)
     ev = body["evidence"][0]
     assert ev["retrieval_path"] == ["keyword"]
     assert ev["char_start"] == 0 and ev["snippet"]
+    assert ev["channels"]["keyword"]["rank"] == 1  # single-channel hit still carries `channels`
 
     g = client.get("/search?q=synergy&mode=graph").json()
     assert g["retrieval_path"] == ["graph"]
@@ -409,6 +411,7 @@ def test_search_vector_mode_returns_evidence(client, tmp_path, monkeypatch):
     hit = body["evidence"][0]
     assert hit["source_id"] == src and hit["retrieval_path"] == ["vector"]
     assert "kind" in hit and hit["snippet"]
+    assert "vector" in hit["channels"] and body["notes"] == []  # 4e shape: channels + notes
 
 
 def test_search_vector_503_without_index(client, tmp_path, monkeypatch):

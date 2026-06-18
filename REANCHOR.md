@@ -59,7 +59,7 @@ critical rules and `CONTEXT.md` for the glossary.
   - `2e7db7f` Phase 4a: keyword evidence + wiki navigation index, design-locked (ADR-0032)
   - `c1f2504` docs: mark Phase 3.5 Complete in Build Spec
   - `eebf11b` Phase 3.5c-2: cross-source synthesis — completes Phase 3.5
-- **Tests/lint green:** `402 passed` (was 390; +12 from 4d-3 `mode=vector` + review round), ruff
+- **Tests/lint green:** `409 passed` (was 390; +19 from 4d-3 + 4e-1 RRF fuser + review rounds), ruff
   clean, **10** validators pass. **LanceDB installed in the venv** (`vector` extra; `uv.lock` updated) — the
   full vector suite runs; a bare `.[dev]` install skips it via `importorskip`.
 
@@ -149,8 +149,14 @@ slice 4d (vector — first slice with new deps).**
   char_end)`, fused hits add an additive **`channels`** field `{keyword/vector:{rank,score}}` (top
   `score`=RRF, tie-break `(source_id,ordinal,char_start)`); (4) eval harness = **pytest + FakeEmbedder**
   (`evals/golden_retrieval.yaml` + `tests/test_retrieval_evals.py`, 8 categories, structural not
-  semantic; CLI deferred). **Next: implement 4e when told "implement now"** (start 4e-1: RRF fuser +
-  model fields + `rrf_k`).
+  semantic; CLI deferred).
+  - **4e-1** ✅ **DONE (uncommitted)** — RRF fuser (`search.fuse_evidence`: dedup by
+    `(source_id,char_start,char_end)`, `score=Σ1/(k+rank)`, tie-break `(source_id,ordinal,char_start,
+    char_end)`); `ChannelRank`/`EvidenceHit.channels` + `SearchResponse.notes` models; `rrf_k=60` in
+    `retrieval.yaml`+policy. **All evidence now flows through the fuser uniformly** (single-channel
+    fuses too → `score`=RRF, native score in `channels`). Auto-blend wiring is 4e-2.
+  - **4e-2** — `mode=auto` conceptual-default+escalation blend + graceful degradation (`notes`).
+  - **4e-3** — `evals/golden_retrieval.yaml` + `tests/test_retrieval_evals.py` (8 categories).
 - **4e** — RRF hybrid fusion (keyword+vector) + per-group caps + retrieval eval harness
   (`evals/golden_retrieval.yaml`, kept separate from Phase-5 `golden_questions.yaml`).
 

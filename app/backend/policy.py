@@ -146,6 +146,7 @@ _DEFAULT_CAPS = {
     "max_query_chars": 512,
     "max_query_terms": 32,
     "escalation_primary_below_k": 3,
+    "rrf_k": 60,  # Reciprocal Rank Fusion constant (Phase 4e); canonical default
 }
 
 
@@ -200,4 +201,7 @@ def load_retrieval_policy(path: Path) -> RetrievalPolicy:
     # Guarantee a non-empty default so a routed query always runs at least one real channel.
     if not default_mode_set:
         default_mode_set = list(_DEFAULT_MODE_SET)
+    # The RRF constant must be >= 1 (it is a divisor); a malformed policy value falls back to default.
+    if not isinstance(caps.get("rrf_k"), int) or caps["rrf_k"] < 1:
+        caps["rrf_k"] = _DEFAULT_CAPS["rrf_k"]
     return RetrievalPolicy(router_rules=router_rules, default_mode_set=default_mode_set, caps=caps)
