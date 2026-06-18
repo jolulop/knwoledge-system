@@ -12,9 +12,29 @@ critical rules and `CONTEXT.md` for the glossary.
 
 ## Where we are
 
-- **Branch:** `main`, **1 commit ahead of `origin/main`** (4a committed locally, not pushed).
-  **Phase 3.5 complete + pushed. Phase 4 design-locked (2026-06-17); 4a committed, 4b implemented
-  + green but uncommitted.**
+- **Branch:** `main`, **in sync with `origin/main`** (4a + 4b pushed at `7838479`). **Phase 3.5
+  complete. Phase 4 design-locked (2026-06-17); 4a + 4b committed & pushed; 4c implemented + green
+  but uncommitted.**
+- **Slice 4c — IMPLEMENTED, UNCOMMITTED** (deterministic router + `GET /search`, ADR-0032 §4/§8):
+  - `app/backend/policy.py` (new) — minimal dependency-free YAML-subset loader + `RetrievalPolicy`
+    (routing taxonomy + caps, layered over code defaults); `policies/retrieval.yaml` extended with
+    `router:` (shape→modes) + `caps:` (graph caps moved here per ADR addendum 4).
+  - `app/backend/search.py` (new) — safe FTS5 query builder (tokenize+quote, bounded), deterministic
+    `classify_shape` (Build Spec §8.2), `route`, per-channel search (evidence/navigation/graph),
+    `run_search` orchestrator → grouped `{evidence,navigation,graph,counts,truncated,no_results}`.
+  - `GET /search` in `main.py` (modes keyword/navigation/graph/auto; vector→400 until 4d; retention
+    + type + language filters →400 on bad); `SearchResponse` models; `keyword_index_path`/
+    `retrieval_policy_path` in `config.py`. Evidence keyword-only (RRF is 4e), `retrieval_path:["keyword"]`.
+  - **Review round applied (2026-06-18):** (1) **topic extraction** — `extract_terms` strips
+    stopwords + §8.2 trigger words so routed NL queries search the topic, not the question words;
+    evidence uses AND, navigation/graph-seeding uses OR (entity recall). (2) **`/search` graph is now
+    real traversal** — flat `{seeds,nodes,edges,depth,truncated}` via `graph_read.search_subgraph`
+    (multi-seed BFS at the policy `max_graph_depth_default`); disagreement is **graph-native**
+    (seeds from active `contradicts` endpoints when no topic). (3) **retention applied to graph
+    nodes** — `search_subgraph` drops archived/deleted adjacents (`/search`'s job, ADR addendum 2).
+    (4) unknown source status **excluded by default** (Q3). (5) policy modes validated (typo→fallback);
+    `language` validated; ADR-0032 line 102 scoped to addendum 1.
+  - Tests: `tests/test_policy.py` (6) + `tests/test_search.py` (27) + `/search` API tests.
 - **Slice 4a — COMMITTED** (`2e7db7f`, includes the planning artifacts ADR-0032 + Phase 4 Plan):
   keyword evidence + wiki navigation index in `indexes/keyword/keyword.sqlite`
   (`app/backend/keyword_index.py`); scaffolds retired (`reindex_vector.py`, `chunks.jsonl`,
@@ -39,8 +59,8 @@ critical rules and `CONTEXT.md` for the glossary.
   - `2e7db7f` Phase 4a: keyword evidence + wiki navigation index, design-locked (ADR-0032)
   - `c1f2504` docs: mark Phase 3.5 Complete in Build Spec
   - `eebf11b` Phase 3.5c-2: cross-source synthesis — completes Phase 3.5
-- **Tests/lint green:** `296 passed` (was 268; +28 from 4b + review round), ruff clean, all 9
-  validators pass. Newest test file: `tests/test_graph_read.py` (21).
+- **Tests/lint green:** `332 passed` (was 296; +36 from 4c + review round), ruff clean, all 9
+  validators pass. Newest test files: `tests/test_search.py` (27), `tests/test_policy.py` (6).
 
 ## Viewing the vault (Obsidian)
 
@@ -73,22 +93,22 @@ critical rules and `CONTEXT.md` for the glossary.
 
 ## Next step
 
-**Phase 3.5 complete. Phase 4 design-locked; 4a committed (`2e7db7f`), 4b implemented + green
-(uncommitted).** **Next action: commit Slice 4b (when the user says so), then implement slice 4c.**
+**Phase 3.5 complete. Phase 4 design-locked; 4a + 4b committed & pushed (`7838479`), 4c implemented
++ green (uncommitted).** **Next action: commit Slice 4c (when the user says so), then implement
+slice 4d (vector — first slice with new deps).**
 
 **Phase 4 = deterministic, offline, key-free retrieval** returning ranked cited *evidence*
 (no LLM, no generated answers — that is Phase 5). Five committable slices:
-- **4a** ✅ **DONE (committed `2e7db7f`)** — keyword evidence index (FTS5 over `normalized/chunks/
-  <source_id>.jsonl`) + wiki navigation index in `indexes/keyword/keyword.sqlite`
-  (`app/backend/keyword_index.py`); fingerprinted incremental rebuild + `--force` + `user_version`
-  guard; `answer_eligible` only for active node-prose types. Scaffolds retired; §7 coordination done.
-- **4b** ✅ **DONE (uncommitted)** — graph read API: `GET /graph/node/{id}` +
-  `GET /graph/neighborhood/{id}`, active-by-edge-status depth-bounded read projection
-  (`app/backend/graph_read.py`) over `app/backend/graph.py`. Caps are code constants (depth
-  default 1 / hard-max 2, node/edge caps); **the `retrieval.yaml` cap wiring is deferred to the
-  4c router** (per Plan §4 sequencing — a deliberate scoping line for the next slice).
-- **4c** — deterministic retrieval router + `GET /search` (keyword + navigation + graph groups;
-  safe FTS query builder; retention filters; reads `policies/retrieval.yaml`).
+- **4a** ✅ **DONE (committed `2e7db7f`)** — keyword evidence + wiki navigation index
+  (`app/backend/keyword_index.py`, `indexes/keyword/keyword.sqlite`).
+- **4b** ✅ **DONE (committed `7838479`)** — graph read API `GET /graph/node/{id}` +
+  `GET /graph/neighborhood/{id}` (`app/backend/graph_read.py`). Endpoint caps are code constants
+  (depth default 1 / hard-max 2) — distinct from the router's `retrieval.yaml` budget by design.
+- **4c** ✅ **DONE (uncommitted)** — deterministic router + `GET /search`. `policy.py` (minimal YAML
+  loader + `RetrievalPolicy`), `search.py` (safe FTS builder, `classify_shape`, channel search,
+  orchestrator). Vector deferred to 4d (explicit `mode=vector`→400); evidence keyword-only until 4e
+  RRF. Graph group seeded from navigation hits; `/search` graph caps come from `retrieval.yaml`
+  (ADR addendum 4) while `/graph/*` endpoints keep their constants.
 - **4d** — vector index (LanceDB + local embeddings, cloud-embedding seam opt-in); joins the same
   `/search` contract. First slice with new deps.
 - **4e** — RRF hybrid fusion (keyword+vector) + per-group caps + retrieval eval harness

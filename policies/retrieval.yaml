@@ -20,5 +20,36 @@ budgets:
   max_candidate_sources_initial: 8
   max_graph_depth_default: 2
   max_answer_unsourced_claims: 0
+# Phase 4c deterministic router (ADR-0032 decision 4). The query *shape* is detected in code
+# (deterministic signal matching against Build Spec §8.2); this maps a detected shape to a set of
+# retrieval modes. `mode=auto` uses these; an explicit `mode=` forces a single path. Vector is
+# deferred to Phase 4d, so no rule emits it yet.
+router:
+  default_mode_set:          # conceptual default when no specific shape matches
+    - keyword
+  rules:
+    exact:                   # quoted string / number / date / filename / acronym
+      - keyword
+    relationship:            # "how are X and Y related"
+      - graph
+    disagreement:            # "which sources disagree / contradict"
+      - graph
+    mention:                 # "which documents mention X"
+      - keyword
+      - graph
+    discovery:               # "what do I know about X" / broad single topic
+      - navigation
+      - graph
+  escalation_primary_below_k: 3   # if the primary path returns < k hits, also run vector (4d)
+# Phase 4c per-group result caps for GET /search (ADR-0032 decision 8). The graph caps moved here
+# from graph_read.py code constants (ADR-0032 addendum 4); they bound the /search graph group.
+caps:
+  max_evidence_hits: 20
+  max_navigation_hits: 20
+  max_graph_nodes: 50
+  max_graph_edges: 100
+  per_channel_prefusion_limit: 50
+  max_query_chars: 512
+  max_query_terms: 32
 fallbacks:
   no_source_found_text: "No source found in vault."

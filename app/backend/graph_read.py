@@ -353,3 +353,98 @@ def neighborhood(
         "truncated": truncated,
         "cap": {"nodes": node_cap, "edges": edge_cap},
     }
+
+
+def active_contradiction_endpoints(conn: sqlite3.Connection) -> list[str]:
+    """Node ids on either end of an ``active`` ``contradicts`` edge (graph-native disagreement seed).
+
+    Lets a "which sources disagree" query surface contradictions directly from the graph, without
+    depending on the literal trigger words matching any page text.
+    """
+    ids: set[str] = set()
+    for r in conn.execute(
+        "SELECT src_id, dst_id FROM edges WHERE edge_type = 'contradicts' AND status = 'active'"
+    ):
+        ids.add(r["src_id"])
+        ids.add(r["dst_id"])
+    return sorted(ids)
+
+
+def search_subgraph(
+    conn: sqlite3.Connection,
+    seed_ids: list[str],
+    *,
+    depth: int,
+    edge_statuses: tuple[str, ...] = DEFAULT_EDGE_STATUSES,
+    node_statuses: tuple[str, ...] | None = None,
+    node_types: frozenset[str] | None = None,
+    edge_types: tuple[str, ...] | None = None,
+    node_cap: int,
+    edge_cap: int,
+) -> dict[str, Any]:
+    """Multi-seed bounded BFS returning a flat ``{seeds, nodes, edges, depth, truncated}`` subgraph.
+
+    Used by ``/search`` (Phase 4c). Unlike :func:`neighborhood` (a single-root ``/graph/*`` view
+    that is edge-status-only by contract), this accepts an optional ``node_statuses`` retention
+    filter — a node is admitted only if its status is allowed — so the search layer can exclude
+    archived/deleted nodes (ADR-0032 addendum 2: retention is ``/search``'s job, not the raw graph
+    projection's). Seeds that do not exist or fail the filters are dropped.
+    """
+    depth = max(0, min(depth, MAX_DEPTH))
+    statuses = tuple(edge_statuses)
+
+    def admit(meta: dict[str, Any] | None) -> bool:
+        if meta is None:
+            return False
+        if node_types is not None and meta["node_type"] not in node_types:
+            return False
+        if node_statuses is not None and meta["status"] not in node_statuses:
+            return False
+        return True
+
+    visited: dict[str, int] = {}
+    admitted_seeds: list[str] = []
+    truncated = False
+    seed_meta = _node_meta_map(conn, set(seed_ids))
+    for sid in seed_ids:  # preserve caller ordering (BM25 rank)
+        if sid in visited or not admit(seed_meta.get(sid)):
+            continue
+        if len(visited) >= node_cap:
+            truncated = True
+            break
+        visited[sid] = 0
+        admitted_seeds.append(sid)
+
+    frontier = list(admitted_seeds)
+    for dist in range(1, depth + 1):
+        rows = _edges_touching(conn, frontier, statuses, edge_types)
+        candidates = {ep for r in rows for ep in (r["src_id"], r["dst_id"]) if ep not in visited}
+        if not candidates:
+            break
+        cand_meta = _node_meta_map(conn, candidates)
+        added: list[str] = []
+        for nid in sorted(candidates):
+            if not admit(cand_meta.get(nid)):
+                continue
+            if len(visited) >= node_cap:
+                truncated = True
+                break
+            visited[nid] = dist
+            added.append(nid)
+        if not added:
+            break
+        frontier = added
+
+    edge_rows = _edges_among(conn, set(visited), statuses, edge_types, limit=edge_cap + 1)
+    if len(edge_rows) > edge_cap:
+        truncated = True
+        edge_rows = edge_rows[:edge_cap]
+    edges = [_edge_obj(row) for row in edge_rows]
+
+    meta = _node_meta_map(conn, set(visited))
+    nodes = [
+        {**(meta.get(nid) or _unknown_meta(nid)), "distance": visited[nid]}
+        for nid in sorted(visited, key=lambda n: (visited[n], n))
+    ]
+    return {"seeds": admitted_seeds, "nodes": nodes, "edges": edges,
+            "depth": depth, "truncated": truncated}

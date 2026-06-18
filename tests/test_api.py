@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -12,7 +13,7 @@ if str(ROOT) not in sys.path:
 
 from fastapi.testclient import TestClient
 
-from app.backend import graph
+from app.backend import graph, keyword_index
 from app.backend import main as main_module
 from app.backend.config import get_settings
 
@@ -280,6 +281,83 @@ def test_graph_stale_schema_returns_503(client, tmp_path):
     conn.close()
     assert client.get(f"/graph/node/{clm1}").status_code == 503
     assert client.get(f"/graph/neighborhood/{clm1}").status_code == 503
+
+
+def _build_search_corpus(tmp_path: Path) -> str:
+    """Write one chunk + a source page + a matching active concept page, then build the index
+    and a graph (source mentions concept). Returns the concept node id."""
+    src, cpt = "src_eeeeeeeeeeeeeeee", "cpt_searchxxxxxxxxx"
+    chunks = tmp_path / "normalized" / "chunks" / f"{src}.jsonl"
+    chunks.parent.mkdir(parents=True, exist_ok=True)
+    text = "Synergy capture is central to post-merger integration."
+    chunks.write_text(json.dumps({
+        "chunk_id": f"{src}::0000", "source_id": src, "ordinal": 0, "kind": "prose",
+        "heading_path": [], "section": None, "text": text, "char_start": 0,
+        "char_end": len(text), "page": 1, "page_end": 1,
+        "table_reference": None, "sheet_reference": None,
+    }) + "\n", encoding="utf-8")
+    for rel, fm, summ in [
+        (f"wiki/Sources/{src}.md",
+         {"type": "source", "source_id": src, "title": "Deck", "status": "active", "language": "en"},
+         "synergy in M&A"),
+        (f"wiki/Concepts/{cpt}.md",
+         {"type": "concept", "concept_id": cpt, "title": "Synergy capture", "status": "active",
+          "review_status": "none"},
+         "How synergy is captured."),
+    ]:
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        fm_lines = "\n".join(f"{k}: {v}" for k, v in fm.items())
+        p.write_text(f"---\n{fm_lines}\n---\n\n# {fm['title']}\n\n> [!summary]\n> {summ}\n", encoding="utf-8")
+    keyword_index.reindex(tmp_path, force=True)
+
+    gdb = tmp_path / "db" / "graph.sqlite"
+    graph.init_db(gdb)
+    conn = graph.connect(gdb)
+    try:
+        graph.reindex_nodes(conn, source_ids=[src],
+                            page_nodes=[{"node_id": cpt, "node_type": "concept", "slug": "s", "status": "active"}],
+                            now="t0")
+        graph.upsert_assertion(conn, src_id=src, dst_id=cpt, edge_type="mentions",
+                               asserted_by="llm", status="active")
+    finally:
+        conn.close()
+    return cpt
+
+
+def test_search_returns_grouped_evidence_and_graph(client, tmp_path):
+    cpt = _build_search_corpus(tmp_path)
+
+    body = client.get("/search?q=synergy").json()
+    assert body["mode"] == "auto"
+    assert body["counts"]["evidence"] >= 1
+    ev = body["evidence"][0]
+    assert ev["retrieval_path"] == ["keyword"]
+    assert ev["char_start"] == 0 and ev["snippet"]
+
+    g = client.get("/search?q=synergy&mode=graph").json()
+    assert g["retrieval_path"] == ["graph"]
+    assert cpt in g["graph"]["seeds"]
+    assert any(n["node_id"] == cpt for n in g["graph"]["nodes"])
+
+
+def test_search_errors(client, tmp_path):
+    _build_search_corpus(tmp_path)
+    assert client.get("/search?q=x&mode=vector").status_code == 400
+    assert client.get("/search?q=x&mode=bogus").status_code == 400
+    assert client.get("/search?q=x&source_status=nope").status_code == 400
+    assert client.get("/search?q=x&edge_status=nope").status_code == 400
+    assert client.get("/search?q=x&page_type=widget").status_code == 400
+    assert client.get("/search?q=x&node_type=widget").status_code == 400
+    assert client.get("/search?q=x&language=fr").status_code == 400
+    assert client.get("/search?q=x&evidence_limit=0").status_code == 422
+
+
+def test_search_without_index_is_structural_empty(client):
+    # No keyword index built in this fresh client; /search degrades to a structural empty result.
+    body = client.get("/search?q=synergy").json()
+    assert body["no_results"] is True
+    assert body["counts"] == {"evidence": 0, "navigation": 0, "graph": 0}
 
 
 def test_assert_safe_bind():

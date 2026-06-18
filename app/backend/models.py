@@ -205,3 +205,63 @@ class GraphNeighborhoodResponse(BaseModel):
     edges: list[GraphEdge]
     truncated: bool
     cap: dict[str, int]
+
+
+# --- Phase 4c GET /search grouped response (ADR-0032 decisions 4, 8) ---------
+
+
+class EvidenceHit(BaseModel):
+    # Authoritative citation is (source_id, char_start, char_end) + optional page/section/table
+    # (ADR-0019/0020); chunk_id is advisory.
+    source_id: str
+    chunk_id: str | None = None
+    ordinal: int | None = None
+    kind: str | None = None
+    section: str | None = None
+    heading_path: list[str] = []
+    char_start: int
+    char_end: int
+    page: int | None = None
+    page_end: int | None = None
+    table_reference: str | None = None
+    sheet_reference: str | None = None
+    source_status: str | None = None
+    snippet: str
+    score: float
+    retrieval_path: list[str]
+
+
+class NavigationHit(BaseModel):
+    path: str
+    page_type: str
+    node_id: str | None = None
+    title: str
+    summary: str
+    status: str
+    review_status: str | None = None
+    language: str | None = None
+    answer_eligible: bool
+    score: float
+
+
+class SearchGraph(BaseModel):
+    # Flat subgraph (ADR-0032 addendum: /search graph is a multi-seed BFS at the policy depth
+    # budget). `seeds` are the matched node ids (BM25-ranked); nodes/edges are the induced subgraph.
+    seeds: list[str]
+    nodes: list[GraphNeighborhoodNode]
+    edges: list[GraphEdge]
+    depth: int
+    truncated: bool
+
+
+class SearchResponse(BaseModel):
+    query: str
+    mode: str
+    shape: str | None = None
+    retrieval_path: list[str]
+    evidence: list[EvidenceHit]
+    navigation: list[NavigationHit]
+    graph: SearchGraph
+    counts: dict[str, int]
+    truncated: bool
+    no_results: bool

@@ -13,7 +13,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.backend import db, graph, graph_read, manifests
+from app.backend import db, graph, graph_read, keyword_index, manifests, search
 from app.backend.config import get_settings
 from app.backend.models import (
     ChunksResponse,
@@ -23,11 +23,13 @@ from app.backend.models import (
     Job,
     JobsResponse,
     NormalizedResponse,
+    SearchResponse,
     Source,
     SourcesResponse,
     WikiPageDetail,
     WikiPagesResponse,
 )
+from app.backend.policy import load_retrieval_policy
 from app.workers import extract, intake, wiki
 from app.workers.wiki_render import parse_frontmatter
 
@@ -308,6 +310,82 @@ def get_graph_neighborhood(
         conn.close()
     if result is None:
         raise HTTPException(status_code=404, detail=f"node not found: {node_id}")
+    return result
+
+
+def _open_graph_safe() -> Any:
+    """Open the graph for /search, or ``None`` if absent or schema-mismatched.
+
+    Unlike :func:`_open_graph`, a missing or wrong-schema graph is *not* fatal here — /search is a
+    multi-channel surface, so a degraded graph just yields an empty graph group, never a 5xx.
+    """
+    if not settings.graph_db_path.exists():
+        return None
+    conn = graph.connect(settings.graph_db_path)
+    if graph.schema_version(conn) != graph.SCHEMA_VERSION:
+        conn.close()
+        return None
+    return conn
+
+
+@app.get("/search", response_model=SearchResponse)
+def run_search_endpoint(
+    q: str,
+    mode: str = "auto",
+    source_id: str | None = None,
+    page_type: str | None = None,
+    node_type: str | None = None,
+    language: str | None = None,
+    source_status: str | None = None,
+    node_status: str | None = None,
+    edge_status: str | None = None,
+    evidence_limit: int | None = Query(None, ge=1, le=200),
+    navigation_limit: int | None = Query(None, ge=1, le=200),
+    graph_limit: int | None = Query(None, ge=1, le=200),
+) -> dict[str, Any]:
+    if mode not in search.VALID_MODES:
+        raise HTTPException(status_code=400, detail=f"unknown mode {mode!r}; allowed: {sorted(search.VALID_MODES)}")
+    if mode == "vector":
+        raise HTTPException(
+            status_code=400,
+            detail="vector retrieval arrives in Phase 4d; use keyword/navigation/graph/auto",
+        )
+    for label, value in (("page_type", page_type), ("node_type", node_type)):
+        if value is not None and value not in graph.NODE_TYPES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown {label} {value!r}; allowed: {sorted(graph.NODE_TYPES)}",
+            )
+    if language is not None and language not in {"en", "es", "unknown"}:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown language {language!r}; allowed: ['en', 'es', 'unknown']",
+        )
+    try:
+        source_statuses = search.parse_statuses(source_status, graph.NODE_STATUSES, search.RETENTION_DEFAULT_STATUSES)
+        node_statuses = search.parse_statuses(node_status, graph.NODE_STATUSES, search.RETENTION_DEFAULT_STATUSES)
+        edge_statuses = search.parse_statuses(edge_status, graph.EDGE_STATUSES, graph_read.DEFAULT_EDGE_STATUSES)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    policy = load_retrieval_policy(settings.retrieval_policy_path)
+    keyword_conn = (
+        keyword_index.connect(settings.keyword_index_path)
+        if settings.keyword_index_path.exists() else None
+    )
+    graph_conn = _open_graph_safe()
+    try:
+        result = search.run_search(
+            q=q, mode=mode, keyword_conn=keyword_conn, graph_conn=graph_conn, policy=policy,
+            source_id=source_id, page_type=page_type, node_type=node_type, language=language,
+            source_statuses=source_statuses, node_statuses=node_statuses, edge_statuses=edge_statuses,
+            evidence_limit=evidence_limit, navigation_limit=navigation_limit, graph_limit=graph_limit,
+        )
+    finally:
+        if keyword_conn is not None:
+            keyword_conn.close()
+        if graph_conn is not None:
+            graph_conn.close()
     return result
 
 

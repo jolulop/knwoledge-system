@@ -1,9 +1,9 @@
 # Phase 4 Plan — Search and Graph (deterministic hybrid retrieval)
 
-**Status:** In progress (design-locked 2026-06-17 via grill gate). **Slices 4a + 4b implemented**
-— 4a: keyword evidence + wiki navigation index (scaffolds retired, §7 coordination done); 4b:
-graph read API (`GET /graph/node/{id}` + `GET /graph/neighborhood/{id}`, read projection over
-`app/backend/graph.py`). 4c–4e pending.
+**Status:** In progress (design-locked 2026-06-17 via grill gate). **Slices 4a + 4b + 4c
+implemented** — 4a: keyword evidence + wiki navigation index; 4b: graph read API; 4c: deterministic
+router + `GET /search` (keyword/navigation/graph groups, safe FTS builder, retention filters,
+`policies/retrieval.yaml` loader + caps). 4d (vector) and 4e (RRF fusion) pending.
 **Governing ADR:** [ADR-0032](adr/0032-phase-4-retrieval-architecture.md). Read it first — this
 plan is the operational breakdown of its decisions.
 **Predecessors:** Phase 3 (deterministic Source-page backbone), Phase 3.5a/b/c (semantic LLM

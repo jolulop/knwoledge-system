@@ -99,9 +99,11 @@ graph being the edge SoT and backlinks being derived (ADR-0029/0030):
   still appear via an `active` `mentions`/`derived_from` edge, but is flagged **not
   `answer_eligible`**. `proposed`/`rejected`/`superseded` edges are **hidden by default** and
   reachable only via an explicit review-oriented `include_status=` param.
-- **Symmetric edges** (`contradicts`, `related_to`, `duplicates`) expose both the stored
-  `src_id`/`dst_id` **and** a client-friendly `other_node_id` + `symmetric: true`; the canonical
-  sorted direction (e.g. `contradicts`, ADR-0031) is never erased.
+- **Symmetric edges** (`contradicts`, `related_to`, `duplicates`) always keep their stored canonical
+  `src_id`/`dst_id` (sorted, ADR-0031) and carry `symmetric: true`. **In the node-adjacency view
+  (`/graph/node/{id}`)** they also expose a client-friendly `other_node_id` (the endpoint that is
+  not the queried node). **In the flat `/graph/neighborhood` (and `/search` graph) edge lists,
+  `other_node_id` is omitted** — there is no single reference node — see addendum 1.
 - Edge **evidence anchors are labelled advisory**; for `contradicts` especially, the
   authoritative evidence remains the two Claim pages' structured citations, not the edge row.
 

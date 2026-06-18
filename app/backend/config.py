@@ -50,6 +50,9 @@ class Settings:
     jobs_db_path: Path
     # Authoritative semantic graph (ADR-0030); read-only projection in Phase 4b.
     graph_db_path: Path
+    # Phase 4 retrieval: derived keyword index (4a) + retrieval policy (4c).
+    keyword_index_path: Path
+    retrieval_policy_path: Path
     # Phase 2 normalized layer (ADR-0011): one set of files per source id.
     normalized_dir: Path
     markdown_dir: Path
@@ -99,6 +102,8 @@ def get_settings(root: Path | None = None) -> Settings:
         db_dir=resolved / "db",
         jobs_db_path=resolved / "db" / "jobs.sqlite",
         graph_db_path=resolved / "db" / "graph.sqlite",
+        keyword_index_path=resolved / "indexes" / "keyword" / "keyword.sqlite",
+        retrieval_policy_path=resolved / "policies" / "retrieval.yaml",
         normalized_dir=normalized,
         markdown_dir=normalized / "markdown",
         chunks_dir=normalized / "chunks",
