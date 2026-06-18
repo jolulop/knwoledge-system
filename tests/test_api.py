@@ -424,11 +424,52 @@ def test_search_vector_503_without_index(client, tmp_path, monkeypatch):
     assert client.get("/search?q=x&mode=vector").status_code == 503
 
 
-def test_search_auto_stays_keyword_only_with_vector_configured(client, tmp_path, monkeypatch):
+def test_search_auto_blends_vector_for_conceptual_query(client, tmp_path, monkeypatch):
     _configure_vector(tmp_path, client, monkeypatch)
+    # 4e-2: a conceptual (default-shape) query blends keyword + vector via RRF when vector is ready.
     body = client.get("/search?q=synergy%20capture&mode=auto").json()
-    # 4d: auto never runs vector (RRF/auto-blend is 4e).
+    assert "vector" in body["retrieval_path"]
+    assert body["notes"] == []  # vector available -> no degradation note
+
+
+def test_search_auto_degrades_silently_without_embedder(client, tmp_path, monkeypatch):
+    # Keyword-only deployment (no embedder configured): auto wants vector for a conceptual query but
+    # degrades QUIETLY — no 503, no degradation note (it isn't a degradation, it's the deployment).
+    _build_search_corpus(tmp_path)  # keyword + graph, no embedder
+    body = client.get("/search?q=synergy&mode=auto")
+    assert body.status_code == 200
+    assert body.json()["notes"] == [] and "vector" not in body.json()["retrieval_path"]
+
+
+def test_search_auto_notes_degradation_on_stale_index(client, tmp_path, monkeypatch):
+    src = _configure_vector(tmp_path, client, monkeypatch)  # embedder configured + fresh index
+    # Edit a chunk after indexing -> the vector index is stale (embedder IS configured) -> genuine
+    # degradation: auto conceptual query stays 200 keyword-only WITH a note.
+    (tmp_path / "normalized" / "chunks" / f"{src}.jsonl").write_text(json.dumps({
+        "chunk_id": f"{src}::0000", "source_id": src, "ordinal": 0, "kind": "prose",
+        "heading_path": [], "section": None, "text": "EDITED anchors moved", "char_start": 0,
+        "char_end": 20, "page": 1, "page_end": 1, "table_reference": None, "sheet_reference": None,
+    }) + "\n", encoding="utf-8")
+    body = client.get("/search?q=synergy%20capture&mode=auto").json()
     assert "vector" not in body["retrieval_path"]
+    assert any("degraded to keyword-only" in n for n in body["notes"])
+
+
+def test_search_auto_graph_only_skips_vector_capability(client, tmp_path, monkeypatch):
+    _configure_vector(tmp_path, client, monkeypatch)
+    calls = {"n": 0}
+    real = main_module._vector_capability
+
+    def spy(*a, **k):
+        calls["n"] += 1
+        return real(*a, **k)
+    monkeypatch.setattr(main_module, "_vector_capability", spy)
+    # A discovery (graph-only) auto query must NOT inspect vector state at all.
+    client.get("/search?q=what%20do%20I%20know%20about%20synergy&mode=auto")
+    assert calls["n"] == 0
+    # A conceptual query does build the capability.
+    client.get("/search?q=synergy%20capture&mode=auto")
+    assert calls["n"] == 1
 
 
 def test_search_vector_honors_source_id(client, tmp_path, monkeypatch):

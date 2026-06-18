@@ -59,7 +59,7 @@ critical rules and `CONTEXT.md` for the glossary.
   - `2e7db7f` Phase 4a: keyword evidence + wiki navigation index, design-locked (ADR-0032)
   - `c1f2504` docs: mark Phase 3.5 Complete in Build Spec
   - `eebf11b` Phase 3.5c-2: cross-source synthesis — completes Phase 3.5
-- **Tests/lint green:** `409 passed` (was 390; +19 from 4d-3 + 4e-1 RRF fuser + review rounds), ruff
+- **Tests/lint green:** `423 passed` (was 390; +33 from 4d-3 + 4e-1/4e-2 + review rounds), ruff
   clean, **10** validators pass. **LanceDB installed in the venv** (`vector` extra; `uv.lock` updated) — the
   full vector suite runs; a bare `.[dev]` install skips it via `importorskip`.
 
@@ -155,7 +155,16 @@ slice 4d (vector — first slice with new deps).**
     char_end)`); `ChannelRank`/`EvidenceHit.channels` + `SearchResponse.notes` models; `rrf_k=60` in
     `retrieval.yaml`+policy. **All evidence now flows through the fuser uniformly** (single-channel
     fuses too → `score`=RRF, native score in `channels`). Auto-blend wiring is 4e-2.
-  - **4e-2** — `mode=auto` conceptual-default+escalation blend + graceful degradation (`notes`).
+  - **4e-2** ✅ **DONE (uncommitted)** — `mode=auto` vector blend: conceptual `default` shape always
+    blends keyword+vector (RRF); `exact`/`mention` escalate to vector when keyword evidence
+    `< escalation_primary_below_k`; graph-only shapes defer. Query embedded **lazily** (only when
+    vector runs). Graceful degradation: vector unavailable → keyword-only, **503 only for explicit
+    `mode=vector`** (`search.VectorChannelError`→503); auto adds a `notes` entry **only for genuine
+    degradations** (embedder configured but failing) — a keyword-only deployment degrades silently.
+    `main._vector_capability` (lazy, `(searcher,reason,note_worthy)`); `search.run_search` owns the
+    shape/escalation decision. **Review round:** `search.may_use_vector` skips capability/index-status
+    for graph-only auto shapes; backend failures raise typed `VectorUnavailable` (narrow catch — impl
+    bugs propagate); `escalation_primary_below_k` clamped; ADR/Plan define silent-vs-noted degradation.
   - **4e-3** — `evals/golden_retrieval.yaml` + `tests/test_retrieval_evals.py` (8 categories).
 - **4e** — RRF hybrid fusion (keyword+vector) + per-group caps + retrieval eval harness
   (`evals/golden_retrieval.yaml`, kept separate from Phase-5 `golden_questions.yaml`).

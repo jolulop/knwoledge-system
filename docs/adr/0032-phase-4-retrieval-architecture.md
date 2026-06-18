@@ -240,13 +240,16 @@ adds no new dependencies.
    need is defined). This delivers semantic recall where it matters (free-text conceptual queries)
    while keeping exact lookups cheap and not making every `auto` request depend on the embedder.
 
-6. **`auto` degrades gracefully; only explicit `mode=vector` 503s.** When the embedder or vector
-   index is unavailable/stale during an `auto` request that would have used vector, `/search`
-   **degrades to keyword-only** — never a 503 — and surfaces the degradation in a top-level
-   `notes: []` field (e.g. "vector unavailable: embedder down — degraded to keyword-only"), with
-   `retrieval_path` reflecting the channels that actually ran. The strict 503 posture (Phase 4d /
-   ADR-0033) stays reserved for **explicit** `mode=vector`, where the caller asked specifically for
-   vector and a silent fallback would be wrong.
+6. **`auto` degrades gracefully; only explicit `mode=vector` 503s.** When vector is unavailable
+   during an `auto` request that would have used it, `/search` **degrades to keyword-only** — never a
+   503 — with `retrieval_path` reflecting the channels that actually ran. The degradation is surfaced
+   in a top-level `notes: []` field **only for a genuine degradation: an embedder is configured but
+   vector still can't serve** (index missing/incoherent/stale, embedder down). A **keyword-only
+   deployment** — no embedder configured, or the `vector` extra absent — is *not* a degradation
+   (vector was never part of this deployment), so `auto` degrades **silently** (no note) rather than
+   nagging on every conceptual query. The strict 503 posture (Phase 4d / ADR-0033) stays reserved for
+   **explicit** `mode=vector`, where the caller asked specifically for vector and a silent fallback
+   would be wrong.
 
 7. **RRF fuses by rank with `k` from policy; fused hits keep per-channel detail in `channels`.**
    Reciprocal Rank Fusion scores each chunk `Σ 1/(k + rank_c)` over the channels that returned it,

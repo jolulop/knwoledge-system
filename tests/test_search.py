@@ -345,6 +345,114 @@ def test_rrf_k_clamped_never_divides_by_zero():
     assert search.fuse_evidence({"keyword": [h]}, k=-5, limit=5)
 
 
+# --- 4e-2: mode=auto conceptual-default + escalation blend + graceful degradation ---
+
+
+def _auto(vault, q, *, vector_search=None, reason=None, policy=None):
+    return search.run_search(q=q, mode="auto", keyword_conn=vault[0], graph_conn=None,
+                             policy=policy or RetrievalPolicy(),
+                             vector_search=vector_search, vector_unavailable_reason=reason)
+
+
+def test_auto_default_shape_blends_vector(vault):
+    res = _auto(vault, "integration playbook strategy", vector_search=lambda *, limit: _vector_rows())
+    assert res["shape"] == "default"
+    assert "vector" in res["retrieval_path"]  # conceptual default always blends vector
+
+
+def test_auto_exact_shape_escalates_when_keyword_sparse(vault):
+    calls = {"n": 0}
+
+    def vs(*, limit):
+        calls["n"] += 1
+        return _vector_rows()
+    res = _auto(vault, "revenue grew 999", vector_search=vs)  # exact (number), no keyword match -> sparse
+    assert res["shape"] == "exact" and calls["n"] == 1
+    assert "vector" in res["retrieval_path"]
+
+
+def test_auto_exact_shape_skips_vector_when_not_sparse(vault):
+    calls = {"n": 0}
+
+    def vs(*, limit):
+        calls["n"] += 1
+        return _vector_rows()
+    # escalation threshold 0 -> exact never escalates; vector is not consulted (lazy: never called).
+    res = _auto(vault, 'find "synergy" 2026', vector_search=vs,
+                policy=RetrievalPolicy(caps={"escalation_primary_below_k": 0}))
+    assert res["shape"] == "exact" and calls["n"] == 0
+    assert "vector" not in res["retrieval_path"]
+
+
+def test_auto_graph_only_shape_defers_vector(vault):
+    calls = {"n": 0}
+
+    def vs(*, limit):
+        calls["n"] += 1
+        return _vector_rows()
+    res = _auto(vault, "what do I know about synergy", vector_search=vs)  # discovery -> no keyword channel
+    assert res["shape"] == "discovery" and calls["n"] == 0  # vector deferred (never embedded)
+    assert "vector" not in res["retrieval_path"]
+
+
+def test_auto_degrades_with_note_on_genuine_unavailable(vault):
+    res = _auto(vault, "integration playbook strategy", vector_search=None, reason="embedder down")
+    assert "vector" not in res["retrieval_path"]
+    assert any("degraded to keyword-only" in n for n in res["notes"])
+
+
+def test_auto_degrades_silently_when_not_note_worthy(vault):
+    # reason=None means "keyword-only deployment" -> degrade quietly (no note).
+    res = _auto(vault, "integration playbook strategy", vector_search=None, reason=None)
+    assert res["notes"] == [] and "vector" not in res["retrieval_path"]
+
+
+def test_explicit_vector_failure_raises_channel_error(vault):
+    def boom(*, limit):
+        raise search.VectorUnavailable("embed server down")  # what the real searcher raises
+    with pytest.raises(search.VectorChannelError):
+        search.run_search(q="x", mode="vector", keyword_conn=vault[0], graph_conn=None,
+                          policy=RetrievalPolicy(), vector_search=boom)
+
+
+def test_auto_vector_backend_failure_degrades_with_note(vault):
+    def boom(*, limit):
+        raise search.VectorUnavailable("embed server down")
+    res = search.run_search(q="integration playbook strategy", mode="auto", keyword_conn=vault[0],
+                            graph_conn=None, policy=RetrievalPolicy(), vector_search=boom)
+    assert "vector" not in res["retrieval_path"]
+    assert any("degraded to keyword-only" in n for n in res["notes"])
+
+
+def test_auto_non_vector_exception_propagates(vault):
+    # A non-VectorUnavailable error (e.g. a mapping/impl bug) is NOT swallowed as a fallback.
+    def buggy(*, limit):
+        raise KeyError("malformed row")
+    with pytest.raises(KeyError):
+        search.run_search(q="integration playbook strategy", mode="auto", keyword_conn=vault[0],
+                          graph_conn=None, policy=RetrievalPolicy(), vector_search=buggy)
+
+
+def test_auto_exact_no_escalation_with_sufficient_keyword_evidence(tmp_path):
+    from app.backend import keyword_index
+    sid = "src_alphaaaaaaaaaa"
+    _write_chunks(tmp_path, sid, [_chunk(sid, i, f"alpha topic chunk {i}", i * 30) for i in range(3)])
+    _write_page(tmp_path, f"wiki/Sources/{sid}.md",
+                {"type": "source", "source_id": sid, "title": "A", "status": "active",
+                 "language": "en", "aliases": [], "tags": []}, "alpha")
+    keyword_index.reindex(tmp_path, force=True)
+    kconn = keyword_index.connect(tmp_path / keyword_index.DB_RELPATH)
+    calls = {"n": 0}
+
+    def vs(*, limit):
+        calls["n"] += 1
+        return _vector_rows()
+    res = search.run_search(q='"alpha"', mode="auto", keyword_conn=kconn, graph_conn=None,
+                            policy=RetrievalPolicy(), vector_search=vs)  # exact, 3 hits, threshold 3
+    assert res["shape"] == "exact" and res["counts"]["evidence"] == 3
+    assert calls["n"] == 0 and "vector" not in res["retrieval_path"]  # >= threshold -> no escalation
+
+
 # --- golden Build Spec §8.2 examples (topic extraction makes routed NL queries work) ---
 
 

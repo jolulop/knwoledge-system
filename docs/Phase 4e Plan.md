@@ -1,8 +1,8 @@
 # Phase 4e Plan — RRF hybrid fusion + retrieval eval harness (final Phase 4 slice)
 
-**Status:** In progress (design-locked 2026-06-18 via grill gate). **4e-1 done** (RRF fuser +
-`channels`/`notes` model fields + `rrf_k`); 4e-2 (`auto` blend + degradation) and 4e-3 (eval harness)
-pending.
+**Status:** In progress (design-locked 2026-06-18 via grill gate). **4e-1 + 4e-2 done** (RRF fuser +
+shape; `mode=auto` conceptual-default + escalation blend + graceful degradation). **4e-3 (eval
+harness) pending.**
 **Governing ADR:** [ADR-0032](adr/0032-phase-4-retrieval-architecture.md) decision 6 + **addenda 5–8**.
 **Predecessors:** 4a (keyword/nav index), 4b (graph read), 4c (router + `/search`), 4d (vector channel).
 Phase 4e is the **last** Phase 4 slice; it adds **no new dependencies**.
@@ -62,11 +62,16 @@ whole suite stay key-free (fake embedder).
     count `< escalation_primary_below_k`.
   - `discovery` / `relationship` / `disagreement` → navigation/graph primary; escalate the
     evidence-producing path only (graph-only shapes defer vector).
-- **Degradation:** if vector is selected but the embedder/index is unavailable or **stale**, `auto`
-  **runs keyword-only** (never 503) and appends a top-level `notes` entry
-  (e.g. `"vector unavailable: embedder down — degraded to keyword-only"`); `retrieval_path` reflects
-  the channels that actually ran. The strict 503 posture (ADR-0033) stays for **explicit**
+- **Degradation:** if vector is selected but unavailable, `auto` **runs keyword-only** (never 503),
+  `retrieval_path` reflecting the channels that actually ran. A `notes` entry is added **only for a
+  genuine degradation** — an embedder *is* configured but vector can't serve (index missing/stale/
+  incoherent, embedder down). A **keyword-only deployment** (no embedder / `vector` extra absent)
+  degrades **silently** (no note). The strict 503 posture (ADR-0033) stays for **explicit**
   `mode=vector`.
+- **Capability laziness:** the endpoint inspects vector state only when the request *could* run vector
+  (`search.may_use_vector`) — graph-only auto shapes skip the index-status check entirely; the query
+  is embedded only when vector actually runs. A vector-backend failure surfaces as a typed
+  `VectorUnavailable` (mapping/impl bugs are not swallowed).
 - **Single-channel auto** (keyword-only result) returns plain keyword hits — `channels` still present
   (just `{"keyword": …}`) so the shape is uniform.
 

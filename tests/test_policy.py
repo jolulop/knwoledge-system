@@ -90,6 +90,12 @@ def test_invalid_rrf_k_falls_back_to_default(tmp_path):
     assert policy.load_retrieval_policy(f).cap("rrf_k") == 60  # <1 -> default, never a divisor of 0
 
 
+def test_negative_escalation_threshold_falls_back(tmp_path):
+    f = tmp_path / "retrieval.yaml"
+    f.write_text("caps:\n  escalation_primary_below_k: -2\n", encoding="utf-8")
+    assert policy.load_retrieval_policy(f).cap("escalation_primary_below_k") == 3  # negative -> default
+
+
 def test_malformed_policy_values_do_not_crash(tmp_path):
     f = tmp_path / "retrieval.yaml"
     f.write_text("router: not-a-mapping\ncaps:\n  max_graph_nodes: not-an-int\n", encoding="utf-8")

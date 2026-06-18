@@ -330,22 +330,29 @@ def _open_graph_safe() -> Any:
     return conn
 
 
-def _build_vector_search(q: str, policy: Any, source_id: str | None) -> search.VectorSearchFn:
-    """Embed the raw query and return a LanceDB ANN-search closure, or raise 503 if vector is not
-    ready. The optional dependency absent, embedder unconfigured/down, a missing/incoherent index, or
-    **any chunk-level staleness** are all controlled 503s — explicit vector serving never returns
-    stale citations or a silent empty (ADR-0033 decision 4; stricter than the maintenance validator,
-    which only warns on drift)."""
+def _vector_capability(
+    q: str, policy: Any, source_id: str | None
+) -> tuple[search.VectorSearchFn | None, str | None, bool]:
+    """Decide whether the vector channel can serve, returning ``(searcher, reason, note_worthy)``:
+    ``(searcher, None, _)`` when ready, else ``(None, reason, note_worthy)``. The query is embedded
+    **lazily** inside the searcher, so the cost is paid only if the channel actually runs.
+
+    ``note_worthy`` is ``True`` only when an embedder **is configured** but vector still can't serve —
+    i.e. a genuine *degradation* (mode=auto surfaces it as a note). A keyword-only deployment (no
+    embedder / extra not installed) is **not** a degradation, so auto stays quietly keyword-only.
+    The full ``reason`` is always returned for the explicit ``mode=vector`` 503 message.
+
+    Strict serving checks (ADR-0033 decision 4): the optional dependency, the embedder config, and a
+    missing/incoherent/**stale** index all make vector unavailable — explicit vector never serves a
+    stale citation or a silent empty."""
     if not vector_index.lancedb_available():
-        raise HTTPException(503, "vector search unavailable: the 'vector' extra (LanceDB) is not installed")
+        return None, "the 'vector' extra (LanceDB) is not installed", False
     try:
         embedder = embeddings.client_from_settings(settings)
     except embeddings.EmbeddingError as exc:
-        raise HTTPException(503, f"vector search unavailable: embedding config error: {exc}") from exc
+        return None, f"embedding config error: {exc}", True
     if embedder is None:
-        raise HTTPException(
-            503, "vector search unavailable: no embedder configured (set EMBEDDING_BASE_URL + EMBEDDING_MODEL_REF)"
-        )
+        return None, "no embedder configured (set EMBEDDING_BASE_URL + EMBEDDING_MODEL_REF)", False
     expected = vector_index.VectorMeta(
         embedding_model_ref=settings.embedding_model_ref,
         embedding_code_version=vector_index.EMBED_CODE_VERSION,
@@ -355,33 +362,29 @@ def _build_vector_search(q: str, policy: Any, source_id: str | None) -> search.V
     )
     st = vector_index.status(settings.root, expected=expected)
     if not st.present:
-        raise HTTPException(503, "vector search unavailable: no vector index built (run scripts/reindex_vector.py)")
+        return None, "no vector index built (run scripts/reindex_vector.py)", True
     if not st.coherent:
-        raise HTTPException(
-            503, "vector search unavailable: index stale/incoherent (" + "; ".join(st.issues)
-            + "); rerun scripts/reindex_vector.py --force"
-        )
+        return None, "index stale/incoherent (" + "; ".join(st.issues) + "); rerun reindex_vector.py --force", True
     if st.stale_or_missing_chunks or st.removed_chunks:
-        raise HTTPException(
-            503, f"vector search unavailable: index is stale ({st.stale_or_missing_chunks} chunk(s) "
-            f"changed/missing, {st.removed_chunks} removed) — stale citations are unsafe; "
-            "rerun scripts/reindex_vector.py"
-        )
+        return None, (f"index is stale ({st.stale_or_missing_chunks} chunk(s) changed/missing, "
+                      f"{st.removed_chunks} removed); rerun scripts/reindex_vector.py"), True
 
     qtext = (q or "")[:policy.cap("max_query_chars")]
-    if not qtext.strip():
-        return lambda *, limit: []  # empty query -> structural empty result
-    try:
-        query_vector = embedder.embed([qtext])[0]
-    except embeddings.EmbeddingError as exc:
-        raise HTTPException(503, f"vector search unavailable: embedding server error: {exc}") from exc
     metric = settings.embedding_distance_metric
+    cache: dict[str, list[float]] = {}
 
     def searcher(*, limit: int) -> list[dict[str, Any]]:
-        return vector_index.search(settings.root, query_vector, limit=limit, metric=metric,
-                                   source_id=source_id)
+        if not qtext.strip():
+            return []
+        try:
+            if "vec" not in cache:
+                cache["vec"] = embedder.embed([qtext])[0]  # lazy: embed only when vector actually runs
+            return vector_index.search(settings.root, cache["vec"], limit=limit, metric=metric,
+                                       source_id=source_id)
+        except Exception as exc:  # backend failure (embed/index) -> narrow, typed unavailability
+            raise search.VectorUnavailable(str(exc)) from exc
 
-    return searcher
+    return searcher, None, False
 
 
 @app.get("/search", response_model=SearchResponse)
@@ -426,24 +429,33 @@ def run_search_endpoint(
     )
     graph_conn = _open_graph_safe()
     try:
-        # mode=vector is explicit-only (4d). Unavailable/stale embedder or index -> controlled 503.
-        vector_search = None
-        if mode == "vector":
-            # Serving vector evidence requires the navigation index to verify source-status retention;
-            # without it we'd silently drop every hit. Refuse explicitly instead.
+        # Build the vector capability for explicit mode=vector and mode=auto (it may blend vector).
+        # Serving vector evidence needs the navigation index to verify source-status retention.
+        vector_search: search.VectorSearchFn | None = None
+        vector_reason: str | None = None  # the auto degradation note (None = degrade silently)
+        # Only inspect vector state for requests that could actually run vector — graph-only auto
+        # shapes (discovery/relationship/disagreement) skip the capability/index-status check entirely.
+        if search.may_use_vector(mode, q, policy):
             if keyword_conn is None:
-                raise HTTPException(
-                    503, "vector search unavailable: the keyword/navigation index is required for "
-                    "source-status retention; run scripts/reindex_keyword.py"
-                )
-            vector_search = _build_vector_search(q, policy, source_id)
+                reason = ("the keyword/navigation index is required for source-status retention; "
+                          "run scripts/reindex_keyword.py")
+                note_worthy = False  # missing keyword index is a degenerate state, not a vector degradation
+            else:
+                vector_search, reason, note_worthy = _vector_capability(q, policy, source_id)
+            if mode == "vector" and vector_search is None:
+                raise HTTPException(status_code=503, detail=f"vector search unavailable: {reason}")
+            if mode == "auto" and vector_search is None and note_worthy:
+                vector_reason = reason
+
         result = search.run_search(
             q=q, mode=mode, keyword_conn=keyword_conn, graph_conn=graph_conn, policy=policy,
             source_id=source_id, page_type=page_type, node_type=node_type, language=language,
             source_statuses=source_statuses, node_statuses=node_statuses, edge_statuses=edge_statuses,
             evidence_limit=evidence_limit, navigation_limit=navigation_limit, graph_limit=graph_limit,
-            vector_search=vector_search,
+            vector_search=vector_search, vector_unavailable_reason=vector_reason,
         )
+    except search.VectorChannelError as exc:  # explicit mode=vector failed at query time
+        raise HTTPException(status_code=503, detail=f"vector search unavailable: {exc}") from exc
     finally:
         if keyword_conn is not None:
             keyword_conn.close()

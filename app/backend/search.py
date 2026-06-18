@@ -17,11 +17,11 @@ share a relevance scale (ADR-0032 decision 6). The pieces:
   subgraph (multi-seed BFS at the policy depth budget), applies retention-aware status filters and
   per-group caps, and assembles the grouped response.
 
-Scope: keyword/navigation/graph + **explicit `mode=vector`**. All chunk evidence flows through
-:func:`fuse_evidence` (Reciprocal Rank Fusion, Phase 4e-1) — single-channel results fuse too, so every
-hit carries the `channels` detail and an RRF top-level `score`. The **`mode=auto` keyword+vector
-blend** (running both channels in auto) is **Phase 4e-2** — until then `auto` evidence stays
-keyword-only.
+Scope: keyword/navigation/graph + vector. All chunk evidence flows through :func:`fuse_evidence`
+(Reciprocal Rank Fusion) — single-channel results fuse too, so every hit carries the `channels` detail
+and an RRF top-level `score`. `mode=auto` blends keyword+vector for the conceptual default and escalates
+to vector for keyword-primary shapes when keyword evidence is sparse; when vector is unavailable, auto
+degrades to keyword-only (a `notes` entry; never a 5xx — that is reserved for explicit `mode=vector`).
 """
 from __future__ import annotations
 
@@ -33,10 +33,22 @@ from typing import Any, Callable
 from app.backend import graph_read
 from app.backend.policy import RetrievalPolicy
 
-# Injected by the endpoint for mode=vector: returns LanceDB rows (citation fields + `_distance`).
-# Kept as a callable so search.py never imports vector_index/lancedb (the optional dependency stays
-# isolated to vector_index.py + reindex_vector.py).
+# Injected by the endpoint for the vector channel: returns LanceDB rows (citation fields +
+# `_distance`). Kept as a callable so search.py never imports vector_index/lancedb (the optional
+# dependency stays isolated to vector_index.py + reindex_vector.py). It embeds the query lazily, so
+# it is only invoked — and the embedding cost only paid — when the vector channel actually runs.
 VectorSearchFn = Callable[..., list[dict[str, Any]]]
+
+
+class VectorUnavailable(Exception):
+    """The vector *backend* (embedder / index read) could not serve at query time. Raised by the
+    injected `vector_search` callable so degradation is narrow: a row-mapping/fusion bug is NOT a
+    VectorUnavailable and propagates normally instead of being hidden as a keyword-only fallback."""
+
+
+class VectorChannelError(RuntimeError):
+    """The vector channel was unavailable while serving an *explicit* ``mode=vector`` request (the
+    endpoint maps this to 503). In ``mode=auto`` a :class:`VectorUnavailable` degrades to keyword-only."""
 
 VALID_MODES = frozenset({"keyword", "vector", "graph", "navigation", "auto"})
 # Default retention window (ADR-0032 decision 8): deprecated content stays searchable; everything
@@ -154,14 +166,28 @@ def classify_shape(q: str) -> str:
 def route(mode: str, q: str, policy: RetrievalPolicy) -> tuple[list[str], str | None]:
     """Resolve the channel set to run and the classified shape (None unless mode=auto).
 
-    Vector is dropped from any auto-derived set (Phase 4d); an explicit ``mode=vector`` is handled
-    (rejected) at the endpoint, not here.
+    No policy rule emits ``vector``; auto's vector blend is decided in :func:`run_search` by shape +
+    keyword-escalation (and :func:`may_use_vector`), so any stray ``vector`` is dropped from an
+    auto-derived set here.
     """
     if mode == "auto":
         shape = classify_shape(q)
         modes = [m for m in policy.modes_for_shape(shape) if m != "vector"]
         return modes, shape
     return [mode], None
+
+
+def may_use_vector(mode: str, q: str, policy: RetrievalPolicy) -> bool:
+    """Whether the vector channel could possibly run for this request — so the endpoint can skip the
+    vector-capability / index-status check entirely for shapes that never use vector (graph-only auto
+    queries). ``auto`` can use vector only when the routed set has a keyword evidence channel
+    (conceptual default always, keyword-primary shapes on escalation)."""
+    if mode == "vector":
+        return True
+    if mode != "auto":
+        return False
+    modes, _ = route(mode, q, policy)
+    return "keyword" in modes
 
 
 # --------------------------------------------------------------------------- status filters
@@ -343,7 +369,7 @@ def search_vector(
     prefusion_limit: int,
     limit: int,
 ) -> list[dict[str, Any]]:
-    """Standalone vector evidence (Phase 4d): ANN rows → keyword-identical hits, retention-filtered.
+    """Vector evidence: ANN rows → keyword-identical hits, retention-filtered (one fusion channel).
 
     Honors the same ``source_id`` filter and retention window as keyword evidence (ADR-0033): a hit
     whose source is the wrong source, or archived/deleted/unknown, is excluded unless asked for.
@@ -479,6 +505,7 @@ def run_search(
     navigation_limit: int | None = None,
     graph_limit: int | None = None,
     vector_search: VectorSearchFn | None = None,
+    vector_unavailable_reason: str | None = None,
 ) -> dict[str, Any]:
     """Run the routed channels and assemble the grouped ``/search`` response."""
     modes, shape = route(mode, q, policy)
@@ -523,13 +550,33 @@ def run_search(
             node_statuses=node_statuses, node_types=node_types, node_cap=node_cap, edge_cap=edge_cap,
         )
 
-    # Vector evidence (explicit mode=vector in 4d; joins auto via the conceptual-default blend in 4e).
-    # The query is embedded from raw NL text by the endpoint, which supplies `vector_search`.
-    if "vector" in modes and vector_search is not None:
-        channel_hits["vector"] = search_vector(
-            vector_search, keyword_conn, source_id=source_id, source_statuses=source_statuses,
-            prefusion_limit=prefusion, limit=prefusion,
-        )
+    # Vector-channel decision (ADR-0032 addenda 5–6). Explicit mode=vector always runs vector. In
+    # auto, the conceptual `default` shape always blends vector, and the keyword-primary shapes
+    # (exact/mention) escalate to vector only when keyword evidence is sparse
+    # (< escalation_primary_below_k); graph-only shapes (no keyword evidence channel) defer vector.
+    # vector_search embeds the query lazily, so the cost is paid only here, when vector actually runs.
+    keyword_count = len(channel_hits.get("keyword", []))
+    want_vector = "vector" in modes or (
+        mode == "auto" and "keyword" in modes
+        and (shape == "default" or keyword_count < policy.cap("escalation_primary_below_k"))
+    )
+    if want_vector and vector_search is not None:
+        try:
+            channel_hits["vector"] = search_vector(
+                vector_search, keyword_conn, source_id=source_id, source_statuses=source_statuses,
+                prefusion_limit=prefusion, limit=prefusion,
+            )
+        except VectorUnavailable as exc:  # backend failed: explicit -> 503; auto -> degrade
+            if mode != "auto":
+                raise VectorChannelError(str(exc)) from exc
+            notes.append(f"vector channel unavailable — degraded to keyword-only: {exc}")
+        else:
+            if "vector" not in modes:
+                modes = [*modes, "vector"]
+    elif want_vector and mode == "auto" and vector_unavailable_reason is not None:
+        # Auto wanted vector but it is unavailable — note only genuine degradations (a keyword-only
+        # deployment passes reason=None and degrades silently).
+        notes.append(f"vector channel unavailable — degraded to keyword-only: {vector_unavailable_reason}")
 
     # RRF-fuse the chunk-evidence channels into one ranked evidence[] (ADR-0032 addendum 7).
     evidence = fuse_evidence(channel_hits, k=policy.cap("rrf_k"), limit=ev_limit)

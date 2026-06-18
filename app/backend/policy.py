@@ -204,4 +204,8 @@ def load_retrieval_policy(path: Path) -> RetrievalPolicy:
     # The RRF constant must be >= 1 (it is a divisor); a malformed policy value falls back to default.
     if not isinstance(caps.get("rrf_k"), int) or caps["rrf_k"] < 1:
         caps["rrf_k"] = _DEFAULT_CAPS["rrf_k"]
+    # The escalation threshold must be >= 0; a negative value (which would silently disable
+    # escalation) falls back to the default.
+    if not isinstance(caps.get("escalation_primary_below_k"), int) or caps["escalation_primary_below_k"] < 0:
+        caps["escalation_primary_below_k"] = _DEFAULT_CAPS["escalation_primary_below_k"]
     return RetrievalPolicy(router_rules=router_rules, default_mode_set=default_mode_set, caps=caps)
