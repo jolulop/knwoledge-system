@@ -59,7 +59,7 @@ critical rules and `CONTEXT.md` for the glossary.
   - `2e7db7f` Phase 4a: keyword evidence + wiki navigation index, design-locked (ADR-0032)
   - `c1f2504` docs: mark Phase 3.5 Complete in Build Spec
   - `eebf11b` Phase 3.5c-2: cross-source synthesis — completes Phase 3.5
-- **Tests/lint green:** `435 passed` (was 390; +45 across Phase 4d/4e), ruff clean, **10** validators
+- **Tests/lint green:** `452 passed` (was 390; +45 Phase 4d/4e, +17 Phase 5-1), ruff clean, **10** validators
   pass. Newest test file: `tests/test_retrieval_evals.py` (12, LanceDB-gated golden retrieval evals). **LanceDB installed in the venv** (`vector` extra; `uv.lock` updated) — the
   full vector suite runs; a bare `.[dev]` install skips it via `importorskip`.
 
@@ -184,7 +184,20 @@ slice 4d (vector — first slice with new deps).**
   edges / no review**; (7) CI gate = **fake `LLMClient` + structural assertions** (key-free), real-
   model quality opt-in. Heavily scaffolded already (`templates/query.md`, `citation.yaml`,
   `ground_citation`, `validate_citations::_check_query`, `app/llm`, `golden_questions.yaml`).
-  **Next: implement 5-1 when told "implement now"** (query worker core + answer schema + FakeLLMClient).
+  - **5-1** ✅ **DONE (uncommitted)** — `app/workers/query.py::answer_query`: evidence pack (stable
+    `e1..eN` ids + verbatim quote sliced from source Markdown) → `client.parse(ANSWER_SCHEMA)` returns
+    claims `{text, evidence_ids[]}` → **harness builds citations from retrieved evidence** + runs
+    `ground_citation(require_quote=True)` → grounded → `claims[]`/`citations[]` (deduped, ordinal
+    `[n]` markers), ungrounded → `unsourced_claims[]`, zero grounded → abstain `NO_SOURCE_FOUND`.
+    Pipeline-only (no endpoint/retrieval/save). **Review round applied:** evidence pack is
+    **JSON-serialized** (untrusted quote can't break the boundary); `source_id` validated via shared
+    `citations.is_source_id` + path-containment **before** any file read; grounded admission requires
+    **non-empty** claim text; narrow **path-leak guard on claim text** → `security_rejected_count`
+    (verbatim text discarded, logged only — never in API/asdict/saved page), kept separate from ordinary
+    `unsourced_claims`; compact `e1..eN`; `QUERY_PROMPT_VERSION`/`QUERY_SCHEMA_VERSION` passed to
+    `parse`. `tests/test_query.py` (17, key-free `FakeLLMClient` + real grounding gate; sentinel-
+    injection-safe, malformed-id-dropped, blank-text, path-leak-rejected, compact-ids, version-fields).
+  - **5-2** next — `POST /query` endpoint + `QueryResponse` + `QUERY_MODEL` + 503-when-unconfigured.
 - **4e** — RRF hybrid fusion (keyword+vector) + per-group caps + retrieval eval harness
   (`evals/golden_retrieval.yaml`, kept separate from Phase-5 `golden_questions.yaml`).
 

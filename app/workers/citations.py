@@ -22,6 +22,12 @@ _SOURCE_ID = re.compile(r"^src_[0-9a-f]{16}$")
 _INT = re.compile(r"-?\d+$")
 
 
+def is_source_id(value: Any) -> bool:
+    """True iff ``value`` is the canonical ``src_<16 hex>`` source identifier (ADR-0019/0020). The
+    single source of truth shared by citation grounding and query synthesis so the shape can't drift."""
+    return isinstance(value, str) and _SOURCE_ID.match(value) is not None
+
+
 def _norm(text: str) -> str:
     return _WS.sub(" ", text).strip()
 
@@ -41,7 +47,7 @@ def ground_citation(
     problems: list[str] = []
 
     sid = citation.get("source_id")
-    if not isinstance(sid, str) or not _SOURCE_ID.match(sid):
+    if not is_source_id(sid):
         problems.append(f"source_id missing or malformed: {sid!r}")
 
     start, end = citation.get("char_start"), citation.get("char_end")
