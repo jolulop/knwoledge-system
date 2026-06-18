@@ -1,0 +1,134 @@
+# Phase 4e-3 retrieval eval cases (ADR-0032 addendum 8). Run by tests/test_retrieval_evals.py over a
+# programmatic fixture vault (keyword + vector indexes via a deterministic FakeEmbedder). Assertions
+# are structural (anchors / status / router / RRF shape+order / retention), NOT semantic relevance.
+# Kept separate from the answer-shaped evals/golden_questions.yaml (Phase 5).
+#
+# NOTE: parsed by the project's minimal YAML-subset loader (no PyYAML) — use the dash-on-own-line
+# sequence form and block lists (no inline `[...]` / `- key: val`).
+version: 1
+cases:
+  # 1. Exact-anchor retrieval: the keyword hit returns the right (source_id, char_start).
+  -
+    id: exact_anchor_keyword
+    category: exact_anchor
+    mode: keyword
+    query: '"Synergy capture"'
+    expect:
+      min_evidence: 1
+      top_source_id: src_aaaaaaaaaaaaaaaa
+      top_char_start: 0
+      top_channels:
+        - keyword
+
+  # 2. Status-aware navigation: active concept is answer_eligible, deprecated_candidate is not
+  # (deprecated_candidate is searchable by default; strict `candidate` would need node_status=).
+  -
+    id: status_aware_navigation
+    category: status_nav
+    mode: navigation
+    query: synergy
+    expect:
+      nav_eligible:
+        wiki/Concepts/cpt_activexxxxxxxxx.md: true
+        wiki/Concepts/cpt_deprecatedxxxx.md: false
+
+  # 3. Graph bounds: the /search graph group is depth/cap-bounded and not truncated for this fixture.
+  -
+    id: graph_bounds
+    category: graph_caps
+    mode: graph
+    query: synergy
+    expect:
+      graph_node_ids_include:
+        - cpt_activexxxxxxxxx
+      graph_max_distance: 2
+      graph_truncated: false
+
+  # 4. Router taxonomy: §8.2 shapes classify deterministically.
+  -
+    id: router_exact
+    category: router_taxonomy
+    mode: auto
+    query: '"day one"'
+    expect:
+      shape: exact
+  -
+    id: router_relationship
+    category: router_taxonomy
+    mode: auto
+    query: how are synergy and mergers related
+    expect:
+      shape: relationship
+      retrieval_path:
+        - graph
+  -
+    id: router_mention
+    category: router_taxonomy
+    mode: auto
+    query: which documents mention synergy
+    expect:
+      shape: mention
+  -
+    id: router_discovery
+    category: router_taxonomy
+    mode: auto
+    query: what do I know about synergy
+    expect:
+      shape: discovery
+
+  # 5. FTS-safe malformed query: operators/parens/colons never crash; structural empty.
+  -
+    id: fts_safe_malformed
+    category: fts_safe
+    mode: keyword
+    query: '"unbalanced (quote NEAR* and:or'
+    expect:
+      no_results: true
+
+  # 6. Vector citation carry-through: a vector hit carries the full citation shape (incl. kind).
+  -
+    id: vector_citation_carry_through
+    category: vector_carry
+    mode: vector
+    query: synergy
+    expect:
+      min_evidence: 1
+      top_channels:
+        - vector
+      top_has_fields:
+        - source_id
+        - char_start
+        - char_end
+        - kind
+        - snippet
+
+  # 7. RRF shape + order determinism: a chunk found by BOTH channels merges (channels + retrieval_path),
+  # and identical query+index yields identical output. (Query == a chunk's text -> vector distance 0.)
+  -
+    id: rrf_dual_channel_merge_deterministic
+    category: rrf_determinism
+    mode: auto
+    query: Synergy capture drives post-merger value.
+    expect:
+      retrieval_path:
+        - keyword
+        - vector
+      top_channels:
+        - keyword
+        - vector
+      top_retrieval_path:
+        - keyword
+        - vector
+      deterministic: true
+
+  # 8. Retention defaults: archived source excluded by default; active included.
+  -
+    id: retention_excludes_archived
+    category: retention
+    mode: keyword
+    query: synergy
+    expect:
+      evidence_includes_sources:
+        - src_aaaaaaaaaaaaaaaa
+      evidence_excludes_sources:
+        - src_bbbbbbbbbbbbbbbb

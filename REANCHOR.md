@@ -59,8 +59,8 @@ critical rules and `CONTEXT.md` for the glossary.
   - `2e7db7f` Phase 4a: keyword evidence + wiki navigation index, design-locked (ADR-0032)
   - `c1f2504` docs: mark Phase 3.5 Complete in Build Spec
   - `eebf11b` Phase 3.5c-2: cross-source synthesis — completes Phase 3.5
-- **Tests/lint green:** `423 passed` (was 390; +33 from 4d-3 + 4e-1/4e-2 + review rounds), ruff
-  clean, **10** validators pass. **LanceDB installed in the venv** (`vector` extra; `uv.lock` updated) — the
+- **Tests/lint green:** `435 passed` (was 390; +45 across Phase 4d/4e), ruff clean, **10** validators
+  pass. Newest test file: `tests/test_retrieval_evals.py` (12, LanceDB-gated golden retrieval evals). **LanceDB installed in the venv** (`vector` extra; `uv.lock` updated) — the
   full vector suite runs; a bare `.[dev]` install skips it via `importorskip`.
 
 ## Viewing the vault (Obsidian)
@@ -165,7 +165,15 @@ slice 4d (vector — first slice with new deps).**
     shape/escalation decision. **Review round:** `search.may_use_vector` skips capability/index-status
     for graph-only auto shapes; backend failures raise typed `VectorUnavailable` (narrow catch — impl
     bugs propagate); `escalation_primary_below_k` clamped; ADR/Plan define silent-vs-noted degradation.
-  - **4e-3** — `evals/golden_retrieval.yaml` + `tests/test_retrieval_evals.py` (8 categories).
+  - **4e-3** ✅ **DONE (uncommitted)** — retrieval eval harness: `evals/golden_retrieval.yaml` (cases,
+    dash-on-own-line YAML parsed by `policy.load_yaml`) + `tests/test_retrieval_evals.py` (programmatic
+    fixture vault → keyword+vector indexes via `FakeEmbedder` → `run_search()` directly; 8 categories:
+    exact-anchor, status-nav, graph-bounds, router-taxonomy, fts-safe, vector-carry, RRF
+    shape/order-determinism, retention). Structural-not-semantic, LanceDB-gated, CI-gating.
+- **PHASE 4 (Search & Graph) COMPLETE** — 4a keyword/nav · 4b graph read · 4c router+/search · 4d
+  vector · 4e RRF fusion+evals. **Next: Phase 5 (Query & Cited Answering)** — `POST /query`, LLM
+  answer synthesis over retrieved evidence, saved `Queries/` pages, the `"No source found in vault."`
+  answer text. First LLM-in-the-loop retrieval surface → start with a `/grill-with-docs` planning pass.
 - **4e** — RRF hybrid fusion (keyword+vector) + per-group caps + retrieval eval harness
   (`evals/golden_retrieval.yaml`, kept separate from Phase-5 `golden_questions.yaml`).
 

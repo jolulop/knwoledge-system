@@ -4,9 +4,10 @@
 implemented** — 4a: keyword evidence + wiki navigation index; 4b: graph read API; 4c: deterministic
 router + `GET /search` (keyword/navigation/graph groups, safe FTS builder, retention filters,
 `retrieval.yaml` loader + caps); 4d: LanceDB vector channel (embedding seam + index + `mode=vector`,
-see [ADR-0033](adr/0033-phase-4d-vector-retrieval.md) + [Phase 4d Plan](Phase%204d%20Plan.md)). **4e
-(RRF fusion + `auto` blend + retrieval eval harness) design-locked — see ADR-0032 addenda 5–8 +
-[Phase 4e Plan](Phase%204e%20Plan.md); no code yet.**
+see [ADR-0033](adr/0033-phase-4d-vector-retrieval.md) + [Phase 4d Plan](Phase%204d%20Plan.md)); 4e: RRF
+hybrid fusion + `auto` keyword+vector blend + retrieval eval harness (ADR-0032 addenda 5–8 +
+[Phase 4e Plan](Phase%204e%20Plan.md)). ✅ **Phase 4 (Search & Graph) COMPLETE — next: Phase 5
+(Query & Cited Answering).**
 **Governing ADR:** [ADR-0032](adr/0032-phase-4-retrieval-architecture.md). Read it first — this
 plan is the operational breakdown of its decisions.
 **Predecessors:** Phase 3 (deterministic Source-page backbone), Phase 3.5a/b/c (semantic LLM
