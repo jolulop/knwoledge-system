@@ -97,6 +97,15 @@ The SQLite store under `db/graph.sqlite` that is authoritative for **relationshi
 **Hybrid Retrieval**
 The combination of keyword search, semantic/vector search, graph traversal, and summary-first wiki navigation.
 
+**Embedding Adapter**
+The provider-agnostic seam that turns text into vectors behind one uniform call, `EmbeddingClient.embed(texts) -> vectors`, mirroring the [[llm-adapter]] (ADR-0025). The default adapter speaks the OpenAI-compatible `/embeddings` HTTP wire to a **local** server the operator runs (TEI / vLLM / Ollama on the GPU), so the repository owns no GPU runtime and pulls no Torch into the core install. It owns timeout/bounded-retry and **dimension validation**. A cloud provider is reachable through the same seam only as an explicit, security-gated opt-in (`embedding_api_key`), because sending normalized chunks to a cloud API exports source text across the local-first trust boundary (ADR-0026, ADR-0033).
+
+**Vector Index**
+The derived **LanceDB** index under `indexes/vector/` that embeds the *same* per-source chunks as the keyword evidence index. Each row carries the embedding plus citation metadata identical to a keyword evidence hit (authoritative anchor `(source_id, char_start, char_end)`), so a vector hit returns the same [[structured-citation]] object and "joins the same `/search` contract without changing the shape." It is gitignored and regenerable (ADR-0032 §7), backed up only on opt-in, and refreshed **explicitly** (`scripts/reindex_vector.py`, never the per-file hook) — the keyword channel stays the always-fresh path while the vector index may drift between reindexes by design (ADR-0033).
+
+**Embedding Identity (Staleness Key)**
+The contract that decides when the vector index must be rebuilt. `embedding_model_ref` **is** the embedding identity — the operator pins it precisely and bumps it whenever the served model, quantization, pooling, normalization, or version changes. The **index-level** key (`embedding_model_ref`, `embedding_code_version`, `distance_metric`, `dimension`, `index_schema_version`) and **per-row** key (`source_id`, `chunk_id`, `chunk_fingerprint`, `embedding_model_ref`) drive rebuilds: any index-level mismatch refuses an incremental run and requires `--force`; a chunk-fingerprint-only diff re-embeds just the changed chunks. Bit-identical vectors are **not** required (cosine ranking tolerates GPU float nondeterminism); runtime guards validate the returned dimension and cross-check the server's `model` against the ref (ADR-0033).
+
 **Summary-First Navigation**
 The rule that every major wiki page includes a short `> [!summary]` callout so humans and agents can decide whether to open the full page.
 

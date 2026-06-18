@@ -109,8 +109,13 @@ slice 4d (vector — first slice with new deps).**
   orchestrator). Vector deferred to 4d (explicit `mode=vector`→400); evidence keyword-only until 4e
   RRF. Graph group seeded from navigation hits; `/search` graph caps come from `retrieval.yaml`
   (ADR addendum 4) while `/graph/*` endpoints keep their constants.
-- **4d** — vector index (LanceDB + local embeddings, cloud-embedding seam opt-in); joins the same
-  `/search` contract. First slice with new deps.
+- **4d** ✅ **DESIGN-LOCKED (2026-06-18 grill; no code yet)** — vector index (LanceDB + local
+  embeddings via an OpenAI-compatible `/embeddings` HTTP seam, no Torch in repo; cloud opt-in
+  security-gated). Decisions in **ADR-0033** + **`docs/Phase 4d Plan.md`**: config-ref staleness key
+  (`--force` on index-level change, re-embed changed chunks otherwise); `mode=vector` **explicit-only,
+  standalone** (RRF/auto-blend stay 4e); explicit `scripts/reindex_vector.py` (never the per-file
+  hook); validators surface vector staleness; fake embedder in tests (key-free). Slices 4d-1/2/3.
+  Next: implement 4d-1 when told "implement now".
 - **4e** — RRF hybrid fusion (keyword+vector) + per-group caps + retrieval eval harness
   (`evals/golden_retrieval.yaml`, kept separate from Phase-5 `golden_questions.yaml`).
 
@@ -156,4 +161,6 @@ runs cost money; no key → `skipped` job but deterministic parts still run):
 edges; backlinks derived), 0030 (graph schema), 0031 (3.5c synthesis & contradiction —
 graph-blocked pairing, sorted-pair `contradicts`, per-concept synthesis, review gates),
 0032 (Phase 4 retrieval architecture — evidence vs. answer seam, citable chunks vs. node prose,
-deterministic router + RRF fusion, index storage/lifecycle relayout).
+deterministic router + RRF fusion, index storage/lifecycle relayout),
+0033 (Phase 4d vector retrieval — local `/embeddings` HTTP seam, LanceDB same-citation index,
+config-ref staleness key, explicit-only `mode=vector`, explicit non-hooked reindex).

@@ -66,11 +66,13 @@ keyword/graph/router stack is stable (ADR-0028 discipline). Commitments:
   embedding API exports source text and crosses the local-first trust boundary.
 - **Store: LanceDB** (embedded, serverless, file-based — fits local-first; Build Spec allows
   "LanceDB or ChromaDB").
-- **Vector is reproducible-enough only if the staleness key is complete:** embedding model,
-  model version/hash, embedding code version, distance metric, dimension, and chunk fingerprint
-  are all stored. A model/version bump **invalidates the whole vector index**. (This is *why* the
-  vector index is not an ADR-0027-style durable record: embeddings derive from deterministic local
-  inputs, unlike non-reproducible LLM sampling.)
+- **Vector is reproducible-enough only if the staleness key is complete:** embedding model
+  identity, embedding code version, distance metric, dimension, and chunk fingerprint are all
+  stored. A model/version bump **invalidates the whole vector index**. (This is *why* the vector
+  index is not an ADR-0027-style durable record: embeddings derive from deterministic local inputs,
+  unlike non-reproducible LLM sampling.) **Refined by ADR-0033:** "embedding model identity" is the
+  operator-pinned `embedding_model_ref` — there is **no separate model-version/hash field**; the
+  operator bumps the ref on any model/quantization/pooling/normalization/version change.
 
 **4. The retrieval router is deterministic and policy-driven; `/search` exposes explicit `mode`
 plus `auto`.** Phase 4 has no LLM, so classification is a small deterministic, testable function

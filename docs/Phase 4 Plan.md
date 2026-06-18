@@ -60,9 +60,12 @@ synthesis eligibility. Navigation surfaces candidates; evidence does not cite th
 - **Source:** the same per-source chunks as 2.1.
 - **Store:** `indexes/vector/` (LanceDB). Local GPU embeddings by default; embedding-provider seam
   with cloud opt-in gated + security docs.
-- **Row metadata:** citation fields (as 2.1) + the staleness key: `embedding_model_ref`, model
-  version/hash, embedding code version, distance metric, `dimension`, chunk fingerprint, index
-  version. A model/version bump invalidates the whole index.
+- **Row metadata:** citation fields (as 2.1) + the staleness key. **Refined by ADR-0033:**
+  `embedding_model_ref` *is* the embedding identity (operator-pinned) — there is **no separate
+  "model version/hash" field**. Index-level key = `embedding_model_ref`, `embedding_code_version`,
+  `distance_metric`, `dimension`, `index_schema_version`; per-row = `source_id`, `chunk_id`,
+  `chunk_fingerprint`, `embedding_model_ref`. A ref/metric/dimension/code/schema change invalidates
+  the whole index (`--force`); a chunk-fingerprint diff re-embeds only changed chunks.
 
 ### 2.4 Storage & lifecycle (ADR-0032 §7)
 - `db/` durable: `graph.sqlite` (backed up), `jobs.sqlite`, `llm_cache.sqlite`.
@@ -127,7 +130,7 @@ synthesis eligibility. Navigation surfaces candidates; evidence does not cite th
 | **4a** | Keyword evidence index + navigation index + reindex script + index-consistency validator; **retire scaffolds** (`documents_fts`, path-keyed `chunks.jsonl`). | none |
 | **4b** | Graph read API (`/graph/node`, `/graph/neighborhood`): active-default, depth-bounded projection over `graph.py`. | none |
 | **4c** | Retrieval router + `GET /search` (keyword + navigation + graph groups; safe FTS builder; retention filters). `mode=auto` covers keyword/navigation/graph only. | none |
-| **4d** | Vector index: LanceDB + local embeddings + embedding-provider seam (cloud opt-in). Vector joins the **same** `/search` contract without changing response shape. | LanceDB, embedding model |
+| **4d** | Vector index: LanceDB + local embeddings + embedding-provider seam (cloud opt-in). Vector joins the **same** `/search` contract without changing response shape. **Design-locked — see [ADR-0033](adr/0033-phase-4d-vector-retrieval.md) + [Phase 4d Plan](Phase%204d%20Plan.md).** | LanceDB, embedding model |
 | **4e** | RRF hybrid fusion over keyword+vector + per-group caps + retrieval eval harness. | none |
 
 Up through 4c the layer is fully offline/deterministic; 4d is the first slice introducing new
