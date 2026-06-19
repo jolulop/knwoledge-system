@@ -552,6 +552,9 @@ def _build_query_corpus(tmp_path):
     sp.parent.mkdir(parents=True, exist_ok=True)
     sp.write_text("---\ntype: source\nsource_id: " + QSRC + "\ntitle: Deck\nstatus: active\n"
                   "language: en\n---\n\n# Deck\n\n> [!summary]\n> synergy\n", encoding="utf-8")
+    man = tmp_path / "raw" / "manifests" / f"{QSRC}.json"  # so saved-query citations ground (ADR-0020)
+    man.parent.mkdir(parents=True, exist_ok=True)
+    man.write_text(json.dumps({"source_id": QSRC}), encoding="utf-8")
     keyword_index.reindex(tmp_path, force=True)
 
 
@@ -697,3 +700,188 @@ def test_query_response_leaks_no_absolute_paths(client, tmp_path, monkeypatch):
         {"claims": [{"text": "Synergy is captured.", "evidence_ids": ["e1"]}]}))
     r = client.post("/query", json=_q("synergy capture"))
     assert str(tmp_path) not in r.text and r.status_code == 200
+
+
+# --------------------------------------------------------------------------- /query save (5-3)
+
+
+def _saved_query_path(tmp_path, qid):
+    return tmp_path / "wiki" / "Queries" / f"{qid}.md"
+
+
+def _validator_ok(tmp_path, script):
+    import subprocess
+    import sys as _sys
+    r = subprocess.run([_sys.executable, f"scripts/{script}", str(tmp_path)],
+                       capture_output=True, text=True)
+    return r.returncode == 0, r.stdout + r.stderr
+
+
+def _frontmatter_ok_isolated(tmp_path, page_path):
+    # Validate ONLY the query page: the minimal fixture Source page isn't a full source artifact, so
+    # check the saved page against validate_frontmatter.py in a clean vault containing just it.
+    clean = tmp_path / "_fmcheck"
+    dest = clean / "wiki" / "Queries"
+    dest.mkdir(parents=True, exist_ok=True)
+    (dest / page_path.name).write_text(page_path.read_text(encoding="utf-8"), encoding="utf-8")
+    return _validator_ok(clean, "validate_frontmatter.py")
+
+
+def test_query_save_writes_roundtrip_page(client, tmp_path, monkeypatch):
+    from app.workers import citations
+    from app.workers.wiki_render import parse_frontmatter
+    _build_query_corpus(tmp_path)
+    _use_client(monkeypatch, _FakeQueryClient(
+        {"claims": [{"text": "Synergy capture is central to integration.", "evidence_ids": ["e1"]}]}))
+    body = client.post("/query", json=_q("What is synergy capture?", save=True)).json()
+    qid = body["query_id"]
+    assert qid and qid.startswith("qry_")
+    assert body["navigation_stale"] is True  # honest: page saved, nav not yet rebuilt
+    page = _saved_query_path(tmp_path, qid).read_text(encoding="utf-8")
+
+    fm = parse_frontmatter(page)
+    assert fm["type"] == "query" and fm["status"] == "active" and fm["answer_eligible"] == "false"
+    assert "created" not in fm and "last_compiled_at" not in fm  # deterministic, no wall-clock
+    fmblock = page.split("---", 2)[1]
+    cites = citations.parse_citations(fmblock)
+    assert len(cites) == 1 and cites[0]["source_id"] == QSRC
+    md = (tmp_path / "normalized" / "markdown" / f"{QSRC}.md").read_text(encoding="utf-8")
+    assert citations.ground_citation(cites[0], md, require_quote=True) == []  # frontmatter record grounds
+    assert "## Citations" in page and "## Answer" in page
+
+    # The real validators accept the saved page (citations grounded + frontmatter complete).
+    ok_c, out_c = _validator_ok(tmp_path, "validate_citations.py")
+    assert ok_c, out_c
+    ok_f, out_f = _frontmatter_ok_isolated(tmp_path, _saved_query_path(tmp_path, qid))
+    assert ok_f, out_f
+
+
+def test_query_save_defers_navigation_refresh(client, tmp_path, monkeypatch):
+    # ADR-0034 Q3: save persists the page + appends wiki/log.md, but does NOT synchronously rebuild
+    # wiki/index.md or the nav index — discoverability lags until the next reindex.
+    _build_query_corpus(tmp_path)
+    _use_client(monkeypatch, _FakeQueryClient(
+        {"claims": [{"text": "Synergy is captured.", "evidence_ids": ["e1"]}]}))
+    body = client.post("/query", json=_q("synergy capture", save=True)).json()
+    assert body["navigation_stale"] is True
+    assert not (tmp_path / "wiki" / "index.md").exists()        # index NOT synchronously rebuilt
+    log = (tmp_path / "wiki" / "log.md").read_text(encoding="utf-8")
+    assert body["query_id"] in log and "query saved" in log     # but the write is logged for audit
+
+
+def test_query_save_abstained_page_is_valid(client, tmp_path, monkeypatch):
+    _build_query_corpus(tmp_path)
+    _use_client(monkeypatch, _FakeQueryClient({"claims": [{"text": "x", "evidence_ids": ["e1"]}]}))
+    body = client.post("/query", json=_q("nonexistentterm", save=True)).json()
+    assert body["abstained"] is True
+    page = _saved_query_path(tmp_path, body["query_id"]).read_text(encoding="utf-8")
+    assert "No source found in vault." in page  # marker present -> validators accept the no-citation page
+    assert _validator_ok(tmp_path, "validate_citations.py")[0]
+    assert _frontmatter_ok_isolated(tmp_path, _saved_query_path(tmp_path, body["query_id"]))[0]
+
+
+def test_query_id_source_status_order_insensitive():
+    from app.workers import query as qmod
+    a = qmod.query_id("q", source_status="active,deprecated_candidate")
+    b = qmod.query_id("q", source_status="deprecated_candidate,active")
+    assert a == b  # same scope regardless of filter order
+    assert a != qmod.query_id("q", source_status="active")  # but a different status set differs
+
+
+def test_query_distinct_scope_gets_distinct_ids(client, tmp_path, monkeypatch):
+    _build_query_corpus(tmp_path)
+    _use_client(monkeypatch, _FakeQueryClient(
+        {"claims": [{"text": "Synergy is captured.", "evidence_ids": ["e1"]}]}))
+    a = client.post("/query", json=_q("synergy capture", save=True)).json()["query_id"]
+    # Same question, different answer-affecting scope (source_id filter) -> different page, no clobber.
+    b = client.post("/query", json=_q("synergy capture", save=True, source_id=QSRC)).json()["query_id"]
+    assert a != b and len(list((tmp_path / "wiki" / "Queries").glob("*.md"))) == 2
+
+
+def test_query_no_save_persists_nothing(client, tmp_path, monkeypatch):
+    _build_query_corpus(tmp_path)
+    _use_client(monkeypatch, _FakeQueryClient(
+        {"claims": [{"text": "Synergy is captured.", "evidence_ids": ["e1"]}]}))
+    body = client.post("/query", json=_q("synergy capture")).json()  # save defaults to false
+    assert body["query_id"] is None and body["navigation_stale"] is False
+    assert not (tmp_path / "wiki" / "Queries").exists()
+
+
+def test_query_save_deterministic_id_overwrites(client, tmp_path, monkeypatch):
+    _build_query_corpus(tmp_path)
+    _use_client(monkeypatch, _FakeQueryClient(
+        {"claims": [{"text": "Synergy is captured.", "evidence_ids": ["e1"]}]}))
+    a = client.post("/query", json=_q("What is synergy?", save=True)).json()["query_id"]
+    b = client.post("/query", json=_q("  what   IS Synergy?  ", save=True)).json()["query_id"]
+    assert a == b  # normalized (whitespace + case) content key -> same page, overwritten
+    assert list((tmp_path / "wiki" / "Queries").glob("*.md")) == [_saved_query_path(tmp_path, a)]
+
+
+def test_query_save_security_rejection_not_in_page(client, tmp_path, monkeypatch):
+    _build_query_corpus(tmp_path)
+    _use_client(monkeypatch, _FakeQueryClient({"claims": [
+        {"text": "Synergy is captured.", "evidence_ids": ["e1"]},
+        {"text": "Stored at /home/jolulop/secret.txt.", "evidence_ids": ["e1"]},
+    ]}))
+    qid = client.post("/query", json=_q("synergy capture", save=True)).json()["query_id"]
+    page = _saved_query_path(tmp_path, qid).read_text(encoding="utf-8")
+    assert "/home/jolulop/secret.txt" not in page          # never persisted verbatim
+    assert "absolute_path_leak" in page                    # summarised by reason
+
+
+def test_query_validator_rejects_bad_saved_citations(tmp_path):
+    # The strengthened _check_query grounds saved-query citations like a claim: each failure mode fails.
+    from app.workers.wiki_render import render_query_page
+    _build_query_corpus(tmp_path)
+    (tmp_path / "raw" / "manifests" / "src_aaaaaaaaaaaaaaaa.json").write_text(
+        json.dumps({"source_id": "src_aaaaaaaaaaaaaaaa"}), encoding="utf-8")  # manifest, but no Markdown
+    base = {"source_id": QSRC, "char_start": 0, "char_end": len(QTEXT), "page": None, "page_end": None,
+            "section": None, "table_reference": None, "sheet_reference": None, "chunk_id": None,
+            "quote": QTEXT}
+    qdir = tmp_path / "wiki" / "Queries"
+    qdir.mkdir(parents=True, exist_ok=True)
+    bad = [
+        {**base, "quote": "not the source text"},          # quote mismatch
+        {**base, "char_end": len(QTEXT) + 500},            # out-of-bounds span
+        {**base, "source_id": "src_bbbbbbbbbbbbbbbb"},      # no manifest
+        {**base, "source_id": "src_aaaaaaaaaaaaaaaa"},      # manifest but no normalized Markdown
+    ]
+    for cit in bad:
+        page = render_query_page({"query_id": "qry_bad0000000000", "question": "q", "answer": "a [1]",
+                                  "citations": [cit], "retrieval_modes": ["keyword"],
+                                  "unsourced_claims": [], "security_rejected_count": 0})
+        (qdir / "qry_bad0000000000.md").write_text(page, encoding="utf-8")
+        assert not _validator_ok(tmp_path, "validate_citations.py")[0], f"expected failure: {cit}"
+    # Sanity: the well-formed citation passes.
+    good = render_query_page({"query_id": "qry_bad0000000000", "question": "q", "answer": "a [1]",
+                              "citations": [base], "retrieval_modes": ["keyword"],
+                              "unsourced_claims": [], "security_rejected_count": 0})
+    (qdir / "qry_bad0000000000.md").write_text(good, encoding="utf-8")
+    assert _validator_ok(tmp_path, "validate_citations.py")[0]
+
+
+def test_query_save_preserves_source_quote_path(client, tmp_path, monkeypatch):
+    src, text = "src_ffffffffffffffff", "Logs live at /var/log/app per the runbook."
+    ch = tmp_path / "normalized" / "chunks" / f"{src}.jsonl"
+    ch.parent.mkdir(parents=True, exist_ok=True)
+    ch.write_text(json.dumps({
+        "chunk_id": f"{src}::0000", "source_id": src, "ordinal": 0, "kind": "prose",
+        "heading_path": [], "section": None, "text": text, "char_start": 0, "char_end": len(text),
+        "page": 1, "page_end": 1, "table_reference": None, "sheet_reference": None,
+    }) + "\n", encoding="utf-8")
+    (tmp_path / "normalized" / "markdown").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "normalized" / "markdown" / f"{src}.md").write_text(text, encoding="utf-8")
+    sp = tmp_path / "wiki" / "Sources" / f"{src}.md"
+    sp.parent.mkdir(parents=True, exist_ok=True)
+    sp.write_text("---\ntype: source\nsource_id: " + src + "\ntitle: Run\nstatus: active\n"
+                  "language: en\n---\n\n# Run\n\n> [!summary]\n> logs\n", encoding="utf-8")
+    (tmp_path / "raw" / "manifests" / f"{src}.json").write_text(
+        json.dumps({"source_id": src}), encoding="utf-8")
+    keyword_index.reindex(tmp_path, force=True)
+    _use_client(monkeypatch, _FakeQueryClient(
+        {"claims": [{"text": "The runbook documents the log path.", "evidence_ids": ["e1"]}]}))
+    qid = client.post("/query", json=_q("where are logs", save=True)).json()["query_id"]
+    page = _saved_query_path(tmp_path, qid).read_text(encoding="utf-8")
+    assert "/var/log/app" in page                # verbatim source quote preserved (grounding needs it)
+    assert str(tmp_path) not in page             # but no server/generated path
+    assert _validator_ok(tmp_path, "validate_citations.py")[0]

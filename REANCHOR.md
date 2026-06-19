@@ -59,7 +59,7 @@ critical rules and `CONTEXT.md` for the glossary.
   - `2e7db7f` Phase 4a: keyword evidence + wiki navigation index, design-locked (ADR-0032)
   - `c1f2504` docs: mark Phase 3.5 Complete in Build Spec
   - `eebf11b` Phase 3.5c-2: cross-source synthesis — completes Phase 3.5
-- **Tests/lint green:** `464 passed` (was 390; +45 Phase 4d/4e, +17 5-1, +13 5-2 endpoint+review), ruff clean, **10** validators
+- **Tests/lint green:** `474 passed` (was 390; +45 Phase 4d/4e, +17 5-1, +13 5-2, +10 5-3 save+review), ruff clean, **10** validators
   pass. Newest test file: `tests/test_retrieval_evals.py` (12, LanceDB-gated golden retrieval evals). **LanceDB installed in the venv** (`vector` extra; `uv.lock` updated) — the
   full vector suite runs; a bare `.[dev]` install skips it via `importorskip`.
 
@@ -213,7 +213,25 @@ slice 4d (vector — first slice with new deps).**
     redaction would break grounding). `tests/test_api.py` +12 query (grounded, abstain, 503-no-model,
     503-malformed-model, 503-parse-raises, 400-empty, 400-graph-mode, count-only-vs-include_unsourced,
     path-leak-not-leaked, source-quote-path-intact, no-server-path-leak).
-  - **5-3** next — explicit `save` → `wiki/Queries/<id>.md` render (template round-trip) + nodes-index.
+  - **5-3** ✅ **DONE (uncommitted)** — explicit `save`: `QueryRequest.save` → `query.query_id(question)`
+    (deterministic `qry_<sha256[:16]>`, normalized whitespace+case → overwrite, not duplicate) →
+    `wiki_render.render_query_page` (frontmatter `type: query`, `status active`, `answer_eligible`-off
+    by page_type, **`derived_from: []` reserved, no graph edges**, machine-readable `citations:` block
+    that round-trips `parse_citations`+`ground_citation`; body = summary/Question/Answer/Citations table/
+    Retrieval Path/Unsourced Claims; **no wall-clock → byte-stable**) → write `wiki/Queries/<id>.md`
+    (gitignored); response gains `query_id`. Ungrounded benign text listed; **path-leak rejections
+    summarised by count/reason, never verbatim**. `tests/test_api.py` +4 (save round-trip +
+    `validate_citations` subprocess green, no-save-persists-nothing, deterministic-id-overwrites,
+    security-rejection-not-in-page). **Review round applied:** (B1) `validate_citations::_check_query`
+    now **grounds** saved-query citations like a claim (manifest + Markdown + verbatim quote; shared
+    `_ground_citations`); (B2/Q2) dropped `created`/`last_compiled_at` from `validate_frontmatter`
+    query-required + `templates/query.md`, added `answer_eligible: false` to render; (Q1) `query_id`
+    keyed on the **answer-affecting request scope** (question+mode+filters; canonical JSON), not
+    question alone → distinct scope ≠ clobber; (Q3) save **appends `wiki/log.md`** + returns
+    **`navigation_stale: true`**, nav/index **not** synchronously rebuilt (deferred, documented). +6
+    tests (defer-navigation, abstained-page-valid, distinct-scope-distinct-ids, validator-rejects-
+    bad-citations ×4, source-quote-path-preserved, frontmatter-isolated-green).
+  - **5-4** next — `tests/test_query_evals.py` over `evals/golden_questions.yaml` (fake adapter, structural).
 - **4e** — RRF hybrid fusion (keyword+vector) + per-group caps + retrieval eval harness
   (`evals/golden_retrieval.yaml`, kept separate from Phase-5 `golden_questions.yaml`).
 

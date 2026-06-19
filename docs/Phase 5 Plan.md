@@ -86,14 +86,22 @@ deterministic Phase 4 stack stays key-free (only `/query` needs a model).
 ---
 
 ## 5. Saved Queries (explicit; ADR-0034 decision 6)
-- `save=true` → render `wiki/Queries/<query_id>.md` from `templates/query.md`: frontmatter `citations:`
-  = the grounded citations (machine-readable record of truth), `type: query`, `status: active`,
-  `review_status: none`, `answer_eligible: false`, `derived_from: []` (reserved), `retrieval_modes`,
-  the `> [!summary]` callout, `## Answer`, the `## Citations` table, `## Retrieval Path`, `## Unsourced
-  Claims`. `query_id` content-keyed (e.g. `qry_<hash>`), deterministic page (ADR-0023).
-- A saved query is a **derived nodes-index** entry (`type: query`, indexed by `reindex_nodes`) — no
-  graph edges, no review gate. `validate_citations.py::_check_query` already stale-checks it.
-- No auto-save. `wiki/Queries/*.md` is gitignored runtime state (already).
+- `save=true` → `render_query_page` writes `wiki/Queries/<query_id>.md`: frontmatter `citations:` =
+  the grounded citations (machine-readable record), `type: query`, `status: active`, `review_status:
+  none`, `answer_eligible: false`, `derived_from: []` (reserved), `retrieval_modes`; body = `>
+  [!summary]`, `## Question`, `## Answer`, `## Citations` table, `## Retrieval Path`, `## Unsourced
+  Claims`. **No `created`/`last_compiled_at`** — a deterministic byte-stable derived artifact
+  (ADR-0023), like claim/synthesis pages.
+- `query_id` is content-keyed over the **answer-affecting request scope** (normalized question + mode +
+  `source_id`/`source_status`/`language`); `include_unsourced`/`save` and retrieval output/model are
+  excluded. Same scope → idempotent overwrite; different scope → distinct page (no silent clobber).
+- **Discoverability deferred:** save appends to `wiki/log.md` but does **not** synchronously rebuild
+  `wiki/index.md` or the nav index — the page is navigable after the next **`scripts/reindex_keyword.py`**
+  run (which rebuilds the keyword/navigation index over `wiki/**`); the response returns
+  **`navigation_stale: true`**. `validate_citations.py::_check_query` grounds the saved citations
+  (manifest + Markdown + verbatim quote), like a claim.
+- Ungrounded benign claims are listed; path-leak/security-rejected claims are summarised by count/
+  reason, never persisted verbatim. No auto-save; `wiki/Queries/*.md` is gitignored runtime state.
 
 ---
 

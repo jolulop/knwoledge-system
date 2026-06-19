@@ -24,7 +24,9 @@ REQUIRED_BY_TYPE = {
     "organization": ["type", "organization_id", "title", "status", "confidence"],
     "project": ["type", "project_id", "title", "status", "confidence"],
     "synthesis": ["type", "synthesis_id", "title", "status"],
-    "query": ["type", "query_id", "title", "question", "created"],
+    # No wall-clock fields: a saved Query page is a deterministic derived artifact (ADR-0023/0034),
+    # like claim/synthesis pages — byte-stable, so no `created`/`last_compiled_at`.
+    "query": ["type", "query_id", "title", "question", "status"],
 }
 
 

@@ -41,7 +41,7 @@ from app.llm.adapters import AdapterError
 from app.llm.cache import ResponseCache
 from app.llm.client import ConfigError, ParseError, build_client
 from app.workers import extract, intake, query, wiki
-from app.workers.wiki_render import parse_frontmatter
+from app.workers.wiki_render import parse_frontmatter, render_query_page
 
 # Hosts on which serving the unauthenticated API is acceptable (loopback only).
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost", ""}
@@ -493,6 +493,15 @@ def _query_client():
     return build_client(settings, cache=ResponseCache(settings.response_cache_path))
 
 
+def _append_wiki_log(message: str) -> None:
+    """Append a one-line audit entry to wiki/log.md (the wiki-write log; CLAUDE.md ingest workflow).
+    Deterministic — no wall-clock — so it doesn't perturb byte-stable artifacts."""
+    log = settings.wiki_dir / "log.md"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with log.open("a", encoding="utf-8") as fh:
+        fh.write(f"- {message}\n")
+
+
 def _no_source_text() -> str:
     """The abstention text, sourced from policies/citation.yaml so it can't drift (ADR-0034)."""
     path = settings.root / "policies" / "citation.yaml"
@@ -561,6 +570,25 @@ def run_query_endpoint(req: QueryRequest) -> dict[str, Any]:
         logger.warning("POST /query: synthesis failed: %s", exc)
         raise HTTPException(status_code=503, detail="query answering is temporarily unavailable") from exc
 
+    saved_id: str | None = None
+    navigation_stale = False
+    if req.save:  # explicit save -> deterministic wiki/Queries/<id>.md (no graph edges, no review)
+        saved_id = query.query_id(q, mode=req.mode, source_id=req.source_id,
+                                  source_status=req.source_status, language=req.language)
+        page = render_query_page({
+            "query_id": saved_id, "question": q, "answer": answer.answer,
+            "citations": answer.citations, "retrieval_modes": result["retrieval_path"],
+            "unsourced_claims": answer.unsourced_claims,
+            "security_rejected_count": answer.security_rejected_count,
+        })
+        qpath = settings.wiki_dir / "Queries" / f"{saved_id}.md"
+        qpath.parent.mkdir(parents=True, exist_ok=True)
+        qpath.write_text(page, encoding="utf-8")
+        # Audit only (ADR-0034 Q3): the nav/index are NOT synchronously rebuilt — the saved query is
+        # discoverable after the next reindex. Surfaced via navigation_stale so the API stays honest.
+        _append_wiki_log(f"query saved: Queries/{saved_id}.md")
+        navigation_stale = True
+
     return {
         "query": answer.question,
         "mode": req.mode,
@@ -575,6 +603,8 @@ def run_query_endpoint(req: QueryRequest) -> dict[str, Any]:
         # Q2: full ungrounded text only under explicit local/debug review; default exposes counts only.
         "unsourced_claims": answer.unsourced_claims if req.include_unsourced else [],
         "notes": result.get("notes", []),
+        "query_id": saved_id,
+        "navigation_stale": navigation_stale,
     }
 
 

@@ -19,6 +19,8 @@ _TOKEN = re.compile(r"\{\{(\w+)\}\}")
 _FRONTMATTER = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 _WS = re.compile(r"\s+")
 _SENTENCE = re.compile(r"[.!?]")
+# The abstention marker (policies/citation.yaml when_no_source_found); validate_citations greps for it.
+NO_SOURCE = "No source found in vault."
 _FP_LINE = re.compile(r"(?m)^input_fingerprint:.*\n?")
 _WIKILINK_SUB = re.compile(r"\[\[([^\]]+)\]\]")
 
@@ -566,3 +568,112 @@ def render_source_page(
     draft = render_template(template, {**values, "input_fingerprint": ""})
     fingerprint = _fingerprint(_FP_LINE.sub("", draft))
     return draft.replace('input_fingerprint: ""', f'input_fingerprint: "{fingerprint}"', 1)
+
+
+def render_query_page(query: dict[str, Any]) -> str:
+    """Render a deterministic saved Query page (Phase 5, ADR-0034) from a grounded answer.
+
+    The frontmatter `citations:` list is the machine-readable record (grounded by
+    scripts/validate_citations.py::_check_query); the Citations table is a rendered view. The page is
+    a navigable answer artifact — `type: query`, `answer_eligible: false`, `derived_from: []`
+    (reserved) — and adds NO graph edges. No wall-clock is embedded, so re-saving the same
+    question+answer is byte-stable. Ungrounded model text is audit-only: ordinary unsourced claims are
+    listed; path-leak/security-rejected claims are summarised by count/reason, never verbatim.
+    """
+    qid = query["query_id"]
+    question = _WS.sub(" ", str(query["question"])).strip()
+    answer = str(query.get("answer", "")).strip()
+    citations = query.get("citations", []) or []
+    modes = query.get("retrieval_modes", []) or []
+    title = _query_title(question)
+    summary = _delink(_WS.sub(" ", answer))[:280] or "No answer."
+
+    fm_lines = [
+        "---",
+        "type: query",
+        f'query_id: "{qid}"',
+        f'title: "{_fm_quote(title)}"',
+        f'question: "{_fm_quote(question)}"',
+        "status: active",
+        "review_status: none",
+        "generation_status: enriched",
+        "confidence: low",
+        "answer_eligible: false",  # a query is a navigable answer artifact, never itself citable
+        f"retrieval_modes: [{', '.join(modes)}]",
+        "derived_from: []",
+    ]
+    evidence_rows = []
+    if citations:
+        fm_lines.append("citations:")
+        for c in citations:
+            fm_lines.extend([
+                f'  - source_id: "{c["source_id"]}"',
+                f'    char_start: {c["char_start"]}',
+                f'    char_end: {c["char_end"]}',
+                f'    page: {c.get("page") if c.get("page") is not None else "null"}',
+                f'    page_end: {c.get("page_end") if c.get("page_end") is not None else "null"}',
+                f'    section: {_fm_opt(c.get("section"))}',
+                f'    table_reference: {_fm_opt(c.get("table_reference"))}',
+                f'    sheet_reference: {_fm_opt(c.get("sheet_reference"))}',
+                f'    chunk_id: {_fm_opt(c.get("chunk_id"))}',
+                f'    quote: "{_fm_quote(c.get("quote", ""))}"',
+            ])
+            loc = c.get("section") or (f"p.{c['page']}" if c.get("page") is not None else "—")
+            evidence_rows.append(
+                f'| [[Sources/{c["source_id"]}]] | {_delink(_quote_cell(str(loc)))} | '
+                f'{c["char_start"]}–{c["char_end"]} | {_delink(_quote_cell(c.get("quote", "")))} |'
+            )
+    else:
+        fm_lines.append("citations: []")
+    fm_lines.append("---")
+
+    citations_section = (["| Source | Page / Section | Char range | Quote |", "|---|---|---|---|",
+                          *evidence_rows] if citations else [f"_{NO_SOURCE}_"])
+    unsourced = [_delink(_WS.sub(" ", u)) for u in (query.get("unsourced_claims") or [])]
+    rejected = int(query.get("security_rejected_count", 0) or 0)
+    unsourced_section = [f"- {u}" for u in unsourced]
+    if rejected:
+        # Path-leak rejections are summarised by reason/count only — never the verbatim text.
+        unsourced_section.append(f"- _{rejected} claim(s) withheld (absolute_path_leak)._")
+    if not unsourced_section:
+        unsourced_section = ["None."]
+
+    body = [
+        "",
+        f"# Query: {_delink(title)}",
+        "",
+        "> [!summary]",
+        f"> {summary}",
+        "",
+        "## Question",
+        "",
+        _delink(question),
+        "",
+        "## Answer",
+        "",
+        _delink(answer) if answer else f"_{NO_SOURCE}_",
+        "",
+        "## Citations",
+        "",
+        *citations_section,
+        "",
+        "## Retrieval Path",
+        "",
+        ", ".join(modes) if modes else "—",
+        "",
+        "## Unsourced Claims",
+        "",
+        *unsourced_section,
+        "",
+    ]
+    return "\n".join(fm_lines + body)
+
+
+def _query_title(question: str) -> str:
+    one_line = _WS.sub(" ", question).strip()
+    return one_line if len(one_line) <= 80 else one_line[:77].rstrip() + "…"
+
+
+def _fm_opt(value: Any) -> str:
+    """Frontmatter scalar for an optional citation field: null, or a quoted escaped string."""
+    return "null" if value is None else f'"{_fm_quote(str(value))}"'

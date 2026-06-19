@@ -20,6 +20,7 @@ retrieval) — the caller supplies the evidence hits and a configured (or fake) 
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -32,6 +33,33 @@ from app.workers import citations
 logger = logging.getLogger(__name__)
 
 NO_SOURCE_FOUND = "No source found in vault."
+_WS = re.compile(r"\s+")
+
+
+def query_id(question: str, *, mode: str = "auto", source_id: str | None = None,
+             source_status: str | None = None, language: str | None = None) -> str:
+    """Deterministic content-key for a saved Query page (ADR-0023/0034) over the **answer-affecting
+    request scope** — normalized question + mode + retrieval filters. The same scope → the same id
+    (idempotent overwrite); a different scope (e.g. another `source_id`) → a different id, so a
+    materially different answer never silently clobbers another. `include_unsourced`/`save` are
+    excluded (they don't change the answer), and retrieval output / model_ref are excluded (volatile)."""
+    scope = {
+        "question": _WS.sub(" ", question).strip().lower(),
+        "mode": mode,
+        "source_id": source_id,
+        # Order-insensitive: "active,deprecated_candidate" == "deprecated_candidate,active".
+        "source_status": _canon_csv(source_status),
+        "language": language,
+    }
+    canonical = json.dumps(scope, sort_keys=True, ensure_ascii=False)
+    return f"qry_{hashlib.sha256(canonical.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _canon_csv(value: str | None) -> str | None:
+    """Canonicalize a comma-separated filter (e.g. source_status) to an order-insensitive form."""
+    if value is None:
+        return None
+    return ",".join(sorted(p.strip() for p in value.split(",") if p.strip()))
 
 # Bump when the prompt wording / output schema changes — folded into the response-cache key so a
 # changed contract does not replay a stale answer (ADR-0027). Used once /query wires the real client.

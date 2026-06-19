@@ -290,11 +290,13 @@ class QueryRequest(BaseModel):
     source_status: str | None = None
     language: str | None = None
     include_unsourced: bool = False  # LOCAL/DEBUG only: return ungrounded claim *text* (counts always present)
+    save: bool = False  # persist the answer to wiki/Queries/<query_id>.md (explicit; ADR-0034)
 
 
 class QueryCitation(BaseModel):
     # Resolved answer citation — authoritative (source_id, char_start, char_end) + advisory locators
-    # and the verbatim source quote (Phase 5, ADR-0034). No filesystem paths are ever exposed.
+    # and the verbatim source quote (Phase 5, ADR-0034). No system/generated filesystem paths are ever
+    # exposed; a path-shaped substring inside `quote` is verbatim source content (preserved, ADR-0034 Q2).
     source_id: str
     char_start: int
     char_end: int
@@ -330,3 +332,7 @@ class QueryResponse(BaseModel):
     security_rejected_count: int
     unsourced_claims: list[str] = []
     notes: list[str] = []
+    query_id: str | None = None  # set only when save=true (the saved wiki/Queries/<id>.md)
+    # True when a page was saved but the nav/index were NOT synchronously rebuilt — the saved query is
+    # discoverable only after the next reindex (ADR-0034 Q3). False/None when nothing was saved.
+    navigation_stale: bool = False

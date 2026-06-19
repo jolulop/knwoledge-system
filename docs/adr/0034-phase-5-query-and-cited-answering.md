@@ -72,11 +72,20 @@ synthesized from keyword evidence; only a *missing model* 503s.
 **6. `POST /query` is read-only; saving to `wiki/Queries/` is explicit, and a saved query is an
 answer artifact, not graph authority.** `/query` returns the grounded answer and persists nothing by
 default. Saving is an **explicit** action (a `save` flag / action, per CLAUDE.md "save useful answers
-when requested") that renders `wiki/Queries/<query_id>.md` from `templates/query.md` — the grounded
-citations live in the frontmatter `citations:` block (the machine-readable record), `type: query`,
-`answer_eligible: false`, `derived_from: []` (reserved). A saved query enters the **navigation/derived
-nodes index** (discoverable in `index.md`) but creates **no graph edges** and needs **no review gate**
-(its asserted claims already passed the verbatim gate). It does *not* mint new claim/concept nodes.
+when requested") that renders `wiki/Queries/<query_id>.md` — the grounded citations live in the
+frontmatter `citations:` block (the machine-readable record, grounded by `validate_citations` exactly
+like a claim), `type: query`, `answer_eligible: false`, `derived_from: []` (reserved). The page is a
+**deterministic derived artifact** (no `created`/`last_compiled_at` wall-clock — byte-stable, like
+claim/synthesis pages). `query_id` is content-keyed over the **answer-affecting request scope**
+(normalized question + mode + retrieval filters), so re-asking the same scope overwrites idempotently
+while a different scope (e.g. another `source_id`) gets a distinct page — never a silent clobber.
+**Discoverability is deferred:** save writes the page and appends to `wiki/log.md`, but does **not**
+synchronously rebuild `wiki/index.md` or the nav index — the saved query becomes navigable after the
+next `scripts/reindex_keyword.py` run (which rebuilds the keyword/navigation index over `wiki/**`),
+and the response returns **`navigation_stale: true`** so the API never implies otherwise (synchronous
+reindex per interactive save is the wrong cost, and `index.md` is regenerable). It creates
+**no graph edges** and needs **no review gate** (its asserted claims already passed the verbatim gate),
+and does *not* mint new claim/concept nodes.
 `derived_from query→source` would also violate the ADR-0030 edge-endpoint contract (`query` is not an
 allowed `derived_from` src), and pulling ephemeral Q&A into the curated semantic graph is undesirable.
 Saved pages are derived/regenerable from the cached answer and are stale-checked by

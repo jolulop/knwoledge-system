@@ -7,6 +7,7 @@ status: active
 review_status: none
 generation_status: enriched
 confidence: low
+answer_eligible: false
 retrieval_modes: []
 derived_from: []
 citations:
@@ -20,9 +21,11 @@ citations:
     sheet_reference: {{sheet_reference_or_null}}
     chunk_id: "{{chunk_id_advisory}}"
     quote: "{{short_quote}}"
-created: "{{created_at}}"
-last_compiled_at: "{{last_compiled_at}}"
 ---
+
+<!-- Saved Query pages are deterministic derived artifacts (ADR-0034): no created/last_compiled_at
+     wall-clock, byte-stable, rendered by app/workers/wiki_render.render_query_page. -->
+
 
 # Query: {{question_title}}
 
