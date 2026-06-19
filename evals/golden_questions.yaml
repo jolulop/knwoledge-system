@@ -1,20 +1,115 @@
-version: 0.1
-golden_questions:
-  - id: gq_001
-    question: "What is summary-first navigation?"
-    expected_concepts:
-      - summary-first-navigation
-    expected_sources:
-      - sample-source
-    must_include_citations: true
-  - id: gq_002
-    question: "Which sample claim is supported by the sample source?"
-    expected_claims:
-      - sample-claim
-    expected_sources:
-      - sample-source
-    must_include_citations: true
-  - id: gq_003
-    question: "Which documents are archive candidates?"
-    expected_policy: older_than_3_years
-    must_include_citations: false
+# Phase 5-4 query-answer eval cases (ADR-0034 decision 7). Run by tests/test_query_evals.py over a
+# programmatic KEYWORD-ONLY fixture vault (no LanceDB) via POST /query with a deterministic fake
+# LLMClient. Assertions are STRUCTURAL — cited answering behaviour, not real semantic relevance.
+# Answer-quality with a real model is a manual/opt-in smoke concern, not this gate.
+#
+# Per case: a `fake.strategy` directive the canned client executes by reading the evidence pack from
+# the prompt (cite_all / cite[+ids] / bogus / path_leak / no_claims), and `expect:` predicates.
+# `cited_source_ids` is the canonical assertion field. Global invariants (every answer-body claim
+# grounds, body zero-unsourced, no server path, notes==[]) live in the test, not here.
+#
+# NOTE: parsed by the project's minimal YAML-subset loader (no PyYAML) — dash-on-own-line sequences
+# and block lists only (no inline `[...]`).
+version: 1
+cases:
+  # Grounded answer: a single retrieved chunk, cited.
+  -
+    id: gq_grounded_answer
+    category: grounded_answer
+    question: summary first navigation
+    mode: auto
+    fake:
+      strategy: cite_all
+    expect:
+      abstained: false
+      must_include_citations: true
+      cited_source_ids:
+        - src_aaaaaaaaaaaaaaaa
+      unsourced_count: 0
+      security_rejected_count: 0
+
+  # Multi-citation: two sources retrieved, both cited by one claim.
+  -
+    id: gq_multi_citation
+    category: multi_citation
+    question: navigation
+    mode: auto
+    fake:
+      strategy: cite
+      ids:
+        - e1
+        - e2
+    expect:
+      abstained: false
+      must_include_citations: true
+      cited_source_ids:
+        - src_aaaaaaaaaaaaaaaa
+        - src_bbbbbbbbbbbbbbbb
+      unsourced_count: 0
+
+  # Abstention via retrieval miss: no citable evidence -> abstain before the fake is even called.
+  -
+    id: gq_abstain_no_evidence
+    category: abstention
+    question: zzzznonexistentterm
+    mode: auto
+    fake:
+      strategy: cite_all
+    expect:
+      abstained: true
+      must_include_citations: false
+
+  # Abstention via empty model output: evidence exists but the model asserts nothing.
+  -
+    id: gq_abstain_empty_model
+    category: abstention
+    question: navigation
+    mode: auto
+    fake:
+      strategy: no_claims
+    expect:
+      abstained: true
+      must_include_citations: false
+
+  # Ungrounded claim excluded: the model cites a non-existent evidence id -> no grounded claim -> abstain.
+  -
+    id: gq_ungrounded_excluded
+    category: ungrounded
+    question: navigation
+    mode: auto
+    fake:
+      strategy: bogus
+    expect:
+      abstained: true
+      must_include_citations: false
+      unsourced_count: 1
+
+  # Security: a path-leak claim is rejected (count only), the grounded claim still answers.
+  -
+    id: gq_security_path_leak
+    category: security
+    question: summary first navigation
+    mode: auto
+    fake:
+      strategy: path_leak
+    expect:
+      abstained: false
+      must_include_citations: true
+      cited_source_ids:
+        - src_aaaaaaaaaaaaaaaa
+      security_rejected_count: 1
+
+  # Save round-trip: persisted page grounds + validates (asserted in the test).
+  -
+    id: gq_save_roundtrip
+    category: save
+    question: summary first navigation
+    mode: auto
+    save: true
+    fake:
+      strategy: cite_all
+    expect:
+      abstained: false
+      must_include_citations: true
+      cited_source_ids:
+        - src_aaaaaaaaaaaaaaaa

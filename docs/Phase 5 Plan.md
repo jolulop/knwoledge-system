@@ -1,6 +1,7 @@
 # Phase 5 Plan — Query & Cited Answering
 
-**Status:** Planned (design-locked 2026-06-18 via grill gate). No code yet.
+**Status:** ✅ **Complete.** 5-1 worker core · 5-2 `POST /query` · 5-3 saved Queries · 5-4 eval harness
+(`tests/test_query_evals.py` + `evals/golden_questions.yaml`, fake adapter + structural, keyword-only).
 **Governing ADR:** [ADR-0034](adr/0034-phase-5-query-and-cited-answering.md). Read it first.
 **Predecessors:** Phase 4 (Search & Graph) complete — `GET /search` returns RRF chunk evidence +
 graph + navigation, all key-free. Phase 5 is the **first LLM-in-the-loop** surface.
@@ -115,15 +116,43 @@ deterministic Phase 4 stack stays key-free (only `/query` needs a model).
 ---
 
 ## 7. Eval harness (`tests/test_query_evals.py` + `evals/golden_questions.yaml`)
-- Builds a small fixture vault + Phase 4 indexes; drives the pipeline with the fake `LLMClient`.
-- **Structural assertions (key-free CI):** expected sources cited; every answer-body claim grounds;
-  ungrounded claims excluded from the body; abstention emits `"No source found in vault."`; Unsourced
-  Claims is diagnostic-only; no absolute path / system-prompt leak in the response; a saved Query page
-  round-trips the template (and passes `validate_citations`).
-- `golden_questions.yaml` stays answer-shaped (`question`, `expected_sources`/`expected_claims`,
-  `must_include_citations`, + abstention cases), separate from `golden_retrieval.yaml`.
-- **No LLM-judge in CI.** Real-model quality = a manual / env-gated smoke run, replayable via the
-  response cache.
+Design-locked 2026-06-19 (grill). Mirrors the 4e-3 `test_retrieval_evals.py` shape (module-scoped
+fixture, `load_yaml` cases, `parametrize`, predicate interpreter, coverage test).
+
+- **Driver — endpoint-level (`TestClient` `POST /query`).** Each golden question is a real request
+  against the fixture vault with the fake `LLMClient` injected (`monkeypatch` `main._query_client`),
+  so the eval exercises the full user-facing chain: retrieve → evidence pack → fake synth → **real
+  `ground_citation`** → response (and save round-trip for `save: true` cases). The 5-2/5-3 endpoint
+  edge cases (503, mode-restriction, Q2 exposure detail) stay in `test_api.py`; the eval asserts
+  *golden-question invariants*, not endpoint plumbing. No second worker-level harness.
+- **Fixture — fresh, keyword-only, NOT lancedb-gated.** A query-specific builder (not coupled to the
+  4e-3 vault): sources with chunks + normalized Markdown + **manifests** + active source pages +
+  keyword index, built once. **No vector index, no embedder configured** — `mode=auto` degrades
+  *silently* to keyword evidence (no embedder ⇒ `note_worthy=False`), so the file imports no `lancedb`
+  and needs no `importorskip`. Phase 5 evals gate cited answering, not LanceDB; vector/RRF is covered
+  by the 4e-3 retrieval evals. Includes an **abstention** question that retrieves no citable evidence
+  (exercising the no-evidence path before the fake is even called).
+- **Fake strategy — per-case directives** (the fake reads the evidence pack from the prompt messages
+  and executes the directive; deterministic, order-robust): `cite_all` (one grounded claim per
+  retrieved evidence), `cite: [ids]` (precise multi-citation), `bogus` (cite a guaranteed-absent id
+  → exclusion/abstain), `path_leak` (one grounded claim + one absolute-path claim → security
+  rejection), `no_claims` (model-empty-output abstention).
+- **`golden_questions.yaml` schema** (rewritten from the seed, fixture-grounded): per case `id`,
+  `category`, `question`, `mode?` (default `auto`), `save?`, `fake: {strategy, ids?}`, and `expect:`
+  per-case predicates — `abstained`, **`cited_source_ids`** (the canonical assertion field),
+  `must_include_citations`, `unsourced_count`, `security_rejected_count`. (`expected_sources` kept only
+  where existing docs reference it; `cited_source_ids` is the one place the harness reads.) Categories
+  cover: grounded answer, multi-citation, abstention (retrieval-miss + `no_claims`), ungrounded-excluded
+  (`bogus`), security-rejected (`path_leak`), save round-trip.
+- **Assertion split:** per-case predicates in YAML `expect`; **global invariants in test code, run for
+  every non-error case** — every answer-body claim grounds (re-run `ground_citation`); the body is
+  zero-unsourced (`max_answer_unsourced_claims: 0`); no **server/generated** path in the response
+  (a path *inside a verbatim source quote* is allowed, ADR-0034 Q2); abstained cases emit the
+  `"No source found in vault."` fallback; **no degradation note** (`notes == []`, pinning the silent
+  keyword-only degradation). Plus a
+  category-coverage test (mirrors 4e-3's `covers_all`).
+- **No LLM-judge in CI.** Real-model answer quality is **deferred** to a manual / env-gated smoke run
+  (replayable via the response cache) — **not scaffolded in 5-4**.
 
 ---
 

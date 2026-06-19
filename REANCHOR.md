@@ -59,7 +59,7 @@ critical rules and `CONTEXT.md` for the glossary.
   - `2e7db7f` Phase 4a: keyword evidence + wiki navigation index, design-locked (ADR-0032)
   - `c1f2504` docs: mark Phase 3.5 Complete in Build Spec
   - `eebf11b` Phase 3.5c-2: cross-source synthesis — completes Phase 3.5
-- **Tests/lint green:** `474 passed` (was 390; +45 Phase 4d/4e, +17 5-1, +13 5-2, +10 5-3 save+review), ruff clean, **10** validators
+- **Tests/lint green:** `483 passed` (was 390; +45 Phase 4d/4e, +17 5-1, +13 5-2, +10 5-3, +9 5-4 evals), ruff clean, **10** validators
   pass. Newest test file: `tests/test_retrieval_evals.py` (12, LanceDB-gated golden retrieval evals). **LanceDB installed in the venv** (`vector` extra; `uv.lock` updated) — the
   full vector suite runs; a bare `.[dev]` install skips it via `importorskip`.
 
@@ -231,7 +231,26 @@ slice 4d (vector — first slice with new deps).**
     **`navigation_stale: true`**, nav/index **not** synchronously rebuilt (deferred, documented). +6
     tests (defer-navigation, abstained-page-valid, distinct-scope-distinct-ids, validator-rejects-
     bad-citations ×4, source-quote-path-preserved, frontmatter-isolated-green).
-  - **5-4** next — `tests/test_query_evals.py` over `evals/golden_questions.yaml` (fake adapter, structural).
+  - **5-4** — **DESIGN-LOCKED (2026-06-19 grill; Plan §7; no code yet).** `tests/test_query_evals.py`
+    over `evals/golden_questions.yaml` (fake adapter, structural; mirrors 4e-3). **Endpoint-level**
+    driver (`TestClient POST /query`, fake `_query_client` injected). **Fresh keyword-only fixture**
+    (chunks+markdown+manifests+source pages+keyword index; **no vector/lancedb** — `mode=auto` degrades
+    silently). **Per-case fake directives** `cite_all`/`cite`/`bogus`/`path_leak`/`no_claims`. YAML
+    schema: `{id, category, question, mode?, save?, fake:{strategy,ids?}, expect:{abstained,
+    cited_source_ids, must_include_citations, unsourced_count, security_rejected_count}}`. Per-case
+    predicates in YAML; **global invariants in test for every case** (all body claims ground, body
+    zero-unsourced, no server path, `notes==[]`) + category-coverage test. Real-model smoke **deferred**.
+  - **5-4** ✅ **DONE (uncommitted)** — `tests/test_query_evals.py` (8: 7 golden questions + coverage)
+    + rewritten `evals/golden_questions.yaml` (7 cases, fixture-grounded schema). Endpoint-level
+    TestClient driver, fresh keyword-only vault (chunks+md+manifests+source pages+kw index), directive
+    fake (cite_all/cite/bogus/path_leak/no_claims), per-case `expect` + global invariants. **Not
+    lancedb-gated** (no import; silent degrade verified via `notes==[]`). **Review round:** eval
+    settings **force embedding off** (`dataclasses.replace` nulls `embedding_base_url`/`model_ref`/
+    `api_key`) so ambient `EMBEDDING_*`+LanceDB can't leak a vector attempt — guard test sets the env
+    and asserts `notes==[]`; abstention cases assert the `"No source found in vault."` fallback;
+    diagnostic counts default to 0; "no server/**generated** path" wording.
+- **PHASE 5 (Query & Cited Answering) COMPLETE** — 5-1 worker · 5-2 `/query` · 5-3 saved Queries · 5-4
+  evals. **Next: Phase 6+** (UI / agents / maintenance per Build Spec).
 - **4e** — RRF hybrid fusion (keyword+vector) + per-group caps + retrieval eval harness
   (`evals/golden_retrieval.yaml`, kept separate from Phase-5 `golden_questions.yaml`).
 
