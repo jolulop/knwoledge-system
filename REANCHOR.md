@@ -1,41 +1,29 @@
 # REANCHOR — session status
 
-_Last updated: 2026-06-17. **Reanchor command:** "read REANCHOR.md and reanchor". Read this
+_Last updated: 2026-06-19. **Reanchor command:** "read REANCHOR.md and reanchor". Read this
 first after an app restart, then `wiki/index.md` if working in the vault._
 
 ## Project
 
 Local-first **LLM Wiki** knowledge-system. Immutable `raw/` → derived `normalized/` →
 generated `wiki/` (gitignored, regenerable) → `db/` SQLite (graph, jobs, llm_cache) →
-`reviews/`, `policies/`. ADR-driven (`docs/adr/0001–0031`). See `CLAUDE.md` for the
+`reviews/`, `policies/`. ADR-driven (`docs/adr/0001–0035`). See `CLAUDE.md` for the
 critical rules and `CONTEXT.md` for the glossary.
 
 ## Where we are
 
-- **Branch:** `main`, **in sync with `origin/main`** (4a + 4b pushed at `7838479`). **Phase 3.5
-  complete. Phase 4 design-locked (2026-06-17); 4a + 4b committed & pushed; 4c implemented + green
-  but uncommitted.**
-- **Slice 4c — IMPLEMENTED, UNCOMMITTED** (deterministic router + `GET /search`, ADR-0032 §4/§8):
-  - `app/backend/policy.py` (new) — minimal dependency-free YAML-subset loader + `RetrievalPolicy`
-    (routing taxonomy + caps, layered over code defaults); `policies/retrieval.yaml` extended with
-    `router:` (shape→modes) + `caps:` (graph caps moved here per ADR addendum 4).
-  - `app/backend/search.py` (new) — safe FTS5 query builder (tokenize+quote, bounded), deterministic
-    `classify_shape` (Build Spec §8.2), `route`, per-channel search (evidence/navigation/graph),
-    `run_search` orchestrator → grouped `{evidence,navigation,graph,counts,truncated,no_results}`.
-  - `GET /search` in `main.py` (modes keyword/navigation/graph/auto; vector→400 until 4d; retention
-    + type + language filters →400 on bad); `SearchResponse` models; `keyword_index_path`/
-    `retrieval_policy_path` in `config.py`. Evidence keyword-only (RRF is 4e), `retrieval_path:["keyword"]`.
-  - **Review round applied (2026-06-18):** (1) **topic extraction** — `extract_terms` strips
-    stopwords + §8.2 trigger words so routed NL queries search the topic, not the question words;
-    evidence uses AND, navigation/graph-seeding uses OR (entity recall). (2) **`/search` graph is now
-    real traversal** — flat `{seeds,nodes,edges,depth,truncated}` via `graph_read.search_subgraph`
-    (multi-seed BFS at the policy `max_graph_depth_default`); disagreement is **graph-native**
-    (seeds from active `contradicts` endpoints when no topic). (3) **retention applied to graph
-    nodes** — `search_subgraph` drops archived/deleted adjacents (`/search`'s job, ADR addendum 2).
-    (4) unknown source status **excluded by default** (Q3). (5) policy modes validated (typo→fallback);
-    `language` validated; ADR-0032 line 102 scoped to addendum 1.
-  - Tests: `tests/test_policy.py` (6) + `tests/test_search.py` (27) + `/search` API tests.
-- **Slice 4a — COMMITTED** (`2e7db7f`, includes the planning artifacts ADR-0032 + Phase 4 Plan):
+- **Branch:** `main`, **in sync with `origin/main`** (Phase 5 pushed at `0dce1e8`). The per-slice
+  rhythm: implement → test → external review (user pastes) → fix → commit (user says so) → push.
+- **PHASES 1–5 COMPLETE + pushed.** 1 intake · 2 extract/normalize · 3 deterministic wiki · 3.5 LLM
+  semantic layer (summaries/tags/concepts/entities/claims/synthesis + grounding) · **4 Search & Graph**
+  (4a keyword/nav · 4b graph read · 4c router+`/search` · 4d LanceDB vector · 4e RRF fusion+evals) ·
+  **5 Query & Cited Answering** (5-1 worker · 5-2 `POST /query` · 5-3 saved Queries · 5-4 evals).
+- **PHASE 6 (Human Review UI) — DESIGN-LOCKED, docs uncommitted** (ADR-0035 + `docs/Phase 6 Plan.md`);
+  see the Phase-6 block below + the "Phase status" section. **Next: implement slice 6-1** (review read
+  model) on "implement now".
+- Detailed per-phase notes for 4d/4e/5/6 are in the sections further down (kept current each slice).
+- _(Historical 4a/4b/4c slice detail trimmed 2026-06-19 — all committed & pushed; see git log.)_
+- **(archived note)** Slice 4a — committed `2e7db7f` (planning artifacts ADR-0032 + Phase 4 Plan):
   keyword evidence + wiki navigation index in `indexes/keyword/keyword.sqlite`
   (`app/backend/keyword_index.py`); scaffolds retired (`reindex_vector.py`, `chunks.jsonl`,
   `db/metadata.sqlite`); bidirectional fingerprint-fresh `validate_index_consistency.py`; §7
@@ -250,7 +238,22 @@ slice 4d (vector — first slice with new deps).**
     and asserts `notes==[]`; abstention cases assert the `"No source found in vault."` fallback;
     diagnostic counts default to 0; "no server/**generated** path" wording.
 - **PHASE 5 (Query & Cited Answering) COMPLETE** — 5-1 worker · 5-2 `/query` · 5-3 saved Queries · 5-4
-  evals. **Next: Phase 6+** (UI / agents / maintenance per Build Spec).
+  evals.
+- **PHASE 6 (Human Review UI) — DESIGN-LOCKED (2026-06-19 grill; ADR-0035 + `docs/Phase 6 Plan.md`;
+  no code yet).** First user-facing surface over the `reviews/` ledger. Key facts: **decide/apply are
+  already decoupled** (`resolve_review_item` records; deterministic key-free executors apply on scan of
+  `approved/`). Decisions: (1) **server-rendered HTML on FastAPI** over a JSON read model (`GET /reviews`,
+  `/reviews/{id}`; `/ui/reviews*`; forms `POST` approve/reject/defer) — no SPA, HTML never authority;
+  (2) read model deterministic+malformed-robust (sort priority→created_at→review_id, explicit status,
+  skip corrupt JSON); (3) **type-complete record-only ledger** (list+decide every pending type); (4)
+  **explicit `POST /reviews/apply`** runs the 3 existing executors (synthesis/promote/contradiction) +
+  (5) a new **tightly-scoped `apply_approved_deprecations`** (via explicit `review_status` render input,
+  no frontmatter surgery; `deprecate_wiki_page`→`deprecated_candidate`, raw-free, idempotent), typed
+  summary w/ honest unapplied gaps; `change_entity_subtype`+raw-touching types record-only-deferred;
+  (6) mandatory proposal preview before approve; (7) loopback-only safety (CSRF/auth deferred,
+  conditional); (8) key-free TestClient tests. Slices **6-1** read model · **6-2** decisions · **6-3**
+  apply+deprecation executor · **6-4** HTML UI. **Next: implement 6-1 on "implement now".**
+- New ADR: **0035** (Phase 6 Human Review UI).
 - **4e** — RRF hybrid fusion (keyword+vector) + per-group caps + retrieval eval harness
   (`evals/golden_retrieval.yaml`, kept separate from Phase-5 `golden_questions.yaml`).
 
