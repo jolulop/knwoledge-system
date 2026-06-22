@@ -8,7 +8,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Form, HTTPException, Query
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 logger = logging.getLogger(__name__)
 
@@ -18,8 +19,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.backend import (
-    db, embeddings, graph, graph_read, keyword_index, manifests, review_read, search,
-    vector_index,
+    db, embeddings, graph, graph_read, keyword_index, manifests, review_html, review_read,
+    search, vector_index,
 )
 from app.backend.config import get_settings
 from app.backend.models import (
@@ -583,6 +584,82 @@ def apply_reviews() -> dict[str, Any]:
             "unapplied": _unapplied_by_type(reviews_dir),
         },
     }
+
+
+# --- Human Review UI (server-rendered HTML; ADR-0035 decision 1 + A8) -------
+# The HTML layer is never authority: each /ui route calls the same read-model / _record_decision /
+# apply_reviews primitives the JSON API uses, then renders via review_html (every value escaped).
+# `/ui/reviews/apply` is declared before `/ui/reviews/{review_id}` so "apply" is not read as an id.
+# Mutating routes are POST-only under the loopback-only assert_safe_bind; CSRF stays deferred while
+# loopback-only — any move to a LAN/public bind or added auth MUST revisit form safety first.
+
+_UI_DECISIONS = {"approve": "approved", "reject": "rejected", "defer": "deferred"}
+
+
+def _html_error(exc: HTTPException) -> HTMLResponse:
+    return HTMLResponse(review_html.render_error(exc.status_code, str(exc.detail)),
+                        status_code=exc.status_code)
+
+
+@app.get("/ui/reviews", response_class=HTMLResponse)
+def ui_review_queue(
+    status: str = "pending",
+    type: str | None = None,  # noqa: A002 - the public ?type= filter
+    priority: str | None = None,
+    limit: int | None = Query(None, ge=1),
+    offset: int = Query(0, ge=0),
+) -> HTMLResponse:
+    try:
+        data = review_read.list_reviews(
+            settings.reviews_dir, status=status, type=type, priority=priority,
+            limit=limit, offset=offset)
+    except ValueError as exc:
+        return HTMLResponse(review_html.render_error(400, str(exc)), status_code=400)
+    return HTMLResponse(review_html.render_queue(data, status=status))
+
+
+@app.get("/ui/reviews/apply", response_class=HTMLResponse)
+def ui_apply_confirm() -> HTMLResponse:
+    """Two-step apply, step 1: a read-only scope-count confirm page (not a dry-run; ADR-0035 A8)."""
+    scope = review_read.apply_scope_counts(settings.reviews_dir)
+    return HTMLResponse(review_html.render_apply_confirm(scope))
+
+
+@app.post("/ui/reviews/apply", response_class=HTMLResponse)
+def ui_apply() -> HTMLResponse:
+    """Two-step apply, step 2: execute via the same logic as POST /reviews/apply, render the summary."""
+    try:
+        result = apply_reviews()
+    except HTTPException as exc:
+        return _html_error(exc)
+    return HTMLResponse(review_html.render_apply_result(result))
+
+
+@app.get("/ui/reviews/{review_id}", response_class=HTMLResponse)
+def ui_review_detail(review_id: str) -> HTMLResponse:
+    result = review_read.get_review(
+        settings.reviews_dir, review_id,
+        graph_db=settings.graph_db_path, wiki_dir=settings.wiki_dir)
+    if result is None or result.get("parse_error") or result.get("schema_error"):
+        return HTMLResponse(
+            review_html.render_error(404, f"review not found: {review_id}"), status_code=404)
+    return HTMLResponse(review_html.render_detail(result, review_id=review_id))
+
+
+@app.post("/ui/reviews/{review_id}/decide", response_model=None)
+def ui_review_decide(
+    review_id: str, action: str = Form(...), note: str = Form(""),
+) -> HTMLResponse | RedirectResponse:
+    """Record a decision from the detail form, then PRG-redirect to the item detail (ADR-0035 A8)."""
+    decision = _UI_DECISIONS.get(action)
+    if decision is None:
+        return HTMLResponse(
+            review_html.render_error(400, f"unknown action: {action}"), status_code=400)
+    try:
+        _record_decision(review_id, decision, ReviewDecisionRequest(note=note))
+    except HTTPException as exc:
+        return _html_error(exc)
+    return RedirectResponse(f"/ui/reviews/{review_id}", status_code=303)
 
 
 def _open_graph_safe() -> Any:

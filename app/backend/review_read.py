@@ -50,7 +50,9 @@ NO_EFFECT_REQUIRED = "no_effect_required"
 # is not — ADR-0035 decisions 3-5). Maps type -> the executor name surfaced in the preview.
 EXECUTOR_BY_TYPE = {
     "promote_candidate_node": "promote_candidates",
-    "propose_synthesis": "apply_synthesis_decisions",
+    # synthesis has no extracted wrapper — /reviews/apply calls apply_resolved_syntheses directly
+    # (it renders its own pages); the 6-3 design dropped apply_synthesis_decisions (ADR-0035 A4).
+    "propose_synthesis": "apply_resolved_syntheses",
     "resolve_contradiction": "apply_contradiction_decisions",
     "deprecate_wiki_page": "apply_approved_deprecations",
 }
@@ -195,6 +197,29 @@ def list_reviews(
         "parse_errors": parse_errors,
         "schema_errors": schema_errors,
         "items": window,
+    }
+
+
+def apply_scope_counts(reviews_dir: Path) -> dict[str, Any]:
+    """Read-only classification of the `approved/` queue for the apply confirm page (ADR-0035 A8).
+
+    Groups approved items into executor-backed types (an apply will *process* them — some may be
+    idempotent no-ops) vs record-only types (no Phase-6 executor — the `unapplied` set), and counts
+    malformed files. **No graph/page reads and no executor calls** — this is scope, *not* a dry-run
+    prediction of effects. JSON apply and the HTML confirm page share this one classification.
+    """
+    items, parse_errors, schema_errors = _scan_dir(reviews_dir, "approved")
+    executor_backed: dict[str, int] = {}
+    record_only: dict[str, int] = {}
+    for it in items:
+        rtype = str(it.get("type"))
+        bucket = executor_backed if rtype in EXECUTOR_BY_TYPE else record_only
+        bucket[rtype] = bucket.get(rtype, 0) + 1
+    return {
+        "executor_backed": dict(sorted(executor_backed.items())),
+        "record_only": dict(sorted(record_only.items())),
+        "parse_errors": parse_errors,
+        "schema_errors": schema_errors,
     }
 
 

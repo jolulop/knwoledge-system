@@ -1,6 +1,7 @@
 # Phase 6 Plan — Human Review UI
 
-**Status:** Planned (design-locked 2026-06-19 via grill gate). No code yet.
+**Status:** In progress — slices **6-1 (read model), 6-2 (decisions), 6-3 (apply) are committed +
+pushed**; **6-4 (HTML UI) implemented** (design-locked 2026-06-19/22 via grill gate; A8 + this §5).
 **Governing ADR:** [ADR-0035](adr/0035-phase-6-human-review-ui.md). Read it first.
 **Predecessors:** Phases 1–5 complete. The Phase 3.5 workers already file review items under
 `reviews/pending/` (ADR-0018); Phase 6 surfaces + actions them.
