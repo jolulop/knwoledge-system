@@ -17,7 +17,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.backend import (
-    db, embeddings, graph, graph_read, keyword_index, manifests, search, vector_index,
+    db, embeddings, graph, graph_read, keyword_index, manifests, review_read, search,
+    vector_index,
 )
 from app.backend.config import get_settings
 from app.backend.models import (
@@ -30,6 +31,8 @@ from app.backend.models import (
     NormalizedResponse,
     QueryRequest,
     QueryResponse,
+    ReviewDetailResponse,
+    ReviewListResponse,
     SearchResponse,
     Source,
     SourcesResponse,
@@ -320,6 +323,44 @@ def get_graph_neighborhood(
         conn.close()
     if result is None:
         raise HTTPException(status_code=404, detail=f"node not found: {node_id}")
+    return result
+
+
+@app.get("/reviews", response_model=ReviewListResponse)
+def list_reviews(
+    status: str = "pending",
+    type: str | None = None,  # noqa: A002 - the public ?type= filter
+    priority: str | None = None,
+    limit: int | None = Query(None, ge=1),
+    offset: int = Query(0, ge=0),
+) -> dict[str, Any]:
+    """Phase 6 review ledger (ADR-0035): deterministic, malformed-robust list of review items.
+
+    Filters on the item's explicit ``status`` field (``pending``/``deferred`` share ``reviews/
+    pending/``); ``count``/``by_type`` cover the full filtered set before pagination. Read-only.
+    """
+    try:
+        return review_read.list_reviews(
+            settings.reviews_dir, status=status, type=type, priority=priority,
+            limit=limit, offset=offset)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/reviews/{review_id}", response_model=ReviewDetailResponse)
+def get_review(review_id: str) -> dict[str, Any]:
+    """One review item plus its mandatory normalized preview projection (ADR-0035 A1, decision 6).
+
+    The preview's ``apply`` block carries a read-only, best-effort ``effect_status`` derived from the
+    actual wiki/graph state. A corrupt review file is a 404 (the queue never crashes on bad JSON).
+    """
+    result = review_read.get_review(
+        settings.reviews_dir, review_id,
+        graph_db=settings.graph_db_path, wiki_dir=settings.wiki_dir)
+    # A missing, corrupt, or schema-invalid review file is a 404 (the read model never 500s on bad
+    # queue state; the parse_error/schema_error markers are diagnostic only).
+    if result is None or result.get("parse_error") or result.get("schema_error"):
+        raise HTTPException(status_code=404, detail=f"review not found: {review_id}")
     return result
 
 

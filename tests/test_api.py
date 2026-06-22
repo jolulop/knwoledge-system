@@ -885,3 +885,100 @@ def test_query_save_preserves_source_quote_path(client, tmp_path, monkeypatch):
     assert "/var/log/app" in page                # verbatim source quote preserved (grounding needs it)
     assert str(tmp_path) not in page             # but no server/generated path
     assert _validator_ok(tmp_path, "validate_citations.py")[0]
+
+
+# --- Phase 6 review ledger (ADR-0035 slice 6-1) ----------------------------
+
+
+def _write_review(tmp_path, state, item):
+    d = tmp_path / "reviews" / state
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{item['review_id']}.json").write_text(json.dumps(item), encoding="utf-8")
+
+
+def test_reviews_list_default_pending_excludes_deferred(client, tmp_path):
+    _write_review(tmp_path, "pending", {
+        "review_id": "rev_a", "type": "promote_candidate_node", "status": "pending",
+        "priority": "high", "created_at": "2026-01-01T00:00:00Z", "subject": {"node_id": "cpt_1"},
+        "proposal": {"to_status": "active", "node_type": "concept"}, "context": {}})
+    _write_review(tmp_path, "pending", {
+        "review_id": "rev_b", "type": "deprecate_wiki_page", "status": "deferred",
+        "priority": "low", "subject": {}, "proposal": {}, "context": {}})
+
+    resp = client.get("/reviews")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["count"] == 1
+    assert body["by_type"] == {"promote_candidate_node": 1}
+    assert [it["review_id"] for it in body["items"]] == ["rev_a"]
+    assert body["parse_errors"] == 0
+
+
+def test_reviews_list_unknown_status_is_400(client, tmp_path):
+    assert client.get("/reviews", params={"status": "bogus"}).status_code == 400
+
+
+def test_reviews_list_malformed_json_counted_not_crashing(client, tmp_path):
+    _write_review(tmp_path, "pending", {
+        "review_id": "rev_ok", "type": "promote_candidate_node", "status": "pending",
+        "subject": {}, "proposal": {}, "context": {}})
+    (tmp_path / "reviews" / "pending" / "rev_bad.json").write_text("{nope", encoding="utf-8")
+    body = client.get("/reviews").json()
+    assert body["parse_errors"] == 1
+    assert [it["review_id"] for it in body["items"]] == ["rev_ok"]
+
+
+def test_reviews_list_schema_invalid_json_does_not_500(client, tmp_path):
+    # valid JSON object but not a usable ReviewItem (missing review_id/type) must not crash the queue
+    _write_review(tmp_path, "pending", {
+        "review_id": "rev_ok", "type": "promote_candidate_node", "status": "pending",
+        "subject": {}, "proposal": {}, "context": {}})
+    (tmp_path / "reviews" / "pending" / "rev_bad.json").write_text(
+        json.dumps({"status": "pending"}), encoding="utf-8")
+    resp = client.get("/reviews")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["schema_errors"] == 1
+    assert body["parse_errors"] == 0
+    assert [it["review_id"] for it in body["items"]] == ["rev_ok"]
+
+
+def test_reviews_detail_404_for_schema_invalid(client, tmp_path):
+    (tmp_path / "reviews" / "pending").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "reviews" / "pending" / "rev_bad.json").write_text(
+        json.dumps({"status": "pending"}), encoding="utf-8")
+    assert client.get("/reviews/rev_bad").status_code == 404
+
+
+def test_reviews_detail_returns_item_and_preview(client, tmp_path):
+    _write_review(tmp_path, "pending", {
+        "review_id": "rev_a", "type": "promote_candidate_node", "status": "pending",
+        "priority": "low", "subject": {"node_id": "cpt_1"},
+        "proposal": {"to_status": "active", "node_type": "concept", "name": "thing"}, "context": {}})
+    body = client.get("/reviews/rev_a").json()
+    assert body["item"]["review_id"] == "rev_a"
+    prev = body["preview"]
+    assert prev["type"] == "promote_candidate_node"
+    assert prev["apply"]["supported"] is True
+    assert prev["apply"]["effect_status"] == "pending_apply"
+    assert prev["node_ids"] == ["cpt_1"]
+
+
+def test_reviews_detail_404_for_missing(client, tmp_path):
+    assert client.get("/reviews/rev_nope").status_code == 404
+
+
+def test_reviews_detail_404_for_malformed(client, tmp_path):
+    (tmp_path / "reviews" / "pending").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "reviews" / "pending" / "rev_bad.json").write_text("{broken", encoding="utf-8")
+    assert client.get("/reviews/rev_bad").status_code == 404
+
+
+def test_reviews_detail_no_server_path_leak(client, tmp_path):
+    _write_review(tmp_path, "pending", {
+        "review_id": "rev_d", "type": "deprecate_wiki_page", "status": "pending",
+        "subject": {"node_id": "clm_1", "page": "Claims/clm_1.md"},
+        "proposal": {"to_status": "deprecated_candidate", "reason": "x"},
+        "context": {"node_type": "claim"}})
+    raw = client.get("/reviews/rev_d").text
+    assert str(tmp_path) not in raw

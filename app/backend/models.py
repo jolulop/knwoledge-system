@@ -336,3 +336,70 @@ class QueryResponse(BaseModel):
     # True when a page was saved but the nav/index were NOT synchronously rebuilt — the saved query is
     # discoverable only after the next reindex (ADR-0034 Q3). False/None when nothing was saved.
     navigation_stale: bool = False
+
+
+# --- Phase 6 review ledger (ADR-0035) --------------------------------------
+
+
+class ReviewItem(BaseModel):
+    # One stored review item (reviews/<status>/<id>.json). subject/proposal/context are per-type
+    # free-form payloads (ADR-0018), so they stay permissive dicts; the typed governance shape is the
+    # per-type preview projection below, not this raw record.
+    review_id: str
+    type: str
+    status: str
+    priority: str = "low"
+    created_at: str | None = None
+    subject: dict[str, Any] = {}
+    proposal: dict[str, Any] = {}
+    context: dict[str, Any] = {}
+    decided_by: str | None = None
+    decided_at: str | None = None
+    decision_note: str | None = None
+
+
+class ReviewListResponse(BaseModel):
+    # GET /reviews (ADR-0035 A3). count/by_type cover the full filtered set (status+type+priority)
+    # *before* limit/offset; items is the deterministically-sorted post-pagination window. Two skip
+    # counters keep the queue crash-proof and diagnosable: parse_errors (unreadable/invalid/non-object
+    # JSON) vs schema_errors (valid JSON object that is not a usable ReviewItem shape).
+    count: int
+    by_type: dict[str, int]
+    parse_errors: int
+    schema_errors: int
+    items: list[ReviewItem]
+
+
+class ReviewApply(BaseModel):
+    # Read-only, best-effort apply-capability + effect state derived from wiki/graph (ADR-0035 A2).
+    # effect_status in {pending_apply, effected, apply_deferred, unknown, no_effect_required};
+    # no_effect_required = a decided item that owes no world change (rejected promote / rejected
+    # in-scope deprecate). `effected` is None for record-only types (never implies a *failed* apply).
+    supported: bool
+    executor: str | None = None
+    effect_status: str
+    effected: bool | None = None
+    warnings: list[str] = []
+
+
+class ReviewPreview(BaseModel):
+    # The mandatory normalized preview a human sees before approving (ADR-0035 A1, decision 6). Built
+    # by a per-type projector; record-only/unknown types use a shared fallback. Not a mutation diff.
+    review_id: str | None = None
+    type: str | None = None
+    status: str | None = None
+    summary: str = ""
+    affected_paths: list[str] = []
+    node_ids: list[str] = []
+    current_status: str | None = None
+    proposed_status: str | None = None
+    proposed_action: str | None = None
+    warnings: list[str] = []
+    apply: ReviewApply
+    details: dict[str, Any] = {}
+
+
+class ReviewDetailResponse(BaseModel):
+    # GET /reviews/{id} — the full stored item plus its preview projection.
+    item: ReviewItem
+    preview: ReviewPreview

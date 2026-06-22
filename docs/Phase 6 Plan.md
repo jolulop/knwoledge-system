@@ -34,15 +34,31 @@ destructive action without a recorded decision; the surface inherits the loopbac
 ---
 
 ## 2. Read model (`GET /reviews`, `GET /reviews/{id}`)
-- **`GET /reviews?status=pending&type=&priority=&limit=&offset=`** → `{count, by_type, items[]}` from
-  `reviews/<status>/`. Each item exposes its **explicit `status`** (`deferred` lives in `pending/` but
-  is not semantically pending). Deterministic sort: **priority desc → `created_at` asc (when present) →
-  `review_id`** (malformed/missing `created_at` falls back to `review_id`).
-- **`GET /reviews/{id}`** → the full item + a **preview** = normalized read projection (affected page
-  paths, node ids, current status, proposed status/action, warnings `apply_deferred`/`executor_missing`).
-  *Not* a computed mutation diff.
-- **Robustness:** a malformed/corrupt review JSON is skipped and reported (e.g. a `parse_errors` count /
-  list), never crashes the queue.
+- **`GET /reviews?status=pending&type=&priority=&limit=&offset=`** → `{count, by_type, parse_errors,
+  schema_errors, items[]}`. **Filter on the explicit `status` field, not the directory** (ADR-0035 A3): `pending`/
+  `deferred` both scan `reviews/pending/` then filter `item.status`; `approved`/`rejected` scan their own
+  dirs. **Default (no `status`) = `pending` only** — deferred excluded (the queue stays actionable;
+  deferred reachable via `?status=deferred`). `count` and `by_type` are computed over the **full filtered
+  set (status+type+priority) before `limit`/`offset`**; `items[]` is the sorted window after pagination.
+  Deterministic sort: **priority desc → `created_at` asc (when present) → `review_id`** (malformed/missing
+  `created_at` falls back to `review_id`).
+- **`GET /reviews/{id}`** → the full item + a **preview** built by a **per-type projection registry**
+  (ADR-0035 A1; no generic-first extraction, no raw passthrough). Each projector returns one normalized
+  model: `{review_id, type, status, summary, affected_paths[], node_ids[], current_status, proposed_status,
+  proposed_action, warnings[], apply:{…}, details{}}`. Record-only types reuse a shared
+  `record_only_preview(...)` helper. The `apply` block carries the **read-time-derived effect state**
+  (ADR-0035 A2): `{supported, executor, effect_status ∈ {pending_apply, effected, apply_deferred,
+  unknown, no_effect_required}, effected, warnings[]}` — best-effort read of actual wiki/graph state,
+  `unknown` on inconsistency, never a tracked applied-marker. `no_effect_required` marks a decided item
+  that owes no world change (rejected promote / rejected in-scope deprecate); rejected synthesis/
+  contradiction keep ordinary derivation. Effect checks read the **full** required state (supersede →
+  edge + `supersedes` + loser deprecation; synthesis → node + page; in-scope deprecate → page + graph
+  mirror, else `unknown`). *Not* a computed mutation diff. **Projectors are strictly read-only**
+  (ADR-0035 A2): they read pages/frontmatter/review files/graph but never init DBs, create dirs, repair
+  pages, or call producer/apply code.
+- **Robustness:** unusable files are skipped + counted, never crashing the queue — `parse_errors`
+  (unreadable/invalid/non-object JSON) vs `schema_errors` (valid JSON, not a usable ReviewItem shape);
+  `GET /reviews/{id}` 404s either.
 
 ---
 
@@ -55,23 +71,44 @@ destructive action without a recorded decision; the surface inherits the loopbac
 
 ---
 
-## 4. Apply (`POST /reviews/apply`; ADR-0035 decisions 4–5)
-- Runs the existing deterministic key-free passes over `approved/`:
-  `apply_resolved_syntheses` · `promote_candidates` · `apply_resolved_contradictions`, **plus** the new
-  `apply_approved_deprecations`. Re-renders affected pages + mirrors graph node status, rebuilds
-  `wiki/index.md`, runs validators.
+## 4. Apply (`POST /reviews/apply`; ADR-0035 decisions 4–5, addenda A4–A6)
+- Composes **extracted key-free apply orchestrators** (ADR-0035 A4) — `apply_synthesis_decisions` ·
+  `apply_contradiction_decisions` · the new `apply_approved_deprecations` · `promote_candidates(
+  rebuild_index=False)`. The two extracted orchestrators pull the deterministic apply portion (executor →
+  recompose affected pages → mirror graph → `{changed_pages, graph_changed, summary}`) **out of** the LLM
+  producers (`detect_contradictions`/`generate_synthesis`) so both the producers and the endpoint call the
+  same code (bare executors alone don't re-project pages / rebuild the index). Calling producers with a
+  no-key client, and inline re-implementation in the endpoint, are both rejected. **No behavior change** to
+  existing producer entrypoints; existing tests stay the regression guard + new direct orchestrator tests.
+- Then rebuilds `wiki/index.md` **once** (only if something changed) and runs validators **once**.
 - **Never triggers LLM generation** (only the deterministic review-application portion of any pass);
   **never touches `raw/`**; **idempotent**.
-- Returns a **typed summary**: e.g. `{syntheses:{promoted,rejected}, promotions:{promoted},
-  contradictions:{acknowledged,rejected,superseded}, deprecations:{applied,skipped[]},
-  pages_changed, validators_ok, unapplied:[{type,count,reason}]}`.
-- **`apply_approved_deprecations`** (new): only items with `type==deprecate_wiki_page`,
-  `proposal.to_status==deprecated_candidate`, `subject.page` under a known wiki subdir, `context.node_type`
-  matching the page type, no raw delete/archive/hide. Marks the page `deprecated_candidate` +
-  `review_status: approved` via an **explicit `review_status` input to the deterministic render path**
-  (claim/concept renderers gain a `review_status` arg — not frontmatter string surgery), preserving
-  citations/evidence + summary callouts, mirroring graph node status, idempotent, reporting skips with
-  reasons.
+- **Non-transactional; validators report, never roll back (A6):** effects are written before validation
+  and cannot be rolled back. Runs the **full validator suite once at the end** (discovered like
+  `scripts/validate_all.py`, each a subprocess `[sys.executable, script, root]`). On any failure returns
+  **HTTP 200** with a clear top-level `status` (`"applied"` | `"validation_failed"`) plus `{applied:true,
+  validators_ok:false, failed_validators:[{name, returncode, stdout_tail, stderr_tail}], summary:{…}}` —
+  clients read `status` directly, not nested fields. HTTP 500 only for unexpected infrastructure errors in
+  the route's own control flow.
+- Returns a **typed summary**: e.g. `{status, applied, validators_ok, failed_validators[], summary:{
+  syntheses:{promoted,rejected}, promotions:{promoted}, contradictions:{acknowledged,rejected,superseded},
+  deprecations:{applied,normalized,skipped[]}, pages_changed, unapplied:[{type,count,reason}]}}`.
+- **`apply_approved_deprecations`** (new; A5): only items with `type==deprecate_wiki_page`,
+  `proposal.to_status==deprecated_candidate`, `subject.page` under an in-scope subdir, `context.node_type`
+  matching the page type, no raw delete/archive/hide. **In scope:** `Claims/`, `Concepts/`, `Entities/`,
+  `People/`, `Organizations/`, `Projects/`; **out of scope:** `Synthesis/` (→ `skipped[{reason:
+  handled_by_synthesis_executor}]`), `Sources/`, `Queries/`. Marks the page `deprecated_candidate` +
+  `review_status: approved` via an **explicit `review_status` input to the deterministic render path** —
+  the render seam is **mandatory** because the renderers derive `review_status: pending` for a no-evidence
+  claim tombstone / no-mention concept and cannot otherwise express an approved deprecation.
+  `render_claim_page`/`render_concept_page` gain an optional `review_status: str | None = None` (default
+  `None` = today's derived behavior); claims reuse `recompose_claim(deprecate=True, review_status=
+  "approved")`, concepts/entity-family use the new **`recompose_semantic_node_page(...)`** helper in
+  `concepts.py`. Preserves citations/evidence + summary callouts, mirrors graph node status, reports skips
+  with reasons. **Idempotency:** a true no-op needs page status **and** `review_status` **and** graph
+  mirror to match; if only `review_status` differs (e.g. an auto-approved contradiction-supersede
+  deprecation), it performs a **normalization apply** (flip `review_status`, mirror graph, count as
+  `normalized`) rather than skipping.
 
 ---
 
@@ -90,7 +127,7 @@ destructive action without a recorded decision; the surface inherits the loopbac
 |---|---|
 | **6-1** | Read model: review-service read helpers (list/get, malformed-robust, deterministic sort, explicit status) + `GET /reviews` + `GET /reviews/{id}` JSON + response models. Tests. |
 | **6-2** | Decision endpoints: `defer_review_item` + `POST /reviews/{id}/approve|reject|defer` (record-only, audit). Tests. |
-| **6-3** | Apply: `POST /reviews/apply` wiring the 3 existing executors + new `apply_approved_deprecations` (render-path `review_status` input); typed summary incl. unapplied. Tests (apply, idempotent, skip-reasons). |
+| **6-3** | Apply: extract `apply_synthesis_decisions`/`apply_contradiction_decisions` (key-free, no producer-behavior change) + new `apply_approved_deprecations` (render-path `review_status` arg + `recompose_semantic_node_page`); `POST /reviews/apply` composes them + `promote_candidates(rebuild_index=False)`, rebuilds index once, runs full validator suite once (200 + `validators_ok` on failure); typed summary incl. `normalized`/`unapplied`. Tests (apply, idempotent/normalization, skip-reasons, validator-failure → 200, extracted-orchestrator direct tests). |
 | **6-4** | HTML UI: `/ui/reviews` + `/ui/reviews/{id}` + apply view (server-rendered, mandatory preview, `POST` forms). TestClient HTML tests. |
 
 ---

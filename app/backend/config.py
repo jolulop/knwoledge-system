@@ -48,6 +48,8 @@ class Settings:
     manifests_dir: Path
     db_dir: Path
     jobs_db_path: Path
+    # Human-review ledger (ADR-0018/0035): reviews/<pending|approved|rejected>/ + audit_log/.
+    reviews_dir: Path
     # Authoritative semantic graph (ADR-0030); read-only projection in Phase 4b.
     graph_db_path: Path
     # Phase 4 retrieval: derived keyword index (4a) + retrieval policy (4c).
@@ -113,6 +115,7 @@ def get_settings(root: Path | None = None) -> Settings:
         manifests_dir=resolved / "raw" / "manifests",
         db_dir=resolved / "db",
         jobs_db_path=resolved / "db" / "jobs.sqlite",
+        reviews_dir=resolved / "reviews",
         graph_db_path=resolved / "db" / "graph.sqlite",
         keyword_index_path=resolved / "indexes" / "keyword" / "keyword.sqlite",
         retrieval_policy_path=resolved / "policies" / "retrieval.yaml",
