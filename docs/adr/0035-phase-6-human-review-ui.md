@@ -245,3 +245,40 @@ widening scope:
   `index_rebuild_failed` (script present, non-zero, after changes — distinct from a missing script) is
   surfaced in a top-level `warnings[]`; validator `stdout/stderr` tails are sanitized of the absolute root
   path.
+
+**A8 — 6-4 HTML UI implementation contract (2026-06-22 grill).** The server-rendered surface (decision 1)
+is locked as follows:
+- **Hand-rolled HTML, not Jinja2** — the surface is three pages (queue, detail, apply), so no templating
+  dependency is added (keeps the dependency-minimal posture; CLAUDE.md rule 10). The **non-negotiable
+  invariant** is that *every* dynamic value is HTML-escaped: one mandatory `_h(value) =
+  html.escape(value, quote=True)` helper, no raw interpolation of review/read-model content, list/table
+  helpers that route through `_h`, and **no "trusted HTML" escape-hatch for review content**. An XSS
+  fixture (`<script>`, quoted-attr, wikilink, LLM text) + a recursive nested-`details` fixture prove the
+  generic renderer escapes recursively and never stringifies raw markup. Jinja2 (with autoescape) is the
+  documented fallback only if the UI later outgrows hand-rolling.
+- **Pure render module `app/backend/review_html.py`** — string renderers only, no filesystem mutation, no
+  FastAPI coupling beyond returning strings. `main.py` stays thin: route → call read/service/apply helper →
+  wrap in `HTMLResponse`/`RedirectResponse`. **No `templates/` use** (that dir stays wiki-Markdown).
+- **The detail page renders the read model's normalized preview projection uniformly** — per-type semantics
+  live in the 6-1 projector registry, so the HTML iterates the normalized fields (`summary`,
+  `affected_paths`, `node_ids`, `proposed_action`, `apply{…}`, `details`) the same way for all types; **no
+  per-type HTML** (which would drift from the registry). The `apply` block drives the "Approved, pending
+  apply" / `no_effect_required` / `apply_deferred` labels.
+- **Form seam: separate `/ui` POST routes over the shared primitives** (the JSON endpoints are **not**
+  content-negotiated). Approve/reject/defer parse `Form(...)` fields, call the same `_record_decision(...)`,
+  and **303-redirect to the item detail** (immediate confirmation + new effect state). Mutating routes are
+  `POST`-only under `assert_safe_bind`; **CSRF still deferred** while loopback-only (a flagged comment must
+  point any LAN/auth move back to form safety).
+- **Two-step apply:** `GET /ui/reviews/apply` is a **confirm page showing read-only scope counts** —
+  approved executor-backed items grouped by type **and** the record-only `unapplied` types — framed as
+  *"items the apply step will process; already-effected items may be no-ops; exact applied/normalized/
+  skipped/validation reported after apply."* It is **not** a dry-run (ADR-0035 defers that): no would-apply
+  prediction, no executor calls. The counts come from a read-only **`apply_scope_counts(reviews_dir)`** in
+  `review_read.py` (scans `approved/`, groups executor-backed vs record-only types, counts parse/schema
+  errors; no graph/page reads) so JSON and HTML share one classification vocabulary. `POST /ui/reviews/apply`
+  executes via the same logic as `POST /reviews/apply` and renders the typed summary (incl. `warnings[]`,
+  `failed_validators[]`, `unapplied[]`).
+- **Errors render as HTML, never raw JSON/500:** the `/ui` handlers catch the shared logic's
+  `HTTPException` (404 missing · 409 flip-conflict · 503 graph-unavailable) and render a small HTML error
+  page. Styling is **minimal inline `<style>`, no JS, no `StaticFiles` mount**. No absolute path ever
+  reaches the HTML.

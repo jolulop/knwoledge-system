@@ -124,13 +124,29 @@ destructive action without a recorded decision; the surface inherits the loopbac
 
 ---
 
-## 5. HTML UI (server-rendered; ADR-0035 decisions 1, 6)
-- `/ui/reviews` — the queue (default pending; filter links by type/priority; counts), each row linking
-  to detail. `/ui/reviews/{id}` — detail with the **mandatory preview** (subject/proposal/context/
-  affected pages-nodes/winner-loser) and approve/reject/defer **`POST` forms**. An apply view
-  (`/ui/reviews/apply` or a button) runs `POST /reviews/apply` and shows the typed summary.
-- Rendered server-side (Jinja2 or hand-rolled), no SPA/JS build. "Approved, pending apply" until applied.
-- Mutating forms are `POST`-only; inherits `assert_safe_bind` (loopback-only). No new bind surface.
+## 5. HTML UI (server-rendered; ADR-0035 decisions 1, 6 + addendum A8)
+- **Hand-rolled HTML** (no Jinja2 — three pages) in a pure render module `app/backend/review_html.py`;
+  `main.py` stays thin (route → helper → `HTMLResponse`/`RedirectResponse`). **Mandatory escape invariant:**
+  one `_h() = html.escape(quote=True)`, every dynamic value through it, no "trusted HTML" for review
+  content; XSS + recursive-`details` fixtures prove it. Minimal inline CSS, **no JS**, no `StaticFiles`,
+  **no `templates/` use**.
+- `/ui/reviews` — the queue (default pending; filter links pending/deferred/approved/rejected; `by_type`
+  counts; `parse_errors`/`schema_errors` banner), each row → detail, plus a link to the apply view.
+- `/ui/reviews/{id}` — detail rendering the read model's **normalized preview projection uniformly** (no
+  per-type HTML — the 6-1 projector registry owns per-type semantics): `summary`/`affected_paths`/
+  `node_ids`/`proposed_action`/`apply{…}`/`details` (escaped key/value/list, recursively) + approve/reject/
+  defer **`POST` forms** (optional `note`). The `apply` block drives "Approved, pending apply" /
+  `no_effect_required` / `apply_deferred`.
+- **Form seam:** separate `/ui` `POST` routes over the **shared primitives** (JSON endpoints are *not*
+  content-negotiated). Approve/reject/defer call `_record_decision(...)` then **303 → item detail**.
+- **Two-step apply:** `GET /ui/reviews/apply` = confirm page with **read-only scope counts**
+  (`apply_scope_counts(reviews_dir)` in the read model: approved executor-backed by type + record-only
+  `unapplied`; no graph/page reads, no executor calls) framed as *process / may-be-no-ops / exact reported
+  after* — **not a dry-run**. `POST /ui/reviews/apply` executes via the same logic as `POST /reviews/apply`
+  → typed-summary page (`warnings[]`/`failed_validators[]`/`unapplied[]`).
+- **Errors render as HTML, never JSON/500** (404 missing · 409 flip · 503 graph-unavailable). Mutating
+  forms `POST`-only under `assert_safe_bind` (loopback); **CSRF deferred** (flagged comment). No new bind
+  surface, no absolute path in the HTML.
 
 ---
 
@@ -140,7 +156,7 @@ destructive action without a recorded decision; the surface inherits the loopbac
 | **6-1** | Read model: review-service read helpers (list/get, malformed-robust, deterministic sort, explicit status) + `GET /reviews` + `GET /reviews/{id}` JSON + response models. Tests. |
 | **6-2** | Decision endpoints: `defer_review_item` + `POST /reviews/{id}/approve|reject|defer` (record-only, audit). Tests. |
 | **6-3** | Apply: extract shared `_reproject_claim_pages` + composed `apply_contradiction_decisions` (the one bundle; synthesis calls `apply_resolved_syntheses` directly, no wrapper; no index rebuild inside any apply fn) + new `apply_approved_deprecations` (render-path `review_status` arg constrained to known values + `recompose_semantic_node_page` with explicit required status + reverse-`NODE_DIR` type derivation + `_execute_supersede` forward-fix `context.node_type`); `POST /reviews/apply` composes them + `promote_candidates(rebuild_index=False)`, rebuilds index once at the caller layer, runs full validator suite once (200 + `validators_ok` on failure); typed summary incl. `normalized`/`unapplied`. Tests (apply, idempotent/normalization, legacy + node_type_mismatch skips, validator-failure → 200, `_reproject_claim_pages`/`apply_contradiction_decisions` direct tests, producer-summary-unchanged regression). |
-| **6-4** | HTML UI: `/ui/reviews` + `/ui/reviews/{id}` + apply view (server-rendered, mandatory preview, `POST` forms). TestClient HTML tests. |
+| **6-4** | HTML UI (hand-rolled, `app/backend/review_html.py`, `_h()` escape invariant): `/ui/reviews` queue + `/ui/reviews/{id}` detail (normalized projection rendered uniformly, approve/reject/defer `POST` forms → 303 to detail) + two-step apply (`GET` confirm w/ `apply_scope_counts` scope counts, `POST` executes → typed summary). HTML error pages (404/409/503). TestClient tests: render + form-POST→303 PRG + XSS/recursive-escape fixtures + error pages + no path leak. |
 
 ---
 
