@@ -1,6 +1,6 @@
 # REANCHOR — session status
 
-_Last updated: 2026-06-19. **Reanchor command:** "read REANCHOR.md and reanchor". Read this
+_Last updated: 2026-06-22. **Reanchor command:** "read REANCHOR.md and reanchor". Read this
 first after an app restart, then `wiki/index.md` if working in the vault._
 
 ## Project
@@ -12,44 +12,44 @@ critical rules and `CONTEXT.md` for the glossary.
 
 ## Where we are
 
-- **Branch:** `main`, **in sync with `origin/main`** (Phase 5 pushed at `0dce1e8`). The per-slice
-  rhythm: implement → test → external review (user pastes) → fix → commit (user says so) → push.
-- **PHASES 1–5 COMPLETE + pushed.** 1 intake · 2 extract/normalize · 3 deterministic wiki · 3.5 LLM
+- **Branch:** `main`, **in sync with `origin/main` at `0bdabca`** (Phase 6 pushed). The per-slice
+  rhythm: implement → test → external review (user pastes) → analyze+recommend+wait → fix → commit
+  (user says so) → push.
+- **PHASES 1–6 COMPLETE + pushed.** 1 intake · 2 extract/normalize · 3 deterministic wiki · 3.5 LLM
   semantic layer (summaries/tags/concepts/entities/claims/synthesis + grounding) · **4 Search & Graph**
   (4a keyword/nav · 4b graph read · 4c router+`/search` · 4d LanceDB vector · 4e RRF fusion+evals) ·
-  **5 Query & Cited Answering** (5-1 worker · 5-2 `POST /query` · 5-3 saved Queries · 5-4 evals).
-- **PHASE 6 (Human Review UI) — DESIGN-LOCKED, docs uncommitted** (ADR-0035 + `docs/Phase 6 Plan.md`);
-  see the Phase-6 block below + the "Phase status" section. **Next: implement slice 6-1** (review read
-  model) on "implement now".
-- Detailed per-phase notes for 4d/4e/5/6 are in the sections further down (kept current each slice).
-- _(Historical 4a/4b/4c slice detail trimmed 2026-06-19 — all committed & pushed; see git log.)_
-- **(archived note)** Slice 4a — committed `2e7db7f` (planning artifacts ADR-0032 + Phase 4 Plan):
-  keyword evidence + wiki navigation index in `indexes/keyword/keyword.sqlite`
-  (`app/backend/keyword_index.py`); scaffolds retired (`reindex_vector.py`, `chunks.jsonl`,
-  `db/metadata.sqlite`); bidirectional fingerprint-fresh `validate_index_consistency.py`; §7
-  coordination (backup posture, hook, skills, README, `.env.example`, doc pointers).
-- **Slice 4b — IMPLEMENTED, UNCOMMITTED** (graph read API, ADR-0032 decision 5):
-  - `app/backend/graph_read.py` (new) — read-only projection over `app/backend/graph.py`:
-    `node_view` (adjacent assertions grouped by edge_type, in/out, adjacent metadata inline) +
-    `neighborhood` (bounded BFS, depth default 1 / hard-max 2, node/edge caps, induced subgraph).
-  - Endpoints in `app/backend/main.py`: `GET /graph/node/{id}`, `GET /graph/neighborhood/{id}`;
-    response models in `models.py`; `graph_db_path` added to `config.py`.
-  - Active-by-edge-status default (candidate/archived/deleted nodes appear via active edges, flagged
-    not `answer_eligible`); evidence anchors advisory. Caps are code constants in 4b —
-    `retrieval.yaml` wiring deferred to the 4c router.
-  - **Review round applied (2026-06-18):** symmetric `other_node_id` is now a `node_view`-only
-    field (flat neighborhood edges are canonical `src/dst`+`symmetric`, ADR-0032 addendum 1);
-    `ANSWER_ELIGIBLE_TYPES` extracted to neutral `app/backend/eligibility.py` (shared by 4a+4b);
-    induced-edge fetch bounded by SQL `LIMIT edge_cap+1`; `_open_graph` schema-version check →
-    503 on drift; pinned edge-status-only traversal + slug-only metadata (ADR addenda 2–3).
-  - Tests: `tests/test_graph_read.py` (21) + 7 graph API tests in `tests/test_api.py`.
-- **Recent commits:**
-  - `2e7db7f` Phase 4a: keyword evidence + wiki navigation index, design-locked (ADR-0032)
-  - `c1f2504` docs: mark Phase 3.5 Complete in Build Spec
-  - `eebf11b` Phase 3.5c-2: cross-source synthesis — completes Phase 3.5
-- **Tests/lint green:** `483 passed` (was 390; +45 Phase 4d/4e, +17 5-1, +13 5-2, +10 5-3, +9 5-4 evals), ruff clean, **10** validators
-  pass. Newest test file: `tests/test_retrieval_evals.py` (12, LanceDB-gated golden retrieval evals). **LanceDB installed in the venv** (`vector` extra; `uv.lock` updated) — the
-  full vector suite runs; a bare `.[dev]` install skips it via `importorskip`.
+  **5 Query & Cited Answering** (5-1 worker · 5-2 `POST /query` · 5-3 saved Queries · 5-4 evals) ·
+  **6 Human Review UI** (6-1 read model · 6-2 decisions · 6-3 apply · 6-4 HTML UI).
+- **PHASE 6 (Human Review UI) — COMPLETE + pushed** (ADR-0035 + addenda A1–A8; `docs/Phase 6 Plan.md`).
+  Governance surface over the `reviews/` ledger; decide and apply stay **decoupled**:
+  - **6-1 read model** (`app/backend/review_read.py`): `GET /reviews` (explicit-status-field filter,
+    `pending` default, `count`/`by_type` pre-pagination, `parse_errors`+`schema_errors`) + `GET
+    /reviews/{id}` with a per-type **projector registry** → normalized preview incl. a read-only
+    best-effort `apply{effect_status ∈ pending_apply|effected|apply_deferred|unknown|no_effect_required}`.
+    Strictly read-only (no DB init / page repair / executor calls).
+  - **6-2 decision endpoints** (record-only): `POST /reviews/{id}/approve|reject|defer` via shared
+    `_record_decision`; `defer_review_item` (stays in `pending/` as `status: deferred`); terminal
+    decisions immutable (same-decision idempotent, flip → 409, missing → 404).
+  - **6-3 apply** (`POST /reviews/apply`, key-free/`raw/`-free/idempotent): `apply_resolved_syntheses`
+    (direct) + extracted `apply_contradiction_decisions` (shares `_reproject_claim_pages` with the
+    producer) + new **`app/workers/deprecations.py`** (`apply_approved_deprecations` — canonical-page
+    safety, idempotent/normalization, typed skips) + `promote_candidates(rebuild_index=False)`; one
+    index rebuild + full validator suite once; typed summary; **non-transactional** (validator failure
+    → 200 `validation_failed`, never rollback); graph-missing-with-approved-items → controlled 503.
+    Render seam: `render_claim_page`/`render_concept_page` gain a constrained `review_status` override +
+    new `concepts.recompose_semantic_node_page`.
+  - **6-4 HTML UI** (`app/backend/review_html.py`, hand-rolled, no Jinja2): `/ui/reviews` queue ·
+    `/ui/reviews/{id}` detail (normalized projection + generic escaped **Stored proposal** section;
+    decision forms only for pending/deferred) · two-step apply (`GET /ui/reviews/apply` scope counts via
+    `apply_scope_counts` → `POST` executes → summary). Mandatory `_h()=html.escape` on every value +
+    recursive `_render_value`; HTML error pages (400/404/409/503); PRG (303) on decide. No JS, no
+    `templates/`, no path leak; CSRF deferred (loopback).
+- **Recent commits:** `0bdabca` Phase 6-4 HTML UI · `a344f4e` 6-4 design-lock · `2d31e58` Phase 6-3 apply ·
+  `9a4f332` Phase 6-2 decisions · `bb0fef5` Phase 6-1 read model.
+- **Tests/lint green:** `591 passed` (was 483; +29 6-1, +15 6-2, +21 6-3, +23 6-4), ruff clean,
+  **10** validators pass. Newest test files: `tests/test_review_read.py`, `tests/test_reviews.py`
+  (defer), `tests/test_deprecations.py`, `tests/test_review_html.py`. `python-multipart` already a
+  declared dep (HTML form handling — no new dependency added in Phase 6).
 
 ## Viewing the vault (Obsidian)
 
@@ -60,227 +60,42 @@ critical rules and `CONTEXT.md` for the glossary.
   *Windows* Obsidian over `\\wsl$\…` is flaky (gives `EISDIR`) — use the WSL Obsidian.
 - `wiki/` is **regenerated by the pipeline** (derived data) — Obsidian is a viewer; manual edits
   are overwritten on the next run. `wiki/.obsidian/` (its config) is gitignored.
-- **Offline demo** of the full pipeline (no API key, stand-in model) lives at `/tmp/ks-demo-run.py`
-  → writes a scratch vault to `/tmp/ks-demo` (ephemeral). Re-run: `uv run python /tmp/ks-demo-run.py`.
+- The **Human Review UI** (Phase 6) is served by the FastAPI app at `/ui/reviews` (loopback only);
+  start the app, then browse the review queue / detail / apply pages there.
 
 ## Phase status
 
 | Phase | Status |
 |---|---|
-| Phase 3 (deterministic Source-page backbone) | **Complete** |
-| Phase 3.5a (per-source LLM summary + tags → enrichment artifact) | **Complete** (`app/workers/enrich.py`, `enrichment_artifact.py`; commit `df45a0e`) |
-| Phase 3.5b (semantic nodes + grounding + promotion) | **Complete** — all 5 slices |
-| Phase 3.5c (cross-source synthesis + contradiction detection) | **Complete** — slices 3.5c-1 (contradiction detection, `app/workers/contradictions.py`) + 1b (supersede executor) + 2 (cross-source synthesis, `app/workers/synthesis.py`) all done |
-| **Phase 3.5 overall (semantic LLM layer)** | **Complete** — 3.5a + 3.5b + 3.5c |
-
-### Phase 3.5b slices (all done)
-1. Mechanical citation grounding gate + validator (`app/workers/citations.py`, `scripts/validate_citations.py`)
-2. SQLite graph store + `validate_graph` (`app/backend/graph.py`, `scripts/validate_graph.py`) — per-assertion edges, derived `nodes` index
-3. LLM claim extraction + Source-page Claims projection (`app/workers/claims.py`)
-4. Candidate concepts & entities + review subsystem (`app/workers/concepts.py`, `app/workers/reviews.py`)
-5. Promotion lifecycle (`app/workers/promote.py`, `scripts/promote.py`): candidate→active by ≥2 independent sources (manifest provenance, canonicalized) or approved-review early promotion; idempotent; `validate_projection` enforces page-status == graph-node-status
+| 1 intake · 2 extract/normalize · 3 deterministic wiki | **Complete + pushed** |
+| 3.5 LLM semantic layer (3.5a summaries/tags · 3.5b nodes/grounding/promotion · 3.5c synthesis/contradiction) | **Complete + pushed** |
+| 4 Search & Graph (4a–4e) | **Complete + pushed** |
+| 5 Query & Cited Answering (5-1–5-4) | **Complete + pushed** |
+| **6 Human Review UI (6-1–6-4)** | **Complete + pushed** (`0bdabca`) |
+| 7 Autonomous Maintenance | **Not started** (next — design/grill first) |
 
 ## Next step
 
-**Phase 3.5 complete. Phase 4 design-locked; 4a + 4b committed & pushed (`7838479`), 4c implemented
-+ green (uncommitted).** **Next action: commit Slice 4c (when the user says so), then implement
-slice 4d (vector — first slice with new deps).**
+**Phase 6 complete and pushed.** The next phase is **Phase 7 — Autonomous Maintenance** (Build Spec
+§13/§14): scheduled/triggered lint, stale/summary-rot detection, retention, contradiction sweeps,
+golden-question regression — filing review items rather than acting destructively (CLAUDE.md rule 9).
+**Not yet designed.** Recommended first action: a `grill-phase` gate to design-lock Phase 7 (new ADR +
+`docs/Phase 7 Plan.md`) before any code — no implementation until "implement now".
 
-**Phase 4 = deterministic, offline, key-free retrieval** returning ranked cited *evidence*
-(no LLM, no generated answers — that is Phase 5). Five committable slices:
-- **4a** ✅ **DONE (committed `2e7db7f`)** — keyword evidence + wiki navigation index
-  (`app/backend/keyword_index.py`, `indexes/keyword/keyword.sqlite`).
-- **4b** ✅ **DONE (committed `7838479`)** — graph read API `GET /graph/node/{id}` +
-  `GET /graph/neighborhood/{id}` (`app/backend/graph_read.py`). Endpoint caps are code constants
-  (depth default 1 / hard-max 2) — distinct from the router's `retrieval.yaml` budget by design.
-- **4c** ✅ **DONE (uncommitted)** — deterministic router + `GET /search`. `policy.py` (minimal YAML
-  loader + `RetrievalPolicy`), `search.py` (safe FTS builder, `classify_shape`, channel search,
-  orchestrator). Vector deferred to 4d (explicit `mode=vector`→400); evidence keyword-only until 4e
-  RRF. Graph group seeded from navigation hits; `/search` graph caps come from `retrieval.yaml`
-  (ADR addendum 4) while `/graph/*` endpoints keep their constants.
-- **4d** — vector index, **design-locked** (ADR-0033 + `docs/Phase 4d Plan.md`, committed `e001b5f`).
-  Slices 4d-1/2/3:
-  - **4d-1** ✅ **DONE (uncommitted)** — embedding seam: `app/backend/embeddings.py`
-    (`EmbeddingClient` over stdlib `urllib`; **refuses 3xx redirects** + scheme guard; `local_http`
-    loopback/LAN host guard (lexical, documented); cloud three-leg gate + **https required**;
-    `encoding_format:float` + **base64 fallback**; **validated index permutation**, dimension +
-    **finite-numeric** checks, model cross-check; **partial config → hard error**). 8 config keys in
-    `config.py`/`.env.example`; shared `FakeEmbedder` in `tests/test_embeddings.py` (37 tests).
-    Review round (2 reviewers) applied. No index yet.
-  - **4d-2** ✅ **DONE (uncommitted)** — LanceDB vector index: `app/backend/vector_index.py`
-    (embeds per-source chunks, full `EvidenceHit` citation + `kind` + text; **atomic temp-dir swap
-    with rollback**; incremental embeds **before** mutating, uses **`merge_insert`** atomic upsert +
-    separate delete; `_meta.json` index-level staleness → refuse incremental + `--force`).
-    `scripts/reindex_vector.py` (explicit, not hooked); `scripts/validate_vector_index.py` — **Q1
-    split:** hard-fail on incoherent/index-level-key mismatch (model/dim/metric vs config when
-    embedder set, else note), warn on chunk drift, pass on missing. `vector` optional dep group
-    (lancedb) + `uv.lock`; lazy import (isolated from app startup/`/search`).
-    Tests `tests/test_vector_index.py` (20, `importorskip`). **2-reviewer round applied** (guardrails
-    + Q1 validator key / Q2 swap rollback / Q3 merge_insert).
-  - **4d-3** ✅ **DONE (uncommitted)** — `GET /search` `mode=vector` channel: embeds the raw NL query
-    (bounded), ANN-searches LanceDB, returns **standalone** `evidence[]` (`retrieval_path:["vector"]`,
-    same `EvidenceHit` shape incl. `kind`+snippet), **same source-status retention** as keyword
-    (excludes archived/deleted/unknown by default), deterministic order (distance, tie-break
-    source_id+ordinal). **503** when embedder unconfigured/down or index missing/incoherent; `auto`
-    unchanged (vector joins `auto` via RRF in 4e). `search.py` stays lancedb-free (injected
-    `vector_search` callable); `_build_vector_search` in `main.py` owns the embed + 503 gating.
-    **Review round applied:** `mode=vector` honors `source_id` (LanceDB `where` pre-filter + guard);
-    **strict serving posture** — 503 on *any* chunk drift (stale anchors unsafe) and when the
-    keyword/nav index is absent (retention unverifiable); `chunk_id` added to the order tie-break.
-    Tests: vector channel in `test_search.py` (6) + `/search?mode=vector` in `test_api.py` (6).
-- **Phase 4d COMPLETE + pushed** (4d-1 seam + 4d-2 index + 4d-3 `/search`).
-- **4e — DESIGN-LOCKED (2026-06-18 grill; no code yet)** — RRF hybrid fusion + retrieval evals.
-  Decisions in **ADR-0032 addenda 5–8** + **`docs/Phase 4e Plan.md`** (uncommitted): (1) `mode=auto`
-  blends vector by **conceptual-default + escalation** (embed only when vector will run; graph-only
-  shapes defer vector); (2) `auto` **degrades to keyword-only + top-level `notes`, never 503** (503
-  stays explicit `mode=vector`); (3) RRF `k=60` in `retrieval.yaml`, dedup by `(source_id,char_start,
-  char_end)`, fused hits add an additive **`channels`** field `{keyword/vector:{rank,score}}` (top
-  `score`=RRF, tie-break `(source_id,ordinal,char_start)`); (4) eval harness = **pytest + FakeEmbedder**
-  (`evals/golden_retrieval.yaml` + `tests/test_retrieval_evals.py`, 8 categories, structural not
-  semantic; CLI deferred).
-  - **4e-1** ✅ **DONE (uncommitted)** — RRF fuser (`search.fuse_evidence`: dedup by
-    `(source_id,char_start,char_end)`, `score=Σ1/(k+rank)`, tie-break `(source_id,ordinal,char_start,
-    char_end)`); `ChannelRank`/`EvidenceHit.channels` + `SearchResponse.notes` models; `rrf_k=60` in
-    `retrieval.yaml`+policy. **All evidence now flows through the fuser uniformly** (single-channel
-    fuses too → `score`=RRF, native score in `channels`). Auto-blend wiring is 4e-2.
-  - **4e-2** ✅ **DONE (uncommitted)** — `mode=auto` vector blend: conceptual `default` shape always
-    blends keyword+vector (RRF); `exact`/`mention` escalate to vector when keyword evidence
-    `< escalation_primary_below_k`; graph-only shapes defer. Query embedded **lazily** (only when
-    vector runs). Graceful degradation: vector unavailable → keyword-only, **503 only for explicit
-    `mode=vector`** (`search.VectorChannelError`→503); auto adds a `notes` entry **only for genuine
-    degradations** (embedder configured but failing) — a keyword-only deployment degrades silently.
-    `main._vector_capability` (lazy, `(searcher,reason,note_worthy)`); `search.run_search` owns the
-    shape/escalation decision. **Review round:** `search.may_use_vector` skips capability/index-status
-    for graph-only auto shapes; backend failures raise typed `VectorUnavailable` (narrow catch — impl
-    bugs propagate); `escalation_primary_below_k` clamped; ADR/Plan define silent-vs-noted degradation.
-  - **4e-3** ✅ **DONE (uncommitted)** — retrieval eval harness: `evals/golden_retrieval.yaml` (cases,
-    dash-on-own-line YAML parsed by `policy.load_yaml`) + `tests/test_retrieval_evals.py` (programmatic
-    fixture vault → keyword+vector indexes via `FakeEmbedder` → `run_search()` directly; 8 categories:
-    exact-anchor, status-nav, graph-bounds, router-taxonomy, fts-safe, vector-carry, RRF
-    shape/order-determinism, retention). Structural-not-semantic, LanceDB-gated, CI-gating.
-- **PHASE 4 (Search & Graph) COMPLETE + pushed** — 4a keyword/nav · 4b graph read · 4c router+/search
-  · 4d vector · 4e RRF fusion+evals.
-- **PHASE 5 (Query & Cited Answering) — DESIGN-LOCKED (2026-06-18 grill; no code yet).** Decisions in
-  **ADR-0034** + **`docs/Phase 5 Plan.md`** (uncommitted): (1) answer = grounded **claims that
-  reference evidence by id**; harness builds anchors from *retrieved* evidence + runs the verbatim
-  `ground_citation` gate (LLM never emits anchors); (2) `max_answer_unsourced_claims:0` on the answer
-  body — ungrounded → audit "Unsourced Claims" section, zero grounded → abstain
-  `"No source found in vault."`; (3) citations only from **citable chunks**, never node prose; (4)
-  untrusted evidence pack (ADR-0026 reuse); (5) `/query` is the **first key-requiring** surface →
-  **503 with no model** (retrieval stays key-free, degrades 4e-style); answers cache-replayable
-  (ADR-0027); (6) saved `wiki/Queries/` pages **explicit only**, navigable artifact, **no graph
-  edges / no review**; (7) CI gate = **fake `LLMClient` + structural assertions** (key-free), real-
-  model quality opt-in. Heavily scaffolded already (`templates/query.md`, `citation.yaml`,
-  `ground_citation`, `validate_citations::_check_query`, `app/llm`, `golden_questions.yaml`).
-  - **5-1** ✅ **DONE (uncommitted)** — `app/workers/query.py::answer_query`: evidence pack (stable
-    `e1..eN` ids + verbatim quote sliced from source Markdown) → `client.parse(ANSWER_SCHEMA)` returns
-    claims `{text, evidence_ids[]}` → **harness builds citations from retrieved evidence** + runs
-    `ground_citation(require_quote=True)` → grounded → `claims[]`/`citations[]` (deduped, ordinal
-    `[n]` markers), ungrounded → `unsourced_claims[]`, zero grounded → abstain `NO_SOURCE_FOUND`.
-    Pipeline-only (no endpoint/retrieval/save). **Review round applied:** evidence pack is
-    **JSON-serialized** (untrusted quote can't break the boundary); `source_id` validated via shared
-    `citations.is_source_id` + path-containment **before** any file read; grounded admission requires
-    **non-empty** claim text; narrow **path-leak guard on claim text** → `security_rejected_count`
-    (verbatim text discarded, logged only — never in API/asdict/saved page), kept separate from ordinary
-    `unsourced_claims`; compact `e1..eN`; `QUERY_PROMPT_VERSION`/`QUERY_SCHEMA_VERSION` passed to
-    `parse`. `tests/test_query.py` (17, key-free `FakeLLMClient` + real grounding gate; sentinel-
-    injection-safe, malformed-id-dropped, blank-text, path-leak-rejected, compact-ids, version-fields).
-  - **5-2** ✅ **DONE (uncommitted)** — `POST /query` endpoint (`main.run_query_endpoint`): validates
-    question/mode/filters → builds the LLM client (`_query_client`, indirected for test fakes) →
-    **503 if `not provider_available(query_model)`** → retrieves via shared `_run_search` (extracted
-    from `/search`; both surfaces share the channel/vector/retention wiring) → `query.answer_query`
-    over chunk evidence → `QueryResponse`. **Q2:** default exposes `unsourced_count` +
-    `security_rejected_count` only; full `unsourced_claims[]` text only under `include_unsourced=true`;
-    path-leak text never returned. `config.query_model` (`QUERY_MODEL` env, default standard tier);
-    abstention text sourced from `policies/citation.yaml` (`_no_source_text`). Models `QueryCitation`/
-    `QueryClaim`/`QueryResponse`. **Review round applied:** `QueryRequest` **JSON body** (`question`…;
-    `/search` left unchanged, contracts intentionally differ); modes restricted to `{auto,keyword,vector}`
-    (graph/nav → 400); **503 mapping** for `ConfigError`/`ParseError`/`AdapterError` (generic detail,
-    concrete exception logged server-side); `QUERY_MODEL` added to `.env.example` + operational-refs
-    test; ADR/Plan tightened to "no **system/generated** paths" (verbatim source-quote paths preserved —
-    redaction would break grounding). `tests/test_api.py` +12 query (grounded, abstain, 503-no-model,
-    503-malformed-model, 503-parse-raises, 400-empty, 400-graph-mode, count-only-vs-include_unsourced,
-    path-leak-not-leaked, source-quote-path-intact, no-server-path-leak).
-  - **5-3** ✅ **DONE (uncommitted)** — explicit `save`: `QueryRequest.save` → `query.query_id(question)`
-    (deterministic `qry_<sha256[:16]>`, normalized whitespace+case → overwrite, not duplicate) →
-    `wiki_render.render_query_page` (frontmatter `type: query`, `status active`, `answer_eligible`-off
-    by page_type, **`derived_from: []` reserved, no graph edges**, machine-readable `citations:` block
-    that round-trips `parse_citations`+`ground_citation`; body = summary/Question/Answer/Citations table/
-    Retrieval Path/Unsourced Claims; **no wall-clock → byte-stable**) → write `wiki/Queries/<id>.md`
-    (gitignored); response gains `query_id`. Ungrounded benign text listed; **path-leak rejections
-    summarised by count/reason, never verbatim**. `tests/test_api.py` +4 (save round-trip +
-    `validate_citations` subprocess green, no-save-persists-nothing, deterministic-id-overwrites,
-    security-rejection-not-in-page). **Review round applied:** (B1) `validate_citations::_check_query`
-    now **grounds** saved-query citations like a claim (manifest + Markdown + verbatim quote; shared
-    `_ground_citations`); (B2/Q2) dropped `created`/`last_compiled_at` from `validate_frontmatter`
-    query-required + `templates/query.md`, added `answer_eligible: false` to render; (Q1) `query_id`
-    keyed on the **answer-affecting request scope** (question+mode+filters; canonical JSON), not
-    question alone → distinct scope ≠ clobber; (Q3) save **appends `wiki/log.md`** + returns
-    **`navigation_stale: true`**, nav/index **not** synchronously rebuilt (deferred, documented). +6
-    tests (defer-navigation, abstained-page-valid, distinct-scope-distinct-ids, validator-rejects-
-    bad-citations ×4, source-quote-path-preserved, frontmatter-isolated-green).
-  - **5-4** — **DESIGN-LOCKED (2026-06-19 grill; Plan §7; no code yet).** `tests/test_query_evals.py`
-    over `evals/golden_questions.yaml` (fake adapter, structural; mirrors 4e-3). **Endpoint-level**
-    driver (`TestClient POST /query`, fake `_query_client` injected). **Fresh keyword-only fixture**
-    (chunks+markdown+manifests+source pages+keyword index; **no vector/lancedb** — `mode=auto` degrades
-    silently). **Per-case fake directives** `cite_all`/`cite`/`bogus`/`path_leak`/`no_claims`. YAML
-    schema: `{id, category, question, mode?, save?, fake:{strategy,ids?}, expect:{abstained,
-    cited_source_ids, must_include_citations, unsourced_count, security_rejected_count}}`. Per-case
-    predicates in YAML; **global invariants in test for every case** (all body claims ground, body
-    zero-unsourced, no server path, `notes==[]`) + category-coverage test. Real-model smoke **deferred**.
-  - **5-4** ✅ **DONE (uncommitted)** — `tests/test_query_evals.py` (8: 7 golden questions + coverage)
-    + rewritten `evals/golden_questions.yaml` (7 cases, fixture-grounded schema). Endpoint-level
-    TestClient driver, fresh keyword-only vault (chunks+md+manifests+source pages+kw index), directive
-    fake (cite_all/cite/bogus/path_leak/no_claims), per-case `expect` + global invariants. **Not
-    lancedb-gated** (no import; silent degrade verified via `notes==[]`). **Review round:** eval
-    settings **force embedding off** (`dataclasses.replace` nulls `embedding_base_url`/`model_ref`/
-    `api_key`) so ambient `EMBEDDING_*`+LanceDB can't leak a vector attempt — guard test sets the env
-    and asserts `notes==[]`; abstention cases assert the `"No source found in vault."` fallback;
-    diagnostic counts default to 0; "no server/**generated** path" wording.
-- **PHASE 5 (Query & Cited Answering) COMPLETE** — 5-1 worker · 5-2 `/query` · 5-3 saved Queries · 5-4
-  evals.
-- **PHASE 6 (Human Review UI) — DESIGN-LOCKED (2026-06-19 grill; ADR-0035 + `docs/Phase 6 Plan.md`;
-  no code yet).** First user-facing surface over the `reviews/` ledger. Key facts: **decide/apply are
-  already decoupled** (`resolve_review_item` records; deterministic key-free executors apply on scan of
-  `approved/`). Decisions: (1) **server-rendered HTML on FastAPI** over a JSON read model (`GET /reviews`,
-  `/reviews/{id}`; `/ui/reviews*`; forms `POST` approve/reject/defer) — no SPA, HTML never authority;
-  (2) read model deterministic+malformed-robust (sort priority→created_at→review_id, explicit status,
-  skip corrupt JSON); (3) **type-complete record-only ledger** (list+decide every pending type); (4)
-  **explicit `POST /reviews/apply`** runs the 3 existing executors (synthesis/promote/contradiction) +
-  (5) a new **tightly-scoped `apply_approved_deprecations`** (via explicit `review_status` render input,
-  no frontmatter surgery; `deprecate_wiki_page`→`deprecated_candidate`, raw-free, idempotent), typed
-  summary w/ honest unapplied gaps; `change_entity_subtype`+raw-touching types record-only-deferred;
-  (6) mandatory proposal preview before approve; (7) loopback-only safety (CSRF/auth deferred,
-  conditional); (8) key-free TestClient tests. Slices **6-1** read model · **6-2** decisions · **6-3**
-  apply+deprecation executor · **6-4** HTML UI. **Next: implement 6-1 on "implement now".**
-- New ADR: **0035** (Phase 6 Human Review UI).
-- **4e** — RRF hybrid fusion (keyword+vector) + per-group caps + retrieval eval harness
-  (`evals/golden_retrieval.yaml`, kept separate from Phase-5 `golden_questions.yaml`).
+Optional housekeeping: confirm Phase 6 §8 success criteria are all met in `docs/Phase 6 Plan.md`, and
+mark Phase 6 done in the Build Spec.
 
-Read **ADR-0032** + **`docs/Phase 4 Plan.md`** before touching retrieval. §7 of the Plan lists the
-storage-relayout files that must change together (reindex scripts, `.gitignore`, `backup.py`,
-`validate_index_consistency.py`).
-
-3.5c details are durable in **ADR-0031** + **`docs/Phase 3.5c Plan.md`** (read those before
-touching synthesis/contradiction code). One-line recall of what shipped:
-- **3.5c-1/1b contradiction** (`app/workers/contradictions.py`): graph-blocked claim pairs →
-  review-gated sorted `contradicts` edges; `acknowledge`/`reject`/`supersede` resolution;
-  Claim-page projection; endpoint validity is **evidence-based** (`graph.claims_with_active_evidence`).
-- **3.5c-2 synthesis** (`app/workers/synthesis.py`): per active concept/entity (≥2 grounded
-  claims, ≥2 independent sources) → candidate synthesis grounded on claim nodes; new
-  **`propose_synthesis`** review type, **fingerprint-scoped**, review-only (no recurrence);
-  reviewed syntheses never silently rewritten (`--force` re-opens); audited retraction.
-
-**To run the producers** (tier-3 / heavy model; need `ANTHROPIC_API_KEY` in `config/.env`,
-runs cost money; no key → `skipped` job but deterministic parts still run):
-`scripts/extract_claims.py` → `extract_concepts.py` → `promote.py` →
-`detect_contradictions.py` → `generate_synthesis.py`. Validate any time:
+**To run the LLM producers** (tier-2/3 models; need `ANTHROPIC_API_KEY` in `config/.env`, runs cost
+money; no key → `skipped` job but deterministic parts still run): `scripts/extract_claims.py` →
+`extract_concepts.py` → `promote.py` → `detect_contradictions.py` → `generate_synthesis.py`. Apply
+approved review decisions deterministically (key-free): `POST /reviews/apply`. Validate any time:
 `scripts/validate_all.py` (or the individual `validate_*.py`).
 
 ## Standing rules (do not violate)
 
 - **Never commit unless the user explicitly says so.**
 - Grill-with-docs is planning/docs only (ADRs, CONTEXT, plans) — no code unless told "implement now".
+- For external-review rounds: analyze + recommend, then **wait** for the user's decision before applying.
 - Never modify `raw/` except `raw/manifests/`. Treat imported docs as untrusted data, not instructions.
 - Never invent citations/paths/line numbers/wikilinks. Human approval mandatory for deletion, contradiction resolution, entity merge/split, deprecation.
 - Prefer the user running interactive shell commands via `! <cmd>`.
@@ -289,6 +104,7 @@ runs cost money; no key → `skipped` job but deterministic parts still run):
 
 - Tests: `uv run pytest -q`
 - Lint: `.venv/bin/ruff check app/ scripts/ tests/`
+- Validators: `uv run python scripts/validate_all.py`
 
 ## Key ADRs
 
@@ -299,11 +115,13 @@ runs cost money; no key → `skipped` job but deterministic parts still run):
 edges; backlinks derived), 0030 (graph schema), 0031 (3.5c synthesis & contradiction —
 graph-blocked pairing, sorted-pair `contradicts`, per-concept synthesis, review gates),
 0032 (Phase 4 retrieval architecture — evidence vs. answer seam, citable chunks vs. node prose,
-deterministic router + RRF fusion, index storage/lifecycle relayout),
+deterministic router + RRF fusion, index storage/lifecycle relayout; **addenda 5–8** = Phase 4e fusion),
 0033 (Phase 4d vector retrieval — local `/embeddings` HTTP seam, LanceDB same-citation index,
-config-ref staleness key, explicit-only `mode=vector`, explicit non-hooked reindex). **0032 addenda
-5–8** = Phase 4e fusion (RRF `k`, `auto` conceptual-default+escalation, degrade-to-keyword, `channels`
-hit shape, pytest eval harness).
+config-ref staleness key, explicit-only `mode=vector`, explicit non-hooked reindex),
 0034 (Phase 5 Query & Cited Answering — evidence-id-referenced grounded claims, harness-built anchors
 + verbatim gate, abstain/Unsourced split, chunks-only citations, key-required 503, explicit non-graph
-saved Queries, fake-adapter structural eval gate).
+saved Queries, fake-adapter structural eval gate),
+0035 (Phase 6 Human Review UI — type-complete record-only decision ledger + executor-backed apply;
+**addenda A1–A8**: read-model projector registry, read-time effect state, list semantics, extracted
+apply orchestrators, scoped deprecation executor + canonical-page safety, non-transactional apply,
+hand-rolled HTML UI).
