@@ -86,7 +86,7 @@ def _write_source_artifact(apath, sid, fingerprint, source_claims, model_ref, no
 
 
 def recompose_claim(gconn, *, cid, claims_dir, reviews_dir, now, markdown_dir, text_hint=None,
-                    contradiction_affected=None, deprecate=False) -> str:
+                    contradiction_affected=None, deprecate=False, review_status=None) -> str:
     """Render a Claim page from its `active` derived_from edges (tombstone if none).
 
     The single, shared claim renderer (used by the claim worker and the contradiction worker):
@@ -95,7 +95,10 @@ def recompose_claim(gconn, *, cid, claims_dir, reviews_dir, now, markdown_dir, t
     active endpoint — superseding `contradicts` assertions touching it and withdrawing their
     pending reviews — and records the surviving endpoints in `contradiction_affected` so the
     caller re-renders their pages to drop the dead backlink (ADR-0031). This keeps the endpoint
-    invariant local, so the claim CLI stays valid without a separate contradiction pass."""
+    invariant local, so the claim CLI stays valid without a separate contradiction pass.
+
+    `review_status` overrides the renderer's derived value — the Phase-6 deprecation executor passes
+    `"approved"` so an approved tombstone deprecation isn't rendered as `pending` (ADR-0035 A5)."""
     edges = [e for e in graph.outgoing_active(gconn, cid) if e["edge_type"] == "derived_from"]
     page_path = claims_dir / f"{cid}.md"
     claim_text = text_hint or _read_claim_text(page_path)
@@ -119,7 +122,8 @@ def recompose_claim(gconn, *, cid, claims_dir, reviews_dir, now, markdown_dir, t
     claims_dir.mkdir(parents=True, exist_ok=True)
     page_path.write_text(
         render_claim_page({"claim_id": cid, "claim_text": claim_text, "confidence": "low",
-                           "citations": cites, "contradicts": contradicts, "deprecated": deprecated}),
+                           "citations": cites, "contradicts": contradicts, "deprecated": deprecated},
+                          review_status=review_status),
         encoding="utf-8",
     )
     # Mirror the page's status into the derived node index (active / deprecated / tombstone).

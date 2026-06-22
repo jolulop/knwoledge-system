@@ -129,3 +129,50 @@ def test_fingerprint_changes_when_summary_config_changes():
         wiki_render.render_source_page(template, _manifest(), md, summary_max=80, summary_min=40)
     )["input_fingerprint"]
     assert a != b
+
+
+# --- Phase 6 (ADR-0035 A5): review_status render override --------------------
+
+
+def _claim(**over):
+    base = {"claim_id": "clm_x", "claim_text": "A claim.", "confidence": "low",
+            "citations": [], "contradicts": [], "deprecated": False}
+    base.update(over)
+    return base
+
+
+def _concept(**over):
+    base = {"node_type": "concept", "node_id": "cpt_x", "id_field": "concept_id",
+            "title": "Thing", "aliases": [], "confidence": "low", "source_ids": [], "status": "active"}
+    base.update(over)
+    return base
+
+
+def test_review_status_none_preserves_derived_claim():
+    # default (None) is byte-identical to the no-arg render — derivation unchanged
+    assert wiki_render.render_claim_page(_claim()) == wiki_render.render_claim_page(_claim(), review_status=None)
+
+
+def test_review_status_none_preserves_derived_concept():
+    assert wiki_render.render_concept_page(_concept()) == wiki_render.render_concept_page(_concept(), review_status=None)
+
+
+def test_explicit_review_status_marks_no_evidence_claim_tombstone_approved():
+    # a no-evidence claim derives review_status: pending; the override forces approved (deprecation path)
+    page = wiki_render.render_claim_page(_claim(citations=[]), review_status="approved")
+    fm = wiki_render.parse_frontmatter(page)
+    assert fm["status"] == "deprecated_candidate" and fm["review_status"] == "approved"
+
+
+def test_explicit_review_status_marks_no_mention_concept_approved():
+    page = wiki_render.render_concept_page(_concept(source_ids=[], status="deprecated_candidate"),
+                                           review_status="approved")
+    fm = wiki_render.parse_frontmatter(page)
+    assert fm["status"] == "deprecated_candidate" and fm["review_status"] == "approved"
+
+
+def test_unknown_review_status_override_raises():
+    with pytest.raises(ValueError):
+        wiki_render.render_claim_page(_claim(), review_status="bogus")
+    with pytest.raises(ValueError):
+        wiki_render.render_concept_page(_concept(), review_status="bogus")

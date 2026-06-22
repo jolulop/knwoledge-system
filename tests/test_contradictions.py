@@ -18,6 +18,7 @@ from app.backend import graph, manifests  # noqa: E402
 from app.llm.cache import ResponseCache  # noqa: E402
 from app.llm.client import LLMClient  # noqa: E402
 from app.workers import claims, concepts, contradictions, extract, intake, reviews, wiki  # noqa: E402
+from app.workers.wiki_render import render_claim_page  # noqa: E402
 
 TEMPLATES = ROOT / "templates"
 CLAIM_MODEL = "anthropic:claude-sonnet-4-6"
@@ -635,3 +636,50 @@ def test_confidence_is_clamped(tmp_path):
     finally:
         conn.close()
     assert conf == 1.0
+
+
+# --- Phase 6 slice 6-3: apply_contradiction_decisions bundle (ADR-0035 A4) ---
+
+
+def _seed_evidenced_claim(conn, tmp_path, cid, src, text):
+    md = tmp_path / "normalized" / "markdown" / f"{src}.md"
+    md.parent.mkdir(parents=True, exist_ok=True)
+    md.write_text(text, encoding="utf-8")
+    graph.upsert_node(conn, node_id=src, node_type="source", slug=src, status="active")
+    graph.upsert_node(conn, node_id=cid, node_type="claim", slug=cid, status="active")
+    graph.upsert_assertion(conn, src_id=cid, dst_id=src, edge_type="derived_from",
+                           asserted_by="llm", status="active", evidence_source_id=src,
+                           evidence_char_start=0, evidence_char_end=len(text))
+    page = tmp_path / "wiki" / "Claims" / f"{cid}.md"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(render_claim_page({
+        "claim_id": cid, "claim_text": text, "confidence": "low",
+        "citations": [{"source_id": src, "char_start": 0, "char_end": len(text), "quote": text}],
+        "contradicts": [], "deprecated": False}), encoding="utf-8")
+
+
+def test_apply_contradiction_decisions_acknowledge_flips_edge_and_reprojects(tmp_path):
+    gdb = tmp_path / "db" / "graph.sqlite"
+    gdb.parent.mkdir(parents=True, exist_ok=True)
+    graph.init_db(gdb)
+    conn = graph.connect(gdb)
+    a, b = sorted(("clm_1", "clm_2"))
+    _seed_evidenced_claim(conn, tmp_path, a, "src_a", "Revenue rose ten percent.")
+    _seed_evidenced_claim(conn, tmp_path, b, "src_b", "Revenue fell five percent.")
+    rid = reviews.review_id("resolve_contradiction", {"claim_a": a, "claim_b": b})
+    graph.upsert_assertion(conn, src_id=a, dst_id=b, edge_type="contradicts", asserted_by="llm",
+                           status="proposed", evidence_source_id="src_a", evidence_char_start=0,
+                           evidence_char_end=5, review_id=rid)
+    appr = tmp_path / "reviews" / "approved"
+    appr.mkdir(parents=True, exist_ok=True)
+    (appr / f"{rid}.json").write_text(json.dumps({
+        "review_id": rid, "type": "resolve_contradiction", "status": "approved",
+        "subject": {"claim_a": a, "claim_b": b}, "proposal": {}, "context": {}}), encoding="utf-8")
+
+    res = contradictions.apply_contradiction_decisions(
+        conn, tmp_path / "reviews", claims_dir=tmp_path / "wiki" / "Claims",
+        markdown_dir=tmp_path / "normalized" / "markdown")
+    assert res["resolution"]["acknowledged"] == 1 and res["graph_changed"] is True
+    assert graph.contradiction_between(conn, a, b)[0]["status"] == "active"
+    # both endpoint claims reprojected so the new contradiction backlink renders
+    assert set(res["changed_pages"]) == {a, b}

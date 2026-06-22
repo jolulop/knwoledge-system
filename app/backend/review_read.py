@@ -215,11 +215,31 @@ def _open_graph_readonly(graph_db: Path | None) -> Any:
     return conn
 
 
+def _safe_wiki_subpath(wiki_dir: Path, page: str) -> Path | None:
+    """Resolve ``page`` under ``wiki_dir`` only if it stays contained — else ``None``.
+
+    A containment guard (no graph-derived matching — the preview may be inspecting malformed ledger
+    state). Rejects absolute paths, any ``..`` segment, and anything that resolves outside ``wiki_dir``,
+    so a hostile ``subject.page`` can never make the read model read outside the wiki (CLAUDE.md rule 1).
+    """
+    p = Path(page)
+    if p.is_absolute() or ".." in p.parts:
+        return None
+    resolved = (wiki_dir / p).resolve()
+    try:
+        resolved.relative_to(wiki_dir.resolve())
+    except ValueError:
+        return None
+    return resolved
+
+
 def _page_frontmatter(wiki_dir: Path | None, page: str | None) -> dict[str, Any] | None:
-    """Read a wiki page's frontmatter, or ``None`` if the path is absent/unreadable (read-only)."""
+    """Read a wiki page's frontmatter, or ``None`` if the path is unsafe/absent/unreadable (read-only)."""
     if wiki_dir is None or not page:
         return None
-    page_path = Path(wiki_dir) / page
+    page_path = _safe_wiki_subpath(Path(wiki_dir), page)
+    if page_path is None:
+        return None
     try:
         text = page_path.read_text(encoding="utf-8")
     except OSError:

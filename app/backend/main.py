@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,7 @@ from app.backend.models import (
     NormalizedResponse,
     QueryRequest,
     QueryResponse,
+    ReviewApplyResponse,
     ReviewDecisionRequest,
     ReviewDecisionResponse,
     ReviewDetailResponse,
@@ -45,7 +47,9 @@ from app.backend.policy import load_retrieval_policy, load_yaml
 from app.llm.adapters import AdapterError
 from app.llm.cache import ResponseCache
 from app.llm.client import ConfigError, ParseError, build_client
-from app.workers import extract, intake, query, reviews, wiki
+from app.workers import (
+    contradictions, deprecations, extract, intake, promote, query, reviews, synthesis, wiki,
+)
 from app.workers.wiki_render import parse_frontmatter, render_query_page
 
 # Hosts on which serving the unauthenticated API is acceptable (loopback only).
@@ -424,6 +428,161 @@ def defer_review(
 ) -> dict[str, Any]:
     """Defer a decision: keep the item in pending/ with status: deferred (record-only)."""
     return _record_decision(review_id, "deferred", body)
+
+
+# Review types POST /reviews/apply has a deterministic executor for (ADR-0035 A4/A5). Any other
+# approved type is reported honestly as `unapplied` (record-only / raw-touching / identity-changing).
+_APPLY_TYPES = frozenset({
+    "propose_synthesis", "resolve_contradiction", "promote_candidate_node", "deprecate_wiki_page"})
+
+
+def _rebuild_index_status(root: Path) -> str:
+    """Rebuild wiki/index.md (caller owns the single rebuild). "rebuilt"|"failed"|"missing".
+
+    `missing` (no script — a degraded/test env) is distinct from `failed` (script ran, non-zero) so
+    only a genuine failure after real changes is surfaced as a warning (ADR-0035 review round)."""
+    script = root / "scripts" / "rebuild_index.py"
+    if not script.exists():
+        return "missing"
+    return "rebuilt" if subprocess.run(
+        [sys.executable, str(script), str(root)]).returncode == 0 else "failed"
+
+
+def _run_all_validators(root: Path) -> list[dict[str, Any]]:
+    """Run every `scripts/validate_*.py` once (the integrity bar), capturing per-validator results.
+
+    Discovered exactly as `scripts/validate_all.py` does; module-level so tests can monkeypatch it.
+    Output tails are sanitized of the absolute root path (the no-server-path-leak invariant)."""
+    scripts_dir = root / "scripts"
+    root_str = str(root)
+    results: list[dict[str, Any]] = []
+    for script in sorted(scripts_dir.glob("validate_*.py")):
+        if script.name == "validate_all.py":
+            continue
+        proc = subprocess.run(
+            [sys.executable, str(script), str(root)], capture_output=True, text=True)
+        results.append({
+            "name": script.name, "returncode": proc.returncode,
+            "stdout_tail": proc.stdout.replace(root_str, "<root>")[-800:],
+            "stderr_tail": proc.stderr.replace(root_str, "<root>")[-800:]})
+    return results
+
+
+def _approved_graph_backed_count(reviews_dir: Path) -> int:
+    """Count approved items whose application needs the graph (every executor-backed type does)."""
+    n = 0
+    d = reviews_dir / "approved"
+    for path in sorted(d.glob("*.json")) if d.exists() else []:
+        try:
+            item = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(item, dict) and item.get("type") in _APPLY_TYPES:
+            n += 1
+    return n
+
+
+def _unapplied_by_type(reviews_dir: Path) -> list[dict[str, Any]]:
+    """Approved items whose type has no Phase-6 executor — reported honestly, not hidden (ADR-0035)."""
+    counts: dict[str, int] = {}
+    d = reviews_dir / "approved"
+    for path in sorted(d.glob("*.json")) if d.exists() else []:
+        try:
+            item = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        rtype = item.get("type") if isinstance(item, dict) else None
+        if rtype and rtype not in _APPLY_TYPES:
+            counts[rtype] = counts.get(rtype, 0) + 1
+    return [{"type": t, "count": c, "reason": "no_executor_in_phase_6"}
+            for t, c in sorted(counts.items())]
+
+
+@app.post("/reviews/apply", response_model=ReviewApplyResponse)
+def apply_reviews() -> dict[str, Any]:
+    """Deterministically apply approved review decisions (ADR-0035 A4/A6). Key-free, raw/-free.
+
+    Composes the existing key-free executors — `apply_resolved_syntheses`,
+    `apply_contradiction_decisions`, the scoped `apply_approved_deprecations`, and
+    `promote_candidates(rebuild_index=False)` — then rebuilds `wiki/index.md` **once** and runs the full
+    validator suite **once**. Non-transactional: effects are written before validation, so a validator
+    failure is reported as `status: "validation_failed"` with **HTTP 200** (never a roll back / 500).
+    """
+    root = settings.root
+    reviews_dir = settings.reviews_dir
+    wiki_dir = settings.wiki_dir
+    claims_dir = wiki_dir / "Claims"
+    synthesis_dir = wiki_dir / "Synthesis"
+    enrichment_dir = settings.normalized_dir / "enrichment"
+    markdown_dir = settings.markdown_dir
+    now = manifests.iso_now()
+
+    syntheses = {"promoted": 0, "rejected": 0}
+    contra: dict[str, Any] = {"resolution": {"acknowledged": 0, "rejected": 0,
+                                             "superseded_executed": 0}, "changed_pages": []}
+    deprec: dict[str, Any] = {"applied": 0, "normalized": 0, "skipped": [], "changed_pages": []}
+
+    # _open_graph() returns None if the graph doesn't exist yet (nothing to apply against) and raises
+    # a controlled 503 on schema drift. Each executor commits its own graph writes.
+    gconn = _open_graph()  # None if absent (raises a controlled 503 on schema drift)
+    if gconn is not None:
+        try:
+            syntheses = synthesis.apply_resolved_syntheses(
+                gconn, reviews_dir, synthesis_dir=synthesis_dir, enrichment_dir=enrichment_dir, now=now)
+            contra = contradictions.apply_contradiction_decisions(
+                gconn, reviews_dir, claims_dir=claims_dir, markdown_dir=markdown_dir, now=now)
+            deprec = deprecations.apply_approved_deprecations(
+                gconn, reviews_dir, wiki_dir=wiki_dir, claims_dir=claims_dir,
+                markdown_dir=markdown_dir, now=now)
+            gconn.commit()
+        finally:
+            gconn.close()
+    elif _approved_graph_backed_count(reviews_dir):
+        # The graph is gone but approved graph-backed decisions are waiting — fail loudly rather than
+        # report a silent "applied" (and BEFORE promote_candidates would init an empty graph).
+        raise HTTPException(
+            status_code=503,
+            detail="graph index unavailable; rebuild db/graph.sqlite before applying reviews")
+
+    promo = promote.promote_candidates(root, rebuild_index=False, record_job=False)
+
+    # pages_changed counts every page write: contradiction re-projections, deprecations, the synthesis
+    # pages apply_resolved_syntheses re-rendered, and the concept/entity pages promotion rewrote.
+    pages_changed = (len(contra["changed_pages"]) + len(deprec["changed_pages"])
+                     + syntheses["promoted"] + syntheses["rejected"] + promo["promoted"])
+    changed = bool(pages_changed or contra["resolution"]["acknowledged"]
+                   or contra["resolution"]["rejected"] or contra["resolution"]["superseded_executed"])
+
+    warnings: list[str] = []
+    index_status = _rebuild_index_status(root) if changed else "skipped"
+    if index_status == "failed":  # script present but non-zero after real changes — surface it
+        warnings.append("index_rebuild_failed")
+
+    validators = _run_all_validators(root)
+    failed = [v for v in validators if v["returncode"] != 0]
+    validators_ok = not failed
+
+    return {
+        "status": "applied" if validators_ok else "validation_failed",
+        "applied": True,
+        "validators_ok": validators_ok,
+        "failed_validators": failed,
+        "warnings": warnings,
+        "summary": {
+            "syntheses": {"promoted": syntheses["promoted"], "rejected": syntheses["rejected"]},
+            "promotions": {"promoted": promo["promoted"]},
+            "contradictions": {
+                "acknowledged": contra["resolution"]["acknowledged"],
+                "rejected": contra["resolution"]["rejected"],
+                "superseded": contra["resolution"]["superseded_executed"],
+            },
+            "deprecations": {"applied": deprec["applied"], "normalized": deprec["normalized"],
+                             "skipped": deprec["skipped"]},
+            "pages_changed": pages_changed,
+            "index_rebuilt": index_status == "rebuilt",
+            "unapplied": _unapplied_by_type(reviews_dir),
+        },
+    }
 
 
 def _open_graph_safe() -> Any:

@@ -159,19 +159,26 @@ helper returns a `schema_error: true` marker for diagnostics, mirroring `parse_e
 the filtered queue only — global ledger composition, if ever needed, is a separate `/reviews/summary`
 surface (deferred).
 
-**A4 — `POST /reviews/apply` composes extracted key-free orchestrators (decision 4 refined).** The bare
-executors are *not* a complete apply — the affected-page re-projection + index rebuild currently live
-inside the LLM producer wrappers (`detect_contradictions`, `generate_synthesis`). Slice 6-3 therefore
-**extracts** those deterministic apply portions into key-free orchestrators
-`apply_contradiction_decisions(...)` and `apply_synthesis_decisions(...)` (each:
-executor → recompose affected pages → mirror graph → return `{changed_pages, graph_changed, summary}`,
-index rebuild **deferrable to the caller**), called by **both** the existing producers and the endpoint.
-This makes "key-free apply" a real API boundary, not the side effect of an absent key (calling producers
-with a no-key client is **rejected** — it would silently run LLM detection on a configured machine; inline
-re-implementation in the endpoint is **rejected** — the projection/mirror logic is exactly what drifts
-when copied). Constraints: **no behavior change** to existing producer entrypoints; existing
-producer/promote tests remain the regression guard **plus** new direct tests for the extracted
-orchestrators. The endpoint composes the orchestrators + the new `apply_approved_deprecations` +
+**A4 — `POST /reviews/apply` composition (decision 4 refined; 2026-06-22 design-lock).** Only
+*contradiction* needs extraction. `apply_resolved_contradictions` mutates only graph edges and hands
+back an `affected` set; the affected-Claim re-projection lives in the LLM producer (`detect_
+contradictions`). So slice 6-3 extracts a **shared key-free helper `_reproject_claim_pages(...)`** from
+the producer's step-4 loop, plus a thin composed
+**`apply_contradiction_decisions(...) = apply_resolved_contradictions + _reproject_claim_pages`**
+(returns `{resolution, changed_pages, graph_changed}`, **no index rebuild inside**). The producer keeps
+its current control flow and shares **only `_reproject_claim_pages`** (not the whole bundle): its
+`affected` set is accumulated across the stale-handling steps, so a wholesale orchestrator call would
+reorder it. **Synthesis needs no wrapper** — `apply_resolved_syntheses` already renders its own Synthesis
+pages, so `/reviews/apply` calls it directly (there is no `apply_synthesis_decisions`). **Index rebuild
+belongs only to the caller layer** (the producer's existing single rebuild, or the endpoint's single
+final rebuild): the apply functions take **no `root`/index path and never rebuild**. This is deliberately
+cleaner than the first A4 draft — one extracted helper, one composed bundle, and a single special case
+justified by contradiction's separate re-projection. Calling producers with a no-key client is
+**rejected** (it would run LLM detection on a configured machine); inline re-implementation of the
+re-projection in the endpoint is **rejected** (drift). Constraints: **no behavior change** to existing
+producer entrypoints; existing producer/promote tests stay the regression guard **plus** new direct tests
+for `_reproject_claim_pages` / `apply_contradiction_decisions`. The endpoint composes
+`apply_resolved_syntheses` + `apply_contradiction_decisions` + the new `apply_approved_deprecations` +
 `promote_candidates(rebuild_index=False)`, rebuilds `wiki/index.md` **once** (only if something changed),
 then validates **once**.
 
@@ -179,20 +186,31 @@ then validates **once**.
 optional**: the claim/concept renderers derive `review_status` from node state, and that derivation
 yields `pending` for a no-evidence claim tombstone and a no-mention concept — there is no node-state input
 that expresses an *approved* deprecation. So `render_claim_page`/`render_concept_page` gain an optional
-`review_status: str | None = None` override (default `None` preserves today's derived behavior; explicit
-`"approved"` used only by the deprecation apply path). Concepts have no recompose helper today; the
-executor adds **`recompose_semantic_node_page(...)`** in `concepts.py` (named for the family — it serves
-`concept/entity/person/organization/project`, all of which flow through `render_concept_page`/`NODE_DIR`).
-Claims reuse `recompose_claim(deprecate=True, review_status="approved")`. **In scope (v1):** `Claims/`,
-`Concepts/`, `Entities/`, `People/`, `Organizations/`, `Projects/`. **Out of scope:** `Synthesis/`
-(reported `skipped[{reason: handled_by_synthesis_executor}]`), `Sources/`, `Queries/`, and any
-raw-delete/archive/hide (record-only). Scope guard per item: `type==deprecate_wiki_page`,
-`proposal.to_status==deprecated_candidate`, page under an in-scope dir, `context.node_type` matches the
-page type. **Idempotency / normalization-apply:** a true no-op requires page status **and**
-`review_status` **and** graph mirror to already match; if everything matches *except* `review_status`
-(e.g. an auto-approved contradiction-supersede deprecation left the loser at `review_status` ≠ `approved`),
-the executor performs a **normalization apply** — flip `review_status` to `approved`, mirror graph, count
-it as applied/normalized rather than skipping.
+`review_status: str | None = None` override (default `None` preserves today's derived behavior; an
+explicit value is **constrained to the known frontmatter statuses `{none, pending, approved, rejected}`**
+— an unknown value raises; only `"approved"` is used by the deprecation apply path). Concepts have no
+recompose helper today; the executor adds **`recompose_semantic_node_page(...)`** in `concepts.py` (named
+for the family — it serves `concept/entity/person/organization/project`, all of which flow through
+`render_concept_page`/`NODE_DIR`). The helper takes an **explicit, required `status`** that is passed
+straight to the renderer and mirrored to the graph — it is **never re-derived from active mentions**, so a
+still-mentioned node cannot resurrect itself out of a deprecation — plus an explicit `review_status`; it
+reloads title/aliases from the page and active sources from the graph, preserving citations/evidence + the
+summary callout. Claims reuse `recompose_claim(deprecate=True, review_status="approved")`. **In scope
+(v1):** `Claims/`, `Concepts/`, `Entities/`, `People/`, `Organizations/`, `Projects/`. **Out of scope:**
+`Synthesis/` (reported `skipped[{reason: handled_by_synthesis_executor}]`), `Sources/`, `Queries/`,
+`Tags/`, and any raw-delete/archive/hide (record-only). **Scope guard per item:** `type==
+deprecate_wiki_page`, `proposal.to_status==deprecated_candidate`, page under an in-scope dir, and the
+**expected node type derived from `subject.page`'s directory via a canonical reverse of `NODE_DIR`**
+(`Claims→claim`, `Concepts→concept`, …) **must match the graph node's `node_type`** (disagreement →
+`skipped[{reason: node_type_mismatch}]`). `context.node_type`, when present, is an **advisory cross-check
+only — not required** — so the legacy auto-approved contradiction-supersede deprecations (filed *without*
+`context.node_type` by `_execute_supersede`, `contradictions.py`) are absorbed as idempotent no-ops rather
+than skipped; going forward `_execute_supersede` files the deprecation **with** `context.node_type:
+"claim"`. **Idempotency / normalization-apply:** a true no-op requires page status **and** `review_status`
+**and** graph mirror to already match; if everything matches *except* `review_status` (e.g. an
+auto-approved supersede deprecation left the loser at `review_status` ≠ `approved`), the executor performs
+a **normalization apply** — flip `review_status` to `approved`, mirror graph, count it as `normalized`
+rather than skipping.
 
 **A6 — Apply is non-transactional; validators report, never roll back (new).** `POST /reviews/apply`
 writes effects before validating and cannot roll back. It runs the **full validator suite once at the
@@ -206,3 +224,24 @@ failed when the real state is "apply ran; validation found follow-up work." HTTP
 unexpected infrastructure errors that prevent the route's own control flow. No targeted-subset shortcut in
 v1 (explicit human-triggered governance action — full-suite latency is acceptable and avoids guessing
 which invariants were touched).
+
+**A7 — 6-3 review-round hardening (2026-06-22).** Five fixes that close boundary/honesty gaps without
+widening scope:
+- **Canonical-page deprecation safety.** `subject.page` is **never trusted for a read/write**. The
+  deprecation executor derives the canonical page from the graph node (`NODE_DIR[node_type]/<slug>.md`)
+  and requires `subject.page` to equal it; a malformed/traversal/absolute path is rejected **before any
+  read** (`skipped[invalid_page_path]`, regex `^[A-Za-z]+/[^/\\]+\.md$`), a well-formed-but-wrong target is
+  `skipped[page_node_mismatch]`. This structurally prevents escaping `wiki/` into `raw/` and the
+  read-one-page / write-another mismatch. (`page_node_mismatch` subsumes the earlier `node_type_mismatch`.)
+- **Preview containment guard.** The read-model preview keeps a **containment-only** guard
+  (`_safe_wiki_subpath`: no absolute, no `..`, must resolve under `wiki_dir`) — it may inspect malformed
+  ledger state, so it does *not* require graph-canonical matching; an out-of-wiki path is simply unreadable.
+- **Graph-missing is not silent success.** If `db/graph.sqlite` is absent but approved graph-backed items
+  exist, `/reviews/apply` returns a **controlled 503** (checked **before** `promote_candidates` would init
+  an empty graph), mirroring the existing schema-drift 503 — never a clean `applied` that drops them.
+- **Approved-tombstone prose** tracks the resolved `review_status` (an approved deprecation no longer reads
+  "pending review"); gated on the explicit override so the default path stays byte-identical.
+- **Honest summary + no leak:** `pages_changed` now also counts synthesis + promotion page writes; a real
+  `index_rebuild_failed` (script present, non-zero, after changes — distinct from a missing script) is
+  surfaced in a top-level `warnings[]`; validator `stdout/stderr` tails are sanitized of the absolute root
+  path.

@@ -72,43 +72,55 @@ destructive action without a recorded decision; the surface inherits the loopbac
 ---
 
 ## 4. Apply (`POST /reviews/apply`; ADR-0035 decisions 4–5, addenda A4–A6)
-- Composes **extracted key-free apply orchestrators** (ADR-0035 A4) — `apply_synthesis_decisions` ·
-  `apply_contradiction_decisions` · the new `apply_approved_deprecations` · `promote_candidates(
-  rebuild_index=False)`. The two extracted orchestrators pull the deterministic apply portion (executor →
-  recompose affected pages → mirror graph → `{changed_pages, graph_changed, summary}`) **out of** the LLM
-  producers (`detect_contradictions`/`generate_synthesis`) so both the producers and the endpoint call the
-  same code (bare executors alone don't re-project pages / rebuild the index). Calling producers with a
-  no-key client, and inline re-implementation in the endpoint, are both rejected. **No behavior change** to
-  existing producer entrypoints; existing tests stay the regression guard + new direct orchestrator tests.
-- Then rebuilds `wiki/index.md` **once** (only if something changed) and runs validators **once**.
+- Composes **key-free apply executors** (ADR-0035 A4) — `apply_resolved_syntheses` (called directly: it
+  already renders its own Synthesis pages, so **no `apply_synthesis_decisions` wrapper**) ·
+  `apply_contradiction_decisions` (the **one** extracted bundle = `apply_resolved_contradictions` + the
+  shared `_reproject_claim_pages` helper, **no index rebuild inside**) · the new `apply_approved_
+  deprecations` · `promote_candidates(rebuild_index=False)`. Only contradiction needs extraction (its
+  affected-Claim re-projection lives in the producer); the producer keeps its control flow and shares
+  **only `_reproject_claim_pages`** (its `affected` set accrues across stale-handling, so a wholesale call
+  would reorder it). Calling producers with a no-key client, and inline re-implementation in the endpoint,
+  are both rejected. **No behavior change** to existing producer entrypoints; existing tests stay the
+  regression guard + new direct tests for `_reproject_claim_pages` / `apply_contradiction_decisions`.
+- **Index rebuild belongs only to the caller layer** — the apply functions take no `root`/index path; the
+  endpoint rebuilds `wiki/index.md` **once** (only if something changed) and runs validators **once**.
 - **Never triggers LLM generation** (only the deterministic review-application portion of any pass);
   **never touches `raw/`**; **idempotent**.
 - **Non-transactional; validators report, never roll back (A6):** effects are written before validation
   and cannot be rolled back. Runs the **full validator suite once at the end** (discovered like
-  `scripts/validate_all.py`, each a subprocess `[sys.executable, script, root]`). On any failure returns
-  **HTTP 200** with a clear top-level `status` (`"applied"` | `"validation_failed"`) plus `{applied:true,
-  validators_ok:false, failed_validators:[{name, returncode, stdout_tail, stderr_tail}], summary:{…}}` —
-  clients read `status` directly, not nested fields. HTTP 500 only for unexpected infrastructure errors in
-  the route's own control flow.
+  `scripts/validate_all.py`, each a subprocess `[sys.executable, script, root]`; output tails sanitized of
+  the absolute root path). On any failure returns **HTTP 200** with a clear top-level `status` (`"applied"`
+  | `"validation_failed"`) plus `{applied:true, validators_ok:false, failed_validators:[{name, returncode,
+  stdout_tail, stderr_tail}], warnings[], summary:{…}}` — clients read `status` directly. HTTP 500 only for
+  unexpected infrastructure errors in the route's own control flow.
+- **Graph-missing is not silent success (A7):** if `db/graph.sqlite` is absent but approved graph-backed
+  items exist, the route returns a **controlled 503** (checked *before* `promote_candidates` would init an
+  empty graph), never a clean `applied` that drops them. A genuine `index_rebuild_failed` is surfaced in
+  `warnings[]`.
 - Returns a **typed summary**: e.g. `{status, applied, validators_ok, failed_validators[], summary:{
   syntheses:{promoted,rejected}, promotions:{promoted}, contradictions:{acknowledged,rejected,superseded},
   deprecations:{applied,normalized,skipped[]}, pages_changed, unapplied:[{type,count,reason}]}}`.
 - **`apply_approved_deprecations`** (new; A5): only items with `type==deprecate_wiki_page`,
-  `proposal.to_status==deprecated_candidate`, `subject.page` under an in-scope subdir, `context.node_type`
-  matching the page type, no raw delete/archive/hide. **In scope:** `Claims/`, `Concepts/`, `Entities/`,
-  `People/`, `Organizations/`, `Projects/`; **out of scope:** `Synthesis/` (→ `skipped[{reason:
-  handled_by_synthesis_executor}]`), `Sources/`, `Queries/`. Marks the page `deprecated_candidate` +
-  `review_status: approved` via an **explicit `review_status` input to the deterministic render path** —
-  the render seam is **mandatory** because the renderers derive `review_status: pending` for a no-evidence
-  claim tombstone / no-mention concept and cannot otherwise express an approved deprecation.
-  `render_claim_page`/`render_concept_page` gain an optional `review_status: str | None = None` (default
-  `None` = today's derived behavior); claims reuse `recompose_claim(deprecate=True, review_status=
-  "approved")`, concepts/entity-family use the new **`recompose_semantic_node_page(...)`** helper in
-  `concepts.py`. Preserves citations/evidence + summary callouts, mirrors graph node status, reports skips
-  with reasons. **Idempotency:** a true no-op needs page status **and** `review_status` **and** graph
-  mirror to match; if only `review_status` differs (e.g. an auto-approved contradiction-supersede
-  deprecation), it performs a **normalization apply** (flip `review_status`, mirror graph, count as
-  `normalized`) rather than skipping.
+  `proposal.to_status==deprecated_candidate`, `subject.page` under an in-scope subdir, no raw
+  delete/archive/hide. **In scope:** `Claims/`, `Concepts/`, `Entities/`, `People/`, `Organizations/`,
+  `Projects/`; **out of scope:** `Synthesis/` (→ `skipped[{reason: handled_by_synthesis_executor}]`),
+  `Sources/`, `Queries/`, `Tags/`, raw. **The graph node is authoritative for the page path (A7):** the
+  canonical page (`NODE_DIR[node_type]/<slug>.md`) is derived from the node and `subject.page` must equal
+  it — a malformed/traversal/absolute path is `skipped[invalid_page_path]` before any read, a wrong target
+  is `skipped[page_node_mismatch]`; `context.node_type` is an advisory cross-check only (not required), so
+  legacy auto-approved supersede deprecations filed without it (`_execute_supersede`) are absorbed as no-ops —
+  `_execute_supersede` is forward-fixed to file `context.node_type: "claim"`. Marks the page
+  `deprecated_candidate` + `review_status: approved` via an **explicit `review_status` input to the
+  deterministic render path** — mandatory because the renderers derive `review_status: pending` for a
+  no-evidence claim tombstone / no-mention concept. `render_claim_page`/`render_concept_page` gain an
+  optional `review_status: str | None = None` (default `None` = derived; an explicit value is constrained
+  to `{none, pending, approved, rejected}`); claims reuse `recompose_claim(deprecate=True,
+  review_status="approved")`, concepts/entity-family use the new **`recompose_semantic_node_page(...)`**
+  helper in `concepts.py` (explicit **required** `status`, never re-derived from mentions). Preserves
+  citations/evidence + summary callouts, mirrors graph node status, reports skips with reasons.
+  **Idempotency:** a true no-op needs page status **and** `review_status` **and** graph mirror to match; if
+  only `review_status` differs (e.g. an auto-approved supersede deprecation), it performs a **normalization
+  apply** (flip `review_status`, mirror graph, count as `normalized`) rather than skipping.
 
 ---
 
@@ -127,7 +139,7 @@ destructive action without a recorded decision; the surface inherits the loopbac
 |---|---|
 | **6-1** | Read model: review-service read helpers (list/get, malformed-robust, deterministic sort, explicit status) + `GET /reviews` + `GET /reviews/{id}` JSON + response models. Tests. |
 | **6-2** | Decision endpoints: `defer_review_item` + `POST /reviews/{id}/approve|reject|defer` (record-only, audit). Tests. |
-| **6-3** | Apply: extract `apply_synthesis_decisions`/`apply_contradiction_decisions` (key-free, no producer-behavior change) + new `apply_approved_deprecations` (render-path `review_status` arg + `recompose_semantic_node_page`); `POST /reviews/apply` composes them + `promote_candidates(rebuild_index=False)`, rebuilds index once, runs full validator suite once (200 + `validators_ok` on failure); typed summary incl. `normalized`/`unapplied`. Tests (apply, idempotent/normalization, skip-reasons, validator-failure → 200, extracted-orchestrator direct tests). |
+| **6-3** | Apply: extract shared `_reproject_claim_pages` + composed `apply_contradiction_decisions` (the one bundle; synthesis calls `apply_resolved_syntheses` directly, no wrapper; no index rebuild inside any apply fn) + new `apply_approved_deprecations` (render-path `review_status` arg constrained to known values + `recompose_semantic_node_page` with explicit required status + reverse-`NODE_DIR` type derivation + `_execute_supersede` forward-fix `context.node_type`); `POST /reviews/apply` composes them + `promote_candidates(rebuild_index=False)`, rebuilds index once at the caller layer, runs full validator suite once (200 + `validators_ok` on failure); typed summary incl. `normalized`/`unapplied`. Tests (apply, idempotent/normalization, legacy + node_type_mismatch skips, validator-failure → 200, `_reproject_claim_pages`/`apply_contradiction_decisions` direct tests, producer-summary-unchanged regression). |
 | **6-4** | HTML UI: `/ui/reviews` + `/ui/reviews/{id}` + apply view (server-rendered, mandatory preview, `POST` forms). TestClient HTML tests. |
 
 ---

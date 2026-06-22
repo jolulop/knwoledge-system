@@ -190,6 +190,41 @@ def apply_resolved_contradictions(
             "superseded_executed": superseded_executed}
 
 
+def _reproject_claim_pages(gconn, cids, *, claims_dir: Path, reviews_dir: Path, markdown_dir: Path,
+                           now: str) -> list[str]:
+    """Re-render the given Claim pages from the graph; return the cids whose page was (re)written.
+
+    The shared re-projection unit used by **both** `detect_contradictions` (step 4) and the Phase-6
+    `apply_contradiction_decisions` — so the affected-claim render logic lives in one place and never
+    drifts (ADR-0035 A4). No index rebuild here (the caller owns the single rebuild)."""
+    written: list[str] = []
+    for cid in sorted(cids):
+        if claims.recompose_claim(gconn, cid=cid, claims_dir=claims_dir, reviews_dir=reviews_dir,
+                                  markdown_dir=markdown_dir, now=now) == "written":
+            written.append(cid)
+    return written
+
+
+def apply_contradiction_decisions(gconn, reviews_dir: Path, *, claims_dir: Path, markdown_dir: Path,
+                                  now: str | None = None) -> dict[str, Any]:
+    """Key-free Phase-6 apply: record contradiction decisions to the graph + re-project the affected
+    Claim pages (ADR-0035 A4). Composes the existing `apply_resolved_contradictions` executor with the
+    shared `_reproject_claim_pages` helper — the same code `detect_contradictions` uses. **No index
+    rebuild** (the caller — `/reviews/apply` — owns the single final rebuild). Returns
+    `{resolution, changed_pages, graph_changed}`."""
+    now = now or iso_now()
+    affected: set[str] = set()
+    resolution = apply_resolved_contradictions(
+        gconn, reviews_dir, claims_dir=claims_dir, markdown_dir=markdown_dir, affected=affected, now=now)
+    active_claims = set(graph.active_node_ids_of_type(gconn, "claim"))
+    changed_pages = _reproject_claim_pages(
+        gconn, affected & active_claims, claims_dir=claims_dir, reviews_dir=reviews_dir,
+        markdown_dir=markdown_dir, now=now)
+    graph_changed = bool(resolution["acknowledged"] or resolution["rejected"]
+                         or resolution["superseded_executed"])
+    return {"resolution": resolution, "changed_pages": changed_pages, "graph_changed": graph_changed}
+
+
 def _execute_supersede(
     gconn, reviews_dir: Path, *, winner: str, loser: str, source_review_id: str, now: str,
     claims_dir: Path, markdown_dir: Path,
@@ -219,7 +254,10 @@ def _execute_supersede(
         subject={"node_id": loser, "page": f"Claims/{loser}.md"},
         proposal={"to_status": "deprecated_candidate",
                   "reason": "superseded via approved contradiction resolution"},
-        context={"resolved_by_review": source_review_id, "winner": winner}, now=now)
+        # node_type lets the Phase-6 deprecation executor recognise this as a claim deprecation
+        # (already effected here) without inferring it from the page dir (ADR-0035 A5).
+        context={"resolved_by_review": source_review_id, "winner": winner, "node_type": "claim"},
+        now=now)
     reviews.resolve_review_item(
         reviews_dir, dep_rid, decision="approved", decided_by="contradiction_resolution",
         note=f"deprecated as loser of approved contradiction {source_review_id}; winner {winner}",
@@ -374,13 +412,11 @@ def detect_contradictions(
                     priority="medium", now=now)
                 proposed += 1
 
-        # 4. Re-project Claim pages whose active contradiction backlinks changed (ADR-0031).
-        pages_reprojected = 0
-        for cid in sorted(affected & active_claims):
-            outcome = claims.recompose_claim(
-                gconn, cid=cid, claims_dir=claims_dir, reviews_dir=reviews_dir,
-                markdown_dir=markdown_dir, now=now)
-            pages_reprojected += outcome == "written"
+        # 4. Re-project Claim pages whose active contradiction backlinks changed (ADR-0031). Shared
+        #    with the Phase-6 apply_contradiction_decisions via _reproject_claim_pages (ADR-0035 A4).
+        pages_reprojected = len(_reproject_claim_pages(
+            gconn, affected & active_claims, claims_dir=claims_dir, reviews_dir=reviews_dir,
+            markdown_dir=markdown_dir, now=now))
         index_rebuilt = _rebuild_index(root) if (rebuild_index and pages_reprojected) else False
 
         if errors:

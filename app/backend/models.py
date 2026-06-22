@@ -418,3 +418,25 @@ class ReviewDecisionResponse(BaseModel):
     decision_recorded: bool
     status: str
     apply_required: bool
+
+
+class FailedValidator(BaseModel):
+    # One validate_*.py that exited non-zero during POST /reviews/apply (ADR-0035 A6). Tails only —
+    # no absolute paths are surfaced (the validators print repo-relative diagnostics).
+    name: str
+    returncode: int
+    stdout_tail: str = ""
+    stderr_tail: str = ""
+
+
+class ReviewApplyResponse(BaseModel):
+    # POST /reviews/apply (ADR-0035 A4/A6). Non-transactional: effects are written, then validators run
+    # once. status is "applied" (clean) or "validation_failed" (apply ran; the vault now reports an
+    # inconsistency to resolve) — a validator failure is HTTP 200, not 500. `summary` carries the typed
+    # per-executor counts + honest `unapplied` (approved types with no Phase-6 executor).
+    status: str
+    applied: bool
+    validators_ok: bool
+    failed_validators: list[FailedValidator] = []
+    warnings: list[str] = []  # non-fatal post-apply issues, e.g. "index_rebuild_failed"
+    summary: dict[str, Any]

@@ -1065,3 +1065,109 @@ def test_decision_apply_required_true_for_contradiction_reject(client, tmp_path)
         "subject": {"claim_a": "clm_1", "claim_b": "clm_2"}, "proposal": {}, "context": {}})
     body = client.post("/reviews/rev_c/reject").json()
     assert body["status"] == "rejected" and body["apply_required"] is True
+
+
+# --- Phase 6 slice 6-3: POST /reviews/apply --------------------------------
+
+
+def _approved_concept_deprecation(tmp_path):
+    """A graph concept node + page + an approved deprecate_wiki_page item, at the settings paths."""
+    gdb = tmp_path / "db" / "graph.sqlite"
+    gdb.parent.mkdir(parents=True, exist_ok=True)
+    graph.init_db(gdb)
+    conn = graph.connect(gdb)
+    graph.upsert_node(conn, node_id="cpt_x", node_type="concept", slug="thing", status="active")
+    conn.commit()
+    conn.close()
+    page = tmp_path / "wiki" / "Concepts" / "thing.md"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text('---\ntype: concept\nconcept_id: "cpt_x"\ntitle: "Thing"\nstatus: active\n'
+                    "review_status: none\naliases: []\n---\n\n# Thing\n", encoding="utf-8")
+    _write_review(tmp_path, "approved", {
+        "review_id": "rev_d", "type": "deprecate_wiki_page", "status": "approved",
+        "subject": {"node_id": "cpt_x", "page": "Concepts/thing.md"},
+        "proposal": {"to_status": "deprecated_candidate", "reason": "x"},
+        "context": {"node_type": "concept"}})
+    return page
+
+
+def test_apply_empty_is_clean(client, tmp_path):
+    body = client.post("/reviews/apply").json()
+    assert body["status"] == "applied" and body["applied"] is True
+    assert body["validators_ok"] is True and body["failed_validators"] == []
+    assert body["summary"]["deprecations"] == {"applied": 0, "normalized": 0, "skipped": []}
+    assert body["summary"]["unapplied"] == []
+
+
+def test_apply_runs_deprecation_executor_and_summary(client, tmp_path):
+    page = _approved_concept_deprecation(tmp_path)
+    body = client.post("/reviews/apply").json()
+    assert body["applied"] is True
+    assert body["summary"]["deprecations"]["applied"] == 1
+    fm = main_module.parse_frontmatter(page.read_text(encoding="utf-8"))
+    assert fm["status"] == "deprecated_candidate" and fm["review_status"] == "approved"
+    assert graph.connect(tmp_path / "db" / "graph.sqlite").execute(
+        "SELECT status FROM nodes WHERE node_id='cpt_x'").fetchone()["status"] == "deprecated_candidate"
+
+
+def test_apply_is_idempotent(client, tmp_path):
+    _approved_concept_deprecation(tmp_path)
+    client.post("/reviews/apply")
+    again = client.post("/reviews/apply").json()
+    assert again["summary"]["deprecations"] == {"applied": 0, "normalized": 0, "skipped": []}
+
+
+def test_apply_reports_unapplied_record_only_types(client, tmp_path):
+    _write_review(tmp_path, "approved", {
+        "review_id": "rev_m", "type": "merge_entities", "status": "approved",
+        "subject": {"node_id": "ent_1"}, "proposal": {}, "context": {}})
+    body = client.post("/reviews/apply").json()
+    assert {"type": "merge_entities", "count": 1, "reason": "no_executor_in_phase_6"} \
+        in body["summary"]["unapplied"]
+
+
+def test_apply_validator_failure_is_200_not_500(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(main_module, "_run_all_validators", lambda root: [
+        {"name": "validate_projection.py", "returncode": 1, "stdout_tail": "boom", "stderr_tail": ""}])
+    resp = client.post("/reviews/apply")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "validation_failed" and body["validators_ok"] is False
+    assert body["failed_validators"][0]["name"] == "validate_projection.py"
+    assert body["applied"] is True  # the apply still ran; never a pretend-rollback
+
+
+def test_apply_no_server_path_leak(client, tmp_path):
+    _approved_concept_deprecation(tmp_path)
+    assert str(tmp_path) not in client.post("/reviews/apply").text
+
+
+def test_apply_graph_missing_with_approved_items_is_503(client, tmp_path):
+    # no graph db exists, but an approved graph-backed item is waiting -> controlled 503, not a
+    # silent "applied" (and before promote_candidates would init an empty graph)
+    _write_review(tmp_path, "approved", {
+        "review_id": "rev_d", "type": "deprecate_wiki_page", "status": "approved",
+        "subject": {"node_id": "cpt_x", "page": "Concepts/thing.md"},
+        "proposal": {"to_status": "deprecated_candidate"}, "context": {"node_type": "concept"}})
+    assert client.post("/reviews/apply").status_code == 503
+
+
+def test_apply_index_rebuild_failure_warns(client, tmp_path, monkeypatch):
+    _approved_concept_deprecation(tmp_path)
+    monkeypatch.setattr(main_module, "_rebuild_index_status", lambda root: "failed")
+    body = client.post("/reviews/apply").json()
+    assert body["summary"]["deprecations"]["applied"] == 1   # the change happened
+    assert "index_rebuild_failed" in body["warnings"]
+    assert body["summary"]["index_rebuilt"] is False
+
+
+def test_run_all_validators_sanitizes_root_path(tmp_path):
+    # a validator that echoes its argv (the absolute root) must have the path scrubbed from the tail
+    scripts = tmp_path / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    (scripts / "validate_leak.py").write_text(
+        "import sys\nprint('checked', sys.argv[1])\nsys.exit(1)\n", encoding="utf-8")
+    results = main_module._run_all_validators(tmp_path)
+    leak = next(r for r in results if r["name"] == "validate_leak.py")
+    assert str(tmp_path) not in leak["stdout_tail"]
+    assert "<root>" in leak["stdout_tail"]

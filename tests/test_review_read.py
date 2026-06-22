@@ -508,6 +508,28 @@ def test_get_review_schema_invalid_marks_schema_error(tmp_path):
     assert res is not None and res.get("schema_error") is True
 
 
+def test_preview_traversal_page_is_not_read_outside_wiki(tmp_path):
+    # a hostile subject.page must not make the preview read outside wiki/ (containment guard)
+    secret = tmp_path / "raw" / "permanent" / "x.md"
+    secret.parent.mkdir(parents=True, exist_ok=True)
+    secret.write_text("---\nstatus: secret\n---\n", encoding="utf-8")
+    rv = tmp_path / "reviews"
+    _write_item(rv, "approved", _item("rev_d", "deprecate_wiki_page", status="approved",
+                                      subject={"node_id": "clm_1",
+                                               "page": "Claims/../../raw/permanent/x.md"},
+                                      proposal={"to_status": "deprecated_candidate"}))
+    prev = review_read.get_review(rv, "rev_d", wiki_dir=tmp_path / "wiki")["preview"]
+    # the out-of-wiki frontmatter was never read -> current_status stays None
+    assert prev["current_status"] is None
+
+
+def test_safe_wiki_subpath_rejects_traversal_and_absolute(tmp_path):
+    wiki = tmp_path / "wiki"
+    assert review_read._safe_wiki_subpath(wiki, "Claims/../../etc/passwd") is None
+    assert review_read._safe_wiki_subpath(wiki, "/etc/passwd") is None
+    assert review_read._safe_wiki_subpath(wiki, "Claims/clm_1.md") == (wiki / "Claims" / "clm_1.md").resolve()
+
+
 def test_preview_paths_are_repository_relative(tmp_path):
     rv = tmp_path / "reviews"
     _write_item(rv, "pending", _item("rev_d", "deprecate_wiki_page",

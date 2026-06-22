@@ -27,6 +27,19 @@ _WIKILINK_SUB = re.compile(r"\[\[([^\]]+)\]\]")
 # Bump to force a global Source-page rebuild even when rendered bytes are unchanged.
 SOURCE_SCHEMA_VERSION = "wiki-source-v1"
 
+# Frontmatter review_status vocabulary (ADR-0022). An explicit render override (the Phase-6 deprecation
+# render seam, ADR-0035 A5) must be one of these; None preserves the renderer's derived value.
+REVIEW_STATUSES = frozenset({"none", "pending", "approved", "rejected"})
+
+
+def _resolve_review_status(override: str | None, derived: str) -> str:
+    """Return an explicit review_status override (validated) or the renderer's derived value."""
+    if override is None:
+        return derived
+    if override not in REVIEW_STATUSES:
+        raise ValueError(f"unknown review_status {override!r}; allowed: {sorted(REVIEW_STATUSES)}")
+    return override
+
 # Node type -> wiki subdirectory (page routing / link targets), Build Spec §6.1.
 NODE_DIR = {
     "source": "Sources", "concept": "Concepts", "entity": "Entities", "person": "People",
@@ -290,7 +303,7 @@ def _fm_quote(text: str) -> str:
             .replace("[", "\\[").replace("]", "\\]"))
 
 
-def render_claim_page(claim: dict[str, Any]) -> str:
+def render_claim_page(claim: dict[str, Any], *, review_status: str | None = None) -> str:
     """Render a deterministic Claim page from a grounded claim record (ADR-0019/0020/0022).
 
     The frontmatter `citations:` list is the machine-readable record (validated by
@@ -299,6 +312,10 @@ def render_claim_page(claim: dict[str, Any]) -> str:
     wall-clock value is embedded — enriched but idempotent: freshness lives in the
     input_fingerprint, so a cache-replay re-run is byte-stable. Empty supporting/contradicting
     sections are omitted (no placeholder links, ADR-0016/0029).
+
+    `review_status` is normally *derived* from the claim's evidence/deprecated state; an explicit,
+    validated override is the deterministic render-path input the Phase-6 deprecation executor uses to
+    mark an approved deprecation (ADR-0035 A5) — a no-evidence tombstone would otherwise derive `pending`.
     """
     claim_id = claim["claim_id"]
     claim_text = _WS.sub(" ", str(claim["claim_text"])).strip()
@@ -314,18 +331,19 @@ def render_claim_page(claim: dict[str, Any]) -> str:
     #  - otherwise active.
     deprecated = bool(claim.get("deprecated"))
     if not active:
-        status, review_status = "deprecated_candidate", "pending"
+        status, derived_review_status = "deprecated_candidate", "pending"
     elif deprecated:
-        status, review_status = "deprecated_candidate", "approved"
+        status, derived_review_status = "deprecated_candidate", "approved"
     else:
-        status, review_status = "active", "none"
+        status, derived_review_status = "active", "none"
+    rs = _resolve_review_status(review_status, derived_review_status)
 
     fm_lines = [
         "---",
         "type: claim",
         f'claim_id: "{claim_id}"',
         f"status: {status}",
-        f"review_status: {review_status}",
+        f"review_status: {rs}",
         "generation_status: enriched",
         f"confidence: {confidence}",
         # claim_text is the durable authority for the claim's wording (ADR-0030 node
@@ -367,10 +385,17 @@ def render_claim_page(claim: dict[str, Any]) -> str:
                  else "Generated claim (unverified)")
         evidence_section = ["| Source | Char range | Quote |", "|---|---|---|", *evidence_rows]
     else:
-        label = "Claim evidence superseded — pending review"
+        # The callout prose tracks the resolved review_status so an approved deprecation doesn't read
+        # "pending review" (ADR-0035 A5). Default (derived `pending`) is byte-identical to before.
+        if rs == "approved":
+            label = "Claim evidence superseded — approved deprecation"
+            review_note = "approved for deprecation (ADR-0018)"
+        else:
+            label = "Claim evidence superseded — pending review"
+            review_note = "pending human review (ADR-0018)"
         evidence_section = [
-            "_Evidence superseded; this claim is retained for audit and is pending "
-            "human review (ADR-0018). It has no active source._"
+            f"_Evidence superseded; this claim is retained for audit and is {review_note}. "
+            "It has no active source._"
         ]
 
     body = [
@@ -407,7 +432,7 @@ def render_claim_page(claim: dict[str, Any]) -> str:
     return draft.replace('input_fingerprint: ""', f'input_fingerprint: "{fingerprint}"', 1)
 
 
-def render_concept_page(node: dict[str, Any]) -> str:
+def render_concept_page(node: dict[str, Any], *, review_status: str | None = None) -> str:
     """Render a deterministic candidate concept/entity stub page (slice 4, ADR-0017/0018).
 
     No LLM-authored prose: frontmatter (id, type, title, aliases, status, confidence) plus a
@@ -416,6 +441,10 @@ def render_concept_page(node: dict[str, Any]) -> str:
     page-authoritative, ADR-0030): `candidate` until promoted to `active` by recurrence
     (slice 5), or `deprecated_candidate` when no active mention remains (a tombstone, kept
     page-backed and never hard-deleted).
+
+    `review_status` is normally *derived* from `status`/active-mentions; an explicit, validated override
+    is the deterministic render-path input the Phase-6 deprecation executor uses to mark an approved
+    deprecation (ADR-0035 A5) — the derivation would otherwise yield `pending` for a no-mention node.
     """
     node_type = node["node_type"]
     title = _WS.sub(" ", str(node["title"])).strip()
@@ -424,7 +453,8 @@ def render_concept_page(node: dict[str, Any]) -> str:
     source_ids = node.get("source_ids") or []
     active_mentions = bool(source_ids)
     status = node.get("status") or ("candidate" if active_mentions else "deprecated_candidate")
-    review_status = "none" if status == "active" else ("none" if active_mentions else "pending")
+    derived_review_status = "none" if status == "active" else ("none" if active_mentions else "pending")
+    rs = _resolve_review_status(review_status, derived_review_status)
 
     fm_lines = [
         "---",
@@ -432,7 +462,7 @@ def render_concept_page(node: dict[str, Any]) -> str:
         f'{node["id_field"]}: "{node["node_id"]}"',
         f'title: "{_fm_quote(title)}"',
         f"status: {status}",
-        f"review_status: {review_status}",
+        f"review_status: {rs}",
         "generation_status: deterministic",
         f"confidence: {confidence}",
         f"aliases: {_render_tag_list(aliases)}",
@@ -444,8 +474,10 @@ def render_concept_page(node: dict[str, Any]) -> str:
         summary = f"{label.capitalize()} {node_type} mentioned by {len(source_ids)} source(s)."
         mentioned = [f"- [[Sources/{s}]]" for s in source_ids]
     else:
-        summary = f"{node_type.capitalize()} with no active mentions — pending review."
-        mentioned = ["_No active source mentions; pending review._"]
+        # Callout prose tracks the resolved review_status (ADR-0035 A5); default `pending` byte-stable.
+        review_note = "approved for deprecation" if rs == "approved" else "pending review"
+        summary = f"{node_type.capitalize()} with no active mentions — {review_note}."
+        mentioned = [f"_No active source mentions; {review_note}._"]
     alias_lines = [f"- {_delink(a)}" for a in aliases] if aliases else ["_None._"]
     body = [
         "",

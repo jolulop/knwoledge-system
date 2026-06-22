@@ -165,6 +165,40 @@ def _recompose_node(gconn, *, node_id, wiki_dir, reviews_dir, now, text_hint=Non
     return "written"
 
 
+def recompose_semantic_node_page(
+    gconn, *, node_id: str, wiki_dir: Path, status: str, review_status: str, now: str | None = None,
+) -> str:
+    """Re-render a concept/entity-family page at an EXPLICIT status + review_status (ADR-0035 A5).
+
+    The Phase-6 deprecation executor's render seam for `concept/entity/person/organization/project`
+    (all flow through `render_concept_page`/`NODE_DIR`). Reloads the node's display metadata
+    (title/aliases) from the existing page — the page is the authority (ADR-0030) — and its active
+    `mentions` sources from the graph, preserving citations/evidence and the summary callout, then
+    re-renders with the **explicit** status (never re-derived from mentions, so a still-mentioned node
+    cannot resurrect out of a deprecation) and mirrors the graph node status. Idempotent and
+    deterministic. Returns "written", else a typed skip reason
+    ("node_missing"/"unsupported_node_type"/"page_missing")."""
+    node = graph.get_node(gconn, node_id)
+    if node is None:
+        return "node_missing"
+    node_type, slug = node["node_type"], node["slug"]
+    if node_type not in ID_FIELD:
+        return "unsupported_node_type"
+    page_path = wiki_dir / NODE_DIR[node_type] / f"{slug}.md"
+    meta = _read_node_meta(page_path)
+    if meta is None:
+        return "page_missing"
+    sources = graph.sources_for_node(gconn, node_id)
+    page_path.write_text(render_concept_page({
+        "node_type": node_type, "node_id": node_id, "id_field": ID_FIELD[node_type],
+        "title": meta["title"], "aliases": meta["aliases"], "confidence": "low",
+        "source_ids": sources, "status": status,
+    }, review_status=review_status), encoding="utf-8")
+    graph.upsert_node(gconn, node_id=node_id, node_type=node_type, slug=slug, status=status,
+                      now=now or iso_now())
+    return "written"
+
+
 def extract_concepts(
     root: Path,
     *,
