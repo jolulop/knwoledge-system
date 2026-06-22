@@ -172,6 +172,22 @@ def test_get_review_malformed_marks_parse_error(tmp_path):
 # --- preview: record-only fallback -----------------------------------------
 
 
+def test_decision_apply_required_classification():
+    f = review_read.decision_apply_required
+    # approve of an executor-backed type -> apply needed
+    for t in ("promote_candidate_node", "propose_synthesis", "resolve_contradiction",
+              "deprecate_wiki_page"):
+        assert f(t, "approved") is True
+    # reject only matters for the types with a reject-effect
+    assert f("propose_synthesis", "rejected") is True
+    assert f("resolve_contradiction", "rejected") is True
+    assert f("promote_candidate_node", "rejected") is False
+    assert f("deprecate_wiki_page", "rejected") is False
+    # record-only types and deferrals never require apply
+    assert f("merge_entities", "approved") is False
+    assert f("promote_candidate_node", "deferred") is False
+
+
 def test_record_only_type_is_apply_deferred(tmp_path):
     rv = tmp_path / "reviews"
     _write_item(rv, "pending", _item("rev_m", "merge_entities",

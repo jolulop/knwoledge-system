@@ -31,6 +31,8 @@ from app.backend.models import (
     NormalizedResponse,
     QueryRequest,
     QueryResponse,
+    ReviewDecisionRequest,
+    ReviewDecisionResponse,
     ReviewDetailResponse,
     ReviewListResponse,
     SearchResponse,
@@ -43,7 +45,7 @@ from app.backend.policy import load_retrieval_policy, load_yaml
 from app.llm.adapters import AdapterError
 from app.llm.cache import ResponseCache
 from app.llm.client import ConfigError, ParseError, build_client
-from app.workers import extract, intake, query, wiki
+from app.workers import extract, intake, query, reviews, wiki
 from app.workers.wiki_render import parse_frontmatter, render_query_page
 
 # Hosts on which serving the unauthenticated API is acceptable (loopback only).
@@ -362,6 +364,66 @@ def get_review(review_id: str) -> dict[str, Any]:
     if result is None or result.get("parse_error") or result.get("schema_error"):
         raise HTTPException(status_code=404, detail=f"review not found: {review_id}")
     return result
+
+
+def _record_decision(
+    review_id: str, decision: str, body: ReviewDecisionRequest | None
+) -> dict[str, Any]:
+    """Record a human decision (record-only; ADR-0035 decision 3). No effect is applied here.
+
+    A recorded terminal decision (approved/rejected) is immutable: re-sending the same decision is an
+    idempotent no-op (``decision_recorded: false``); trying to flip it is a 409. A pending or deferred
+    item can be approved/rejected/deferred. Missing/corrupt item -> 404.
+    """
+    note = body.note if body else ""
+    item, error = review_read.find_review(settings.reviews_dir, review_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail=f"review not found: {review_id}")
+    current = item.get("status")
+    rtype = str(item.get("type"))
+    if current in ("approved", "rejected"):
+        if current != decision:
+            raise HTTPException(
+                status_code=409,
+                detail=f"review {review_id} already decided as {current}; decisions are immutable")
+        recorded, final = False, current  # idempotent: same terminal decision re-sent
+    elif decision == "deferred":
+        recorded = reviews.defer_review_item(settings.reviews_dir, review_id, note=note)
+        final = "deferred"
+    else:
+        recorded = reviews.resolve_review_item(
+            settings.reviews_dir, review_id, decision=decision, decided_by="human", note=note)
+        final = decision
+    return {
+        "review_id": review_id,
+        "decision_recorded": recorded,
+        "status": final,
+        "apply_required": review_read.decision_apply_required(rtype, final),
+    }
+
+
+@app.post("/reviews/{review_id}/approve", response_model=ReviewDecisionResponse)
+def approve_review(
+    review_id: str, body: ReviewDecisionRequest | None = None
+) -> dict[str, Any]:
+    """Record an approval (record-only). The effect is applied later by POST /reviews/apply."""
+    return _record_decision(review_id, "approved", body)
+
+
+@app.post("/reviews/{review_id}/reject", response_model=ReviewDecisionResponse)
+def reject_review(
+    review_id: str, body: ReviewDecisionRequest | None = None
+) -> dict[str, Any]:
+    """Record a rejection (record-only)."""
+    return _record_decision(review_id, "rejected", body)
+
+
+@app.post("/reviews/{review_id}/defer", response_model=ReviewDecisionResponse)
+def defer_review(
+    review_id: str, body: ReviewDecisionRequest | None = None
+) -> dict[str, Any]:
+    """Defer a decision: keep the item in pending/ with status: deferred (record-only)."""
+    return _record_decision(review_id, "deferred", body)
 
 
 def _open_graph_safe() -> Any:

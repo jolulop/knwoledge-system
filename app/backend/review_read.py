@@ -61,9 +61,26 @@ EXECUTOR_BY_TYPE = {
 DEPRECATION_SCOPE_DIRS = frozenset(
     {"Claims", "Concepts", "Entities", "People", "Organizations", "Projects"})
 
+# Executor-backed types whose *rejection* still carries a deterministic reject-effect to apply (node
+# -> deprecated_candidate / edge -> rejected). For promote/deprecate a rejection owes no world change.
+_REJECT_HAS_EFFECT = frozenset({"propose_synthesis", "resolve_contradiction"})
+
 _PRIORITY_RANK = {"high": 3, "medium": 2, "low": 1}
 # The four list-filter statuses are exactly the review lifecycle statuses (reviews.REVIEW_STATUSES):
 # pending/approved/rejected/deferred (ADR-0018). deferred lives in pending/ but is filtered by field.
+
+
+def decision_apply_required(review_type: str, decision: str) -> bool:
+    """Whether ``POST /reviews/apply`` is relevant to a recorded decision (Phase 6 slice 6-2).
+
+    True only for decisions a deterministic executor will realize: an approval of any executor-backed
+    type, and a rejection of ``propose_synthesis``/``resolve_contradiction`` (which carry a reject-
+    effect). Record-only types, deferrals, and the no-effect rejections (promote/deprecate) are False.
+    Type-level hint only — the apply step still reports per-item skips (e.g. out-of-scope deprecation).
+    """
+    if decision not in ("approved", "rejected") or review_type not in EXECUTOR_BY_TYPE:
+        return False
+    return decision == "approved" or review_type in _REJECT_HAS_EFFECT
 
 
 def _synthesis_id(topic_node_id: str) -> str:

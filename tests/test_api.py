@@ -982,3 +982,86 @@ def test_reviews_detail_no_server_path_leak(client, tmp_path):
         "context": {"node_type": "claim"}})
     raw = client.get("/reviews/rev_d").text
     assert str(tmp_path) not in raw
+
+
+# --- Phase 6 slice 6-2: decision endpoints (record-only) -------------------
+
+
+def _pending_promote(tmp_path, rid="rev_a"):
+    _write_review(tmp_path, "pending", {
+        "review_id": rid, "type": "promote_candidate_node", "status": "pending",
+        "subject": {"node_id": "cpt_1"}, "proposal": {"to_status": "active", "node_type": "concept"},
+        "context": {}})
+
+
+def test_approve_records_decision_and_moves_to_approved(client, tmp_path):
+    _pending_promote(tmp_path)
+    resp = client.post("/reviews/rev_a/approve", json={"note": "ok"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body == {"review_id": "rev_a", "decision_recorded": True, "status": "approved",
+                    "apply_required": True}
+    assert (tmp_path / "reviews" / "approved" / "rev_a.json").exists()
+    assert not (tmp_path / "reviews" / "pending" / "rev_a.json").exists()
+    assert (tmp_path / "reviews" / "audit_log" / "rev_a-approved.json").exists()
+
+
+def test_approve_without_body_works(client, tmp_path):
+    _pending_promote(tmp_path)
+    assert client.post("/reviews/rev_a/approve").status_code == 200
+
+
+def test_reject_records_decision(client, tmp_path):
+    _pending_promote(tmp_path)
+    body = client.post("/reviews/rev_a/reject").json()
+    # rejected promotion owes no apply
+    assert body["status"] == "rejected" and body["apply_required"] is False
+    assert (tmp_path / "reviews" / "rejected" / "rev_a.json").exists()
+
+
+def test_defer_keeps_pending_with_deferred_status(client, tmp_path):
+    _pending_promote(tmp_path)
+    body = client.post("/reviews/rev_a/defer").json()
+    assert body == {"review_id": "rev_a", "decision_recorded": True, "status": "deferred",
+                    "apply_required": False}
+    page = tmp_path / "reviews" / "pending" / "rev_a.json"
+    assert page.exists() and json.loads(page.read_text())["status"] == "deferred"
+    # deferred is excluded from the default queue but reachable via ?status=deferred
+    assert client.get("/reviews").json()["count"] == 0
+    assert [it["review_id"] for it in client.get(
+        "/reviews", params={"status": "deferred"}).json()["items"]] == ["rev_a"]
+
+
+def test_deferred_item_can_then_be_approved(client, tmp_path):
+    _pending_promote(tmp_path)
+    client.post("/reviews/rev_a/defer")
+    body = client.post("/reviews/rev_a/approve").json()
+    assert body["decision_recorded"] is True and body["status"] == "approved"
+    assert (tmp_path / "reviews" / "approved" / "rev_a.json").exists()
+
+
+def test_same_decision_is_idempotent(client, tmp_path):
+    _pending_promote(tmp_path)
+    client.post("/reviews/rev_a/approve")
+    again = client.post("/reviews/rev_a/approve").json()
+    assert again == {"review_id": "rev_a", "decision_recorded": False, "status": "approved",
+                     "apply_required": True}
+
+
+def test_flipping_a_recorded_decision_is_409(client, tmp_path):
+    _pending_promote(tmp_path)
+    client.post("/reviews/rev_a/approve")
+    assert client.post("/reviews/rev_a/reject").status_code == 409
+    assert client.post("/reviews/rev_a/defer").status_code == 409
+
+
+def test_decision_on_missing_review_is_404(client, tmp_path):
+    assert client.post("/reviews/rev_nope/approve").status_code == 404
+
+
+def test_decision_apply_required_true_for_contradiction_reject(client, tmp_path):
+    _write_review(tmp_path, "pending", {
+        "review_id": "rev_c", "type": "resolve_contradiction", "status": "pending",
+        "subject": {"claim_a": "clm_1", "claim_b": "clm_2"}, "proposal": {}, "context": {}})
+    body = client.post("/reviews/rev_c/reject").json()
+    assert body["status"] == "rejected" and body["apply_required"] is True

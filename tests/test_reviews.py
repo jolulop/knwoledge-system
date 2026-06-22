@@ -66,3 +66,50 @@ def test_withdraw_only_touches_pending_and_preserves_audit_history(tmp_path):
     assert len(audit) == 2  # both withdrawals recorded, neither overwritten
     # A withdraw is a no-op once nothing is pending (terminal human decisions are untouched).
     assert reviews.withdraw_review_item(rdir, rid) is False
+
+
+def _file(rdir, rtype="promote_candidate_node", subj=None):
+    return reviews.create_review_item(rdir, review_type=rtype,
+                                      subject=subj or {"node_id": "cpt_x"}, proposal={}, now="t")
+
+
+def test_defer_keeps_item_in_pending_with_deferred_status_and_audits(tmp_path):
+    rdir = tmp_path / "reviews"
+    rid = _file(rdir)
+    assert reviews.defer_review_item(rdir, rid, note="later") is True
+    page = rdir / "pending" / f"{rid}.json"
+    assert page.exists()  # stays in pending/, no deferred/ dir
+    data = json.loads(page.read_text())
+    assert data["status"] == "deferred" and data["decided_by"] == "human"
+    assert data["decision_note"] == "later"
+    assert len(list((rdir / "audit_log").glob(f"{rid}-deferred-*.json"))) == 1
+
+
+def test_defer_is_idempotent_no_duplicate_audit(tmp_path):
+    rdir = tmp_path / "reviews"
+    rid = _file(rdir)
+    assert reviews.defer_review_item(rdir, rid) is True
+    assert reviews.defer_review_item(rdir, rid) is False  # already deferred
+    assert len(list((rdir / "audit_log").glob(f"{rid}-deferred-*.json"))) == 1
+
+
+def test_deferred_item_can_still_be_resolved(tmp_path):
+    rdir = tmp_path / "reviews"
+    rid = _file(rdir)
+    reviews.defer_review_item(rdir, rid)
+    assert reviews.resolve_review_item(rdir, rid, decision="approved", now="t2") is True
+    assert (rdir / "approved" / f"{rid}.json").exists()
+    assert not (rdir / "pending" / f"{rid}.json").exists()
+
+
+def test_defer_refuses_already_resolved_item(tmp_path):
+    rdir = tmp_path / "reviews"
+    rid = _file(rdir)
+    reviews.resolve_review_item(rdir, rid, decision="approved", now="t2")
+    assert reviews.defer_review_item(rdir, rid) is False  # terminal record untouched
+    assert json.loads((rdir / "approved" / f"{rid}.json").read_text())["status"] == "approved"
+
+
+def test_defer_no_op_when_not_pending(tmp_path):
+    rdir = tmp_path / "reviews"
+    assert reviews.defer_review_item(rdir, "rev_missing") is False

@@ -403,3 +403,18 @@ class ReviewDetailResponse(BaseModel):
     # GET /reviews/{id} — the full stored item plus its preview projection.
     item: ReviewItem
     preview: ReviewPreview
+
+
+class ReviewDecisionRequest(BaseModel):
+    # Optional body for the decision endpoints (Phase 6 slice 6-2). Loopback single-user, so the
+    # decider is server-fixed ("human"); only an optional free-text note is accepted.
+    note: str = ""
+
+
+class ReviewDecisionResponse(BaseModel):
+    # POST /reviews/{id}/approve|reject|defer — record-only (ADR-0035 decision 3). No effect is applied
+    # here; apply_required flags whether a later POST /reviews/apply is relevant to this decision.
+    review_id: str
+    decision_recorded: bool
+    status: str
+    apply_required: bool

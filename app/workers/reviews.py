@@ -145,3 +145,47 @@ def resolve_review_item(
         "note": note,
     }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return True
+
+
+def defer_review_item(
+    reviews_dir: Path,
+    review_id: str,
+    *,
+    decided_by: str = "human",
+    note: str = "",
+    now: str | None = None,
+) -> bool:
+    """Defer a still-pending item: keep it in `pending/` with `status: deferred` + an audit entry.
+
+    A deferral is explicitly *not* terminal — there is no `deferred/` dir. The item stays in
+    `pending/` so it can still be approved/rejected later (`resolve_review_item` finds it there); the
+    explicit `status` field is what marks it deferred, so `GET /reviews?status=pending` excludes it
+    while `?status=deferred` surfaces it (ADR-0035 A3). Idempotent: a no-op (no duplicate audit) when
+    the item is already deferred, already resolved (approved/rejected), or not pending. Returns True
+    iff it deferred this call. `resolve_review_item` only does approved|rejected, so defer is its own
+    review-service primitive (Phase 6 slice 6-2).
+    """
+    reviews_dir = Path(reviews_dir)
+    # An already-resolved item is a terminal human record — not deferrable.
+    if (reviews_dir / "approved" / f"{review_id}.json").exists() or \
+       (reviews_dir / "rejected" / f"{review_id}.json").exists():
+        return False
+    src = reviews_dir / "pending" / f"{review_id}.json"
+    if not src.exists():
+        return False
+    item = json.loads(src.read_text(encoding="utf-8"))
+    if item.get("status") == "deferred":
+        return False  # idempotent: already deferred, no duplicate audit
+    now = now or iso_now()
+    item.update(status="deferred", decided_by=decided_by, decided_at=now, decision_note=note)
+    src.write_text(json.dumps(item, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    audit = reviews_dir / "audit_log"
+    audit.mkdir(parents=True, exist_ok=True)
+    # A deferral is non-terminal (the item may later be re-opened to a real decision), so use a
+    # unique suffix rather than overwriting — mirrors `withdraw_review_item`.
+    (audit / f"{review_id}-deferred-{uuid.uuid4().hex[:8]}.json").write_text(json.dumps({
+        "review_id": review_id, "type": item.get("type"), "decision": "deferred",
+        "decided_by": decided_by, "decided_at": now, "subject": item.get("subject"),
+        "note": note,
+    }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return True
