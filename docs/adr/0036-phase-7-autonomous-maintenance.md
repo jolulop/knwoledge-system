@@ -8,7 +8,7 @@ ADR-0027 (response cache). Read `policies/retention.yaml` and Build Spec §9.2/�
 
 > [!summary]
 > Phase 7 adds **maintenance passes** — deterministic, job-recorded, **detect-and-propose** operations
-> (`/jobs/lint`, `/jobs/reindex`, `/jobs/stale-check`, eval) that surface health problems and file
+> (`/jobs/lint`, `/jobs/reindex`, `/jobs/stale-check`) that surface health problems and file
 > review items for anything semantic/destructive, acting autonomously only on safe non-destructive ops.
 > **No scheduler/daemon** (scheduling is an OS-cron recipe the operator opts into). Retention is made
 > *actionable* via a reversible **`archive_source`** executor (status transition only); **raw bytes are
@@ -114,8 +114,11 @@ effect.
   **`review_items_existing`** (already in the ledger, not re-created), so reruns over a populated queue
   don't overstate new work.
 
-**9. Eval job is report-only.** Runs the golden questions (`evals/golden_questions.yaml`) and returns
-pass/fail + per-case results as a regression signal. **No review items, no world mutation.**
+**9. Eval as a runtime job is deferred (superseded by decision 14).** The original intent was a
+report-only job over `evals/golden_questions.yaml`, but that file is a **fake-adapter CI fixture**, not a
+real-vault corpus — see decision 14. v1 ships **no eval job** and **no `/evals/run`** endpoint (a
+documented deviation from Build Spec §13.5); the regression gate stays the CI suites + a manual smoke
+recipe. A real-vault eval is future work.
 
 **10. Cache purge = candidate detection only.** The retention pass detects expired/oversize
 `db/llm_cache.sqlite` entries (per `policies/retention.yaml` `cache_ttl_days`/`cache_max_mb`) and files a
@@ -155,16 +158,47 @@ separate curator store**.
 - **Duplicate detection deferred** out of 7-2: exact SHA duplicates already collapse to one `source_id`;
   semantic/near-duplicate detection (`mark_semantic_duplicate`) needs a separate similarity design.
 
+**14. Slice 7-3 design-lock (2026-06-23 grill) — reindex, cache-purge, cron/no-daemon; eval deferred.**
+- **The runtime eval job is deferred / was over-scoped.** `evals/golden_questions.yaml` is a **fake-adapter
+  CI fixture** (each case carries a `fake.strategy` the canned client executes; the file's own header says
+  real-model answer quality is "a manual/opt-in smoke concern, not this gate"), so it **cannot run as a
+  real-vault eval job**, and no real-vault golden corpus exists. 7-3 ships **no eval job**: the structural
+  regression stays gated by the CI suites (`test_query_evals`, `test_retrieval_evals`), and a **manual,
+  opt-in real-model smoke recipe lives in `docs/Operations.md`**. A real-vault eval (new golden Q&A corpus,
+  key-required) is future work.
+- **`POST /jobs/reindex`** — a job-recorded pass that runs **`rebuild_index.py` + `reindex_keyword.py`
+  only** (cheap, deterministic, key-free). The **vector** index stays the explicit `reindex_vector.py`
+  (ADR-0033) — **no `vector` parameter** on the endpoint, so maintenance never triggers a surprise
+  embedding-server side effect.
+- **Cache-purge candidate detection — one aggregate, record-only `purge_response_cache`.** Folded into
+  **`/jobs/stale-check`** (the retention pass already reads `policies/retention.yaml`). When the
+  `db/llm_cache.sqlite` exceeds `cache_ttl_days`/`cache_max_mb`, file **one** `purge_response_cache` review
+  item with **stable subject `{"scope": "response_cache"}`** (idempotent — a standing flag, not a flood).
+  It is **record-only forever** — **no executor, never in `_APPLY_TYPES`** — because a bulk purge forfeits
+  LLM reproducibility (ADR-0027) and must stay manual. The proposal/log/API carry **only counts, total
+  size, cap, oldest age, candidate counts** — **never** `response_json`, prompts, model outputs, or cache
+  keys. Detection **never deletes or mutates** the cache. The `/jobs/stale-check` response reports **live
+  cache stats every run** (even when the review item already exists, so the aging review snapshot is never
+  the only visible state): a **missing** cache DB → `cache_present: false`, no finding; a **corrupt/
+  unreadable** cache → a **warning/degraded cache report**, never a reason to skip source-retention checks.
+  `/jobs/stale-check` appends `wiki/log.md` and records job metadata covering **both** source and cache
+  retention.
+- **Cron + no-daemon.** Operator cadence is a documented `cron`/`systemd` recipe in **`docs/Operations.md`**
+  (the Phase 7 Plan stays design accounting); a **contract test** asserts importing/serving
+  `app.backend.main` starts **no background thread/scheduler**.
+
 ## 3. Scope (v1) and slices
 
 **In v1:** `/jobs/lint` (structural validators + new semantic checks incl. missing-raw), `/jobs/reindex`
-(cheap deterministic default), `/jobs/stale-check` (+ retention candidate detection); the stale/retention
-**producer** + the reversible **`archive_source` executor** wired into `/reviews/apply`; an **eval** job;
-**cache-purge candidate** detection; an OS-**cron recipe** + the **no-daemon contract test**.
+(index + keyword only, no vector), `/jobs/stale-check` (source retention + **cache-purge candidate**
+detection); the stale/retention **producer** + the reversible **`archive_source` executor** wired into
+`/reviews/apply`; `docs/Operations.md` (OS-**cron recipe** + manual eval smoke) + the **no-daemon contract
+test**.
 
-**Deferred (out of v1):** graph-curator duplicate/merge/split detection + their executors; physical raw
-archival / `include_raw` backup; any scheduler daemon; `hide_content` / `mark_semantic_duplicate`
-executors; cache-purge executor.
+**Deferred (out of v1):** the runtime **eval job** / `/evals/run` (the golden set is a fake CI fixture —
+decision 14); graph-curator duplicate/merge/split detection + their executors; physical raw archival /
+`include_raw` backup; any scheduler daemon; `hide_content` / `mark_semantic_duplicate` executors; the
+cache-purge executor.
 
 **Slices (each committable + validated):**
 - **7-1** — `/jobs/lint` job: structural validators wired as a job-recorded report + new semantic checks
@@ -174,8 +208,9 @@ executors; cache-purge executor.
   duplicate detection (`mark_semantic_duplicate`, record-only) + the reversible **`archive_source`
   executor** (manifest + Source page + graph mirror + reindex) wired into `/reviews/apply`. Rename
   `archive_raw_file → archive_source`.
-- **7-3** — `/jobs/reindex` (deterministic surfaces) + eval job (report-only) + cache-purge candidate
-  detection; cron/backup operator docs + the no-daemon contract test.
+- **7-3** — `/jobs/reindex` (index + keyword only, no vector) + cache-purge candidate detection folded
+  into `/jobs/stale-check` (aggregate record-only `purge_response_cache`); `docs/Operations.md` (cron +
+  manual eval smoke + raw-backup note) + the no-daemon contract test. **No eval job** (decision 14).
 
 ## 4. Consequences
 

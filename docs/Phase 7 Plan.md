@@ -8,19 +8,21 @@ ingest/enrich/retrieve/review machinery; it adds no new runtime and no second au
 
 > [!summary]
 > Phase 7 adds deterministic, job-recorded **maintenance passes** — `/jobs/lint`, `/jobs/reindex`,
-> `/jobs/stale-check`, and an eval job — that **detect health problems and propose** governance review
-> items, acting autonomously only on safe non-destructive ops. **No scheduler/daemon** (OS cron). The one
-> new executor is reversible **`archive_source`** (status transition only); **raw bytes are never moved,
-> rewritten, or deleted**; `delete_raw_file`/merge/split/cache-purge stay record-only.
+> `/jobs/stale-check` — that **detect health problems and propose** governance review items, acting
+> autonomously only on safe non-destructive ops. **No scheduler/daemon** (OS cron). The one new executor is
+> reversible **`archive_source`** (status transition only); **raw bytes are never moved, rewritten, or
+> deleted**; `delete_raw_file`/merge/split/cache-purge stay record-only. *(A runtime eval job is deferred —
+> the golden set is a fake CI fixture; real-vault eval is future work.)*
 
 ---
 
 ## 1. Scope
 **In:** `/jobs/lint` (structural validators + new semantic checks incl. missing-raw) · `/jobs/reindex`
-(cheap deterministic default; vector explicit opt-in) · `/jobs/stale-check` (+ retention candidate
+(index + keyword only, **no vector**) · `/jobs/stale-check` (source retention + **cache-purge candidate**
 detection) · the stale/retention **producer** + reversible **`archive_source` executor** in
-`/reviews/apply` · an **eval** job · **cache-purge candidate** detection · OS-**cron recipe** + a
-**no-daemon contract test**. Rename `archive_raw_file → archive_source`; add `missing_raw_source`.
+`/reviews/apply` · `docs/Operations.md` (OS-**cron recipe** + manual eval smoke) + a **no-daemon contract
+test**. Rename `archive_raw_file → archive_source`; add `missing_raw_source` + `purge_response_cache`.
+**Eval job deferred** (the golden set is a fake-adapter CI fixture; real-vault eval is future work).
 
 **Out / deferred:** any scheduler/daemon; graph-curator duplicate/merge/split detection + their executors;
 `delete_raw_file` / `hide_content` / `mark_semantic_duplicate` / cache-purge **executors** (record-only or
@@ -78,17 +80,27 @@ A job-recorded health pass that **completes and reports**, even when health fail
 
 ---
 
-## 4. Reindex / eval / cache (slice 7-3)
-- **`/jobs/reindex`** — `rebuild_index.py` + `reindex_keyword.py` only (cheap, deterministic). Vector
-  reindex is **explicit opt-in** (ADR-0033), never a default side effect. Job-recorded.
-- **Eval job** — runs `evals/golden_questions.yaml`; returns pass/fail + per-case results. **Report-only:
-  no review items, no mutation.**
-- **Cache-purge candidates** — detect expired/oversize `db/llm_cache.sqlite` entries
-  (`cache_ttl_days`/`cache_max_mb`) → review-gated `purge_response_cache` items. **No purge executor**
-  (purge forfeits reproducibility, ADR-0027).
-- **Operator docs + cron recipe** — a documented `cron`/`systemd` example for cadenced runs (lint weekly,
-  stale monthly, eval weekly, backup daily) and the note that raw-file backup is external/opt-in. **A
-  contract test asserts importing/serving the app starts no scheduler/daemon/background thread.**
+## 4. Reindex / cache / cron (slice 7-3) — design-locked (ADR-0036 decision 14)
+- **`/jobs/reindex`** — job-recorded; runs **`rebuild_index.py` + `reindex_keyword.py` only** (cheap,
+  deterministic, key-free). **No `vector` parameter** — the vector index stays the explicit
+  `reindex_vector.py` (ADR-0033), so maintenance never triggers an embedding-server side effect.
+- **Eval job — deferred (over-scoped).** `golden_questions.yaml` is a fake-adapter CI fixture, so it can't
+  run as a real-vault eval; the regression stays gated by the CI suites (`test_query_evals`,
+  `test_retrieval_evals`), with a **manual opt-in real-model smoke recipe in `docs/Operations.md`**. A
+  real-vault eval corpus is future work.
+- **Cache-purge candidates** — **one aggregate, record-only `purge_response_cache`** review item (stable
+  subject `{"scope": "response_cache"}`), folded into **`/jobs/stale-check`**. Filed when
+  `db/llm_cache.sqlite` exceeds `cache_ttl_days`/`cache_max_mb`. **No executor, never in `_APPLY_TYPES`**
+  (purge forfeits reproducibility, ADR-0027 — manual only). Proposal/log/API carry **only** counts / total
+  size / cap / oldest age / candidate counts — **never** `response_json`/prompts/keys. Detection never
+  deletes or mutates the cache. `/jobs/stale-check` reports **live cache stats every run** (even when the
+  item exists): missing cache DB → `cache_present: false`, no finding; corrupt/unreadable → a
+  **warning/degraded cache report**, never a reason to skip source-retention checks. The pass appends
+  `wiki/log.md` + records metadata for **both** source and cache retention.
+- **Cron + no-daemon** — operator cadence recipe (lint weekly, stale monthly, reindex/backup as desired) +
+  the manual eval-smoke recipe + the external/opt-in raw-backup note go in **`docs/Operations.md`** (the
+  Plan stays design accounting). A **contract test** asserts importing/serving the app starts no
+  scheduler/daemon/background thread.
 
 ---
 
@@ -115,7 +127,7 @@ A job-recorded health pass that **completes and reports**, even when health fail
 |---|---|
 | **7-1** ✅ | `/jobs/lint`: structural validators as a job report + semantic checks (orphan / <2-source concept, uncited claim, **missing-raw** with path confinement + `invalid_raw_path`) → report + governance review items (`deprecate_wiki_page`, `missing_raw_source`); 3-state health (healthy/degraded/failing); filed-vs-existing item counts; `wiki/log.md` append. Tests (12+). *(summary-rot / stale-claim drift deferred to a later heuristics slice.)* |
 | **7-2** ✅ | `manifest["status"]` authority (set_status, Source render, validate_wiki check) + `/jobs/stale-check` producer (`archive_source` + ephemeral `delete_raw_file` record-only candidates; detect-always) + reversible **`apply_archive_sources` executor** in `/reviews/apply` (manifest→page→graph mirror, scope-guarded, schema-safe, keyword reindex, no raw move) + `archive_raw_file→archive_source` rename. Tests (14+). *(duplicate detection deferred.)* |
-| **7-3** | `/jobs/reindex` (deterministic surfaces) + eval job (report-only) + cache-purge candidate detection + cron/backup operator docs + **no-daemon contract test**. Tests. |
+| **7-3** | `/jobs/reindex` (index+keyword only, no vector) + cache-purge candidate detection folded into `/jobs/stale-check` (aggregate record-only `purge_response_cache`, live stats, missing/corrupt-safe) + `docs/Operations.md` (cron recipe + manual eval smoke + raw-backup note) + **no-daemon contract test**. Eval job deferred (golden set is a fake fixture). Tests. |
 
 ---
 
