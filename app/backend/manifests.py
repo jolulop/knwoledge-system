@@ -165,3 +165,32 @@ def set_provenance(manifests_dir: Path, source_id: str, **fields: Any) -> dict[s
     manifest["provenance"] = prov
     save_manifest(manifests_dir, manifest)
     return manifest
+
+
+# Source lifecycle status — the durable retrieval-visibility authority (ADR-0036 decision 13). The
+# manifest carries it (default `active`); the Source page reads it and stays a pure projection, so a
+# wiki regen preserves it. Distinct from `retention_class` (policy category). Matches graph NODE_STATUSES.
+SOURCE_STATUSES = ("active", "stale_candidate", "archive_candidate", "archived",
+                   "delete_candidate", "deleted")
+
+
+def get_status(manifest: dict[str, Any]) -> str:
+    """A manifest's source lifecycle status (default ``active`` when unset)."""
+    status = manifest.get("status")
+    return status if status in SOURCE_STATUSES else "active"
+
+
+def set_status(manifests_dir: Path, source_id: str, status: str) -> dict[str, Any] | None:
+    """Set a manifest's source lifecycle status (the single write path); return it or None.
+
+    The only writer of `manifest["status"]` (ADR-0036). Raw bytes are never touched. Reversible:
+    setting `active` un-archives. Validated against SOURCE_STATUSES.
+    """
+    if status not in SOURCE_STATUSES:
+        raise ValueError(f"unknown source status {status!r}; allowed: {list(SOURCE_STATUSES)}")
+    manifest = load_manifest(manifests_dir, source_id)
+    if manifest is None:
+        return None
+    manifest["status"] = status
+    save_manifest(manifests_dir, manifest)
+    return manifest

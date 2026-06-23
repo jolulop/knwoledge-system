@@ -445,6 +445,22 @@ class LintFinding(BaseModel):
     detail: str = ""
 
 
+class StaleCheckResponse(BaseModel):
+    # POST /jobs/stale-check (Phase 7, ADR-0036). Detect-and-propose: files archive_source candidates
+    # (stale active sources) + delete_raw_file candidates (ephemeral past window, record-only). Changes
+    # no status itself. *_filed = newly created this run; *_existing = already in the ledger.
+    job_id: str
+    considered: int
+    archive_candidates: int          # detected (regardless of filing)
+    archive_candidates_filed: int    # newly created this run
+    archive_candidates_existing: int  # already in the ledger
+    delete_candidates: int
+    delete_candidates_filed: int
+    delete_candidates_existing: int
+    archive_review_items_filed: list[str] = []
+    delete_review_items_filed: list[str] = []
+
+
 class LintResponse(BaseModel):
     # POST /jobs/lint (Phase 7, ADR-0036). Detect-and-propose health pass; lint health is an outcome,
     # not an abort (none of these are HTTP errors). `status`: "failing" (a validator failed or a

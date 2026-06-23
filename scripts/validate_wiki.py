@@ -27,7 +27,10 @@ _REQUIRED_FIELDS = (
     "status", "ingestion_status", "summary_status", "generation_status",
     "input_fingerprint",
 )
-_VALID_STATUS = {"active", "candidate", "deprecated_candidate", "archive_candidate", "archived"}
+# Full lifecycle vocabulary (matches graph NODE_STATUSES + manifests.SOURCE_STATUSES, ADR-0036) so any
+# valid manifest/page status round-trips through the validator.
+_VALID_STATUS = {"active", "candidate", "stale_candidate", "deprecated_candidate", "archive_candidate",
+                 "archived", "delete_candidate", "deleted"}
 _VALID_GENERATION = {"deterministic", "enriched", "human_edited"}
 _VALID_SUMMARY = {"stub", "enriched"}
 _WIKILINK = re.compile(r"\[\[([^\]]+)\]\]")
@@ -83,6 +86,11 @@ def _check_page(root: Path, path: Path, manifests: dict[str, dict]) -> list[str]
             errors.append(f"{sid}: chunk_count {fm.get('chunk_count')} != manifest")
         if fm.get("ingestion_status") != manifest.get("ingestion_status"):
             errors.append(f"{sid}: ingestion_status does not match manifest")
+        # The manifest is the durable source lifecycle-status authority (ADR-0036 decision 13); the
+        # page is a projection of it (default active when unset).
+        if fm.get("status") != (manifest.get("status") or "active"):
+            errors.append(f"{sid}: page status {fm.get('status')!r} != manifest "
+                          f"{manifest.get('status') or 'active'!r}")
 
     # Lifecycle fields use the controlled vocabularies (ADR-0018/0022).
     if fm.get("status") and fm["status"] not in _VALID_STATUS:

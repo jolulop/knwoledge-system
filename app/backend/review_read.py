@@ -32,7 +32,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from app.backend import graph
+from app.backend import graph, manifests
 from app.workers.reviews import PRIORITIES, REVIEW_STATUSES
 from app.workers.wiki_render import parse_frontmatter
 
@@ -55,6 +55,8 @@ EXECUTOR_BY_TYPE = {
     "propose_synthesis": "apply_resolved_syntheses",
     "resolve_contradiction": "apply_contradiction_decisions",
     "deprecate_wiki_page": "apply_approved_deprecations",
+    # Phase 7: reversible source archive (active -> archive_candidate), ADR-0036 decision 13.
+    "archive_source": "apply_archive_sources",
 }
 
 # Wiki subdirs the scoped deprecation executor may touch in v1 (ADR-0035 A5). A deprecate item whose
@@ -256,6 +258,14 @@ def _safe_wiki_subpath(wiki_dir: Path, page: str) -> Path | None:
     except ValueError:
         return None
     return resolved
+
+
+def _manifest_status(manifests_dir: Path | None, source_id: str | None) -> str | None:
+    """A source's lifecycle status from the manifest (the authority, ADR-0036), or None if unreadable."""
+    if manifests_dir is None or not source_id:
+        return None
+    m = manifests.load_manifest(Path(manifests_dir), source_id)
+    return manifests.get_status(m) if m is not None else None
 
 
 def _page_frontmatter(wiki_dir: Path | None, page: str | None) -> dict[str, Any] | None:
@@ -526,17 +536,62 @@ def preview_deprecate_wiki_page(
 
 # Per-type projection registry (ADR-0035 A1). Every executor-backed type has a dedicated projector;
 # all other (record-only) types fall through to record_only_preview, so the ledger is type-complete.
+def _effect_archive_source(item: dict[str, Any], wiki_dir: Path | None,
+                           manifests_dir: Path | None) -> tuple[str, list[str]]:
+    status = item.get("status")
+    if status not in ("approved", "rejected"):
+        return PENDING_APPLY, []
+    if status == "rejected":
+        return NO_EFFECT_REQUIRED, []  # a rejected archive leaves the source active; nothing to apply
+    sid = (item.get("subject") or {}).get("source_id")
+    # The manifest is the lifecycle-status authority (ADR-0036 decision 13); the page is a mirror.
+    ms = _manifest_status(manifests_dir, sid)
+    if ms is None:
+        return UNKNOWN, ["manifest_unreadable"]
+    warnings: list[str] = []
+    fm = _page_frontmatter(wiki_dir, f"Sources/{sid}.md") if sid else None
+    if fm is not None and fm.get("status") != ms:
+        warnings.append("page_manifest_drift")  # the page mirror disagrees with the authority
+    return (EFFECTED if ms == "archive_candidate" else PENDING_APPLY), warnings
+
+
+def preview_archive_source(item: dict[str, Any], *, gconn: Any, wiki_dir: Path | None,
+                           manifests_dir: Path | None = None) -> dict[str, Any]:
+    subj = item.get("subject") or {}
+    proposal = item.get("proposal") or {}
+    sid = subj.get("source_id")
+    out = _scaffold(item)
+    out["node_ids"] = [sid] if sid else []
+    out["affected_paths"] = [f"Sources/{sid}.md"] if sid else []
+    out["proposed_status"] = "archive_candidate"
+    out["proposed_action"] = "archive source (active -> archive_candidate; excluded from default retrieval)"
+    out["summary"] = f"Archive source {sid} ({proposal.get('reason', 'stale')})."
+    out["current_status"] = _manifest_status(manifests_dir, sid)  # authority, not the page
+    effect_status, warnings = _effect_archive_source(item, wiki_dir, manifests_dir)
+    out["apply"] = _apply_supported(EXECUTOR_BY_TYPE["archive_source"], effect_status, warnings)
+    out["details"] = {"reason": proposal.get("reason"), "age_days": proposal.get("age_days")}
+    return out
+
+
 _PROJECTORS = {
     "promote_candidate_node": preview_promote_candidate_node,
     "propose_synthesis": preview_propose_synthesis,
     "resolve_contradiction": preview_resolve_contradiction,
     "deprecate_wiki_page": preview_deprecate_wiki_page,
+    "archive_source": preview_archive_source,
 }
 
 
-def project_review(item: dict[str, Any], *, gconn: Any, wiki_dir: Path | None) -> dict[str, Any]:
-    """Build the normalized preview for one item via the per-type registry (record-only fallback)."""
-    projector = _PROJECTORS.get(str(item.get("type")), record_only_preview)
+def project_review(item: dict[str, Any], *, gconn: Any, wiki_dir: Path | None,
+                   manifests_dir: Path | None = None) -> dict[str, Any]:
+    """Build the normalized preview for one item via the per-type registry (record-only fallback).
+
+    Only the archive projector needs the manifest (its status authority); the others read graph/page.
+    """
+    rtype = str(item.get("type"))
+    projector = _PROJECTORS.get(rtype, record_only_preview)
+    if rtype == "archive_source":
+        return projector(item, gconn=gconn, wiki_dir=wiki_dir, manifests_dir=manifests_dir)
     return projector(item, gconn=gconn, wiki_dir=wiki_dir)
 
 
@@ -569,6 +624,7 @@ def get_review(
     *,
     graph_db: Path | None = None,
     wiki_dir: Path | None = None,
+    manifests_dir: Path | None = None,
 ) -> dict[str, Any] | None:
     """Return ``{item, preview}`` for one review id, or ``None`` if not found.
 
@@ -585,7 +641,7 @@ def get_review(
         return None
     conn = _open_graph_readonly(graph_db)
     try:
-        preview = project_review(item, gconn=conn, wiki_dir=wiki_dir)
+        preview = project_review(item, gconn=conn, wiki_dir=wiki_dir, manifests_dir=manifests_dir)
     finally:
         if conn is not None:
             conn.close()

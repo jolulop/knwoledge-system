@@ -233,6 +233,10 @@ def build_source_values(
     return {
         "source_id": sid,
         "title": title,
+        # Source lifecycle status authority is the manifest (default active, ADR-0036 decision 13;
+        # validated at the write path manifests.set_status). Templatized so it flows into the page +
+        # its input_fingerprint — a status change re-renders the Source page.
+        "status": manifest.get("status") or "active",
         "relative_raw_path": manifest.get("relative_raw_path", ""),
         "normalized_path": normalized.get("markdown_path", f"normalized/markdown/{sid}.md"),
         "sha256": manifest.get("sha256", ""),

@@ -1,7 +1,7 @@
 # ADR-0036 — Phase 7: Autonomous Maintenance
 
-**Status:** Accepted (design-locked 2026-06-23 via grill gate). **Slice 7-1 (`/jobs/lint`) implemented**;
-7-2/7-3 pending.
+**Status:** Accepted (design-locked 2026-06-23 via grill gate). **Slices 7-1 (`/jobs/lint`) and 7-2
+(stale/retention + `archive_source` executor) implemented**; 7-3 pending.
 **Supersedes/extends:** ADR-0004 (Claude Code = supervised maintenance), ADR-0002/0024 (raw immutable),
 ADR-0018/0035 (review ledger + decoupled apply), ADR-0032 §8 (retention-aware retrieval),
 ADR-0027 (response cache). Read `policies/retention.yaml` and Build Spec §9.2/§12.
@@ -63,7 +63,8 @@ legitimately fresh vault.
 node mirror**, then reindex — the same render-path-mirror pattern Phase 6's deprecation executor uses. It
 is **not** a physical move or delete. Archived material **stays indexed** with status metadata and is
 **excluded from default retrieval/navigation via the existing status filter** — an explicit
-`source_status=archived` still finds it. This is already plumbed: `graph.NODE_STATUSES` already includes
+an explicit status filter that includes `archive_candidate` still finds it. This is already plumbed:
+`graph.NODE_STATUSES` already includes
 `stale_candidate/archive_candidate/archived/delete_candidate/deleted`, and
 `search.RETENTION_DEFAULT_STATUSES = ("active", "deprecated_candidate")` already excludes everything else
 unless a caller asks (ADR-0032 §8). The executor sets the status; the existing retrieval filter does the

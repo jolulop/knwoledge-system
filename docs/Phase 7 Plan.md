@@ -1,7 +1,7 @@
 # Phase 7 Plan — Autonomous Maintenance
 
-**Status:** In progress — **slice 7-1 (`/jobs/lint`) implemented**; 7-2/7-3 pending (design-locked
-2026-06-23 via grill gate).
+**Status:** In progress — **slices 7-1 (`/jobs/lint`) and 7-2 (stale/retention + `archive_source`)
+implemented**; 7-3 pending (design-locked 2026-06-23 via grill gate).
 **Governing ADR:** [ADR-0036](adr/0036-phase-7-autonomous-maintenance.md). Read it first.
 **Predecessors:** Phases 1–6 complete + pushed. Phase 7 builds the maintenance surface over the existing
 ingest/enrich/retrieve/review machinery; it adds no new runtime and no second authority.
@@ -97,7 +97,8 @@ A job-recorded health pass that **completes and reports**, even when health fail
   appends `wiki/log.md`.
 - Retention: an old source proposes `archive_source`; ephemeral past policy proposes `delete_raw_file`
   (record-only); **no raw mutation**. Approved `archive_source` → status flips on manifest+page+graph,
-  source excluded from default retrieval but found via `source_status=archived`; idempotent.
+  source excluded from default retrieval but found via an explicit status filter including
+  `archive_candidate`; idempotent.
 - Raw-missing: a missing manifest occurrence → high-severity finding + `missing_raw_source` (not a clean
   pass, not an aborted run).
 - Idempotency: producers over the existing large pending queue file no duplicates on rerun.
@@ -113,7 +114,7 @@ A job-recorded health pass that **completes and reports**, even when health fail
 | Slice | Deliverable |
 |---|---|
 | **7-1** ✅ | `/jobs/lint`: structural validators as a job report + semantic checks (orphan / <2-source concept, uncited claim, **missing-raw** with path confinement + `invalid_raw_path`) → report + governance review items (`deprecate_wiki_page`, `missing_raw_source`); 3-state health (healthy/degraded/failing); filed-vs-existing item counts; `wiki/log.md` append. Tests (12+). *(summary-rot / stale-claim drift deferred to a later heuristics slice.)* |
-| **7-2** | `/jobs/stale-check` retention producer (`archive_source` candidates, `delete_raw_file`/`mark_semantic_duplicate` record-only) + reversible **`archive_source` executor** in `/reviews/apply` (manifest+page+graph mirror, reindex, no raw move) + `archive_raw_file→archive_source` rename. Tests. |
+| **7-2** ✅ | `manifest["status"]` authority (set_status, Source render, validate_wiki check) + `/jobs/stale-check` producer (`archive_source` + ephemeral `delete_raw_file` record-only candidates; detect-always) + reversible **`apply_archive_sources` executor** in `/reviews/apply` (manifest→page→graph mirror, scope-guarded, schema-safe, keyword reindex, no raw move) + `archive_raw_file→archive_source` rename. Tests (14+). *(duplicate detection deferred.)* |
 | **7-3** | `/jobs/reindex` (deterministic surfaces) + eval job (report-only) + cache-purge candidate detection + cron/backup operator docs + **no-daemon contract test**. Tests. |
 
 ---

@@ -33,6 +33,7 @@ from app.backend.models import (
     LintResponse,
     NormalizedResponse,
     QueryRequest,
+    StaleCheckResponse,
     QueryResponse,
     ReviewApplyResponse,
     ReviewDecisionRequest,
@@ -50,7 +51,8 @@ from app.llm.adapters import AdapterError
 from app.llm.cache import ResponseCache
 from app.llm.client import ConfigError, ParseError, build_client
 from app.workers import (
-    contradictions, deprecations, extract, intake, lint, promote, query, reviews, synthesis, wiki,
+    contradictions, deprecations, extract, intake, lint, promote, query, retention, reviews,
+    synthesis, wiki,
 )
 from app.workers.wiki_render import parse_frontmatter, render_query_page
 
@@ -363,8 +365,8 @@ def get_review(review_id: str) -> dict[str, Any]:
     actual wiki/graph state. A corrupt review file is a 404 (the queue never crashes on bad JSON).
     """
     result = review_read.get_review(
-        settings.reviews_dir, review_id,
-        graph_db=settings.graph_db_path, wiki_dir=settings.wiki_dir)
+        settings.reviews_dir, review_id, graph_db=settings.graph_db_path,
+        wiki_dir=settings.wiki_dir, manifests_dir=settings.manifests_dir)
     # A missing, corrupt, or schema-invalid review file is a 404 (the read model never 500s on bad
     # queue state; the parse_error/schema_error markers are diagnostic only).
     if result is None or result.get("parse_error") or result.get("schema_error"):
@@ -435,7 +437,12 @@ def defer_review(
 # Review types POST /reviews/apply has a deterministic executor for (ADR-0035 A4/A5). Any other
 # approved type is reported honestly as `unapplied` (record-only / raw-touching / identity-changing).
 _APPLY_TYPES = frozenset({
-    "propose_synthesis", "resolve_contradiction", "promote_candidate_node", "deprecate_wiki_page"})
+    "propose_synthesis", "resolve_contradiction", "promote_candidate_node", "deprecate_wiki_page",
+    "archive_source"})
+# Types whose application *requires* the graph (so a missing graph with such approved items -> 503).
+# archive_source is executor-backed but NOT graph-required — its core effect is manifest + Source page;
+# the graph source-node mirror is best-effort (skipped when the graph is absent).
+_GRAPH_REQUIRED_TYPES = _APPLY_TYPES - {"archive_source"}
 
 
 def _rebuild_index_status(root: Path) -> str:
@@ -457,7 +464,7 @@ def _run_all_validators(root: Path) -> list[dict[str, Any]]:
 
 
 def _approved_graph_backed_count(reviews_dir: Path) -> int:
-    """Count approved items whose application needs the graph (every executor-backed type does)."""
+    """Count approved items whose application *requires* the graph (archive_source is excluded)."""
     n = 0
     d = reviews_dir / "approved"
     for path in sorted(d.glob("*.json")) if d.exists() else []:
@@ -465,7 +472,7 @@ def _approved_graph_backed_count(reviews_dir: Path) -> int:
             item = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if isinstance(item, dict) and item.get("type") in _APPLY_TYPES:
+        if isinstance(item, dict) and item.get("type") in _GRAPH_REQUIRED_TYPES:
             n += 1
     return n
 
@@ -512,7 +519,9 @@ def apply_reviews() -> dict[str, Any]:
 
     # _open_graph() returns None if the graph doesn't exist yet (nothing to apply against) and raises
     # a controlled 503 on schema drift. Each executor commits its own graph writes.
-    gconn = _open_graph()  # None if absent (raises a controlled 503 on schema drift)
+    # Safe open: None on absent OR schema-mismatch (archive doesn't need the graph, so an unrelated
+    # graph problem must not block an archive-only apply). 503 only when graph-required items are waiting.
+    gconn = _open_graph_safe()
     if gconn is not None:
         try:
             syntheses = synthesis.apply_resolved_syntheses(
@@ -526,18 +535,26 @@ def apply_reviews() -> dict[str, Any]:
         finally:
             gconn.close()
     elif _approved_graph_backed_count(reviews_dir):
-        # The graph is gone but approved graph-backed decisions are waiting — fail loudly rather than
-        # report a silent "applied" (and BEFORE promote_candidates would init an empty graph).
+        # The graph is unavailable (absent or schema-mismatched) but approved graph-required decisions
+        # are waiting — fail loudly rather than report a silent "applied" (and BEFORE promote_candidates
+        # would init an empty graph). archive_source is NOT graph-required, so it doesn't trigger this.
         raise HTTPException(
             status_code=503,
             detail="graph index unavailable; rebuild db/graph.sqlite before applying reviews")
 
     promo = promote.promote_candidates(root, rebuild_index=False, record_job=False)
 
+    # Phase 7: reversible source archive (active -> archive_candidate; ADR-0036). Own graph conn +
+    # per-source page re-render; raw bytes untouched.
+    archive = retention.apply_archive_sources(
+        root, manifests_dir=settings.manifests_dir, reviews_dir=reviews_dir, wiki_dir=wiki_dir,
+        graph_db=settings.graph_db_path, now=now)
+
     # pages_changed counts every page write: contradiction re-projections, deprecations, the synthesis
-    # pages apply_resolved_syntheses re-rendered, and the concept/entity pages promotion rewrote.
+    # pages apply_resolved_syntheses re-rendered, the concept/entity pages promotion rewrote, archives.
     pages_changed = (len(contra["changed_pages"]) + len(deprec["changed_pages"])
-                     + syntheses["promoted"] + syntheses["rejected"] + promo["promoted"])
+                     + len(archive["changed_pages"]) + syntheses["promoted"] + syntheses["rejected"]
+                     + promo["promoted"])
     changed = bool(pages_changed or contra["resolution"]["acknowledged"]
                    or contra["resolution"]["rejected"] or contra["resolution"]["superseded_executed"])
 
@@ -545,6 +562,13 @@ def apply_reviews() -> dict[str, Any]:
     index_status = _rebuild_index_status(root) if changed else "skipped"
     if index_status == "failed":  # script present but non-zero after real changes — surface it
         warnings.append("index_rebuild_failed")
+    # Refresh the keyword/navigation index so page status changes (archive, deprecation) reach the
+    # retrieval filter (an archived source must drop out of default retrieval). Caller-owned reindex.
+    if changed:
+        try:
+            retention.reindex_keyword(root)
+        except Exception:  # noqa: BLE001 - a reindex failure is a warning, not an apply failure
+            warnings.append("keyword_reindex_failed")
 
     validators = _run_all_validators(root)
     failed = [v for v in validators if v["returncode"] != 0]
@@ -566,6 +590,7 @@ def apply_reviews() -> dict[str, Any]:
             },
             "deprecations": {"applied": deprec["applied"], "normalized": deprec["normalized"],
                              "skipped": deprec["skipped"]},
+            "archives": {"applied": archive["applied"], "skipped": archive["skipped"]},
             "pages_changed": pages_changed,
             "index_rebuilt": index_status == "rebuilt",
             "unapplied": _unapplied_by_type(reviews_dir),
@@ -585,6 +610,15 @@ def run_lint_job() -> dict[str, Any]:
     return lint.run_lint(
         settings.root, manifests_dir=settings.manifests_dir, graph_db=settings.graph_db_path,
         wiki_dir=settings.wiki_dir, reviews_dir=settings.reviews_dir, jobs_db=settings.jobs_db_path)
+
+
+@app.post("/jobs/stale-check", response_model=StaleCheckResponse)
+def run_stale_check_job() -> dict[str, Any]:
+    """Detect stale/ephemeral sources and propose archive/delete candidates (ADR-0036). Acts on nothing;
+    the reversible archive is applied later via POST /reviews/apply."""
+    return retention.run_stale_check(
+        settings.root, manifests_dir=settings.manifests_dir, reviews_dir=settings.reviews_dir,
+        wiki_dir=settings.wiki_dir, jobs_db=settings.jobs_db_path)
 
 
 # --- Human Review UI (server-rendered HTML; ADR-0035 decision 1 + A8) -------
@@ -639,8 +673,8 @@ def ui_apply() -> HTMLResponse:
 @app.get("/ui/reviews/{review_id}", response_class=HTMLResponse)
 def ui_review_detail(review_id: str) -> HTMLResponse:
     result = review_read.get_review(
-        settings.reviews_dir, review_id,
-        graph_db=settings.graph_db_path, wiki_dir=settings.wiki_dir)
+        settings.reviews_dir, review_id, graph_db=settings.graph_db_path,
+        wiki_dir=settings.wiki_dir, manifests_dir=settings.manifests_dir)
     if result is None or result.get("parse_error") or result.get("schema_error"):
         return HTMLResponse(
             review_html.render_error(404, f"review not found: {review_id}"), status_code=404)

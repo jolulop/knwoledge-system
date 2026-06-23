@@ -10,7 +10,7 @@ file_type: "{{file_type}}"
 language: "{{language}}"
 page_count: {{page_count}}
 chunk_count: {{chunk_count}}
-status: active
+status: {{status}}
 ingestion_status: "{{ingestion_status}}"
 summary_status: {{summary_status}}
 generation_status: {{generation_status}}

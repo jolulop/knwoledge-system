@@ -2,7 +2,7 @@ version: 0.1
 policy_name: default_review
 requires_human_approval:
   - delete_raw_file
-  - archive_raw_file
+  - archive_source          # reversible source status transition active -> archive_candidate (ADR-0036, Phase 7)
   - deprecate_wiki_page
   - resolve_contradiction
   - merge_entities
