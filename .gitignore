@@ -50,6 +50,13 @@ wiki/Tags/*.md
 wiki/Synthesis/*.md
 wiki/Queries/*.md
 wiki/.obsidian/
+# Phase 6 review ledger is durable local runtime state, never committed (like wiki/ and db/): the
+# JSON items churn as they are decided/applied, and durability is scripts/backup.py, not git. The
+# per-subdir .gitkeep files stay tracked so the ledger structure exists on a fresh checkout.
+reviews/pending/*.json
+reviews/approved/*.json
+reviews/rejected/*.json
+reviews/audit_log/*.json
 # Inbox is transient staging for scans; keep its contents out of git.
 raw/inbox/*
 !raw/inbox/.gitkeep
