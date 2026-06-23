@@ -1,7 +1,7 @@
 # Phase 7 Plan — Autonomous Maintenance
 
-**Status:** In progress — **slices 7-1 (`/jobs/lint`) and 7-2 (stale/retention + `archive_source`)
-implemented**; 7-3 pending (design-locked 2026-06-23 via grill gate).
+**Status:** ✅ **Complete** — slices 7-1 (`/jobs/lint`), 7-2 (stale/retention + `archive_source`),
+and 7-3 (`/jobs/reindex` + cache-purge candidate detection + cron/no-daemon docs) are implemented.
 **Governing ADR:** [ADR-0036](adr/0036-phase-7-autonomous-maintenance.md). Read it first.
 **Predecessors:** Phases 1–6 complete + pushed. Phase 7 builds the maintenance surface over the existing
 ingest/enrich/retrieve/review machinery; it adds no new runtime and no second authority.
@@ -115,7 +115,7 @@ A job-recorded health pass that **completes and reports**, even when health fail
   pass, not an aborted run).
 - Idempotency: producers over the existing large pending queue file no duplicates on rerun.
 - Cache-retention: expired/oversize cache → review-gated purge candidate; **no automatic purge**.
-- Eval job: report-only (no review items, no mutation).
+- Eval job: deferred by ADR-0036 decision 14; CI fake-adapter evals remain the regression gate.
 - **No-daemon contract test:** importing/serving the API starts no scheduler/background thread.
 - Lint LLM-free where possible (the semantic checks reuse the graph, not new LLM calls); any LLM-touching
   check is fake-adapter-gated like prior phases.
@@ -127,7 +127,7 @@ A job-recorded health pass that **completes and reports**, even when health fail
 |---|---|
 | **7-1** ✅ | `/jobs/lint`: structural validators as a job report + semantic checks (orphan / <2-source concept, uncited claim, **missing-raw** with path confinement + `invalid_raw_path`) → report + governance review items (`deprecate_wiki_page`, `missing_raw_source`); 3-state health (healthy/degraded/failing); filed-vs-existing item counts; `wiki/log.md` append. Tests (12+). *(summary-rot / stale-claim drift deferred to a later heuristics slice.)* |
 | **7-2** ✅ | `manifest["status"]` authority (set_status, Source render, validate_wiki check) + `/jobs/stale-check` producer (`archive_source` + ephemeral `delete_raw_file` record-only candidates; detect-always) + reversible **`apply_archive_sources` executor** in `/reviews/apply` (manifest→page→graph mirror, scope-guarded, schema-safe, keyword reindex, no raw move) + `archive_raw_file→archive_source` rename. Tests (14+). *(duplicate detection deferred.)* |
-| **7-3** | `/jobs/reindex` (index+keyword only, no vector) + cache-purge candidate detection folded into `/jobs/stale-check` (aggregate record-only `purge_response_cache`, live stats, missing/corrupt-safe) + `docs/Operations.md` (cron recipe + manual eval smoke + raw-backup note) + **no-daemon contract test**. Eval job deferred (golden set is a fake fixture). Tests. |
+| **7-3** ✅ | `/jobs/reindex` (index+keyword only, no vector) + cache-purge candidate detection folded into `/jobs/stale-check` (aggregate record-only `purge_response_cache`, live stats, missing/corrupt-safe) + `docs/Operations.md` (cron recipe + manual eval smoke + raw-backup note) + **no-daemon contract test**. Eval job deferred (golden set is a fake fixture). Tests. |
 
 ---
 

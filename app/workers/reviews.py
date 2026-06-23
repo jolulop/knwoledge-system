@@ -31,6 +31,9 @@ REVIEW_TYPES = frozenset({
     # Phase 7 maintenance (ADR-0036): a catalogued raw file gone missing — record-only governance
     # of a broken source record (high-severity lint finding; never auto-remediated).
     "missing_raw_source",
+    # Phase 7: one aggregate, record-only proposal to manually purge the LLM response cache when it
+    # exceeds policy bounds — NO executor (a bulk purge forfeits reproducibility, ADR-0027).
+    "purge_response_cache",
 })
 REVIEW_STATUSES = frozenset({"pending", "approved", "rejected", "deferred"})
 PRIORITIES = frozenset({"low", "medium", "high"})

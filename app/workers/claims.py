@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from app.backend import db, graph
-from app.backend.manifests import iso_now, list_manifests
+from app.backend.manifests import get_status, iso_now, list_manifests
 from app.llm import prompts
 from app.llm.client import LLMClient, ParseError
 from app.workers import citations, reviews
@@ -247,7 +247,9 @@ def extract_claims(
                 errors.append({"source_id": sid, "error": str(exc)})
                 continue
 
-            graph.upsert_node(gconn, node_id=sid, node_type="source", slug=sid, status="active", now=now)
+            graph.upsert_node(
+                gconn, node_id=sid, node_type="source", slug=sid,
+                status=get_status(manifest), now=now)
             source_claims: list[dict[str, Any]] = []
             seen: set[tuple[str, int, int]] = set()
             for item in result["claims"]:

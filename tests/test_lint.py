@@ -134,6 +134,22 @@ def test_well_supported_concept_is_not_flagged(tmp_path):
     assert not any(f["check"] == "under_supported_concept" for f in res["findings"])
 
 
+def test_archived_sources_do_not_count_as_live_support(tmp_path):
+    gdb, conn = _graph(tmp_path)
+    graph.upsert_node(conn, node_id="src_1", node_type="source", slug="src_1", status="active")
+    graph.upsert_node(conn, node_id="src_arch", node_type="source", slug="src_arch",
+                      status="archive_candidate")
+    graph.upsert_node(conn, node_id="cpt_x", node_type="concept", slug="thing", status="active")
+    for s in ("src_1", "src_arch"):
+        graph.upsert_assertion(conn, src_id=s, dst_id="cpt_x", edge_type="mentions",
+                               asserted_by="llm", status="active")
+    conn.close()
+    res = _run(tmp_path, graph_db=gdb)
+    us = [f for f in res["findings"] if f["check"] == "under_supported_concept"]
+    assert us and us[0]["subject"] == "cpt_x"
+    assert "1 mentioning source" in us[0]["detail"]
+
+
 def test_graph_absent_skips_semantic_checks(tmp_path):
     res = _run(tmp_path)  # no graph db created
     assert res["graph_available"] is False

@@ -127,6 +127,21 @@ def test_extracts_grounds_writes_pages_and_edges(tmp_path):
     assert validate_wikilinks.main([str(tmp_path)]) == 0
 
 
+def test_source_node_status_follows_manifest(tmp_path):
+    _build(tmp_path)
+    _gen_wiki(tmp_path)
+    sid = _sids(tmp_path)["doc.md"]
+    manifests.set_status(tmp_path / "raw" / "manifests", sid, "deprecated_candidate")
+
+    _extract(tmp_path, FakeAdapter())
+
+    conn = graph.connect(tmp_path / "db" / "graph.sqlite")
+    try:
+        assert graph.get_node(conn, sid)["status"] == "deprecated_candidate"
+    finally:
+        conn.close()
+
+
 def test_special_chars_quote_round_trips_and_validates(tmp_path):
     inbox = tmp_path / "raw" / "inbox"
     inbox.mkdir(parents=True)

@@ -477,18 +477,30 @@ def contradiction_between(
     ))
 
 
-def count_independent_sources(conn: sqlite3.Connection, dst_id: str, *, edge_type: str = "mentions") -> int:
+def count_independent_sources(
+    conn: sqlite3.Connection,
+    dst_id: str,
+    *,
+    edge_type: str = "mentions",
+    source_statuses: tuple[str, ...] | None = None,
+) -> int:
     """Distinct source_ids among a node's active assertions of the given type (promotion).
 
     Exact-duplicate sources already share one source_id (ADR-0007), so they count once here;
     same-family independence (ADR-0018) is a slice-5 concern layered on top of this count.
     """
-    row = conn.execute(
+    if source_statuses is not None and not source_statuses:
+        return 0
+    sql = (
         "SELECT COUNT(DISTINCT e.src_id) AS n FROM edges e "
         "JOIN nodes n ON n.node_id = e.src_id AND n.node_type = 'source' "
-        "WHERE e.dst_id = ? AND e.edge_type = ? AND e.status = 'active'",
-        (dst_id, edge_type),
-    ).fetchone()
+        "WHERE e.dst_id = ? AND e.edge_type = ? AND e.status = 'active'"
+    )
+    params: list[Any] = [dst_id, edge_type]
+    if source_statuses is not None:
+        sql += f" AND n.status IN ({','.join('?' for _ in source_statuses)})"
+        params.extend(source_statuses)
+    row = conn.execute(sql, params).fetchone()
     return int(row["n"])
 
 
@@ -500,6 +512,7 @@ def reindex_nodes(
     *,
     source_ids: list[str],
     page_nodes: list[dict[str, Any]],
+    source_statuses: dict[str, str] | None = None,
     now: str | None = None,
 ) -> int:
     """Rebuild the derived `nodes` index from manifests (sources) + page frontmatter.
@@ -510,11 +523,15 @@ def reindex_nodes(
     """
     now = now or iso_now()
     conn.execute("DELETE FROM nodes")
+    source_statuses = source_statuses or {}
     for sid in source_ids:
+        status = source_statuses.get(sid, "active")
+        if status not in NODE_STATUSES:
+            raise ValueError(f"unknown source node status {status!r}; allowed: {sorted(NODE_STATUSES)}")
         conn.execute(
             "INSERT OR REPLACE INTO nodes (node_id, node_type, slug, status, indexed_at) "
-            "VALUES (?, 'source', ?, 'active', ?)",
-            (sid, sid, now),
+            "VALUES (?, 'source', ?, ?, ?)",
+            (sid, sid, status, now),
         )
     for node in page_nodes:
         node_type = node.get("node_type")

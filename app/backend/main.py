@@ -33,6 +33,7 @@ from app.backend.models import (
     LintResponse,
     NormalizedResponse,
     QueryRequest,
+    ReindexResponse,
     StaleCheckResponse,
     QueryResponse,
     ReviewApplyResponse,
@@ -516,12 +517,13 @@ def apply_reviews() -> dict[str, Any]:
     contra: dict[str, Any] = {"resolution": {"acknowledged": 0, "rejected": 0,
                                              "superseded_executed": 0}, "changed_pages": []}
     deprec: dict[str, Any] = {"applied": 0, "normalized": 0, "skipped": [], "changed_pages": []}
+    promo = {"promoted": 0}
 
-    # _open_graph() returns None if the graph doesn't exist yet (nothing to apply against) and raises
-    # a controlled 503 on schema drift. Each executor commits its own graph writes.
-    # Safe open: None on absent OR schema-mismatch (archive doesn't need the graph, so an unrelated
-    # graph problem must not block an archive-only apply). 503 only when graph-required items are waiting.
+    # Safe open: None on absent OR schema-mismatch (archive doesn't need the graph, so an unrelated graph
+    # problem must not block an archive-only apply). The graph executors + promote run only when the graph
+    # is available; 503 only when graph-*required* items are waiting (archive_source is not graph-required).
     gconn = _open_graph_safe()
+    graph_available = gconn is not None
     if gconn is not None:
         try:
             syntheses = synthesis.apply_resolved_syntheses(
@@ -542,7 +544,8 @@ def apply_reviews() -> dict[str, Any]:
             status_code=503,
             detail="graph index unavailable; rebuild db/graph.sqlite before applying reviews")
 
-    promo = promote.promote_candidates(root, rebuild_index=False, record_job=False)
+    if graph_available:
+        promo = promote.promote_candidates(root, rebuild_index=False, record_job=False)
 
     # Phase 7: reversible source archive (active -> archive_candidate; ADR-0036). Own graph conn +
     # per-source page re-render; raw bytes untouched.
@@ -618,7 +621,15 @@ def run_stale_check_job() -> dict[str, Any]:
     the reversible archive is applied later via POST /reviews/apply."""
     return retention.run_stale_check(
         settings.root, manifests_dir=settings.manifests_dir, reviews_dir=settings.reviews_dir,
-        wiki_dir=settings.wiki_dir, jobs_db=settings.jobs_db_path)
+        wiki_dir=settings.wiki_dir, cache_db=settings.response_cache_path, jobs_db=settings.jobs_db_path)
+
+
+@app.post("/jobs/reindex", response_model=ReindexResponse)
+def run_reindex_job() -> dict[str, Any]:
+    """Cheap deterministic reindex: rebuild wiki/index.md + refresh the keyword index (ADR-0036).
+    Index + keyword only — never the vector index (explicit reindex_vector.py only)."""
+    return retention.run_reindex(
+        settings.root, jobs_db=settings.jobs_db_path, wiki_dir=settings.wiki_dir)
 
 
 # --- Human Review UI (server-rendered HTML; ADR-0035 decision 1 + A8) -------

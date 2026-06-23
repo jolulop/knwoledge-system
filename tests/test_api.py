@@ -1171,3 +1171,13 @@ def test_run_all_validators_sanitizes_root_path(tmp_path):
     leak = next(r for r in results if r["name"] == "validate_leak.py")
     assert str(tmp_path) not in leak["stdout_tail"]
     assert "<root>" in leak["stdout_tail"]
+
+
+def test_sources_exposes_lifecycle_status(client, tmp_path):
+    from app.backend import manifests as _m
+    _seed(tmp_path, "doc.md", "hello status\n")
+    client.post("/jobs/intake-scan")
+    sid = client.get("/sources").json()["sources"][0]["source_id"]
+    assert client.get(f"/sources/{sid}").json()["status"] == "active"  # default when unset
+    _m.set_status(tmp_path / "raw" / "manifests", sid, "archive_candidate")
+    assert client.get(f"/sources/{sid}").json()["status"] == "archive_candidate"

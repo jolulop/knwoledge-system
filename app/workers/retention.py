@@ -18,6 +18,8 @@ Two halves, both deterministic and key-free:
 """
 from __future__ import annotations
 
+import subprocess
+import sys
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -26,6 +28,7 @@ from typing import Any
 from app.backend import db, graph, keyword_index, manifests
 from app.backend.manifests import iso_now, list_manifests, load_manifest
 from app.backend.policy import load_yaml
+from app.llm import cache as llm_cache
 from app.workers import reviews, wiki
 
 _DAYS_PER_YEAR = 365
@@ -70,21 +73,24 @@ def run_stale_check(
     manifests_dir: Path | None = None,
     reviews_dir: Path | None = None,
     wiki_dir: Path | None = None,
+    cache_db: Path | None = None,
     policy_path: Path | None = None,
     jobs_db: Path | None = None,
     record_job: bool = True,
     file_review_items: bool = True,
     now: str | None = None,
 ) -> dict[str, Any]:
-    """Detect stale/ephemeral sources and propose archive/delete candidates (ADR-0036). Acts on nothing.
+    """Detect stale/ephemeral sources + LLM-cache purge candidates; propose, never act (ADR-0036).
 
-    Always *detects* + counts candidates; `file_review_items=False` only suppresses the filing.
-    Records a job and appends `wiki/log.md` on every run (maintenance passes are auditable, ADR-0036).
+    Always *detects* + counts candidates (source archive/delete and cache purge); `file_review_items=False`
+    only suppresses the filing. Reports **live** cache stats every run (even when the purge item already
+    exists). Records a job and appends `wiki/log.md` on every run (maintenance passes are auditable).
     """
     root = Path(root).resolve()
     manifests_dir = Path(manifests_dir) if manifests_dir else root / "raw" / "manifests"
     reviews_dir = Path(reviews_dir) if reviews_dir else root / "reviews"
     wiki_dir = Path(wiki_dir) if wiki_dir else root / "wiki"
+    cache_db = Path(cache_db) if cache_db else root / "db" / "llm_cache.sqlite"
     policy_path = Path(policy_path) if policy_path else root / "policies" / "retention.yaml"
     jobs_db = Path(jobs_db) if jobs_db else root / "db" / "jobs.sqlite"
     now = now or iso_now()
@@ -94,9 +100,13 @@ def run_stale_check(
     policy = load_yaml(policy_path.read_text(encoding="utf-8")) if policy_path.exists() else {}
     raw_pol = policy.get("raw_files") or {}
     eph_pol = policy.get("ephemeral") or {}
+    cache_pol = policy.get("response_cache") or {}
     archive_after_days = int(raw_pol.get("older_than_years_archive_candidate", 3)) * _DAYS_PER_YEAR
     ephemeral_enabled = bool(eph_pol.get("enabled", False))
     ephemeral_after_days = int(eph_pol.get("delete_candidate_after_days", 90))
+    cache_enabled = bool(cache_pol.get("enabled", True))
+    cache_ttl_days = int(cache_pol.get("cache_ttl_days", 365))
+    cache_cap_mb = int(cache_pol.get("cache_max_mb", 2048))
 
     conn = None
     if record_job:
@@ -141,20 +151,53 @@ def run_stale_check(
                                       "age_days": age, "record_only": True},
                             priority="medium", now=now, filed=delete_filed, existing=delete_existing)
 
+        # LLM-cache retention (only when policy-enabled): live stats every run; one aggregate record-only
+        # purge candidate when over bounds. Never mutates the cache; payload carries only counts/sizes/ages.
+        warnings: list[str] = []
+        cache_purge_filed: list[str] = []
+        cache_purge_existing: list[str] = []
+        if not cache_enabled:
+            cache: dict[str, Any] = {"enabled": False}
+        else:
+            cache = llm_cache.cache_retention_report(
+                cache_db, ttl_days=cache_ttl_days, cap_mb=cache_cap_mb, now=now_dt)
+        if cache.get("cache_present") and cache.get("cache_readable") is False:
+            warnings.append("cache_unreadable")  # degraded report, never aborts source retention
+        elif cache.get("over_bounds"):
+            cache["purge_candidate"] = True
+            if file_review_items:
+                _file_tracked(
+                    reviews_dir, review_type="purge_response_cache", subject={"scope": "response_cache"},
+                    proposal={"reason": "LLM response cache exceeds retention bounds",
+                              "entries": cache.get("entries"),
+                              "entries_over_ttl": cache.get("entries_over_ttl"),
+                              "total_mb": cache.get("total_mb"), "cap_mb": cache.get("cap_mb"),
+                              "oldest_age_days": cache.get("oldest_age_days"),
+                              "ttl_days": cache_ttl_days, "record_only": True},
+                    priority="low", now=now, filed=cache_purge_filed, existing=cache_purge_existing)
+
         summary = {"considered": considered,
                    "archive_candidates": archive_detected,
                    "archive_candidates_filed": len(archive_filed),
                    "archive_candidates_existing": len(archive_existing),
                    "delete_candidates": delete_detected,
                    "delete_candidates_filed": len(delete_filed),
-                   "delete_candidates_existing": len(delete_existing)}
-        _append_log(wiki_dir, f"stale-check: {archive_detected} archive / {delete_detected} delete "
-                              f"candidate(s); {len(archive_filed) + len(delete_filed)} filed [{job_id}]")
+                   "delete_candidates_existing": len(delete_existing),
+                   "cache": cache,
+                   "cache_purge_filed": len(cache_purge_filed),
+                   "cache_purge_existing": len(cache_purge_existing),
+                   "warnings": warnings}
+        _append_log(wiki_dir, f"stale-check: {archive_detected} archive / {delete_detected} delete / "
+                              f"{1 if cache.get('over_bounds') else 0} cache purge candidate(s); "
+                              f"{len(archive_filed) + len(delete_filed) + len(cache_purge_filed)} filed "
+                              f"[{job_id}]")
         if conn is not None:
-            db.update_job(conn, job_id, status="succeeded", finished_at=iso_now(), metadata=summary)
+            db.update_job(conn, job_id, status="succeeded", finished_at=iso_now(),
+                          metadata=summary, warnings=warnings)
         return {"job_id": job_id, **summary,
                 "archive_review_items_filed": sorted(set(archive_filed)),
-                "delete_review_items_filed": sorted(set(delete_filed))}
+                "delete_review_items_filed": sorted(set(delete_filed)),
+                "cache_purge_review_items_filed": sorted(set(cache_purge_filed))}
     except Exception as exc:
         if conn is not None:
             db.update_job(conn, job_id, status="failed", finished_at=iso_now(), error_message=str(exc))
@@ -249,3 +292,65 @@ def reindex_keyword(root: Path) -> bool:
     """Refresh the keyword/navigation index so archived source status reaches the retrieval filter."""
     keyword_index.reindex(Path(root))
     return True
+
+
+def run_reindex(
+    root: Path,
+    *,
+    jobs_db: Path | None = None,
+    wiki_dir: Path | None = None,
+    record_job: bool = True,
+    now: str | None = None,
+) -> dict[str, Any]:
+    """Cheap deterministic reindex pass: rebuild `wiki/index.md` + refresh the keyword index (ADR-0036).
+
+    **Index + keyword only — never the vector index** (that stays the explicit `reindex_vector.py`,
+    ADR-0033, so maintenance triggers no embedding-server side effect). Job-recorded, appends `wiki/log.md`.
+    A genuine sub-step failure (script present and non-zero, or a keyword reindex error) yields
+    `status: "failed"` with a warning — not a silent success.
+    """
+    root = Path(root).resolve()
+    jobs_db = Path(jobs_db) if jobs_db else root / "db" / "jobs.sqlite"
+    wiki_dir = Path(wiki_dir) if wiki_dir else root / "wiki"
+    now = now or iso_now()
+    job_id = f"job_{uuid.uuid4().hex[:16]}"
+    warnings: list[str] = []
+
+    conn = None
+    if record_job:
+        db.init_db(jobs_db)
+        conn = db.connect(jobs_db)
+        db.insert_job(conn, job_id=job_id, job_type="reindex", status="running",
+                      created_at=now, started_at=now)
+    try:
+        script = root / "scripts" / "rebuild_index.py"
+        if script.exists():
+            index_rebuilt = subprocess.run(
+                [sys.executable, str(script), str(root)]).returncode == 0
+            if not index_rebuilt:
+                warnings.append("index_rebuild_failed")  # script present but non-zero
+        else:
+            index_rebuilt = False  # missing script (degraded/test env) is not a failure
+        try:
+            keyword_index.reindex(root)
+            keyword_reindexed = True
+        except Exception as exc:  # noqa: BLE001 - report, don't crash the maintenance pass
+            keyword_reindexed = False
+            warnings.append(f"keyword_reindex_failed:{type(exc).__name__}")
+
+        status = "failed" if warnings else "succeeded"
+        _append_log(wiki_dir, f"reindex: {status} (index_rebuilt={index_rebuilt}, "
+                              f"keyword={keyword_reindexed}) [{job_id}]")
+        if conn is not None:
+            db.update_job(conn, job_id, status=status, finished_at=iso_now(), warnings=warnings,
+                          metadata={"index_rebuilt": index_rebuilt,
+                                    "keyword_reindexed": keyword_reindexed, "warnings": warnings})
+        return {"job_id": job_id, "status": status, "index_rebuilt": index_rebuilt,
+                "keyword_reindexed": keyword_reindexed, "warnings": warnings}
+    except Exception as exc:
+        if conn is not None:
+            db.update_job(conn, job_id, status="failed", finished_at=iso_now(), error_message=str(exc))
+        raise
+    finally:
+        if conn is not None:
+            conn.close()

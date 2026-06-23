@@ -15,6 +15,7 @@ requires_human_approval:
   - change_entity_subtype       # re-keys a node's id; gated like a merge/split
   - propose_synthesis           # candidate synthesis -> active; review-only, NO recurrence (ADR-0031, Phase 3.5c)
   - missing_raw_source          # catalogued raw file missing; record-only governance (ADR-0036, Phase 7)
+  - purge_response_cache        # aggregate record-only proposal to manually purge the LLM cache (ADR-0036)
 review_statuses:
   - pending
   - approved

@@ -51,6 +51,9 @@ class Source(BaseModel):
     last_seen_at: str
     last_scanned_at: str
     ingestion_status: str
+    # Source lifecycle status — the manifest is the authority (ADR-0036 decision 13); default `active`
+    # when unset. Distinct from `retention_class` (policy category).
+    status: str = "active"
     retention_class: str
     occurrences: list[Occurrence] = []
     notes: list[str] = []
@@ -429,6 +432,16 @@ class FailedValidator(BaseModel):
     stderr_tail: str = ""
 
 
+class ReindexResponse(BaseModel):
+    # POST /jobs/reindex (Phase 7, ADR-0036). Index + keyword only (never vector). status "failed" means
+    # a sub-step (rebuild_index script non-zero, or keyword reindex error) failed — not a silent success.
+    job_id: str
+    status: str  # succeeded | failed
+    index_rebuilt: bool
+    keyword_reindexed: bool
+    warnings: list[str] = []
+
+
 class LintValidator(BaseModel):
     # One structural validator's result in the /jobs/lint report (tails sanitized of the root path).
     name: str
@@ -457,8 +470,15 @@ class StaleCheckResponse(BaseModel):
     delete_candidates: int
     delete_candidates_filed: int
     delete_candidates_existing: int
+    # Live LLM-cache retention stats every run (cache_present/readable/entries/total_mb/over_bounds/…);
+    # the aggregate purge_response_cache item is record-only. Carries no cached responses or keys.
+    cache: dict[str, Any] = {}
+    cache_purge_filed: int = 0
+    cache_purge_existing: int = 0
+    warnings: list[str] = []
     archive_review_items_filed: list[str] = []
     delete_review_items_filed: list[str] = []
+    cache_purge_review_items_filed: list[str] = []
 
 
 class LintResponse(BaseModel):

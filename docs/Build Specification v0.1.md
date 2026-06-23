@@ -540,6 +540,10 @@ GET    /evals/results
 POST   /evals/run
 ```
 
+Note: ADR-0036 decision 14 supersedes this API target for the current v0.1 implementation:
+the runtime `/evals/run` job is deferred. Golden-question regression remains covered by
+the CI fake-adapter suites; a real-vault eval corpus is future work.
+
 ---
 
 ## 16. Evaluation and Success Tests
@@ -560,7 +564,8 @@ v0.1 is successful when:
 - Deletion and entity merges cannot happen without approval.
 - Weekly lint produces actionable reports.
 - Monthly stale check identifies archive candidates.
-- At least 20 golden questions run automatically.
+- At least 20 golden questions run automatically in CI. Runtime `/evals/run` is deferred
+  by ADR-0036 decision 14.
 
 ---
 
@@ -582,7 +587,7 @@ prompt-injection surface is introduced.
 | Phase 4 | Search and Graph. | **Complete** — 4a keyword/nav index, 4b graph read API, 4c router + GET /search, 4d LanceDB vector channel, 4e RRF hybrid fusion + retrieval evals (ADR-0032/0033). |
 | Phase 5 | Query and Cited Answering. | **Complete** — 5-1 answer-synthesis core, 5-2 POST /query, 5-3 saved Queries pages, 5-4 golden-question eval harness (ADR-0034). |
 | Phase 6 | Human Review UI. | **Design-locked** (ADR-0035): server-rendered HTML on FastAPI over a deterministic JSON review read model; type-complete record-only decision ledger; explicit deterministic `POST /reviews/apply` (synthesis/promotion/contradiction + scoped deprecation executor); loopback-only safety; key-free tests. |
-| Phase 7 | Autonomous Maintenance. | Planned |
+| Phase 7 | Autonomous Maintenance. | **Complete** — per ADR-0036: `/jobs/lint`, `/jobs/reindex`, `/jobs/stale-check`, reversible `archive_source`, cache-purge candidate detection, cron/no-daemon operations docs. Runtime `/evals/run` is deferred by decision 14. |
 | Phase 8 | Mobile and Hardening. | Planned |
 
 ---

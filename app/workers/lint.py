@@ -29,7 +29,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from app.backend import db, graph
+from app.backend import db, graph, search
 from app.backend.manifests import iso_now, list_manifests
 from app.workers import reviews
 from app.workers.wiki_render import NODE_DIR
@@ -172,10 +172,10 @@ def _check_graph(gconn, wiki_dir: Path, reviews_dir: Path, *, file_items: bool, 
         for node in graph.nodes_of_type(gconn, node_type):
             if node["status"] != "active":
                 continue
-            # 7-2 FOLLOW-UP: count_independent_sources counts distinct mentioning source ids, not
-            # *lifecycle-active* sources — once archive_source lands, archived/deleted sources should
-            # not count as support (it must match retrieval visibility).
-            n = graph.count_independent_sources(gconn, node["node_id"])
+            # Live support follows default retrieval visibility: archived/deleted sources still exist
+            # as evidence, but they no longer keep a concept active by themselves.
+            n = graph.count_independent_sources(
+                gconn, node["node_id"], source_statuses=search.RETENTION_DEFAULT_STATUSES)
             if n >= 2:
                 continue
             findings.append({

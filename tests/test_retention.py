@@ -137,6 +137,12 @@ def test_stale_check_skips_already_archived(tmp_path):
     assert _stale(tmp_path)["archive_candidates_filed"] == 0
 
 
+def test_stale_check_skips_deprecated_candidate_source(tmp_path):
+    _write_manifest(tmp_path, "src_dep", status="deprecated_candidate", modified_at=OLD)
+    res = _stale(tmp_path)
+    assert res["archive_candidates"] == 0 and _pending(tmp_path, "archive_source") == []
+
+
 def test_stale_check_ephemeral_proposes_delete_candidate(tmp_path):
     _write_manifest(tmp_path, "src_eph", retention_class="ephemeral", discovered_at=OLD)
     res = _stale(tmp_path)
@@ -305,6 +311,7 @@ def test_source_status_vocabulary_round_trips(tmp_path):
         m = _write_manifest(tmp_path, "src_v", status=status)
         page = render_source_page(_TEMPLATE, m, "# t\n\nbody.\n", summary_max=320, summary_min=40)
         assert parse_frontmatter(page)["status"] in validate_wiki._VALID_STATUS, status
+    assert manifests.get_status({"status": "deprecated_candidate"}) == "deprecated_candidate"
 
 
 # --- API: schema-drift behavior + log --------------------------------------
@@ -328,6 +335,11 @@ def test_api_archive_only_proceeds_on_schema_drift(client, tmp_path):
     assert body["summary"]["archives"]["applied"] == 1   # archive proceeds despite graph drift
     assert parse_frontmatter((tmp_path / "wiki" / "Sources" / "src_a.md").read_text())["status"] \
         == "archive_candidate"
+    conn = graph.connect(tmp_path / "db" / "graph.sqlite")
+    try:
+        assert graph.schema_version(conn) == 999  # apply must not reinitialize a mismatched graph
+    finally:
+        conn.close()
 
 
 def test_api_graph_required_still_503_on_schema_drift(client, tmp_path):
@@ -382,3 +394,162 @@ def test_archive_excluded_from_default_search_but_found_with_explicit_status(tmp
     keyword_index.reindex(tmp_path, force=True)   # refresh nav status
     assert not any(h["source_id"] == sid for h in _hits(("active", "deprecated_candidate")))  # excluded
     assert any(h["source_id"] == sid for h in _hits(("archive_candidate",)))  # explicit ask finds it
+
+
+# --- 7-3: reindex / cache-purge / no-daemon --------------------------------
+
+import sqlite3  # noqa: E402
+import threading  # noqa: E402
+
+
+def _seed_cache(tmp_path, *, rows, created_at):
+    """Write a minimal response_cache db with `rows` entries at `created_at`."""
+    cdb = tmp_path / "db" / "llm_cache.sqlite"
+    cdb.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(cdb)
+    conn.execute("CREATE TABLE response_cache (cache_key TEXT PRIMARY KEY, provider TEXT, model_id TEXT, "
+                 "schema_version TEXT, prompt_version TEXT, response_json TEXT NOT NULL, created_at TEXT)")
+    for i in range(rows):
+        conn.execute("INSERT INTO response_cache VALUES (?,?,?,?,?,?,?)",
+                     (f"k{i}", "anthropic", "m", "v", "p", '{"big":"secret-payload"}', created_at))
+    conn.commit()
+    conn.close()
+    return cdb
+
+
+def test_reindex_records_job_and_logs_no_vector(tmp_path):
+    res = retention.run_reindex(tmp_path)  # no scripts/ in tmp_path -> index_rebuilt False, no warning
+    assert res["status"] == "succeeded" and res["keyword_reindexed"] is True
+    assert res["warnings"] == []
+    assert "reindex:" in (tmp_path / "wiki" / "log.md").read_text(encoding="utf-8")
+    conn = main_module.db.connect(tmp_path / "db" / "jobs.sqlite")
+    assert main_module.db.get_job(conn, res["job_id"])["job_type"] == "reindex"
+    conn.close()
+    # never builds a vector index
+    assert not (tmp_path / "indexes" / "vector").exists()
+
+
+def test_reindex_failure_records_failed(tmp_path, monkeypatch):
+    monkeypatch.setattr(retention.keyword_index, "reindex",
+                        lambda root, **kw: (_ for _ in ()).throw(RuntimeError("boom")))
+    res = retention.run_reindex(tmp_path)
+    assert res["status"] == "failed" and res["keyword_reindexed"] is False
+    assert any("keyword_reindex_failed" in w for w in res["warnings"])
+
+
+def test_api_reindex(client, tmp_path):
+    body = client.post("/jobs/reindex").json()
+    assert body["status"] in ("succeeded", "failed") and "keyword_reindexed" in body
+
+
+def test_cache_purge_candidate_over_ttl(tmp_path):
+    _seed_cache(tmp_path, rows=3, created_at="2020-01-01T00:00:00+00:00")  # ancient -> over TTL
+    res = retention.run_stale_check(tmp_path, record_job=False, now=NOW)
+    cache = res["cache"]
+    assert cache["cache_present"] and cache["entries"] == 3 and cache["over_bounds"] is True
+    assert res["cache_purge_filed"] == 1
+    item = json.loads((tmp_path / "reviews" / "pending" / next(
+        p.name for p in (tmp_path / "reviews" / "pending").glob("*.json")
+        if json.loads(p.read_text())["type"] == "purge_response_cache")).read_text())
+    assert item["subject"] == {"scope": "response_cache"}
+    # NEVER leaks cached responses / keys
+    blob = json.dumps(item)
+    assert "secret-payload" not in blob and "response_json" not in blob and "cache_key" not in blob
+
+
+def test_cache_purge_idempotent_and_no_deletion(tmp_path):
+    cdb = _seed_cache(tmp_path, rows=2, created_at="2020-01-01T00:00:00+00:00")
+    retention.run_stale_check(tmp_path, record_job=False, now=NOW)
+    res2 = retention.run_stale_check(tmp_path, record_job=False, now=NOW)
+    assert res2["cache_purge_filed"] == 0 and res2["cache_purge_existing"] == 1
+    # detection never deletes/mutates the cache
+    conn = sqlite3.connect(cdb)
+    assert conn.execute("SELECT COUNT(*) FROM response_cache").fetchone()[0] == 2
+    conn.close()
+
+
+def test_cache_within_bounds_no_candidate(tmp_path):
+    _seed_cache(tmp_path, rows=1, created_at=NOW)  # fresh, tiny -> within bounds
+    res = retention.run_stale_check(tmp_path, record_job=False, now=NOW)
+    assert res["cache"]["over_bounds"] is False and res["cache_purge_filed"] == 0
+
+
+def test_cache_missing_is_no_finding(tmp_path):
+    res = retention.run_stale_check(tmp_path, record_job=False, now=NOW)  # no cache db
+    assert res["cache"] == {"cache_present": False} and res["cache_purge_filed"] == 0
+
+
+def test_cache_corrupt_is_warning_not_abort(tmp_path):
+    cdb = tmp_path / "db" / "llm_cache.sqlite"
+    cdb.parent.mkdir(parents=True, exist_ok=True)
+    cdb.write_text("not a sqlite database", encoding="utf-8")
+    _write_manifest(tmp_path, "src_old", modified_at=OLD)  # a source candidate still detected
+    res = retention.run_stale_check(tmp_path, record_job=False, now=NOW)
+    assert res["cache"]["cache_readable"] is False
+    assert "cache_unreadable" in res["warnings"]
+    assert res["archive_candidates"] == 1  # source retention not aborted by the bad cache
+
+
+def test_purge_response_cache_unapplied_by_reviews_apply(client, tmp_path):
+    _seed_cache(tmp_path, rows=2, created_at="2020-01-01T00:00:00+00:00")
+    client.post("/jobs/stale-check")
+    # move the purge item to approved/ and apply
+    pend = tmp_path / "reviews" / "pending"
+    purge = next(p for p in pend.glob("*.json")
+                 if json.loads(p.read_text())["type"] == "purge_response_cache")
+    appr = tmp_path / "reviews" / "approved"
+    appr.mkdir(parents=True, exist_ok=True)
+    data = json.loads(purge.read_text())
+    data["status"] = "approved"
+    (appr / purge.name).write_text(json.dumps(data), encoding="utf-8")
+    purge.unlink()
+    body = client.post("/reviews/apply").json()
+    # purge_response_cache has no executor -> reported as unapplied, never actioned
+    assert {"type": "purge_response_cache", "count": 1, "reason": "no_executor_in_phase_6"} \
+        in body["summary"]["unapplied"]
+    conn = sqlite3.connect(tmp_path / "db" / "llm_cache.sqlite")
+    assert conn.execute("SELECT COUNT(*) FROM response_cache").fetchone()[0] == 2  # cache untouched
+    conn.close()
+
+
+def test_serving_app_starts_no_scheduler_or_daemon():
+    # importing + serving the app must spin up no scheduler/cron worker (ADR-0036 no-daemon contract)
+    with TestClient(main_module.app) as c:
+        c.get("/health")
+    suspicious = [t.name for t in threading.enumerate()
+                  if any(k in t.name.lower() for k in ("schedul", "cron", "apschedul"))]
+    assert suspicious == [], suspicious
+    assert not any(hasattr(main_module, a)
+                   for a in ("scheduler", "_scheduler", "background_scheduler", "cron"))
+
+
+def test_cache_detection_skipped_when_policy_disabled(tmp_path):
+    _seed_cache(tmp_path, rows=3, created_at="2020-01-01T00:00:00+00:00")  # would be over TTL
+    pol = tmp_path / "policies" / "retention.yaml"
+    pol.parent.mkdir(parents=True, exist_ok=True)
+    pol.write_text("response_cache:\n  enabled: false\n  cache_ttl_days: 365\n  cache_max_mb: 2048\n",
+                   encoding="utf-8")
+    res = retention.run_stale_check(tmp_path, record_job=False, now=NOW, policy_path=pol)
+    assert res["cache"] == {"enabled": False} and res["cache_purge_filed"] == 0
+
+
+def test_reindex_warnings_persisted_to_job_row(tmp_path, monkeypatch):
+    monkeypatch.setattr(retention.keyword_index, "reindex",
+                        lambda root, **kw: (_ for _ in ()).throw(RuntimeError("boom")))
+    res = retention.run_reindex(tmp_path)  # record_job=True by default
+    conn = main_module.db.connect(tmp_path / "db" / "jobs.sqlite")
+    job = main_module.db.get_job(conn, res["job_id"])
+    conn.close()
+    assert job["status"] == "failed"
+    assert any("keyword_reindex_failed" in w for w in job["warnings"])
+
+
+def test_stale_check_cache_warning_persisted_to_job_row(tmp_path):
+    cdb = tmp_path / "db" / "llm_cache.sqlite"
+    cdb.parent.mkdir(parents=True, exist_ok=True)
+    cdb.write_text("not a sqlite database", encoding="utf-8")
+    res = retention.run_stale_check(tmp_path, now=NOW)  # record_job=True
+    conn = main_module.db.connect(tmp_path / "db" / "jobs.sqlite")
+    job = main_module.db.get_job(conn, res["job_id"])
+    conn.close()
+    assert "cache_unreadable" in job["warnings"]

@@ -120,6 +120,17 @@ generated prose. Optionally save an answer to `wiki/Queries/<id>.md`. (Search al
 
 ---
 
+## 5b. Maintenance (Phase 7)
+
+Deterministic, job-recorded **detect-and-propose** passes keep the vault healthy over time, acting on
+nothing semantic/destructive on their own — they file review items you approve + apply later:
+`POST /jobs/lint` (health + governance findings), `POST /jobs/stale-check` (stale sources → `archive_source`
+candidates + LLM-cache purge candidates), `POST /jobs/reindex` (rebuild index + keyword, never vector).
+**There is no scheduler** — run them on your own `cron`/`systemd` cadence. See **`docs/Operations.md`** for
+the cron recipe, the manual answer-quality smoke, and the raw-backup note.
+
+---
+
 ## 6. Day-to-day cheat sheet
 
 ```

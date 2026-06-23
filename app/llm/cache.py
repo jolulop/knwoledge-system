@@ -16,8 +16,46 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+
+def cache_retention_report(db_path: Path, *, ttl_days: int, cap_mb: int,
+                           now: datetime) -> dict[str, Any]:
+    """Read-only retention stats for the LLM response cache (Phase 7, ADR-0036). Never mutates.
+
+    Returns live stats: `{cache_present, cache_readable, entries, entries_over_ttl, total_mb, cap_mb,
+    oldest_age_days, over_bounds}`. A **missing** DB -> `{cache_present: False}` (no finding); a
+    **corrupt/unreadable** DB -> `{cache_present: True, cache_readable: False}` (a degraded report, not an
+    error). Carries only counts/sizes/ages — never `response_json`, prompts, model outputs, or keys.
+    """
+    db_path = Path(db_path)
+    if not db_path.exists():
+        return {"cache_present": False}
+    try:
+        cutoff = (now - timedelta(days=ttl_days)).isoformat()
+        conn = sqlite3.connect(db_path)
+        try:
+            entries, oldest = conn.execute(
+                "SELECT COUNT(*), MIN(created_at) FROM response_cache").fetchone()
+            over_ttl = conn.execute(
+                "SELECT COUNT(*) FROM response_cache WHERE created_at < ?", (cutoff,)).fetchone()[0]
+        finally:
+            conn.close()
+    except sqlite3.DatabaseError:
+        return {"cache_present": True, "cache_readable": False}
+    total_mb = round(db_path.stat().st_size / (1024 * 1024), 3)
+    oldest_age_days = None
+    if oldest:
+        try:
+            oldest_age_days = (now - datetime.fromisoformat(oldest)).days
+        except (ValueError, TypeError):
+            oldest_age_days = None
+    return {"cache_present": True, "cache_readable": True, "entries": int(entries or 0),
+            "entries_over_ttl": int(over_ttl or 0), "total_mb": total_mb, "cap_mb": cap_mb,
+            "oldest_age_days": oldest_age_days,
+            "over_bounds": bool((over_ttl or 0) > 0 or total_mb > cap_mb)}
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS response_cache (

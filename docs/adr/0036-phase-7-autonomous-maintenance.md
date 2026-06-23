@@ -1,7 +1,8 @@
 # ADR-0036 — Phase 7: Autonomous Maintenance
 
-**Status:** Accepted (design-locked 2026-06-23 via grill gate). **Slices 7-1 (`/jobs/lint`) and 7-2
-(stale/retention + `archive_source` executor) implemented**; 7-3 pending.
+**Status:** Accepted (design-locked 2026-06-23 via grill gate). **Phase 7 complete:** slices 7-1
+(`/jobs/lint`), 7-2 (stale/retention + `archive_source` executor), and 7-3 (`/jobs/reindex` +
+cache-purge candidate detection + cron/no-daemon docs) are implemented.
 **Supersedes/extends:** ADR-0004 (Claude Code = supervised maintenance), ADR-0002/0024 (raw immutable),
 ADR-0018/0035 (review ledger + decoupled apply), ADR-0032 §8 (retention-aware retrieval),
 ADR-0027 (response cache). Read `policies/retention.yaml` and Build Spec §9.2/§12.
@@ -201,14 +202,14 @@ decision 14); graph-curator duplicate/merge/split detection + their executors; p
 cache-purge executor.
 
 **Slices (each committable + validated):**
-- **7-1** — `/jobs/lint` job: structural validators wired as a job-recorded report + new semantic checks
-  (orphan / <2-source concept, stale/uncited claim, summary rot, missing-raw) → structural report +
+- **7-1** — implemented: `/jobs/lint` job: structural validators wired as a job-recorded report + new
+  semantic checks (orphan / <2-source concept, uncited claim, missing-raw) → structural report +
   governance review items (`deprecate_wiki_page`, `missing_raw_source`). `wiki/log.md` append.
 - **7-2** — stale/retention producer (`/jobs/stale-check`): age-based `archive_source` candidates +
-  duplicate detection (`mark_semantic_duplicate`, record-only) + the reversible **`archive_source`
-  executor** (manifest + Source page + graph mirror + reindex) wired into `/reviews/apply`. Rename
-  `archive_raw_file → archive_source`.
-- **7-3** — `/jobs/reindex` (index + keyword only, no vector) + cache-purge candidate detection folded
+  ephemeral `delete_raw_file` record-only candidates + the reversible **`archive_source` executor**
+  (manifest + Source page + graph mirror + reindex) wired into `/reviews/apply`. Rename
+  `archive_raw_file → archive_source`; duplicate detection is deferred.
+- **7-3** — implemented: `/jobs/reindex` (index + keyword only, no vector) + cache-purge candidate detection folded
   into `/jobs/stale-check` (aggregate record-only `purge_response_cache`); `docs/Operations.md` (cron +
   manual eval smoke + raw-backup note) + the no-daemon contract test. **No eval job** (decision 14).
 
