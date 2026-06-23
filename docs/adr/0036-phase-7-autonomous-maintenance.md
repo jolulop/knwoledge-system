@@ -1,6 +1,7 @@
 # ADR-0036 — Phase 7: Autonomous Maintenance
 
-**Status:** Accepted (design-locked 2026-06-23 via grill gate). No code yet.
+**Status:** Accepted (design-locked 2026-06-23 via grill gate). **Slice 7-1 (`/jobs/lint`) implemented**;
+7-2/7-3 pending.
 **Supersedes/extends:** ADR-0004 (Claude Code = supervised maintenance), ADR-0002/0024 (raw immutable),
 ADR-0018/0035 (review ledger + decoupled apply), ADR-0032 §8 (retention-aware retrieval),
 ADR-0027 (response cache). Read `policies/retention.yaml` and Build Spec §9.2/§12.
@@ -48,7 +49,11 @@ health**, including a failing health verdict. **"Failing lint" is an outcome rep
 maintenance pass** — the job still records, still reports every finding, still appends `wiki/log.md`.
 (This mirrors Phase 6 apply's non-transactional posture: surface the problem, don't pretend the run
 didn't happen.) Distinguish this from the *deterministic validators* (`validate_*`), which may still hard-
-fail on a true integrity violation (e.g. a **mutated** raw file, ADR-0024).
+fail on a true integrity violation (e.g. a **mutated** raw file, ADR-0024). Health is **three-state**:
+`failing` (a validator failed or a high-severity finding), `degraded` (the pass completed but coverage was
+incomplete — e.g. the graph is absent/schema-mismatched so semantic checks were skipped — with nothing
+failing), `healthy`. A graph-less run is `degraded`, not falsely `healthy` and not unfairly `failing` on a
+legitimately fresh vault.
 
 **4. Retention executor invariant — reversible status only, never raw bytes.**
 > Phase 7 retention executors may change lifecycle/status and retrieval defaults; they may **not** move,
@@ -99,6 +104,14 @@ effect.
   stale/old source → `archive_source`; missing raw → `missing_raw_source`; duplicate source →
   `mark_semantic_duplicate` (record-only). **Contradictions remain owned by the existing contradiction
   producer** (not re-implemented in lint).
+- **Raw-path safety:** the missing-raw check **confines** each manifest occurrence path under `root/raw`
+  (rejecting absolute paths + `..`, mirroring the `extract.py` boundary, ADR-0009) and requires
+  `is_file()` (a directory does not count); an absolute/escaping path is an explicit `invalid_raw_path`
+  finding, and review payloads/reports carry **only safe repo-relative paths + an invalid-count** — never
+  an absolute/escaping path.
+- **Item-count honesty:** the report distinguishes **`review_items_filed`** (newly created this run) from
+  **`review_items_existing`** (already in the ledger, not re-created), so reruns over a populated queue
+  don't overstate new work.
 
 **9. Eval job is report-only.** Runs the golden questions (`evals/golden_questions.yaml`) and returns
 pass/fail + per-case results as a regression signal. **No review items, no world mutation.**

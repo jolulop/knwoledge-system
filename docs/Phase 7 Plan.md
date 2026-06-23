@@ -1,6 +1,7 @@
 # Phase 7 Plan — Autonomous Maintenance
 
-**Status:** Planned (design-locked 2026-06-23 via grill gate). No code yet.
+**Status:** In progress — **slice 7-1 (`/jobs/lint`) implemented**; 7-2/7-3 pending (design-locked
+2026-06-23 via grill gate).
 **Governing ADR:** [ADR-0036](adr/0036-phase-7-autonomous-maintenance.md). Read it first.
 **Predecessors:** Phases 1–6 complete + pushed. Phase 7 builds the maintenance surface over the existing
 ingest/enrich/retrieve/review machinery; it adds no new runtime and no second authority.
@@ -37,14 +38,19 @@ A job-recorded health pass that **completes and reports**, even when health fail
 - **Structural (report-only — fixed by regen, no governance):** broken wikilinks, missing frontmatter,
   missing summary callout, missing/uncited citations. Wraps the deterministic `validate_*` checks as a
   job report (not just script exit codes), so `validators_ok`-style health is recorded.
-- **Semantic (governance → review items):** orphan / under-supported (<2-source) concept →
-  `deprecate_wiki_page`; **missing raw** (catalogued raw file absent) → **high-severity finding +
-  `missing_raw_source`** (record-only); stale/uncited claim, summary rot → findings (claim/summary
-  remediation is regen, not governance — report unless they imply a deprecation). Contradictions stay
-  owned by the existing contradiction producer.
-- Returns a typed report `{status: "healthy"|"failing", findings:[{check, severity, subject, ...}],
-  review_items_filed, job_id}`; appends `wiki/log.md`. **"failing" is an outcome, not a 5xx.**
-- Idempotent: re-running files no duplicate review items (`subject={source_id}`-keyed).
+- **Semantic (governance → review items) — shipped in 7-1:** orphan / under-supported (<2-source) active
+  concept → `deprecate_wiki_page`; **missing raw** (catalogued raw file absent, path-confined under
+  `root/raw` + `is_file()`; an absolute/escaping path → an explicit `invalid_raw_path` finding, no
+  absolute-path leak) → **high-severity finding + `missing_raw_source`** (record-only); **uncited active
+  claim** → report-only backstop. Contradictions stay owned by the existing contradiction producer.
+  *(**Deferred** to a later "lint heuristics" slice: summary-rot and stale-claim drift checks — they need
+  real fingerprint/drift heuristics, better as their own slice than half-done here.)*
+- Returns a typed report `{status: "healthy"|"degraded"|"failing", validators[], findings:[{check,
+  severity, subject, detail}], by_check, review_items_filed (newly created), review_items_existing
+  (already in ledger), graph_available, job_id}`; appends `wiki/log.md`. **None of these states are a
+  5xx** — health is an outcome (`degraded` = coverage incomplete, e.g. graph absent).
+- Idempotent: re-running files no duplicate review items (`subject={source_id|node_id}`-keyed); reruns
+  report matches under `review_items_existing`, not `review_items_filed`.
 
 ---
 
@@ -98,7 +104,7 @@ A job-recorded health pass that **completes and reports**, even when health fail
 ## 6. Sub-slices (each committable + validated)
 | Slice | Deliverable |
 |---|---|
-| **7-1** | `/jobs/lint`: structural validators as a job report + semantic checks (orphan / <2-source concept, stale/uncited claim, summary rot, **missing-raw**) → report + governance review items (`deprecate_wiki_page`, `missing_raw_source`); `wiki/log.md` append; lint-health-as-outcome. Tests. |
+| **7-1** ✅ | `/jobs/lint`: structural validators as a job report + semantic checks (orphan / <2-source concept, uncited claim, **missing-raw** with path confinement + `invalid_raw_path`) → report + governance review items (`deprecate_wiki_page`, `missing_raw_source`); 3-state health (healthy/degraded/failing); filed-vs-existing item counts; `wiki/log.md` append. Tests (12+). *(summary-rot / stale-claim drift deferred to a later heuristics slice.)* |
 | **7-2** | `/jobs/stale-check` retention producer (`archive_source` candidates, `delete_raw_file`/`mark_semantic_duplicate` record-only) + reversible **`archive_source` executor** in `/reviews/apply` (manifest+page+graph mirror, reindex, no raw move) + `archive_raw_file→archive_source` rename. Tests. |
 | **7-3** | `/jobs/reindex` (deterministic surfaces) + eval job (report-only) + cache-purge candidate detection + cron/backup operator docs + **no-daemon contract test**. Tests. |
 

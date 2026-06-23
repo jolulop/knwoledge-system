@@ -429,6 +429,39 @@ class FailedValidator(BaseModel):
     stderr_tail: str = ""
 
 
+class LintValidator(BaseModel):
+    # One structural validator's result in the /jobs/lint report (tails sanitized of the root path).
+    name: str
+    returncode: int
+    stdout_tail: str = ""
+    stderr_tail: str = ""
+
+
+class LintFinding(BaseModel):
+    # One lint finding. `check` names the rule; `severity` ∈ {high, medium}; `subject` is the source/node id.
+    check: str
+    severity: str
+    subject: str | None = None
+    detail: str = ""
+
+
+class LintResponse(BaseModel):
+    # POST /jobs/lint (Phase 7, ADR-0036). Detect-and-propose health pass; lint health is an outcome,
+    # not an abort (none of these are HTTP errors). `status`: "failing" (a validator failed or a
+    # high-severity finding), "degraded" (completed but coverage incomplete — graph absent so semantic
+    # checks skipped — nothing failing), "healthy". `review_items_filed` are newly created this run;
+    # `review_items_existing` were already in the ledger (not re-created).
+    job_id: str
+    status: str  # healthy | degraded | failing
+    validators_ok: bool
+    validators: list[LintValidator] = []
+    findings: list[LintFinding] = []
+    by_check: dict[str, int] = {}
+    review_items_filed: list[str] = []
+    review_items_existing: list[str] = []
+    graph_available: bool
+
+
 class ReviewApplyResponse(BaseModel):
     # POST /reviews/apply (ADR-0035 A4/A6). Non-transactional: effects are written, then validators run
     # once. status is "applied" (clean) or "validation_failed" (apply ran; the vault now reports an

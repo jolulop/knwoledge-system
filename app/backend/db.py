@@ -15,7 +15,9 @@ from typing import Any
 JOB_TYPES = frozenset(
     {"intake_scan", "manifest_create", "duplicate_check", "extract", "generate_wiki",
      "enrich", "extract_claims", "extract_concepts", "promote", "detect_contradictions",
-     "generate_synthesis"}
+     "generate_synthesis",
+     # Phase 7 autonomous-maintenance passes (ADR-0036)
+     "lint", "reindex", "stale_check", "eval"}
 )
 JOB_STATUSES = frozenset(
     {"pending", "running", "succeeded", "failed", "partial", "skipped"}

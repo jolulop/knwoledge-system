@@ -30,6 +30,7 @@ from app.backend.models import (
     HealthResponse,
     Job,
     JobsResponse,
+    LintResponse,
     NormalizedResponse,
     QueryRequest,
     QueryResponse,
@@ -49,7 +50,7 @@ from app.llm.adapters import AdapterError
 from app.llm.cache import ResponseCache
 from app.llm.client import ConfigError, ParseError, build_client
 from app.workers import (
-    contradictions, deprecations, extract, intake, promote, query, reviews, synthesis, wiki,
+    contradictions, deprecations, extract, intake, lint, promote, query, reviews, synthesis, wiki,
 )
 from app.workers.wiki_render import parse_frontmatter, render_query_page
 
@@ -450,23 +451,9 @@ def _rebuild_index_status(root: Path) -> str:
 
 
 def _run_all_validators(root: Path) -> list[dict[str, Any]]:
-    """Run every `scripts/validate_*.py` once (the integrity bar), capturing per-validator results.
-
-    Discovered exactly as `scripts/validate_all.py` does; module-level so tests can monkeypatch it.
-    Output tails are sanitized of the absolute root path (the no-server-path-leak invariant)."""
-    scripts_dir = root / "scripts"
-    root_str = str(root)
-    results: list[dict[str, Any]] = []
-    for script in sorted(scripts_dir.glob("validate_*.py")):
-        if script.name == "validate_all.py":
-            continue
-        proc = subprocess.run(
-            [sys.executable, str(script), str(root)], capture_output=True, text=True)
-        results.append({
-            "name": script.name, "returncode": proc.returncode,
-            "stdout_tail": proc.stdout.replace(root_str, "<root>")[-800:],
-            "stderr_tail": proc.stderr.replace(root_str, "<root>")[-800:]})
-    return results
+    """Run the structural validator suite (sanitized), shared with /jobs/lint. Module-level so tests
+    can monkeypatch it; the implementation lives in the lint worker (single source, no drift)."""
+    return lint.run_validators(root)
 
 
 def _approved_graph_backed_count(reviews_dir: Path) -> int:
@@ -584,6 +571,20 @@ def apply_reviews() -> dict[str, Any]:
             "unapplied": _unapplied_by_type(reviews_dir),
         },
     }
+
+
+# --- Phase 7 maintenance passes (detect-and-propose; ADR-0036) -------------
+
+
+@app.post("/jobs/lint", response_model=LintResponse)
+def run_lint_job() -> dict[str, Any]:
+    """Run the lint maintenance pass: structural health report + semantic checks that file governance
+    review items (ADR-0036). Detect-and-propose: it never acts on semantic/destructive issues. Lint
+    health is an outcome (`status: "failing"` ≠ HTTP error) — the pass always completes + records a job.
+    """
+    return lint.run_lint(
+        settings.root, manifests_dir=settings.manifests_dir, graph_db=settings.graph_db_path,
+        wiki_dir=settings.wiki_dir, reviews_dir=settings.reviews_dir, jobs_db=settings.jobs_db_path)
 
 
 # --- Human Review UI (server-rendered HTML; ADR-0035 decision 1 + A8) -------

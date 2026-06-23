@@ -28,6 +28,9 @@ REVIEW_TYPES = frozenset({
     "merge_entities", "split_entity", "merge_concepts", "mark_semantic_duplicate",
     "promote_single_source_claim_to_concept", "hide_content",
     "promote_candidate_node", "change_entity_subtype", "propose_synthesis",
+    # Phase 7 maintenance (ADR-0036): a catalogued raw file gone missing — record-only governance
+    # of a broken source record (high-severity lint finding; never auto-remediated).
+    "missing_raw_source",
 })
 REVIEW_STATUSES = frozenset({"pending", "approved", "rejected", "deferred"})
 PRIORITIES = frozenset({"low", "medium", "high"})
