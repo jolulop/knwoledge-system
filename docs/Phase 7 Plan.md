@@ -54,19 +54,27 @@ A job-recorded health pass that **completes and reports**, even when health fail
 
 ---
 
-## 3. Stale / retention (slice 7-2)
-- **`/jobs/stale-check`** — age-based candidate detection from manifest dates per `policies/retention.yaml`
-  (`older_than_years_archive_candidate`, ephemeral `delete_candidate_after_days`): files **one
-  `archive_source`** review item per stale source proposing `active → archive_candidate` (staleness/age
-  evidence in the proposal — single gate, P1). Ephemeral past its window → `delete_raw_file` candidate
-  (record-only). Duplicate-source detection → `mark_semantic_duplicate` (record-only).
-- **`archive_source` executor** (new, reversible; wired into `/reviews/apply`): on an approved
-  `archive_source`, set the lifecycle status on **manifest + Source page + graph node mirror**, then
-  reindex. **No raw byte movement.** Archived sources stay indexed but are excluded from default retrieval
-  (existing `RETENTION_DEFAULT_STATUSES` filter); `source_status=archived` still finds them. Idempotent /
-  normalization-aware like the Phase-6 deprecation executor.
+## 3. Stale / retention (slice 7-2) — design-locked (ADR-0036 decision 13)
+- **Manifest is the durable Source lifecycle authority** (the missing piece): add `manifest["status"]`
+  (default `active`) + `manifests.set_status(...)`; the Source renderer reads `manifest.get("status",
+  "active")` and folds it into the Source-page `input_fingerprint`; status flows `manifest → Source page →
+  nav index → retrieval`. Source pages stay a pure projection (never self-preserve status). `validate_wiki`
+  gains a Source page-status == manifest-status check. `retention_class` stays distinct from `status`.
+- **`/jobs/stale-check`** producer (detect-and-propose, never acts): **archive** candidate =
+  `status==active` and `modified_at` age (fallback `discovered_at`) ≥ `older_than_years_archive_candidate`
+  → one **`archive_source`** proposing `active → archive_candidate` (age in proposal, single gate, P1).
+  **Ephemeral delete** candidate = `retention_class==ephemeral` and `discovered_at`/first-seen age >
+  `delete_candidate_after_days` → **`delete_raw_file`** (record-only forever). Idempotent
+  (`subject={source_id}`).
+- **`apply_archive_sources` executor** (new, `app/workers/retention.py`; wired into `/reviews/apply`): on
+  an approved `archive_source`, flip **`active → archive_candidate`** (the honest v1 terminal — excluded
+  from default retrieval via `RETENTION_DEFAULT_STATUSES`, reversible, **no physical move**, not
+  `archived`) on the **manifest**, re-render the Source page, mirror the graph source node, reindex
+  (caller-owned). Scope-guarded + idempotent (only transitions an `active` source); raw untouched.
 - **Rename `archive_raw_file → archive_source`** in `review.yaml` + `REVIEW_TYPES` (no producers today).
 - `delete_raw_file` remains record-only **forever** (manual execution only, outside `/reviews/apply`).
+- **Duplicate detection deferred** (exact SHA dupes already collapse to one `source_id`; semantic/near
+  duplicates need a separate similarity design).
 
 ---
 

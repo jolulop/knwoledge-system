@@ -129,6 +129,31 @@ type-specific subject fields only where needed). Phase 6 `create_review_item` is
 metadata mirrored from wiki/manifests (ADR-0029/0030). Phase 7 adds **no second graph authority and no
 separate curator store**.
 
+**13. Slice 7-2 design-lock (2026-06-23 grill) — source lifecycle status + the archive executor.**
+- **The manifest is the durable Source lifecycle authority.** Source pages have no durable place for
+  status today (the template hardcodes `status: active`, and `generate_wiki` regenerates from the
+  manifest without preserving it), so a status set on the page would be lost on the next regen. Therefore
+  a new **`manifest["status"]`** (default `active`) is the authority; the Source renderer reads
+  `manifest.get("status", "active")` (folded into the Source-page `input_fingerprint`), so the page stays
+  a **pure projection of manifest + normalized markdown** (ADR-0016 intact) and the status flows
+  `manifest → Source page → keyword nav index → retrieval filter` end-to-end. Source pages **never
+  self-preserve** status. `retention_class` (policy category) stays distinct from `status` (lifecycle /
+  retrieval visibility). `validate_wiki` gains a Source page-status == manifest-status check (alongside
+  sha256/paths/ingestion). A new `manifests.set_status(...)` is the only writer.
+- **Staleness signals (the producer detects, never acts):** **archive** candidate = `status == active`
+  **and** content age from `modified_at` (fallback `discovered_at` when absent) ≥
+  `older_than_years_archive_candidate` → one **`archive_source`** proposing `active → archive_candidate`,
+  age in the proposal (single gate, P1). **Ephemeral delete** candidate = `retention_class == ephemeral`
+  **and** time-in-system from `discovered_at`/first-seen > `delete_candidate_after_days` →
+  **`delete_raw_file`** (record-only forever).
+- **`apply_archive_sources` executor** (new, `app/workers/retention.py`, wired into `POST /reviews/apply`):
+  on an approved `archive_source`, flip **`active → archive_candidate`** (the honest v1 terminal status —
+  excluded from default retrieval, reversible, **no physical move**, *not* `archived`) on the **manifest**,
+  re-render the Source page, mirror the graph source node, and reindex (caller-owned single rebuild).
+  Scope-guarded + idempotent (only transitions an `active` source); raw bytes untouched.
+- **Duplicate detection deferred** out of 7-2: exact SHA duplicates already collapse to one `source_id`;
+  semantic/near-duplicate detection (`mark_semantic_duplicate`) needs a separate similarity design.
+
 ## 3. Scope (v1) and slices
 
 **In v1:** `/jobs/lint` (structural validators + new semantic checks incl. missing-raw), `/jobs/reindex`
