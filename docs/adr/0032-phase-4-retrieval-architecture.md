@@ -273,3 +273,20 @@ adds no new dependencies.
    fake embedder has no semantics). Real-model determinism is pinned by index version +
    `embedding_model_ref` and is a documented smoke/eval concern, **not** the CI gate. A standalone CLI
    runner is deferred until repeated real-vault evaluation is an actual workflow.
+
+9. **Weighted RRF + graph boosts revisited (2026-06-24 grill) — stay deferred; prerequisite is a real
+   retrieval eval corpus.** Re-examined the addendum-7 deferral and **reaffirmed it**. The feature is
+   *eval-gated*: RRF is scale-free and weight-free **by design** (addendum 6), and the only retrieval
+   oracle today is the **fake-embedder structural gate** (addendum 8), which cannot measure semantic
+   relevance — so any channel weight / graph-boost *value* would be an unfalsifiable magic constant.
+   Decisions:
+   - **Build the real retrieval eval corpus first** (golden query → expected-evidence over a curated/real
+     vault); only then does weighted RRF / graph-boost tuning become *measurable engineering* rather than
+     configuration scaffolding. That corpus is the next slice, not this one.
+   - **A configurable-mechanism-with-neutral-defaults (`w=1`/`boost=0`) is acceptable but NOT built now** —
+     with no value to tune against, it is latent complexity (untunable knobs); revisit only if a concrete
+     need for the config/experiment surface arises before the corpus exists.
+   - **Lifecycle-aware ranking (demoting visible-but-non-`active` source chunks) is explicitly out of this
+     scope.** It may be defensible, but it is a **retention/retrieval-policy** decision (interacting with
+     `RETENTION_DEFAULT_STATUSES`, ADR-0032 §8 / ADR-0036), not a fusion-weighting change — it must be
+     grilled on its own terms, not bundled under "weighted RRF."
