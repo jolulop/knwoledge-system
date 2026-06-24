@@ -111,6 +111,13 @@ def test_runner_plumbing_with_fake_embedder(tmp_path):
     assert len(result["skipped"]) == 1               # the unresolved-filename case is skipped, not scored
     assert result["graph_present"] is False
 
+    # The build path MUST generate Source wiki pages, else the retention filter drops every evidence hit.
+    assert list((work / "wiki" / "Sources").glob("*.md")), "no Source pages generated"
+    # Regression guard: with Source pages, the exact-anchor keyword case actually retrieves its source.
+    by_id = {r["id"]: r for r in result["rows"]}
+    anchor = by_id["c_anchor"]
+    assert anchor["hit@5"] == 1.0 or anchor["recall@5"] > 0.0, "exact-anchor case scored zero"
+
     report = er.render_report(result, settings=settings, ks=[5], source_label="test")
     for needle in ("## Aggregate", "graph_present: false", "graph_boosts: none", "neg@5",
                    "## Discrimination", "relevant_wins", "negative cases: 1"):

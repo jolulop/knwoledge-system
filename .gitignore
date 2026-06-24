@@ -4,6 +4,8 @@ __pycache__/
 .venv/
 node_modules/
 .DS_Store
+# Local tool/model caches (e.g. the TEI embedding-server cache) — never committed.
+.cache/
 Thumbs.db
 backups/*.zip
 # Windows mark-of-the-web metadata (WSL)

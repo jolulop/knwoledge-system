@@ -80,7 +80,7 @@ def _mean(values: list[float]) -> float:
 # --- vault build + run -----------------------------------------------------------------------------
 
 def _build_corpus_vault(corpus_dir: Path, work_root: Path, embedder: Any, settings: Any) -> None:
-    from app.workers import extract, intake
+    from app.workers import extract, intake, wiki
     inbox = work_root / "raw" / "inbox"
     inbox.mkdir(parents=True, exist_ok=True)
     for md in sorted(corpus_dir.glob("*.md")):
@@ -88,6 +88,11 @@ def _build_corpus_vault(corpus_dir: Path, work_root: Path, embedder: Any, settin
     jobs = work_root / "db" / "jobs.sqlite"
     intake.scan_inbox(work_root, jobs_db=jobs)
     extract.extract_sources(work_root, jobs_db=jobs)
+    # Source wiki pages carry the source-status rows the keyword nav table needs; without them
+    # `_source_status_map` returns nothing, so the default retention filter drops EVERY evidence hit
+    # (ADR-0029/0032 §8) — the cause of an all-zero baseline. Deterministic + key-free.
+    wiki.generate_wiki(work_root, jobs_db=jobs, templates_dir=ROOT / "templates",
+                       rebuild_index=False, record_job=False)
     keyword_index.reindex(work_root, force=True)
     vector_index.reindex(work_root, embedder, embedding_model_ref=settings.embedding_model_ref,
                          distance_metric=settings.embedding_distance_metric, force=True)
