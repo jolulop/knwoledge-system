@@ -22,6 +22,7 @@ Idempotent: review items key on `(type, subject={source_id|node_id})`, so re-run
 """
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import uuid
@@ -30,9 +31,10 @@ from pathlib import Path
 from typing import Any
 
 from app.backend import db, graph, search
-from app.backend.manifests import iso_now, valid_manifests
-from app.workers import reviews
-from app.workers.wiki_render import NODE_DIR
+from app.backend.manifests import is_source_id, iso_now, valid_manifests
+from app.workers import citations, reviews
+from app.workers.enrichment_artifact import artifact_fingerprint
+from app.workers.wiki_render import NODE_DIR, parse_frontmatter
 
 # Concept/entity family — the promotable node types a source "mentions" (ADR-0017/0018).
 _CONCEPT_FAMILY = ("concept", "entity", "person", "organization", "project")
@@ -199,6 +201,154 @@ def _check_graph(gconn, wiki_dir: Path, reviews_dir: Path, *, file_items: bool, 
     return findings
 
 
+def _check_summary_rot(enrichment_dir: Path, markdown_dir: Path, wiki_dir: Path,
+                       summary_model_ref: str | None) -> tuple[list[dict[str, Any]], bool]:
+    """Enriched Source summaries whose artifact fingerprint no longer matches the current inputs (ADR-0037).
+
+    `summary_rot` = `normalized/enrichment/<sid>.json.input_fingerprint` != `artifact_fingerprint(current
+    normalized md, current configured summary model_ref)` — "the current enrich pass would regenerate it".
+    Graph-independent, key-free. Stub/missing artifact is not rot. Coverage-`degraded` only on an
+    expectation mismatch: an enriched artifact whose normalized md is gone, or a Source page marked
+    `summary_status: enriched` whose artifact is missing/unreadable (page reads are coverage-only)."""
+    findings: list[dict[str, Any]] = []
+    degraded = False
+    if enrichment_dir.exists() and summary_model_ref:
+        for apath in sorted(enrichment_dir.glob("*.json")):
+            # Positive-only allowlist (ADR-0037): exactly `src_<16 hex>.json`. `.claims`/`.concepts`/
+            # `.synthesis` artifacts have non-canonical stems and are rejected here — no blocklist.
+            sid = apath.stem
+            if not is_source_id(sid):
+                continue
+            try:
+                art = json.loads(apath.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if art.get("source_id") != sid:  # internal id must match the filename (no spoofing)
+                continue
+            if art.get("generation_status") != "enriched":
+                continue
+            md_path = markdown_dir / f"{sid}.md"  # sid is canonical-validated
+            if not md_path.exists():  # can't recompute the fingerprint -> unverifiable, not rot
+                findings.append({"check": "summary_unverifiable", "severity": "low", "subject": sid,
+                                 "detail": "enriched summary artifact but normalized markdown missing",
+                                 "data": {"source_id": sid}})
+                degraded = True
+                continue
+            current = artifact_fingerprint(md_path.read_text(encoding="utf-8"), summary_model_ref)
+            if art.get("input_fingerprint") != current:
+                findings.append({"check": "summary_rot", "severity": "low", "subject": sid,
+                                 "detail": "enriched summary stale vs current normalized markdown / model",
+                                 "data": {"source_id": sid, "remediation": "rerun_enrich"}})
+    # Coverage probe (page reads only): a page claiming enrichment whose durable artifact is gone.
+    sources_dir = wiki_dir / "Sources"
+    if sources_dir.exists():
+        for page in sorted(sources_dir.glob("*.md")):
+            sid = page.stem
+            if not is_source_id(sid):  # never build a path from a non-canonical page stem
+                continue
+            try:
+                fm = parse_frontmatter(page.read_text(encoding="utf-8"))
+            except OSError:
+                continue
+            if fm.get("summary_status") != "enriched":
+                continue
+            apath = enrichment_dir / f"{sid}.json"
+            ok = apath.exists()
+            if ok:
+                try:
+                    json.loads(apath.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    ok = False
+            if not ok:
+                findings.append({"check": "summary_unverifiable", "severity": "low", "subject": sid,
+                                 "detail": "Source page marked enriched but artifact missing/unreadable",
+                                 "data": {"source_id": sid}})
+                degraded = True
+    return findings, degraded
+
+
+def _check_stale_claims(gconn, enrichment_dir: Path,
+                        markdown_dir: Path) -> tuple[list[dict[str, Any]], bool]:
+    """Claim citations whose stored anchor no longer supports the stored quote (ADR-0037). Graph-gated.
+
+    Stale detection is artifact-driven: for each durable `.claims.json` citation that exactly matches an
+    **active `derived_from` edge** on `(claim_id, source_id, char_start, char_end)`, re-ground the
+    **stored** quote against the current normalized markdown (`ground_citation(require_quote=True)`); a
+    non-empty problem list -> `stale_claim_citation`. Active-node-only matching is too loose (a claim can
+    stay active via another source while this edge is superseded). Coverage is graph-driven: a source the
+    graph shows has active claim evidence but whose `.claims.json` / markdown can't be read -> `degraded`."""
+    findings: list[dict[str, Any]] = []
+    degraded = False
+    cite_cache: dict[str, dict[tuple, Any] | None] = {}  # sid -> {(cid,sid,start,end): quote} or None
+    md_cache: dict[str, str | None] = {}
+
+    def _citations(sid: str) -> dict[tuple, Any] | None:
+        if sid not in cite_cache:
+            apath = enrichment_dir / f"{sid}.claims.json"
+            if not apath.exists():
+                cite_cache[sid] = None
+            else:
+                try:
+                    data = json.loads(apath.read_text(encoding="utf-8"))
+                    lut: dict[tuple, Any] = {}
+                    for item in data.get("claims", []):
+                        c = item.get("citation") or {}
+                        lut[(item.get("claim_id"), c.get("source_id"),
+                             c.get("char_start"), c.get("char_end"))] = c.get("quote")
+                    cite_cache[sid] = lut
+                except (OSError, json.JSONDecodeError):
+                    cite_cache[sid] = None
+        return cite_cache[sid]
+
+    def _md(sid: str) -> str | None:
+        if sid not in md_cache:
+            mp = markdown_dir / f"{sid}.md"
+            md_cache[sid] = mp.read_text(encoding="utf-8") if mp.exists() else None
+        return md_cache[sid]
+
+    def _unverifiable(cid, detail, data):
+        nonlocal degraded
+        findings.append({"check": "claim_evidence_unverifiable", "severity": "low",
+                         "subject": cid, "detail": detail, "data": data})
+        degraded = True
+
+    # Edge-driven: every active derived_from edge MUST be backed by an exact durable citation we can
+    # re-ground; anything missing/unsafe is unverifiable -> degraded, never a silent healthy (ADR-0037).
+    for cid in graph.claims_with_active_evidence(gconn):
+        for e in graph.outgoing_active(gconn, cid):
+            if e["edge_type"] != "derived_from":
+                continue
+            sid, start, end = e["dst_id"], e["evidence_char_start"], e["evidence_char_end"]
+            if not is_source_id(sid):  # never build a path from a non-canonical edge source; no id leak
+                _unverifiable(cid, "active claim evidence has a non-canonical source id", {"claim_id": cid})
+                continue
+            lut = _citations(sid)
+            if lut is None:
+                _unverifiable(cid, "active claim evidence but claims artifact missing/unreadable",
+                              {"claim_id": cid, "source_id": sid})
+                continue
+            key = (cid, sid, start, end)
+            if key not in lut:  # exact citation absent/mismatched (e.g. wrong span) -> cannot verify
+                _unverifiable(cid, "active edge citation absent from durable claims artifact",
+                              {"claim_id": cid, "source_id": sid, "char_start": start, "char_end": end})
+                continue
+            md = _md(sid)
+            if md is None:
+                _unverifiable(cid, "active claim evidence but source markdown missing",
+                              {"claim_id": cid, "source_id": sid})
+                continue
+            problems = citations.ground_citation(
+                {"source_id": sid, "char_start": start, "char_end": end, "quote": lut[key]},
+                md, require_quote=True)
+            if problems:
+                findings.append({
+                    "check": "stale_claim_citation", "severity": "medium", "subject": cid,
+                    "detail": "stored citation quote no longer grounds against current markdown",
+                    "data": {"claim_id": cid, "source_id": sid, "char_start": start,
+                             "char_end": end, "remediation": "rerun_extract_claims"}})
+    return findings, degraded
+
+
 def run_lint(
     root: Path,
     *,
@@ -206,6 +356,9 @@ def run_lint(
     graph_db: Path | None = None,
     wiki_dir: Path | None = None,
     reviews_dir: Path | None = None,
+    enrichment_dir: Path | None = None,
+    markdown_dir: Path | None = None,
+    summary_model_ref: str | None = None,
     jobs_db: Path | None = None,
     record_job: bool = True,
     file_review_items: bool = True,
@@ -218,12 +371,18 @@ def run_lint(
     incomplete — e.g. graph absent/schema-mismatched so semantic checks were skipped — with nothing
     failing), else `"healthy"`. Files governance review items idempotently — `review_items_filed` are
     newly created this run, `review_items_existing` were already in the ledger — and appends `wiki/log.md`.
+
+    `summary_model_ref` is the current configured summary-tier model_ref (the API passes
+    `settings.enrich_model_light`); the ADR-0037 `summary_rot` check is **skipped when it is None**, so a
+    direct caller that wants rot detection must pass it.
     """
     root = Path(root).resolve()
     manifests_dir = Path(manifests_dir) if manifests_dir else root / "raw" / "manifests"
     graph_db = Path(graph_db) if graph_db else root / "db" / "graph.sqlite"
     wiki_dir = Path(wiki_dir) if wiki_dir else root / "wiki"
     reviews_dir = Path(reviews_dir) if reviews_dir else root / "reviews"
+    enrichment_dir = Path(enrichment_dir) if enrichment_dir else root / "normalized" / "enrichment"
+    markdown_dir = Path(markdown_dir) if markdown_dir else root / "normalized" / "markdown"
     jobs_db = Path(jobs_db) if jobs_db else root / "db" / "jobs.sqlite"
     now = now or iso_now()
     job_id = f"job_{uuid.uuid4().hex[:16]}"
@@ -246,6 +405,11 @@ def run_lint(
             manifests_dir, root, reviews_dir, file_items=file_review_items, now=now,
             filed=filed, existing=existing)
 
+        # summary_rot is graph-independent (artifact + normalized md only) — runs always (ADR-0037).
+        rot_findings, coverage_degraded = _check_summary_rot(
+            enrichment_dir, markdown_dir, wiki_dir, summary_model_ref)
+        findings += rot_findings
+
         gconn = _open_graph_ro(graph_db)
         graph_available = gconn is not None
         if gconn is not None:
@@ -253,6 +417,10 @@ def run_lint(
                 findings += _check_graph(
                     gconn, wiki_dir, reviews_dir, file_items=file_review_items, now=now,
                     filed=filed, existing=existing)
+                stale_findings, stale_degraded = _check_stale_claims(  # graph-gated (ADR-0037)
+                    gconn, enrichment_dir, markdown_dir)
+                findings += stale_findings
+                coverage_degraded = coverage_degraded or stale_degraded
             finally:
                 gconn.close()
         else:
@@ -262,7 +430,7 @@ def run_lint(
         high = any(f["severity"] == "high" for f in findings)
         if not validators_ok or high:
             status = "failing"
-        elif not graph_available:  # completed but semantic-check coverage was incomplete
+        elif not graph_available or coverage_degraded:  # incomplete/unverifiable coverage
             status = "degraded"
         else:
             status = "healthy"

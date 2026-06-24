@@ -26,7 +26,7 @@ private network / sidecar behind a TLS/auth proxy) and is **not** a substitute f
 
 | Pass | Endpoint | Script-equivalent | What it does |
 |---|---|---|---|
-| **Lint** | `POST /jobs/lint` | — | Structural validators + semantic checks (orphan/under-supported concept, uncited claim, **missing raw**) → health report + governance review items. |
+| **Lint** | `POST /jobs/lint` | — | Structural validators + semantic checks (orphan/under-supported concept, uncited claim, **missing raw**) + quality heuristics (**summary rot**, **stale claim citations**) → health report + governance review items. |
 | **Stale / retention** | `POST /jobs/stale-check` | — | Stale sources → `archive_source` candidates; ephemeral past window → `delete_raw_file` (record-only); **LLM-cache** over TTL/size → `purge_response_cache` (record-only). Reports **live cache stats** every run. |
 | **Reindex** | `POST /jobs/reindex` | `scripts/rebuild_index.py` + `scripts/reindex_keyword.py` | Rebuild `wiki/index.md` + refresh the keyword index. **Never the vector index.** |
 | **Backup** | — | `scripts/backup.py` | Snapshot manifests, db (incl. graph), wiki, reviews, policies. |
@@ -57,6 +57,22 @@ Or run the passes directly as one-shot scripts under `systemd` timers — same e
 Each pass writes a job row to `db/jobs.sqlite` and appends `wiki/log.md`, so progress survives restarts
 (state is on disk, never chat context). **Review the queue** (`/ui/reviews`) and **apply** on your own
 cadence — nothing is applied automatically.
+
+## Lint quality heuristics — remediation codes (ADR-0037)
+
+`/jobs/lint` also reports two **report-only** quality findings (deterministic, key-free; they never file
+review items and never turn lint `failing` on their own — they surface as maintenance debt in `by_check`).
+Each finding carries a stable `data.remediation` code; act on it by re-running a producer:
+
+| Finding (`check`) | Severity | Meaning | `data.remediation` → action |
+|---|---|---|---|
+| `summary_rot` | low | An enriched Source summary's artifact fingerprint no longer matches the current normalized markdown / configured summary model. | `rerun_enrich` → run enrichment for the source(s): `uv run python scripts/enrich.py` (needs the configured enrichment provider's API key — provider/model-dependent). |
+| `stale_claim_citation` | medium | A claim's stored citation quote no longer grounds at its anchor in the current markdown. | `rerun_extract_claims` → re-run extraction + claim maintenance: `uv run python scripts/extract_claims.py` (needs the configured provider's key; auto-retracts/regrounds stale evidence). |
+
+Two coverage findings (`summary_unverifiable`, `claim_evidence_unverifiable`, low severity) mark lint
+`degraded` when an enriched page / active claim expects a durable artifact that's missing or unreadable —
+re-run the relevant producer to restore it. A fresh deterministic-only vault (stub summaries, no
+enrichment artifacts) stays `healthy`.
 
 ## Caveats / out of scope
 

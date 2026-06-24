@@ -277,3 +277,245 @@ def test_missing_raw_source_preview_is_record_only(tmp_path):
     assert prev["apply"]["supported"] is False
     assert prev["apply"]["effect_status"] == review_read.APPLY_DEFERRED
     assert review_read.decision_apply_required("missing_raw_source", "approved") is False
+
+
+# --- ADR-0037: summary_rot / stale_claim_citation quality heuristics --------
+
+from app.workers.enrichment_artifact import artifact_fingerprint  # noqa: E402
+
+QSID = "src_00000000000000fa"
+QCID = "clm_0000000000000001"
+QMODEL = "anthropic:claude-haiku-4-5"
+
+
+def _summary_artifact(tmp_path, sid, md_text, model_ref, *, fingerprint=None):
+    edir = tmp_path / "normalized" / "enrichment"
+    mdir = tmp_path / "normalized" / "markdown"
+    edir.mkdir(parents=True, exist_ok=True)
+    mdir.mkdir(parents=True, exist_ok=True)
+    (mdir / f"{sid}.md").write_text(md_text, encoding="utf-8")
+    fp = fingerprint if fingerprint is not None else artifact_fingerprint(md_text, model_ref)
+    (edir / f"{sid}.json").write_text(json.dumps({
+        "source_id": sid, "generation_status": "enriched", "model_ref": model_ref,
+        "input_fingerprint": fp, "summary": "a summary.",
+    }), encoding="utf-8")
+
+
+def _drift_md(tmp_path, sid, text):
+    (tmp_path / "normalized" / "markdown" / f"{sid}.md").write_text(text, encoding="utf-8")
+
+
+def _claim_artifact_and_edge(tmp_path, conn, sid, cid, md_text, quote, *, edge_status="active"):
+    start = md_text.index(quote)
+    end = start + len(quote)
+    mdir = tmp_path / "normalized" / "markdown"
+    edir = tmp_path / "normalized" / "enrichment"
+    mdir.mkdir(parents=True, exist_ok=True)
+    edir.mkdir(parents=True, exist_ok=True)
+    (mdir / f"{sid}.md").write_text(md_text, encoding="utf-8")
+    (edir / f"{sid}.claims.json").write_text(json.dumps({
+        "source_id": sid, "generation_status": "enriched", "input_fingerprint": "fp",
+        "claims": [{"claim_id": cid, "claim_text": "a claim",
+                    "citation": {"source_id": sid, "char_start": start, "char_end": end, "quote": quote}}],
+    }), encoding="utf-8")
+    graph.upsert_node(conn, node_id=sid, node_type="source", slug=sid, status="active")
+    graph.upsert_node(conn, node_id=cid, node_type="claim", slug=cid, status="active")
+    graph.upsert_assertion(conn, src_id=cid, dst_id=sid, edge_type="derived_from", asserted_by="llm",
+                           status=edge_status, evidence_source_id=sid,
+                           evidence_char_start=start, evidence_char_end=end)
+    return start, end
+
+
+# summary_rot ---------------------------------------------------------------
+
+def test_summary_rot_detected_on_content_drift(tmp_path):
+    gdb, conn = _graph(tmp_path)  # empty graph -> graph_available, so status reflects only rot
+    conn.close()
+    _summary_artifact(tmp_path, QSID, "# H\n\nOriginal body.\n", QMODEL)
+    _drift_md(tmp_path, QSID, "# H\n\nCompletely different body now.\n")
+    res = _run(tmp_path, graph_db=gdb, summary_model_ref=QMODEL)
+    rot = [f for f in res["findings"] if f["check"] == "summary_rot"]
+    assert rot and rot[0]["subject"] == QSID and rot[0]["severity"] == "low"
+    assert rot[0]["data"]["remediation"] == "rerun_enrich"
+    assert res["status"] == "healthy"  # low severity never turns the board red
+
+
+def test_fresh_summary_is_not_rot(tmp_path):
+    gdb, conn = _graph(tmp_path)
+    conn.close()
+    _summary_artifact(tmp_path, QSID, "# H\n\nBody.\n", QMODEL)  # fingerprint matches current md
+    res = _run(tmp_path, graph_db=gdb, summary_model_ref=QMODEL)
+    assert not any(f["check"] == "summary_rot" for f in res["findings"])
+    assert res["status"] == "healthy"
+
+
+def test_model_bump_is_rot_not_failing(tmp_path):
+    gdb, conn = _graph(tmp_path)
+    conn.close()
+    _summary_artifact(tmp_path, QSID, "# H\n\nBody.\n", QMODEL)
+    res = _run(tmp_path, graph_db=gdb, summary_model_ref="anthropic:claude-sonnet-4-6")  # bumped
+    assert any(f["check"] == "summary_rot" for f in res["findings"])  # model change -> rot
+    assert res["status"] != "failing"
+
+
+def test_stub_only_vault_is_healthy_no_rot(tmp_path):
+    gdb, conn = _graph(tmp_path)  # no enrichment artifacts at all
+    conn.close()
+    res = _run(tmp_path, graph_db=gdb, summary_model_ref=QMODEL)
+    assert not any(f["check"] in ("summary_rot", "summary_unverifiable") for f in res["findings"])
+    assert res["status"] == "healthy"
+
+
+def test_enriched_page_without_artifact_is_unverifiable_degraded(tmp_path):
+    gdb, conn = _graph(tmp_path)
+    conn.close()
+    sdir = tmp_path / "wiki" / "Sources"
+    sdir.mkdir(parents=True)
+    (sdir / f"{QSID}.md").write_text("---\nsummary_status: enriched\n---\n\nbody\n", encoding="utf-8")
+    res = _run(tmp_path, graph_db=gdb, summary_model_ref=QMODEL)
+    assert any(f["check"] == "summary_unverifiable" for f in res["findings"])
+    assert res["status"] == "degraded"
+
+
+# stale_claim_citation ------------------------------------------------------
+
+def test_stale_claim_detected_on_span_drift(tmp_path):
+    gdb, conn = _graph(tmp_path)
+    _claim_artifact_and_edge(tmp_path, conn, QSID, QCID, "# H\n\nThe sky is blue today.\n", "The sky is blue")
+    conn.commit()
+    conn.close()
+    _drift_md(tmp_path, QSID, "# H\n\nXXX everything changed XXX.\n")  # stored quote no longer grounds
+    res = _run(tmp_path, graph_db=gdb, summary_model_ref=QMODEL)
+    stale = [f for f in res["findings"] if f["check"] == "stale_claim_citation"]
+    assert stale and stale[0]["subject"] == QCID and stale[0]["severity"] == "medium"
+    assert stale[0]["data"]["source_id"] == QSID
+    assert stale[0]["data"]["remediation"] == "rerun_extract_claims"
+    assert res["status"] != "failing"  # medium, not failing
+
+
+def test_no_stale_when_quote_still_grounds(tmp_path):
+    gdb, conn = _graph(tmp_path)
+    _claim_artifact_and_edge(tmp_path, conn, QSID, QCID, "# H\n\nThe sky is blue today.\n", "The sky is blue")
+    conn.commit()
+    conn.close()
+    res = _run(tmp_path, graph_db=gdb, summary_model_ref=QMODEL)
+    assert not any(f["check"] == "stale_claim_citation" for f in res["findings"])
+    assert res["status"] == "healthy"
+
+
+def test_no_stale_when_edge_superseded(tmp_path):
+    gdb, conn = _graph(tmp_path)
+    _claim_artifact_and_edge(tmp_path, conn, QSID, QCID, "# H\n\nThe sky is blue today.\n",
+                             "The sky is blue", edge_status="superseded")
+    conn.commit()
+    conn.close()
+    _drift_md(tmp_path, QSID, "# H\n\nchanged.\n")  # would be stale, but no ACTIVE edge matches
+    res = _run(tmp_path, graph_db=gdb, summary_model_ref=QMODEL)
+    assert not any(f["check"] == "stale_claim_citation" for f in res["findings"])
+
+
+def test_active_claim_evidence_without_artifact_is_unverifiable_degraded(tmp_path):
+    gdb, conn = _graph(tmp_path)
+    md = "# H\n\nThe sky is blue.\n"
+    (tmp_path / "normalized" / "markdown").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "normalized" / "markdown" / f"{QSID}.md").write_text(md, encoding="utf-8")
+    start = md.index("The sky is blue")
+    graph.upsert_node(conn, node_id=QSID, node_type="source", slug=QSID, status="active")
+    graph.upsert_node(conn, node_id=QCID, node_type="claim", slug=QCID, status="active")
+    graph.upsert_assertion(conn, src_id=QCID, dst_id=QSID, edge_type="derived_from", asserted_by="llm",
+                           status="active", evidence_source_id=QSID,
+                           evidence_char_start=start, evidence_char_end=start + 15)
+    conn.commit()
+    conn.close()
+    res = _run(tmp_path, graph_db=gdb, summary_model_ref=QMODEL)  # NO .claims.json artifact
+    assert any(f["check"] == "claim_evidence_unverifiable" for f in res["findings"])
+    assert res["status"] == "degraded"
+
+
+# --- ADR-0037 round 2: positive enumeration, path safety, exact-citation coverage ---
+
+def test_synthesis_and_concepts_artifacts_are_not_summaries(tmp_path):
+    gdb, conn = _graph(tmp_path)
+    conn.close()
+    edir = tmp_path / "normalized" / "enrichment"
+    edir.mkdir(parents=True)
+    # both have generation_status: enriched but non-canonical stems -> must be ignored
+    (edir / "cpt_thing.synthesis.json").write_text(json.dumps(
+        {"generation_status": "enriched", "input_fingerprint": "x", "summary": "s"}), encoding="utf-8")
+    (edir / f"{QSID}.concepts.json").write_text(json.dumps(
+        {"source_id": QSID, "generation_status": "enriched", "input_fingerprint": "x"}), encoding="utf-8")
+    res = _run(tmp_path, graph_db=gdb, summary_model_ref=QMODEL)
+    assert not any(f["check"] in ("summary_rot", "summary_unverifiable") for f in res["findings"])
+    assert res["status"] == "healthy"
+
+
+def test_summary_artifact_internal_id_must_match_filename(tmp_path):
+    gdb, conn = _graph(tmp_path)
+    conn.close()
+    edir = tmp_path / "normalized" / "enrichment"
+    mdir = tmp_path / "normalized" / "markdown"
+    edir.mkdir(parents=True)
+    mdir.mkdir(parents=True)
+    (mdir / f"{QSID}.md").write_text("# H\n\nbody.\n", encoding="utf-8")
+    # filename is canonical, but internal source_id is a path-like spoof -> rejected, no read/leak
+    (edir / f"{QSID}.json").write_text(json.dumps(
+        {"source_id": "../../etc/x", "generation_status": "enriched", "input_fingerprint": "x"}),
+        encoding="utf-8")
+    res = _run(tmp_path, graph_db=gdb, summary_model_ref=QMODEL)
+    assert not any(f["check"] in ("summary_rot", "summary_unverifiable") for f in res["findings"])
+    assert not any("etc" in json.dumps(f.get("data", {})) for f in res["findings"])
+    assert res["status"] == "healthy"
+
+
+def test_noncanonical_edge_source_is_unverifiable_no_path_read(tmp_path):
+    gdb, conn = _graph(tmp_path)
+    bad = "../../etc/passwd"
+    graph.upsert_node(conn, node_id=bad, node_type="source", slug="x", status="active")
+    graph.upsert_node(conn, node_id=QCID, node_type="claim", slug=QCID, status="active")
+    graph.upsert_assertion(conn, src_id=QCID, dst_id=bad, edge_type="derived_from", asserted_by="llm",
+                           status="active", evidence_source_id=bad, evidence_char_start=0, evidence_char_end=5)
+    conn.commit()
+    conn.close()
+    res = _run(tmp_path, graph_db=gdb, summary_model_ref=QMODEL)
+    unv = [f for f in res["findings"] if f["check"] == "claim_evidence_unverifiable"]
+    assert unv and res["status"] == "degraded"
+    assert not any("etc" in json.dumps(f.get("data", {})) for f in res["findings"])  # no id leak
+
+
+def test_active_edge_citation_absent_from_artifact_is_unverifiable(tmp_path):
+    gdb, conn = _graph(tmp_path)
+    md = "# H\n\nThe sky is blue today.\n"
+    quote = "The sky is blue"
+    start, end = md.index(quote), md.index(quote) + len(quote)
+    mdir = tmp_path / "normalized" / "markdown"
+    edir = tmp_path / "normalized" / "enrichment"
+    mdir.mkdir(parents=True)
+    edir.mkdir(parents=True)
+    (mdir / f"{QSID}.md").write_text(md, encoding="utf-8")
+    # artifact present + readable, but the citation has a WRONG span (off by 1) -> no exact match
+    (edir / f"{QSID}.claims.json").write_text(json.dumps({
+        "source_id": QSID, "claims": [{"claim_id": QCID, "claim_text": "c",
+            "citation": {"source_id": QSID, "char_start": start + 1, "char_end": end, "quote": quote}}],
+    }), encoding="utf-8")
+    graph.upsert_node(conn, node_id=QSID, node_type="source", slug=QSID, status="active")
+    graph.upsert_node(conn, node_id=QCID, node_type="claim", slug=QCID, status="active")
+    graph.upsert_assertion(conn, src_id=QCID, dst_id=QSID, edge_type="derived_from", asserted_by="llm",
+                           status="active", evidence_source_id=QSID,
+                           evidence_char_start=start, evidence_char_end=end)
+    conn.commit()
+    conn.close()
+    res = _run(tmp_path, graph_db=gdb, summary_model_ref=QMODEL)
+    assert any(f["check"] == "claim_evidence_unverifiable" for f in res["findings"])  # not healthy/stale
+    assert not any(f["check"] == "stale_claim_citation" for f in res["findings"])
+    assert res["status"] == "degraded"
+
+
+def test_jobs_lint_serializes_finding_data(client, tmp_path):
+    gdb, conn = _graph(tmp_path)
+    conn.close()
+    _summary_artifact(tmp_path, QSID, "# H\n\nOriginal.\n", QMODEL)
+    _drift_md(tmp_path, QSID, "# H\n\nChanged entirely.\n")
+    body = client.post("/jobs/lint").json()
+    rot = [f for f in body["findings"] if f["check"] == "summary_rot"]
+    assert rot and rot[0]["data"]["remediation"] == "rerun_enrich"
+    assert rot[0]["data"]["source_id"] == QSID

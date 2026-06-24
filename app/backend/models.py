@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class HealthResponse(BaseModel):
@@ -454,11 +454,14 @@ class LintValidator(BaseModel):
 
 
 class LintFinding(BaseModel):
-    # One lint finding. `check` names the rule; `severity` ∈ {high, medium}; `subject` is the source/node id.
+    # One lint finding. `check` names the rule; `severity` ∈ {high, medium, low}; `subject` is the
+    # source/node id. `data` carries optional machine-actionable fields (e.g. source_id/claim_id/char
+    # range + a stable `remediation` code like rerun_enrich / rerun_extract_claims), ADR-0037.
     check: str
     severity: str
     subject: str | None = None
     detail: str = ""
+    data: dict[str, Any] = Field(default_factory=dict)
 
 
 class StaleCheckResponse(BaseModel):
