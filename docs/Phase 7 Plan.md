@@ -141,3 +141,23 @@ A job-recorded health pass that **completes and reports**, even when health fail
 - No scheduler/daemon ships (cron recipe documented; contract test green); the graph authority model is
   unchanged; raw remains immutable.
 - Full suite + ruff + validators green. → Phase 8 (the API-worker / multi-surface runtime).
+
+## 8. Lint quality heuristics — follow-up slice (design-locked, ADR-0037)
+
+The deferred "lint heuristics" extension of `/jobs/lint` — two new **deterministic, key-free, report-only**
+checks (no review vocabulary, no executors, no graph writes):
+- **`summary_rot`** (severity low, source pages only): enrichment-artifact fingerprint drift vs the current
+  configured summary `model_ref`; stub/missing artifact is not rot. Remediation code `rerun_enrich`.
+- **`stale_claim_citation`** (severity medium, graph-gated): re-ground each durable `.claims.json` citation
+  whose `(claim_id, source_id, char_start, char_end)` exactly matches an **active `derived_from` edge**,
+  using the **stored** quote (graph/page quotes are reconstructed → circular). Remediation
+  `rerun_extract_claims`.
+- Neither flips lint to `failing`; **`degraded` only on expectation-mismatch coverage** via two
+  low-severity coverage findings (`summary_unverifiable`, `claim_evidence_unverifiable`) — a fresh
+  deterministic-only vault stays `healthy`. Add optional `data: dict` to `LintFinding` (machine-actionable
+  subject fields + a stable remediation **code**). Detection reads durable artifacts; wiki pages are read
+  only for coverage probing.
+- Deliverables on implement: the two checks + coverage probes in `app/workers/lint.py`; `LintFinding.data`;
+  key-free tests (rot detected on fingerprint drift, stale on span drift, neither on a clean/stub/fresh
+  vault, coverage→degraded, no false failing on model bump); a `docs/Operations.md` operator note mapping
+  the remediation codes. See **ADR-0037** for the full design lock.
