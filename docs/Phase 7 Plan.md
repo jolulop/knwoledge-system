@@ -161,3 +161,24 @@ checks (no review vocabulary, no executors, no graph writes):
   key-free tests (rot detected on fingerprint drift, stale on span drift, neither on a clean/stub/fresh
   vault, coverage→degraded, no false failing on model bump); a `docs/Operations.md` operator note mapping
   the remediation codes. See **ADR-0037** for the full design lock.
+
+**Status:** decisions 1–5 **implemented** (commit `8958fe3`).
+
+### 8a. Synthesis rot — follow-up (design-locked, ADR-0037 decision 6)
+
+Scoped to **synthesis only** (the one graph-composed page type with an LLM artifact + freshness
+fingerprint):
+- **`synthesis_rot`** (low, report-only, never `failing`, graph-gated): active synthesis whose
+  `<topic_id>.synthesis.json` `input_fingerprint` ≠ `synthesis._fingerprint(current topic,
+  enrich_model_heavy)` — the producer's existing `stale_active` signal, surfaced key-free via
+  **topic-driven enumeration** (`eligible_topics`). `subject=<synthesis_id>`; remediation `rerun_synthesis`.
+- **`synthesis_unverifiable`** (low → `degraded`): active synthesis but artifact missing/unreadable.
+  **Evidence-gone** (topic no longer reconstructs) is *not* a lint finding — the producer's deprecation
+  flow owns it.
+- **Concept / Entity rot — dropped by design** (not deferred): deterministic graph projections, no LLM
+  artifact; consistency already enforced by `validate_projection`. Revisit only if those pages gain
+  LLM-authored prose; any gap is fixed in the validator, not in lint.
+- Deliverables on implement: `_check_synthesis_rot` in `app/workers/lint.py` (+ `summary_model_ref`-style
+  `synthesis_model_ref=enrich_model_heavy` passed by `/jobs/lint`); key-free tests (rot on fingerprint
+  drift, no rot when fresh, evidence-gone produces nothing, missing artifact → unverifiable/degraded, no
+  false `failing` on a schema/prompt/model bump); `docs/Operations.md` `rerun_synthesis` row.
