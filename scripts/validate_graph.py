@@ -14,6 +14,7 @@ enforced once the producers wire the projector into pages (Phase 3.5b slices 3/4
 """
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -22,6 +23,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.backend import graph
+
+# Hard-fail only for node-id grammars that are explicitly documented: `src_<sha256[:16]>` (ADR-0007),
+# `clm_<sha256[:16]>` (claims), `syn_<sha256[:16]>` (synthesis). These flow into filesystem paths, so a
+# non-canonical id is tampering — the validator twin of the runtime `safe_child` guards (ADR-0009/0037).
+# concept/entity/person/organization/project canonicality is **deferred** (their id grammar is not yet
+# explicitly fixed here); the runtime `safe_child` guard already protects their paths. tag/query carry no
+# such id. The defense-in-depth validator stays within documented id rules.
+_NODE_ID_PREFIX = {"source": "src", "claim": "clm", "synthesis": "syn"}
 
 
 def _check(db_path: Path) -> list[str]:
@@ -32,6 +41,10 @@ def _check(db_path: Path) -> list[str]:
         for node_id, node_type in node_types.items():
             if node_type not in graph.NODE_TYPES:
                 errors.append(f"node {node_id}: invalid node_type {node_type!r}")
+            prefix = _NODE_ID_PREFIX.get(node_type)
+            if prefix and not re.fullmatch(rf"{prefix}_[0-9a-f]{{16}}", node_id):
+                # Sanitize: never echo a path-like/oversized id verbatim.
+                errors.append(f"node of type {node_type!r}: non-canonical id (expected {prefix}_<16 hex>)")
 
         known = set(node_types)
         for e in conn.execute("SELECT * FROM edges"):

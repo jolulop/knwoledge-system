@@ -20,24 +20,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.backend.manifests import is_source_id
+from app.backend.paths import safe_under as _safe_under
 
 _EXTRACTED = {"extracted", "partial"}
-
-
-def _safe_under(root: Path, allowed_root: Path, rel: str) -> Path | None:
-    """Resolve a manifest-owned `normalized.*` path under `root/normalized`, or None if it escapes.
-
-    Manifest JSON is untrusted local input (AGENTS.md): a hand-edited normalized path must never make the
-    validator open a file outside `normalized/` (mirrors the raw-integrity guard, ADR-0009)."""
-    p = Path(rel)
-    if p.is_absolute() or ".." in p.parts:
-        return None
-    resolved = (root / p).resolve()
-    try:
-        resolved.relative_to(allowed_root)
-    except ValueError:
-        return None
-    return resolved
 
 
 def _load_chunks(path: Path) -> list[dict] | None:

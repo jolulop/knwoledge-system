@@ -461,3 +461,32 @@ def test_tampered_derived_from_frontmatter_fails_projection(tmp_path):
     tampered = re.sub(r"(?m)^  - clm_[0-9a-f]+\n", "", text, count=1)
     page.write_text(tampered, encoding="utf-8")
     assert validate_projection.main([str(tmp_path)]) == 1
+
+
+def test_lint_synthesis_rot_matches_producer_stale_active(tmp_path):
+    # Real eligible_topics (no monkeypatch): lint's synthesis_rot must fire exactly when the producer
+    # would report stale_active for an active synthesis whose evidence drifted (ADR-0037 decision 6).
+    from app.workers import lint
+    jobs = _build(tmp_path)
+    _gen(tmp_path, SynthAdapter(), jobs)
+    reviews.resolve_review_item(tmp_path / "reviews", _propose_rid(tmp_path),
+                                decision="approved", decided_by="human")
+    _gen(tmp_path, SynthAdapter(), jobs)   # approved -> active synthesis, artifact fingerprinted
+    _bump_a_claim(tmp_path, jobs)          # contributing evidence changes -> topic fingerprint drifts
+    res = lint.run_lint(tmp_path, graph_db=tmp_path / "db" / "graph.sqlite",
+                        synthesis_model_ref=HEAVY, record_job=False)
+    rot = [f for f in res["findings"] if f["check"] == "synthesis_rot"]
+    assert len(rot) == 1 and rot[0]["data"]["remediation"] == "rerun_synthesis"
+    assert res["status"] != "failing"  # low severity
+
+
+def test_lint_synthesis_fresh_no_rot(tmp_path):
+    from app.workers import lint
+    jobs = _build(tmp_path)
+    _gen(tmp_path, SynthAdapter(), jobs)
+    reviews.resolve_review_item(tmp_path / "reviews", _propose_rid(tmp_path),
+                                decision="approved", decided_by="human")
+    _gen(tmp_path, SynthAdapter(), jobs)   # active + fresh (no evidence change)
+    res = lint.run_lint(tmp_path, graph_db=tmp_path / "db" / "graph.sqlite",
+                        synthesis_model_ref=HEAVY, record_job=False)
+    assert not any(f["check"] == "synthesis_rot" for f in res["findings"])

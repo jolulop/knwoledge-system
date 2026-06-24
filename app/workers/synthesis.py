@@ -39,6 +39,7 @@ from typing import Any
 
 from app.backend import db, graph
 from app.backend.manifests import get_provenance, independent_sources, iso_now, valid_manifests
+from app.backend.paths import safe_child
 from app.llm import prompts
 from app.llm.client import LLMClient, ParseError
 from app.workers import enrichment_artifact as art
@@ -79,8 +80,8 @@ def _read_fm_title(page_path: Path) -> str | None:
 def _claim_context(gconn, cid: str, *, claims_dir: Path, markdown_dir: Path) -> dict[str, Any] | None:
     """A contributing claim's durable text + citations reconstructed from its active edges; None
     if its page/wording is missing. A claim with no citations is not usable (caller drops it)."""
-    page = claims_dir / f"{cid}.md"
-    if not page.exists():
+    page = safe_child(claims_dir, f"{cid}.md")  # cid is graph-derived (untrusted), ADR-0009
+    if page is None or not page.exists():
         return None
     m = _CLAIM_TEXT_RE.search(page.read_text(encoding="utf-8", errors="replace"))
     if not m:
@@ -91,7 +92,9 @@ def _claim_context(gconn, cid: str, *, claims_dir: Path, markdown_dir: Path) -> 
         if e["edge_type"] != "derived_from":
             continue
         src, start, end = e["dst_id"], e["evidence_char_start"], e["evidence_char_end"]
-        md_path = markdown_dir / f"{src}.md"
+        md_path = safe_child(markdown_dir, f"{src}.md")
+        if md_path is None:
+            continue  # non-canonical/path-like source id -> drop this citation, never read outside
         md = md_path.read_text(encoding="utf-8") if md_path.exists() else ""
         quote = md[start:end] if start is not None and end is not None and end <= len(md) else ""
         cites.append({"source_id": src, "char_start": start, "char_end": end, "quote": quote})
@@ -141,10 +144,12 @@ def eligible_topics(gconn, prov, *, claims_dir: Path, markdown_dir: Path) -> lis
             surviving_sources = {s for c in ctxs for s in c["sources"]}
             if len(ctxs) < 2 or not _has_independent_pair(surviving_sources, prov):
                 continue
-            topic_page = claims_dir.parent / NODE_DIR[node_type] / f"{node['slug']}.md"
+            node_dir = claims_dir.parent / NODE_DIR[node_type]
+            topic_page = safe_child(node_dir, f"{node['slug']}.md")  # slug is graph-derived
             topics.append({
                 "node_id": nid, "node_type": node_type, "slug": node["slug"],
-                "title": _read_fm_title(topic_page) or node["slug"], "claims": ctxs,
+                "title": (_read_fm_title(topic_page) if topic_page else None) or node["slug"],
+                "claims": ctxs,
                 "disagreements": _disagreement_pairs(gconn, {c["claim_id"] for c in ctxs}),
             })
     return topics
@@ -185,8 +190,8 @@ def _contains_verbatim_quote(text: str, source_texts: list[str], window: int = _
 
 
 def _artifact_fp(enrichment_dir: Path, topic_node_id: str) -> str | None:
-    apath = art.synthesis_artifact_path(enrichment_dir, topic_node_id)
-    if not apath.exists():
+    apath = safe_child(enrichment_dir, f"{topic_node_id}.synthesis.json")  # tid untrusted
+    if apath is None or not apath.exists():
         return None
     try:
         return json.loads(apath.read_text(encoding="utf-8")).get("input_fingerprint")

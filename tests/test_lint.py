@@ -519,3 +519,126 @@ def test_jobs_lint_serializes_finding_data(client, tmp_path):
     rot = [f for f in body["findings"] if f["check"] == "summary_rot"]
     assert rot and rot[0]["data"]["remediation"] == "rerun_enrich"
     assert rot[0]["data"]["source_id"] == QSID
+
+
+# --- ADR-0037 decision 6: synthesis_rot ------------------------------------
+
+from app.workers import synthesis as _synth  # noqa: E402
+
+SYN_TOPIC = {
+    "node_id": "cpt_0000000000000001", "node_type": "concept", "slug": "thing", "title": "Thing",
+    "claims": [
+        {"claim_id": "clm_a", "claim_text": "A", "citations": [
+            {"source_id": QSID, "char_start": 0, "char_end": 5}]},
+        {"claim_id": "clm_b", "claim_text": "B", "citations": [
+            {"source_id": "src_00000000000000bb", "char_start": 0, "char_end": 5}]},
+    ],
+    "disagreements": [],
+}
+
+
+def _synthesis_setup(tmp_path, conn, topic, stored_fp, *, syn_status="active"):
+    tid = topic["node_id"]
+    syn_id = _synth.synthesis_id(tid)
+    graph.upsert_node(conn, node_id=syn_id, node_type="synthesis", slug=topic["slug"], status=syn_status)
+    edir = tmp_path / "normalized" / "enrichment"
+    edir.mkdir(parents=True, exist_ok=True)
+    if stored_fp is not None:
+        (edir / f"{tid}.synthesis.json").write_text(json.dumps(
+            {"topic_node_id": tid, "generation_status": "enriched", "input_fingerprint": stored_fp}),
+            encoding="utf-8")
+    return syn_id
+
+
+def test_synthesis_rot_detected_on_evidence_drift(tmp_path, monkeypatch):
+    gdb, conn = _graph(tmp_path)
+    monkeypatch.setattr(_synth, "eligible_topics", lambda *a, **k: [SYN_TOPIC])
+    syn_id = _synthesis_setup(tmp_path, conn, SYN_TOPIC, "stale-fingerprint")  # stored != recomputed
+    conn.commit()
+    conn.close()
+    res = _run(tmp_path, graph_db=gdb, synthesis_model_ref=QMODEL)
+    rot = [f for f in res["findings"] if f["check"] == "synthesis_rot"]
+    assert rot and rot[0]["subject"] == syn_id and rot[0]["severity"] == "low"
+    assert rot[0]["data"]["topic_node_id"] == SYN_TOPIC["node_id"]
+    assert rot[0]["data"]["remediation"] == "rerun_synthesis"
+    assert res["status"] == "healthy"  # low, never failing
+
+
+def test_fresh_synthesis_is_not_rot(tmp_path, monkeypatch):
+    gdb, conn = _graph(tmp_path)
+    monkeypatch.setattr(_synth, "eligible_topics", lambda *a, **k: [SYN_TOPIC])
+    fresh = _synth._fingerprint(SYN_TOPIC, QMODEL)  # matches what lint will recompute
+    _synthesis_setup(tmp_path, conn, SYN_TOPIC, fresh)
+    conn.commit()
+    conn.close()
+    res = _run(tmp_path, graph_db=gdb, synthesis_model_ref=QMODEL)
+    assert not any(f["check"] == "synthesis_rot" for f in res["findings"])
+    assert res["status"] == "healthy"
+
+
+def test_synthesis_model_bump_is_rot_not_failing(tmp_path, monkeypatch):
+    gdb, conn = _graph(tmp_path)
+    monkeypatch.setattr(_synth, "eligible_topics", lambda *a, **k: [SYN_TOPIC])
+    stored = _synth._fingerprint(SYN_TOPIC, "anthropic:claude-opus-4-8")
+    _synthesis_setup(tmp_path, conn, SYN_TOPIC, stored)
+    conn.commit()
+    conn.close()
+    res = _run(tmp_path, graph_db=gdb, synthesis_model_ref="anthropic:claude-sonnet-4-6")  # bumped
+    assert any(f["check"] == "synthesis_rot" for f in res["findings"])
+    assert res["status"] != "failing"
+
+
+def test_evidence_gone_topic_yields_no_synthesis_finding(tmp_path, monkeypatch):
+    gdb, conn = _graph(tmp_path)
+    monkeypatch.setattr(_synth, "eligible_topics", lambda *a, **k: [])  # topic no longer reconstructs
+    # an active synthesis + artifact still on disk, but the topic is absent from eligible_topics
+    _synthesis_setup(tmp_path, conn, SYN_TOPIC, "whatever")
+    conn.commit()
+    conn.close()
+    res = _run(tmp_path, graph_db=gdb, synthesis_model_ref=QMODEL)
+    assert not any(f["check"] in ("synthesis_rot", "synthesis_unverifiable") for f in res["findings"])
+    assert res["status"] == "healthy"  # producer's deprecation flow owns evidence-gone
+
+
+def test_active_synthesis_missing_artifact_is_unverifiable_degraded(tmp_path, monkeypatch):
+    gdb, conn = _graph(tmp_path)
+    monkeypatch.setattr(_synth, "eligible_topics", lambda *a, **k: [SYN_TOPIC])
+    _synthesis_setup(tmp_path, conn, SYN_TOPIC, None)  # active synthesis node, NO artifact
+    conn.commit()
+    conn.close()
+    res = _run(tmp_path, graph_db=gdb, synthesis_model_ref=QMODEL)
+    unv = [f for f in res["findings"] if f["check"] == "synthesis_unverifiable"]
+    assert unv and unv[0]["data"]["remediation"] == "rerun_synthesis"
+    assert res["status"] == "degraded"
+
+
+def test_no_active_synthesis_node_yields_nothing(tmp_path, monkeypatch):
+    gdb, conn = _graph(tmp_path)
+    monkeypatch.setattr(_synth, "eligible_topics", lambda *a, **k: [SYN_TOPIC])
+    _synthesis_setup(tmp_path, conn, SYN_TOPIC, "x", syn_status="candidate")  # not active
+    conn.commit()
+    conn.close()
+    res = _run(tmp_path, graph_db=gdb, synthesis_model_ref=QMODEL)
+    assert not any(f["check"] in ("synthesis_rot", "synthesis_unverifiable") for f in res["findings"])
+    assert res["status"] == "healthy"
+
+
+def test_synthesis_path_like_topic_id_is_skipped_no_read(tmp_path, monkeypatch):
+    # A path-like topic node id from a tampered graph must not drive a synthesis-artifact read.
+    gdb, conn = _graph(tmp_path)
+    bad_topic = dict(SYN_TOPIC, node_id="../../etc/passwd")
+    monkeypatch.setattr(_synth, "eligible_topics", lambda *a, **k: [bad_topic])
+    syn_id = _synth.synthesis_id("../../etc/passwd")  # canonical (hashed) -> active node exists
+    graph.upsert_node(conn, node_id=syn_id, node_type="synthesis", slug="x", status="active")
+    conn.commit()
+    conn.close()
+    (tmp_path / "evil.synthesis.json").write_text('{"input_fingerprint": "x"}', encoding="utf-8")
+    res = _run(tmp_path, graph_db=gdb, synthesis_model_ref=QMODEL)
+    assert not any(f["check"] in ("synthesis_rot", "synthesis_unverifiable") for f in res["findings"])
+    assert not any("etc" in json.dumps(f.get("data", {})) for f in res["findings"])  # no leak
+
+
+def test_operations_doc_synthesis_remediation_uses_force():
+    text = (Path(__file__).resolve().parents[1] / "docs" / "Operations.md").read_text(encoding="utf-8")
+    row = next(ln for ln in text.splitlines() if "`synthesis_rot`" in ln and "rerun_synthesis" in ln)
+    assert "--force" in row  # the actionable command must use --force (normal run only reports)

@@ -31,8 +31,9 @@ from pathlib import Path
 from typing import Any
 
 from app.backend import db, graph, search
-from app.backend.manifests import is_source_id, iso_now, valid_manifests
-from app.workers import citations, reviews
+from app.backend.manifests import get_provenance, is_source_id, iso_now, valid_manifests
+from app.backend.paths import safe_child, safe_under
+from app.workers import citations, reviews, synthesis
 from app.workers.enrichment_artifact import artifact_fingerprint
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter
 
@@ -82,21 +83,8 @@ def _append_log(wiki_dir: Path, message: str) -> None:
 
 
 def _safe_raw_rel(root: Path, raw_root: Path, rel: str) -> Path | None:
-    """Resolve a manifest occurrence path under ``root/raw``, or ``None`` if unsafe.
-
-    Mirrors the extraction boundary guard (``extract.py``, ADR-0009): rejects absolute paths and any
-    ``..`` segment, and requires the resolved path to stay under ``raw/`` — so a hand-edited/malformed
-    manifest path can never make lint probe (or leak) a file outside the raw repository.
-    """
-    p = Path(rel)
-    if p.is_absolute() or ".." in p.parts:
-        return None
-    resolved = (root / p).resolve()
-    try:
-        resolved.relative_to(raw_root)
-    except ValueError:
-        return None
-    return resolved
+    """Resolve a manifest occurrence path under ``root/raw``, or ``None`` if unsafe (ADR-0009)."""
+    return safe_under(root, raw_root, rel)
 
 
 def _item_exists(reviews_dir: Path, rid: str) -> bool:
@@ -349,6 +337,53 @@ def _check_stale_claims(gconn, enrichment_dir: Path,
     return findings, degraded
 
 
+def _check_synthesis_rot(gconn, manifests_dir: Path, claims_dir: Path, markdown_dir: Path,
+                         enrichment_dir: Path,
+                         model_ref: str | None) -> tuple[list[dict[str, Any]], bool]:
+    """Active syntheses whose evidence drifted since approval (ADR-0037 decision 6). Graph-gated.
+
+    `synthesis_rot` = stored `<topic_id>.synthesis.json.input_fingerprint` != the producer's
+    `synthesis._fingerprint(current topic, enrich_model_heavy)` — surfaced key-free via the producer's own
+    `eligible_topics` (so lint matches `stale_active` exactly). Topic-driven: an **evidence-gone** topic is
+    absent from `eligible_topics` and never visited (that lifecycle condition is the producer's deprecation
+    concern, not rot). An active synthesis whose artifact is missing/unreadable -> `synthesis_unverifiable`
+    (degraded) — the only unverifiable trigger. Skipped when `model_ref` is None (can't recompute)."""
+    findings: list[dict[str, Any]] = []
+    degraded = False
+    if not model_ref:
+        return findings, degraded
+    prov = {m["source_id"]: get_provenance(m) for m in valid_manifests(manifests_dir)[0]}
+    for topic in synthesis.eligible_topics(
+            gconn, prov, claims_dir=claims_dir, markdown_dir=markdown_dir):
+        tid = topic["node_id"]
+        syn_id = synthesis.synthesis_id(tid)
+        node = graph.get_node(gconn, syn_id)
+        if not node or node["status"] != "active":
+            continue  # only an active synthesis can be stale; candidate/none -> nothing
+        apath = safe_child(enrichment_dir, f"{tid}.synthesis.json")  # tid untrusted (basename only)
+        if apath is None:
+            continue  # path-like topic id -> skip read; validate_graph fails hard on it
+        stored = None
+        if apath.exists():
+            try:
+                stored = json.loads(apath.read_text(encoding="utf-8")).get("input_fingerprint")
+            except (OSError, json.JSONDecodeError):
+                stored = None
+        if stored is None:  # active synthesis but artifact missing/unreadable -> can't verify
+            findings.append({"check": "synthesis_unverifiable", "severity": "low", "subject": syn_id,
+                             "detail": "active synthesis but artifact missing/unreadable",
+                             "data": {"synthesis_id": syn_id, "topic_node_id": tid,
+                                      "remediation": "rerun_synthesis"}})
+            degraded = True
+            continue
+        if stored != synthesis._fingerprint(topic, model_ref):
+            findings.append({"check": "synthesis_rot", "severity": "low", "subject": syn_id,
+                             "detail": "active synthesis stale vs current topic evidence / model",
+                             "data": {"synthesis_id": syn_id, "topic_node_id": tid,
+                                      "remediation": "rerun_synthesis"}})
+    return findings, degraded
+
+
 def run_lint(
     root: Path,
     *,
@@ -359,6 +394,7 @@ def run_lint(
     enrichment_dir: Path | None = None,
     markdown_dir: Path | None = None,
     summary_model_ref: str | None = None,
+    synthesis_model_ref: str | None = None,
     jobs_db: Path | None = None,
     record_job: bool = True,
     file_review_items: bool = True,
@@ -372,9 +408,10 @@ def run_lint(
     failing), else `"healthy"`. Files governance review items idempotently — `review_items_filed` are
     newly created this run, `review_items_existing` were already in the ledger — and appends `wiki/log.md`.
 
-    `summary_model_ref` is the current configured summary-tier model_ref (the API passes
-    `settings.enrich_model_light`); the ADR-0037 `summary_rot` check is **skipped when it is None**, so a
-    direct caller that wants rot detection must pass it.
+    `summary_model_ref` / `synthesis_model_ref` are the current configured summary-tier / synthesis-tier
+    model_refs (the API passes `settings.enrich_model_light` / `settings.enrich_model_heavy`); the
+    ADR-0037 `summary_rot` / `synthesis_rot` checks are each **skipped when their model_ref is None**, so a
+    direct caller that wants rot detection must pass them.
     """
     root = Path(root).resolve()
     manifests_dir = Path(manifests_dir) if manifests_dir else root / "raw" / "manifests"
@@ -420,7 +457,11 @@ def run_lint(
                 stale_findings, stale_degraded = _check_stale_claims(  # graph-gated (ADR-0037)
                     gconn, enrichment_dir, markdown_dir)
                 findings += stale_findings
-                coverage_degraded = coverage_degraded or stale_degraded
+                synth_findings, synth_degraded = _check_synthesis_rot(  # graph-gated (ADR-0037 dec. 6)
+                    gconn, manifests_dir, wiki_dir / "Claims", markdown_dir, enrichment_dir,
+                    synthesis_model_ref)
+                findings += synth_findings
+                coverage_degraded = coverage_degraded or stale_degraded or synth_degraded
             finally:
                 gconn.close()
         else:

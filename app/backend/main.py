@@ -631,7 +631,8 @@ def run_lint_job() -> dict[str, Any]:
         settings.root, manifests_dir=settings.manifests_dir, graph_db=settings.graph_db_path,
         wiki_dir=settings.wiki_dir, reviews_dir=settings.reviews_dir,
         enrichment_dir=settings.normalized_dir / "enrichment", markdown_dir=settings.markdown_dir,
-        summary_model_ref=settings.enrich_model_light, jobs_db=settings.jobs_db_path)
+        summary_model_ref=settings.enrich_model_light, synthesis_model_ref=settings.enrich_model_heavy,
+        jobs_db=settings.jobs_db_path)
 
 
 @app.post("/jobs/stale-check", response_model=StaleCheckResponse)

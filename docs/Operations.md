@@ -68,9 +68,11 @@ Each finding carries a stable `data.remediation` code; act on it by re-running a
 |---|---|---|---|
 | `summary_rot` | low | An enriched Source summary's artifact fingerprint no longer matches the current normalized markdown / configured summary model. | `rerun_enrich` → run enrichment for the source(s): `uv run python scripts/enrich.py` (needs the configured enrichment provider's API key — provider/model-dependent). |
 | `stale_claim_citation` | medium | A claim's stored citation quote no longer grounds at its anchor in the current markdown. | `rerun_extract_claims` → re-run extraction + claim maintenance: `uv run python scripts/extract_claims.py` (needs the configured provider's key; auto-retracts/regrounds stale evidence). |
+| `synthesis_rot` | low | An active synthesis's topic evidence (claims/citations/disagreements) drifted since approval — its artifact fingerprint no longer matches the current topic. | `rerun_synthesis` → **`uv run python scripts/generate_synthesis.py --force`** (needs the configured provider's key). `--force` is required: a normal run only *reports* the stale active synthesis (governance gate) and won't rewrite it. |
 
-Two coverage findings (`summary_unverifiable`, `claim_evidence_unverifiable`, low severity) mark lint
-`degraded` when an enriched page / active claim expects a durable artifact that's missing or unreadable —
+Three coverage findings (`summary_unverifiable`, `claim_evidence_unverifiable`, `synthesis_unverifiable`,
+low severity) mark lint `degraded` when an enriched page / active claim / active synthesis expects a
+durable artifact that's missing or unreadable —
 re-run the relevant producer to restore it. A fresh deterministic-only vault (stub summaries, no
 enrichment artifacts) stays `healthy`.
 

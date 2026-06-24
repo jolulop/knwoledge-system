@@ -24,6 +24,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.backend.manifests import is_source_id, sha256_file
+from app.backend.paths import safe_under as _safe_under_raw
 
 
 def _iso_mtime(path: Path) -> str:
@@ -40,22 +41,6 @@ def _occurrences(manifest: dict) -> list[dict]:
         "size_bytes": manifest.get("size_bytes"),
         "modified_at": manifest.get("modified_at"),
     }]
-
-
-def _safe_under_raw(root: Path, raw_root: Path, rel: str) -> Path | None:
-    """Resolve a manifest `relative_path` under `root/raw`, or None if absolute / `..` / escaping.
-
-    Manifest JSON is untrusted local input (CLAUDE.md rule 2): a hand-edited path must never make the
-    validator read/hash a file outside `raw/` (ADR-0009, mirrors `lint._safe_raw_rel`/`extract`)."""
-    p = Path(rel)
-    if p.is_absolute() or ".." in p.parts:
-        return None
-    resolved = (root / p).resolve()
-    try:
-        resolved.relative_to(raw_root)
-    except ValueError:
-        return None
-    return resolved
 
 
 def main(argv: list[str]) -> int:
