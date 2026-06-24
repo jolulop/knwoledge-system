@@ -69,3 +69,6 @@ raw/permanent/*
 !raw/permanent/.gitkeep
 raw/ephemeral/*
 !raw/ephemeral/.gitkeep
+
+# Generated retrieval-relevance reports (ADR-0038); the corpus + golden file ARE committed.
+evals/reports/

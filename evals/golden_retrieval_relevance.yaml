@@ -1,0 +1,187 @@
+# Retrieval RELEVANCE eval cases (ADR-0038). Run by scripts/eval_retrieval.py over evals/corpus/ with the
+# REAL embedder (opt-in, NOT CI). Source-level binary relevance; metrics recall@k / MRR / success@k over
+# run_search evidence[] (mode auto). Distinct from the fake-embedder STRUCTURAL gate
+# (evals/golden_retrieval.yaml / tests/test_retrieval_evals.py) and from answer-quality evals.
+#
+# Cases reference corpus docs by FILENAME (the runner maps filename -> source_id via the manifest's
+# original_filename). Parsed by the project's minimal YAML subset: dash-on-own-line sequences, block
+# maps, no inline `[...]`/`{...}`. Categories: exact_anchor | conceptual | multi_source | disambiguation.
+version: 1
+cases:
+  # --- exact_anchor: a term that appears verbatim in exactly one relevant doc -------------------
+  -
+    id: anchor_telematics
+    category: exact_anchor
+    mode: auto
+    query: telematics
+    relevant:
+      - fleetsense_overview.md
+  -
+    id: anchor_storage_bucket
+    category: exact_anchor
+    mode: auto
+    query: '"storage bucket"'
+    relevant:
+      - security_incident.md
+  -
+    id: anchor_carbon_report
+    category: exact_anchor
+    mode: auto
+    query: '"carbon report"'
+    relevant:
+      - sustainability.md
+  -
+    id: anchor_partner_program
+    category: exact_anchor
+    mode: auto
+    query: '"partner program"'
+    relevant:
+      - partner_program.md
+
+  # --- conceptual / paraphrase: query words are NOT in the relevant doc (vector must carry it) ---
+  -
+    id: paraphrase_earnings_improved
+    category: conceptual
+    mode: auto
+    query: how did the company's earnings improve last quarter?
+    relevant:
+      - q3_report.md
+    irrelevant:
+      - q2_outlook.md
+  -
+    id: paraphrase_eco_friendly
+    category: conceptual
+    mode: auto
+    query: what is the company doing to be more environmentally friendly?
+    relevant:
+      - sustainability.md
+  -
+    id: paraphrase_data_breach
+    category: conceptual
+    mode: auto
+    query: was there a data breach that leaked information?
+    relevant:
+      - security_incident.md
+  -
+    id: paraphrase_headcount
+    category: conceptual
+    mode: auto
+    query: how much did the workforce grow this year?
+    relevant:
+      - hiring_update.md
+  -
+    id: paraphrase_predictive_maintenance
+    category: conceptual
+    mode: auto
+    query: which offering warns about a truck breaking down before it happens?
+    relevant:
+      - fleetsense_overview.md
+  -
+    id: paraphrase_route_planning
+    category: conceptual
+    mode: auto
+    query: software that figures out the best driving path for many deliveries
+    relevant:
+      - routeiq_overview.md
+
+  # --- multi_source: more than one relevant document --------------------------------------------
+  -
+    id: multi_products_offered
+    category: multi_source
+    mode: auto
+    query: what products does Northwind sell?
+    relevant:
+      - routeiq_overview.md
+      - fleetsense_overview.md
+  -
+    id: multi_bundled_by_partners
+    category: multi_source
+    mode: auto
+    query: which products can resellers bundle together?
+    relevant:
+      - routeiq_overview.md
+      - fleetsense_overview.md
+      - partner_program.md
+
+  # --- disambiguation / negative: a near-miss doc must NOT outrank the right one -----------------
+  -
+    id: disambig_q2_guidance
+    category: disambiguation
+    mode: auto
+    query: what guidance did the company give for the second quarter outlook?
+    relevant:
+      - q2_outlook.md
+    irrelevant:
+      - q3_report.md
+  -
+    id: disambig_vehicle_health
+    category: disambiguation
+    mode: auto
+    query: the product that tracks vehicle engine health
+    relevant:
+      - fleetsense_overview.md
+    irrelevant:
+      - routeiq_overview.md
+  -
+    id: disambig_route_planning
+    category: disambiguation
+    mode: auto
+    query: the product that plans multi-stop delivery routes
+    relevant:
+      - routeiq_overview.md
+    irrelevant:
+      - fleetsense_overview.md
+  -
+    id: disambig_q3_revenue_driver
+    category: disambiguation
+    mode: auto
+    query: what drove the third quarter revenue gain?
+    relevant:
+      - q3_report.md
+    irrelevant:
+      - q2_outlook.md
+  -
+    id: anchor_electric_vans
+    category: exact_anchor
+    mode: auto
+    query: '"electric vans"'
+    relevant:
+      - sustainability.md
+  -
+    id: anchor_route_optimization
+    category: exact_anchor
+    mode: auto
+    query: '"route optimization"'
+    relevant:
+      - routeiq_overview.md
+  -
+    id: paraphrase_sales_increase
+    category: conceptual
+    mode: auto
+    query: what fueled the jump in sales during the latest period?
+    relevant:
+      - q3_report.md
+    irrelevant:
+      - q2_outlook.md
+  -
+    id: paraphrase_reseller_packaging
+    category: conceptual
+    mode: auto
+    query: how do third-party dealers package the offerings for their regions?
+    relevant:
+      - partner_program.md
+  -
+    id: paraphrase_emissions_goal
+    category: conceptual
+    mode: auto
+    query: what is the target for cutting greenhouse gas output from the trucks?
+    relevant:
+      - sustainability.md
+  -
+    id: multi_two_software_offerings
+    category: multi_source
+    mode: auto
+    query: describe the company's two software offerings for fleets
+    relevant:
+      - routeiq_overview.md
+      - fleetsense_overview.md
