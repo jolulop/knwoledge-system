@@ -15,7 +15,29 @@ import json
 import sys
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from app.backend.manifests import is_source_id
+
 _EXTRACTED = {"extracted", "partial"}
+
+
+def _safe_under(root: Path, allowed_root: Path, rel: str) -> Path | None:
+    """Resolve a manifest-owned `normalized.*` path under `root/normalized`, or None if it escapes.
+
+    Manifest JSON is untrusted local input (AGENTS.md): a hand-edited normalized path must never make the
+    validator open a file outside `normalized/` (mirrors the raw-integrity guard, ADR-0009)."""
+    p = Path(rel)
+    if p.is_absolute() or ".." in p.parts:
+        return None
+    resolved = (root / p).resolve()
+    try:
+        resolved.relative_to(allowed_root)
+    except ValueError:
+        return None
+    return resolved
 
 
 def _load_chunks(path: Path) -> list[dict] | None:
@@ -36,26 +58,48 @@ def _load_chunks(path: Path) -> list[dict] | None:
 
 
 def _check_source(root: Path, manifest: dict) -> list[str]:
-    sid = manifest.get("source_id", "<unknown>")
+    raw_sid = manifest.get("source_id")
+    # untrusted -> sanitized for diagnostics; a non-canonical id is itself a failure (caught hard in
+    # validate_raw_integrity, but never trusted here either).
+    sid = raw_sid if is_source_id(raw_sid) else "<invalid source_id>"
     errors: list[str] = []
+    if not is_source_id(raw_sid):
+        errors.append(f"{manifest.get('original_filename', '<manifest>')}: non-canonical source_id")
     normalized = manifest.get("normalized") or {}
     md_rel = normalized.get("markdown_path")
     chunks_rel = normalized.get("chunks_path")
     log_rel = normalized.get("extraction_log_path")
     tables_rel = normalized.get("tables_dir")
     if not (md_rel and chunks_rel and log_rel and tables_rel):
-        return [f"{sid}: extracted manifest missing normalized.* paths"]
+        return errors + [f"{sid}: extracted manifest missing normalized.* paths"]
+    if not is_source_id(raw_sid):
+        # Can't derive the content-keyed layout from a non-canonical id; the non-canonical error above
+        # is the signal. Don't trust the stored paths.
+        return errors
 
-    md_path = root / md_rel
-    chunks_path = root / chunks_rel
-    if not (root / log_rel).exists():
-        errors.append(f"{sid}: missing extraction log {log_rel}")
-    if not (root / tables_rel).is_dir():
-        errors.append(f"{sid}: missing tables dir {tables_rel}")
+    # The normalized layout is content-keyed and FIXED (ADR-0011): require the stored paths to EQUAL the
+    # paths derived from the source_id. This catches a contained-but-wrong / cross-source-swapped path
+    # (e.g. source A's manifest pointing at source B's markdown) even though both stay under normalized/.
+    expected = {
+        "markdown_path": f"normalized/markdown/{sid}.md",
+        "chunks_path": f"normalized/chunks/{sid}.jsonl",
+        "extraction_log_path": f"normalized/extraction_logs/{sid}.json",
+        "tables_dir": f"normalized/tables/{sid}",
+    }
+    for key, exp in expected.items():
+        if normalized.get(key) != exp:
+            errors.append(f"{sid}: normalized.{key} does not match fixed layout (expected {exp})")
+    # Read only via the DERIVED paths (inherently contained under normalized/{sid}).
+    md_path = root / expected["markdown_path"]
+    chunks_path = root / expected["chunks_path"]
+    if not (root / expected["extraction_log_path"]).exists():
+        errors.append(f"{sid}: missing extraction log")
+    if not (root / expected["tables_dir"]).is_dir():
+        errors.append(f"{sid}: missing tables dir")
     if not md_path.exists():
-        errors.append(f"{sid}: missing normalized markdown {md_rel}")
+        errors.append(f"{sid}: missing normalized markdown")
     if not chunks_path.exists():
-        errors.append(f"{sid}: missing chunks file {chunks_rel}")
+        errors.append(f"{sid}: missing chunks file")
     if not md_path.exists() or not chunks_path.exists():
         return errors
 
@@ -90,10 +134,16 @@ def _check_source(root: Path, manifest: dict) -> list[str]:
 
         if chunk.get("kind") == "table":
             ref = chunk.get("table_reference")
+            # A table ref must live under THIS source's own tables dir — confines it and rejects a
+            # cross-source swap (a chunk citing another source's CSV).
+            tables_root = (root / expected["tables_dir"]).resolve()
+            ref_path = _safe_under(root, tables_root, ref) if ref else None
             if not ref:
                 errors.append(f"{cid}: table chunk missing table_reference")
-            elif not (root / ref).exists():
-                errors.append(f"{cid}: table_reference points at missing file {ref}")
+            elif ref_path is None:
+                errors.append(f"{cid}: table_reference escapes this source's tables dir (rejected)")
+            elif not ref_path.exists():
+                errors.append(f"{cid}: table_reference points at missing file")
         elif chunk.get("table_reference") is not None:
             errors.append(f"{cid}: non-table chunk has a table_reference")
 

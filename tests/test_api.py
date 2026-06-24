@@ -1181,3 +1181,42 @@ def test_sources_exposes_lifecycle_status(client, tmp_path):
     assert client.get(f"/sources/{sid}").json()["status"] == "active"  # default when unset
     _m.set_status(tmp_path / "raw" / "manifests", sid, "archive_candidate")
     assert client.get(f"/sources/{sid}").json()["status"] == "archive_candidate"
+
+
+def test_insecure_bind_override_warns(caplog):
+    import logging as _logging
+
+    from app.backend.main import assert_safe_bind
+    with caplog.at_level(_logging.WARNING):
+        assert_safe_bind("0.0.0.0", True)  # allowed, but must warn loudly (not silent)
+    assert "KS_ALLOW_INSECURE_BIND" in caplog.text and "no auth" in caplog.text.lower()
+
+
+def test_serve_entrypoint_binds_settings_host(monkeypatch):
+    import app.backend.__main__ as entry
+    from app.backend.config import get_settings
+    captured = {}
+    monkeypatch.setattr(entry.uvicorn, "run",
+                        lambda target, host, port, reload=False: captured.update(host=host, port=port))
+    entry.main()
+    s = get_settings()
+    assert captured == {"host": s.app_host, "port": s.app_port}  # bind can't drift from the guard
+
+
+def test_docker_compose_uses_blessed_entrypoint_and_loopback_port():
+    import pathlib
+    text = (pathlib.Path(__file__).resolve().parents[1] / "docker-compose.yml").read_text(encoding="utf-8")
+    assert "python -m app.backend" in text             # blessed entrypoint
+    assert "uvicorn app.backend.main:app" not in text  # never direct uvicorn
+    for line in text.splitlines():                     # published API port stays loopback-only
+        if "18000:18000" in line:
+            assert "127.0.0.1:18000:18000" in line, line
+
+
+def test_sources_quarantines_invalid_manifests(client, tmp_path):
+    md = tmp_path / "raw" / "manifests"
+    md.mkdir(parents=True, exist_ok=True)
+    # a canonical id in a wrongly-named file is quarantined, never listed (count only, no id echoed)
+    (md / "wrongname.json").write_text('{"source_id": "src_0123456789abcdef"}', encoding="utf-8")
+    body = client.get("/sources").json()
+    assert body["count"] == 0 and body["manifests_skipped_invalid"] == 1

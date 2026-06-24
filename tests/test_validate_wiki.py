@@ -14,7 +14,7 @@ if str(SCRIPTS) not in sys.path:
 import validate_wiki as v  # noqa: E402
 from app.workers import wiki_render  # noqa: E402
 
-SID = "src_validatewiki01"
+SID = "src_00000000000000fb"
 TEMPLATE = (ROOT / "templates" / "source.md").read_text(encoding="utf-8")
 NOW = "2026-01-01T00:00:00+00:00"
 

@@ -11,11 +11,30 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 _CHUNK = 1 << 20  # 1 MiB streaming read for checksums
+
+# Canonical content-derived source id (ADR-0007): src_<first 16 hex chars of SHA256>. Manifest JSON is
+# durable *untrusted* local input (CLAUDE.md rule 2), so a hostile/hand-edited source_id (absolute path,
+# `..`, slashes) must never reach the filesystem — every manifest path is gated on this shape. Mirrors
+# `app/workers/citations.py:_SOURCE_ID`.
+_SOURCE_ID_RE = re.compile(r"^src_[0-9a-f]{16}$")
+
+
+def is_source_id(value: Any) -> bool:
+    """True iff `value` is a canonical `src_<16 hex>` source id."""
+    return isinstance(value, str) and bool(_SOURCE_ID_RE.match(value))
+
+
+def _require_source_id(source_id: Any) -> str:
+    """Raise on a non-canonical source id (the write-path guard)."""
+    if not is_source_id(source_id):
+        raise ValueError(f"invalid source_id {source_id!r}; expected src_<16 hex>")
+    return source_id
 
 
 def iso_now() -> str:
@@ -36,11 +55,18 @@ def source_id_for(sha256: str) -> str:
 
 
 def manifest_path(manifests_dir: Path, source_id: str) -> Path:
+    """The on-disk path for a manifest. Validated chokepoint: a non-canonical id raises (so nothing can
+    build a manifest path that escapes the manifests dir, ADR-0009)."""
+    _require_source_id(source_id)
     return Path(manifests_dir) / f"{source_id}.json"
 
 
 def load_manifest(manifests_dir: Path, source_id: str) -> dict[str, Any] | None:
-    path = manifest_path(manifests_dir, source_id)
+    # Read path is lenient: an invalid/unknown id is treated as "not found" (None), never a traversal.
+    try:
+        path = manifest_path(manifests_dir, source_id)
+    except ValueError:
+        return None
     if not path.exists():
         return None
     try:
@@ -50,6 +76,8 @@ def load_manifest(manifests_dir: Path, source_id: str) -> dict[str, Any] | None:
 
 
 def list_manifests(manifests_dir: Path) -> list[dict[str, Any]]:
+    """Every parseable manifest record, unfiltered. Validators use this + fail hard on a bad id;
+    runtime workers should use `valid_manifests` so a tampered record can't drive a path."""
     manifests_dir = Path(manifests_dir)
     if not manifests_dir.exists():
         return []
@@ -60,6 +88,49 @@ def list_manifests(manifests_dir: Path) -> list[dict[str, Any]]:
         except (OSError, json.JSONDecodeError):
             continue
     return out
+
+
+def valid_manifests(manifests_dir: Path) -> tuple[list[dict[str, Any]], list[str]]:
+    """Partition manifests into (canonical records, skipped reasons) — the runtime-worker entry point.
+
+    A manifest's `source_id` flows into filesystem paths (Source pages, normalized files) and graph node
+    ids, and manifest JSON is untrusted local input (AGENTS.md). A record is **valid** only when all hold:
+    the `source_id` is canonical `src_<16 hex>`, the **filename stem equals it** (ADR-0007:
+    `raw/manifests/<source_id>.json`), and the id has **not already been seen**. This blocks a tampered /
+    misnamed / duplicate manifest from driving a worker for some id and clobbering that id's artifacts.
+
+    `skipped` carries **categorical reasons only** — `"non_canonical_id"` | `"filename_mismatch"` |
+    `"duplicate_source_id"` — never the malformed id text, so callers surface counts without echoing
+    attacker-controlled input. Validators stay on `list_manifests` (all records) + fail hard."""
+    manifests_dir = Path(manifests_dir)
+    valid: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    if not manifests_dir.exists():
+        return valid, skipped
+    records: list[tuple[Path, dict[str, Any]]] = []
+    for path in sorted(manifests_dir.glob("*.json")):
+        try:
+            records.append((path, json.loads(path.read_text(encoding="utf-8"))))
+        except (OSError, json.JSONDecodeError):
+            continue
+    # A canonical content source_id appearing in 2+ files is ambiguous authority — quarantine every copy
+    # (order-independent), even the correctly-named one: with a tampered duplicate present, none is trusted.
+    id_counts: dict[str, int] = {}
+    for _p, rec in records:
+        sid = rec.get("source_id")
+        if is_source_id(sid):
+            id_counts[sid] = id_counts.get(sid, 0) + 1
+    for path, rec in records:
+        sid = rec.get("source_id")
+        if not is_source_id(sid):
+            skipped.append("non_canonical_id")
+        elif id_counts[sid] > 1:
+            skipped.append("duplicate_source_id")
+        elif path.stem != sid:
+            skipped.append("filename_mismatch")
+        else:
+            valid.append(rec)
+    return valid, skipped
 
 
 def normalized_paths(source_id: str) -> dict[str, str]:
@@ -150,6 +221,7 @@ def independent_sources(p1: dict[str, Any], p2: dict[str, Any]) -> bool:
 
 def set_provenance(manifests_dir: Path, source_id: str, **fields: Any) -> dict[str, Any] | None:
     """Set provenance fields on a manifest (the single write path); returns it or None."""
+    _require_source_id(source_id)  # write path: a non-canonical id raises
     unknown = set(fields) - set(PROVENANCE_FIELDS)
     if unknown:
         raise ValueError(f"unknown provenance field(s) {sorted(unknown)}; allowed: {PROVENANCE_FIELDS}")
@@ -186,6 +258,7 @@ def set_status(manifests_dir: Path, source_id: str, status: str) -> dict[str, An
     The only writer of `manifest["status"]` (ADR-0036). Raw bytes are never touched. Reversible:
     setting `active` un-archives. Validated against SOURCE_STATUSES.
     """
+    _require_source_id(source_id)  # write path: a non-canonical id raises, never returns None
     if status not in SOURCE_STATUSES:
         raise ValueError(f"unknown source status {status!r}; allowed: {list(SOURCE_STATUSES)}")
     manifest = load_manifest(manifests_dir, source_id)

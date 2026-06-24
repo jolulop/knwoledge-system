@@ -17,8 +17,9 @@ ephemeral:
 response_cache:                 # raw LLM responses under db/ (ADR-0027)
   enabled: true
   location: db/
-  # cache_ttl_days / cache_max_mb are read by the maintenance purge (not implemented in
-  # 3.5a; planned for the maintenance pass). Declared now so the bound is recorded.
+  # cache_ttl_days / cache_max_mb drive cache-purge candidate detection in /jobs/stale-check
+  # (Phase 7-3, ADR-0036 decision 14): over-bounds -> one aggregate record-only purge_response_cache
+  # review item. `enabled: false` turns the detection off. Purge itself is always manual (below).
   cache_ttl_days: 365           # entries older than this become purge candidates
   cache_max_mb: 2048            # soft cap; oldest entries become purge candidates beyond it
   purge_requires_review: true   # bulk purge forfeits reproducibility -> review-gated

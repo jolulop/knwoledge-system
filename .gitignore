@@ -63,6 +63,9 @@ raw/inbox/*
 # Manifests are local runtime state: authoritative on disk, not committed.
 raw/manifests/*.json
 !raw/manifests/.gitkeep
-# Uncomment if these raw files should also be kept out of git.
-# raw/permanent/*
-# raw/ephemeral/*
+# Raw is operator-owned source data: keep the bytes out of git (large, immutable, private), keep the
+# dirs tracked via .gitkeep. The manifests above remain the catalogued record.
+raw/permanent/*
+!raw/permanent/.gitkeep
+raw/ephemeral/*
+!raw/ephemeral/.gitkeep

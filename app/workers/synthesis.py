@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from app.backend import db, graph
-from app.backend.manifests import get_provenance, independent_sources, iso_now, list_manifests
+from app.backend.manifests import get_provenance, independent_sources, iso_now, valid_manifests
 from app.llm import prompts
 from app.llm.client import LLMClient, ParseError
 from app.workers import enrichment_artifact as art
@@ -332,7 +332,8 @@ def generate_syntheses(
                                               enrichment_dir=enrichment_dir, now=now)
 
         # 2. Eligible topics from the current active graph.
-        prov = {m["source_id"]: get_provenance(m) for m in list_manifests(manifests_dir)}
+        _valid, _skipped_invalid = valid_manifests(manifests_dir)
+        prov = {m["source_id"]: get_provenance(m) for m in _valid}
         topics = eligible_topics(gconn, prov, claims_dir=claims_dir, markdown_dir=markdown_dir)
         eligible_ids = {t["node_id"] for t in topics}
 
@@ -455,6 +456,7 @@ def generate_syntheses(
             "skipped_fresh": skipped_fresh, "skipped_reviewed": skipped_reviewed,
             "stale_active": stale_active, "retracted": retracted,
             "promoted": resolution["promoted"], "rejected": resolution["rejected"],
+            "manifests_skipped_invalid": len(_skipped_invalid),
             "index_rebuilt": index_rebuilt, "errors": len(errors), "error_details": errors,
             "generated_at": now,
         }

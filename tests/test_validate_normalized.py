@@ -13,7 +13,7 @@ if str(SCRIPTS) not in sys.path:
 
 import validate_normalized as v  # noqa: E402
 
-SID = "src_validate00000"
+SID = "src_00000000000000fa"
 
 
 def _make_extracted(root: Path, *, page: int | None = None, page_count: int | None = None):
@@ -105,3 +105,33 @@ def test_stale_output_for_error_manifest_fails(tmp_path):
 
 def test_no_manifests_is_a_pass(tmp_path):
     assert v.main([str(tmp_path)]) == 0
+
+
+def test_escaping_normalized_path_rejected(tmp_path, capsys):
+    _make_extracted(tmp_path)
+    (tmp_path / "outside.md").write_text("secret outside normalized/\n", encoding="utf-8")
+    m = json.loads((tmp_path / "raw" / "manifests" / f"{SID}.json").read_text())
+    m["normalized"]["markdown_path"] = "../outside.md"  # escapes; != the fixed content-keyed layout
+    _write_manifest(tmp_path, m)
+    assert v.main([str(tmp_path)]) == 1
+    out = capsys.readouterr().out
+    assert "does not match fixed layout" in out   # derive-and-equal rejects it; outside.md never read
+    assert "secret" not in out
+
+
+def test_contained_but_wrong_cross_source_path_fails(tmp_path, capsys):
+    # A path that stays under normalized/ but points at ANOTHER source's file must still fail.
+    _make_extracted(tmp_path)
+    m = json.loads((tmp_path / "raw" / "manifests" / f"{SID}.json").read_text())
+    m["normalized"]["chunks_path"] = "normalized/chunks/src_00000000000000ff.jsonl"
+    _write_manifest(tmp_path, m)
+    assert v.main([str(tmp_path)]) == 1
+    assert "does not match fixed layout" in capsys.readouterr().out
+
+
+def test_noncanonical_manifest_source_id_fails(tmp_path):
+    _make_extracted(tmp_path)
+    bad = json.loads((tmp_path / "raw" / "manifests" / f"{SID}.json").read_text())
+    bad["source_id"] = "../evil"
+    (tmp_path / "raw" / "manifests" / "evil.json").write_text(json.dumps(bad), encoding="utf-8")
+    assert v.main([str(tmp_path)]) == 1

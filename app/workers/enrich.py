@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from app.backend import db
-from app.backend.manifests import iso_now, list_manifests
+from app.backend.manifests import iso_now, valid_manifests
 from app.llm import prompts
 from app.llm.client import LLMClient, ParseError
 from app.workers import enrichment_artifact as art
@@ -63,7 +63,7 @@ def enrich_sources(
         )
 
     try:
-        manifests = list_manifests(manifests_dir)
+        manifests, skipped_invalid = valid_manifests(manifests_dir)
         if source_ids is not None:
             wanted = set(source_ids)
             manifests = [m for m in manifests if m.get("source_id") in wanted]
@@ -146,6 +146,7 @@ def enrich_sources(
             "skipped_not_extracted": skipped_not_extracted,
             "skipped_empty": skipped_empty,
             "skipped_no_key": skipped_no_key,
+            "manifests_skipped_invalid": len(skipped_invalid),
             "errors": len(errors),
             "error_details": errors,
             "enriched_at": now,

@@ -64,17 +64,32 @@ _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost", ""}
 def assert_safe_bind(host: str, allow_insecure: bool) -> None:
     """Refuse to expose the unauthenticated API on a non-loopback interface.
 
-    The API has no auth yet (ADR-0009 hardening is partial), so binding it to a LAN /
-    public interface would expose mutating endpoints (intake/extract) to the network.
-    Loopback is always allowed; any other host requires an explicit, acknowledged
-    override via ``KS_ALLOW_INSECURE_BIND=1``.
+    The app has **no application-level authentication or CSRF** (loopback-only posture, ADR-0009;
+    auth+CSRF is Phase-8-class future work). Binding to a LAN/public interface would expose the mutating
+    *and* browser-UI endpoints unauthenticated. Loopback is always allowed.
+
+    ``KS_ALLOW_INSECURE_BIND=1`` is a narrow **internal-transport escape hatch** — for a trusted private
+    network or a container sidecar where an external layer (e.g. a TLS/auth reverse proxy) fronts the app.
+    It does NOT add auth or CSRF, and a fronting proxy is NOT equivalent to app-level CSRF protection for
+    the browser UI routes. Never use it to reach untrusted networks. Using it logs a loud warning.
     """
-    if host in _LOOPBACK_HOSTS or allow_insecure:
+    if host in _LOOPBACK_HOSTS:
+        return
+    if allow_insecure:
+        logging.getLogger(__name__).warning(
+            "KS_ALLOW_INSECURE_BIND=1: serving the UNAUTHENTICATED API on non-loopback APP_HOST=%r. "
+            "Internal-transport escape hatch (trusted private network / container sidecar behind a "
+            "TLS/auth proxy) ONLY — this provides no auth and no CSRF (ADR-0009). Do not expose to "
+            "untrusted networks.", host)
+        print(
+            f"WARNING: KS_ALLOW_INSECURE_BIND=1 — unauthenticated API on non-loopback {host!r}; "
+            "escape hatch for a trusted private network / sidecar only (no auth, no CSRF).",
+            file=sys.stderr)
         return
     raise RuntimeError(
-        f"Refusing to start: APP_HOST={host!r} is not loopback and the API has no "
-        "authentication. Bind to 127.0.0.1, or set KS_ALLOW_INSECURE_BIND=1 to override "
-        "(not recommended — see policies/security.yaml)."
+        f"Refusing to start: APP_HOST={host!r} is not loopback and the API has no authentication. "
+        "Bind to 127.0.0.1, or set KS_ALLOW_INSECURE_BIND=1 ONLY behind a trusted proxy/sidecar "
+        "(internal-transport escape hatch; not a substitute for auth+CSRF — see policies/security.yaml)."
     )
 
 
@@ -90,8 +105,10 @@ def health() -> dict[str, Any]:
 
 @app.get("/sources", response_model=SourcesResponse)
 def list_sources() -> dict[str, Any]:
-    sources = manifests.list_manifests(settings.manifests_dir)
-    return {"count": len(sources), "sources": sources}
+    # Quarantine tampered/misnamed/duplicate manifests like the workers do; expose only counts for
+    # skipped records (never their filenames/ids) so the API can't echo attacker-controlled input.
+    sources, skipped = manifests.valid_manifests(settings.manifests_dir)
+    return {"count": len(sources), "manifests_skipped_invalid": len(skipped), "sources": sources}
 
 
 @app.get("/sources/{source_id}", response_model=Source)

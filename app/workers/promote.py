@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from app.backend import db, graph
-from app.backend.manifests import get_provenance, independent_sources, iso_now, list_manifests
+from app.backend.manifests import get_provenance, independent_sources, iso_now, valid_manifests
 from app.workers import reviews
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter, render_concept_page
 
@@ -90,7 +90,8 @@ def promote_candidates(
                       created_at=now, started_at=now)
 
     try:
-        prov = {m["source_id"]: get_provenance(m) for m in list_manifests(manifests_dir)}
+        _valid, _skipped_invalid = valid_manifests(manifests_dir)
+        prov = {m["source_id"]: get_provenance(m) for m in _valid}
         considered = promoted_recurrence = promoted_review = 0
         if graph_db.exists():
             graph.init_db(graph_db)
@@ -145,6 +146,7 @@ def promote_candidates(
         summary = {
             "job_id": job_id, "candidates_considered": considered, "promoted": promoted,
             "promoted_by_recurrence": promoted_recurrence, "promoted_by_review": promoted_review,
+            "manifests_skipped_invalid": len(_skipped_invalid),
             "index_rebuilt": index_rebuilt, "promoted_at": now,
         }
         if conn is not None:

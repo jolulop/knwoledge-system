@@ -56,3 +56,61 @@ def test_empty_file_is_flagged(tmp_path):
 
     assert "empty_file" in manifest["notes"]
     assert any(w["warning"] == "empty_file" for w in summary["warnings"])
+
+
+# --- canonical source-id validation / path-traversal safety (ADR-0009) -----
+
+import pytest  # noqa: E402
+
+_BAD_IDS = ["../../etc/passwd", "src_../../x", "src_short", "src_ZZZZ012345678901",
+            "/abs/path", "src_0123456789abcdef/extra", "", "nope"]
+
+
+def test_is_source_id():
+    assert manifests.is_source_id("src_0123456789abcdef")
+    assert not any(manifests.is_source_id(b) for b in _BAD_IDS)
+    assert not manifests.is_source_id(None)
+
+
+def test_load_manifest_invalid_id_returns_none_no_traversal(tmp_path):
+    md = tmp_path / "raw" / "manifests"
+    md.mkdir(parents=True)
+    # plant a file one level up that a traversal id would resolve to
+    (tmp_path / "raw" / "secret.json").write_text('{"x":1}', encoding="utf-8")
+    for bad in _BAD_IDS:
+        assert manifests.load_manifest(md, bad) is None  # read -> None, never escapes
+
+
+def test_write_paths_raise_on_invalid_id(tmp_path):
+    md = tmp_path / "raw" / "manifests"
+    md.mkdir(parents=True)
+    outside = tmp_path / "pwned.json"
+    for bad in _BAD_IDS:
+        with pytest.raises(ValueError):
+            manifests.set_status(md, bad, "archived")
+        with pytest.raises(ValueError):
+            manifests.set_provenance(md, bad, extracted_at="2026-01-01T00:00:00+00:00")
+        with pytest.raises(ValueError):
+            manifests.save_manifest(md, {"source_id": bad})
+    assert not outside.exists()                       # nothing written outside the manifests dir
+    assert list(md.glob("**/*.json")) == []           # ... and nothing inside either
+
+
+def test_valid_manifests_partitions(tmp_path):
+    md = tmp_path / "raw" / "manifests"
+    md.mkdir(parents=True)
+    good = "src_0123456789abcdef"
+    (md / f"{good}.json").write_text(f'{{"source_id": "{good}"}}', encoding="utf-8")  # valid
+    (md / "wrongname.json").write_text(
+        '{"source_id": "src_00000000000000ab"}', encoding="utf-8")                    # filename_mismatch
+    (md / "x.json").write_text('{"source_id": "../../etc/x"}', encoding="utf-8")      # non_canonical
+    dup = "src_00000000000000cc"                                                      # duplicate across files
+    (md / f"{dup}.json").write_text(f'{{"source_id": "{dup}"}}', encoding="utf-8")
+    (md / "copy.json").write_text(f'{{"source_id": "{dup}"}}', encoding="utf-8")
+    valid, skipped = manifests.valid_manifests(md)
+    assert [r["source_id"] for r in valid] == [good]  # only the clean, correctly-named, unique record
+    assert sorted(skipped) == ["duplicate_source_id", "duplicate_source_id",
+                               "filename_mismatch", "non_canonical_id"]
+    # categorical reasons only — never the malformed id text
+    assert all(s in ("non_canonical_id", "filename_mismatch", "duplicate_source_id") for s in skipped)
+    assert not any("etc" in s for s in skipped)

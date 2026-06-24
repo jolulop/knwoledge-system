@@ -61,31 +61,31 @@ def _pending(tmp_path, rtype=None):
 
 
 def test_present_raw_is_clean(tmp_path):
-    _manifest(tmp_path, "src_ok", rel_path="raw/inbox/doc.pdf", exists=True)
+    _manifest(tmp_path, "src_00000000000000c0", rel_path="raw/inbox/doc.pdf", exists=True)
     res = _run(tmp_path)
     assert not any(f["check"] == "missing_raw" for f in res["findings"])
 
 
 def test_missing_raw_is_high_finding_and_review_item(tmp_path):
-    _manifest(tmp_path, "src_gone", rel_path="raw/inbox/gone.pdf", exists=False)
+    _manifest(tmp_path, "src_000000000000609e", rel_path="raw/inbox/gone.pdf", exists=False)
     res = _run(tmp_path)
     mr = [f for f in res["findings"] if f["check"] == "missing_raw"]
-    assert mr and mr[0]["severity"] == "high" and mr[0]["subject"] == "src_gone"
+    assert mr and mr[0]["severity"] == "high" and mr[0]["subject"] == "src_000000000000609e"
     assert res["status"] == "failing"            # high-severity finding -> failing health
     items = _pending(tmp_path, "missing_raw_source")
     assert len(items) == 1
-    assert json.loads(items[0].read_text())["subject"] == {"source_id": "src_gone"}
+    assert json.loads(items[0].read_text())["subject"] == {"source_id": "src_000000000000609e"}
 
 
 def test_missing_raw_idempotent_no_duplicate_items(tmp_path):
-    _manifest(tmp_path, "src_gone", rel_path="raw/inbox/gone.pdf", exists=False)
+    _manifest(tmp_path, "src_000000000000609e", rel_path="raw/inbox/gone.pdf", exists=False)
     _run(tmp_path)
     _run(tmp_path)  # rerun
     assert len(_pending(tmp_path, "missing_raw_source")) == 1
 
 
 def test_file_review_items_false_reports_without_filing(tmp_path):
-    _manifest(tmp_path, "src_gone", rel_path="raw/inbox/gone.pdf", exists=False)
+    _manifest(tmp_path, "src_000000000000609e", rel_path="raw/inbox/gone.pdf", exists=False)
     res = _run(tmp_path, file_review_items=False)
     assert any(f["check"] == "missing_raw" for f in res["findings"])
     assert res["review_items_filed"] == []
@@ -98,9 +98,9 @@ def test_file_review_items_false_reports_without_filing(tmp_path):
 def test_under_supported_active_concept_proposes_deprecation(tmp_path):
     gdb, conn = _graph(tmp_path)
     # active concept with one mentioning source -> under-supported (<2)
-    graph.upsert_node(conn, node_id="src_1", node_type="source", slug="src_1", status="active")
+    graph.upsert_node(conn, node_id="src_0000000000000101", node_type="source", slug="src_0000000000000101", status="active")
     graph.upsert_node(conn, node_id="cpt_x", node_type="concept", slug="thing", status="active")
-    graph.upsert_assertion(conn, src_id="src_1", dst_id="cpt_x", edge_type="mentions",
+    graph.upsert_assertion(conn, src_id="src_0000000000000101", dst_id="cpt_x", edge_type="mentions",
                            asserted_by="llm", status="active")
     conn.close()
     res = _run(tmp_path, graph_db=gdb)
@@ -123,10 +123,10 @@ def test_orphan_concept_zero_sources_is_high(tmp_path):
 
 def test_well_supported_concept_is_not_flagged(tmp_path):
     gdb, conn = _graph(tmp_path)
-    for s in ("src_1", "src_2"):
+    for s in ("src_0000000000000101", "src_0000000000000102"):
         graph.upsert_node(conn, node_id=s, node_type="source", slug=s, status="active")
     graph.upsert_node(conn, node_id="cpt_x", node_type="concept", slug="thing", status="active")
-    for s in ("src_1", "src_2"):
+    for s in ("src_0000000000000101", "src_0000000000000102"):
         graph.upsert_assertion(conn, src_id=s, dst_id="cpt_x", edge_type="mentions",
                                asserted_by="llm", status="active")
     conn.close()
@@ -136,11 +136,11 @@ def test_well_supported_concept_is_not_flagged(tmp_path):
 
 def test_archived_sources_do_not_count_as_live_support(tmp_path):
     gdb, conn = _graph(tmp_path)
-    graph.upsert_node(conn, node_id="src_1", node_type="source", slug="src_1", status="active")
-    graph.upsert_node(conn, node_id="src_arch", node_type="source", slug="src_arch",
+    graph.upsert_node(conn, node_id="src_0000000000000101", node_type="source", slug="src_0000000000000101", status="active")
+    graph.upsert_node(conn, node_id="src_00000000000000a4", node_type="source", slug="src_00000000000000a4",
                       status="archive_candidate")
     graph.upsert_node(conn, node_id="cpt_x", node_type="concept", slug="thing", status="active")
-    for s in ("src_1", "src_arch"):
+    for s in ("src_0000000000000101", "src_00000000000000a4"):
         graph.upsert_assertion(conn, src_id=s, dst_id="cpt_x", edge_type="mentions",
                                asserted_by="llm", status="active")
     conn.close()
@@ -160,7 +160,7 @@ def test_graph_absent_skips_semantic_checks(tmp_path):
 
 
 def test_records_job_and_appends_log(tmp_path):
-    _manifest(tmp_path, "src_ok", rel_path="raw/inbox/doc.pdf", exists=True)
+    _manifest(tmp_path, "src_00000000000000c0", rel_path="raw/inbox/doc.pdf", exists=True)
     res = _run(tmp_path)
     conn = db.connect(tmp_path / "db" / "jobs.sqlite")
     job = db.get_job(conn, res["job_id"])
@@ -170,7 +170,7 @@ def test_records_job_and_appends_log(tmp_path):
 
 
 def test_clean_vault_is_healthy(tmp_path):
-    _manifest(tmp_path, "src_ok", rel_path="raw/inbox/doc.pdf", exists=True)
+    _manifest(tmp_path, "src_00000000000000c0", rel_path="raw/inbox/doc.pdf", exists=True)
     gdb, conn = _graph(tmp_path)  # empty graph, no nodes
     conn.close()
     res = _run(tmp_path, graph_db=gdb)
@@ -189,7 +189,7 @@ def client(tmp_path, monkeypatch):
 
 
 def test_api_lint_failing_is_200_not_error(client, tmp_path):
-    _manifest(tmp_path, "src_gone", rel_path="raw/inbox/gone.pdf", exists=False)
+    _manifest(tmp_path, "src_000000000000609e", rel_path="raw/inbox/gone.pdf", exists=False)
     resp = client.post("/jobs/lint")
     assert resp.status_code == 200                # failing health is a 200 report, not an error
     body = resp.json()
@@ -222,17 +222,17 @@ def test_absolute_path_is_not_probed_and_not_leaked(tmp_path):
     # an absolute manifest path pointing at a real file OUTSIDE raw/ must not count as present
     secret = tmp_path / "outside.txt"
     secret.write_text("not a raw source", encoding="utf-8")
-    _manifest_raw(tmp_path, "src_abs", str(secret))
+    _manifest_raw(tmp_path, "src_00000000000000ab", str(secret))
     res = _run(tmp_path)
     inv = [f for f in res["findings"] if f["check"] == "invalid_raw_path"]
-    assert inv and inv[0]["subject"] == "src_abs" and res["status"] == "failing"
+    assert inv and inv[0]["subject"] == "src_00000000000000ab" and res["status"] == "failing"
     item = _pending(tmp_path, "missing_raw_source")[0].read_text()
     assert str(secret) not in item                 # absolute path never leaks into the payload
     assert json.loads(item)["proposal"]["invalid_path_count"] == 1
 
 
 def test_dotdot_escape_is_invalid(tmp_path):
-    _manifest_raw(tmp_path, "src_esc", "raw/../../etc/passwd")
+    _manifest_raw(tmp_path, "src_00000000000000e5", "raw/../../etc/passwd")
     res = _run(tmp_path)
     assert any(f["check"] == "invalid_raw_path" for f in res["findings"])
     assert "etc/passwd" not in json.dumps(res["findings"])  # malformed path not echoed in findings
@@ -241,13 +241,13 @@ def test_dotdot_escape_is_invalid(tmp_path):
 def test_directory_at_raw_path_is_not_a_file(tmp_path):
     # a directory where a raw file should be must NOT count as present (is_file, not exists)
     (tmp_path / "raw" / "inbox" / "doc.pdf").mkdir(parents=True)
-    _manifest_raw(tmp_path, "src_dir", "raw/inbox/doc.pdf")
+    _manifest_raw(tmp_path, "src_00000000000000d1", "raw/inbox/doc.pdf")
     res = _run(tmp_path)
     assert any(f["check"] == "missing_raw" for f in res["findings"])
 
 
 def test_safe_present_file_under_raw_is_clean(tmp_path):
-    _manifest(tmp_path, "src_ok", rel_path="raw/inbox/doc.pdf", exists=True)
+    _manifest(tmp_path, "src_00000000000000c0", rel_path="raw/inbox/doc.pdf", exists=True)
     res = _run(tmp_path)
     assert not any(f["check"] in ("missing_raw", "invalid_raw_path") for f in res["findings"])
 
@@ -256,7 +256,7 @@ def test_safe_present_file_under_raw_is_clean(tmp_path):
 
 
 def test_rerun_reports_existing_not_newly_filed(tmp_path):
-    _manifest(tmp_path, "src_gone", rel_path="raw/inbox/gone.pdf", exists=False)
+    _manifest(tmp_path, "src_000000000000609e", rel_path="raw/inbox/gone.pdf", exists=False)
     first = _run(tmp_path)
     assert len(first["review_items_filed"]) == 1 and first["review_items_existing"] == []
     second = _run(tmp_path)
@@ -264,13 +264,13 @@ def test_rerun_reports_existing_not_newly_filed(tmp_path):
 
 
 def test_degraded_when_graph_absent_and_otherwise_clean(tmp_path):
-    _manifest(tmp_path, "src_ok", rel_path="raw/inbox/doc.pdf", exists=True)
+    _manifest(tmp_path, "src_00000000000000c0", rel_path="raw/inbox/doc.pdf", exists=True)
     res = _run(tmp_path)  # no graph db -> semantic coverage incomplete, nothing failing
     assert res["graph_available"] is False and res["status"] == "degraded"
 
 
 def test_missing_raw_source_preview_is_record_only(tmp_path):
-    _manifest(tmp_path, "src_gone", rel_path="raw/inbox/gone.pdf", exists=False)
+    _manifest(tmp_path, "src_000000000000609e", rel_path="raw/inbox/gone.pdf", exists=False)
     res = _run(tmp_path)
     rid = res["review_items_filed"][0]
     prev = review_read.get_review(tmp_path / "reviews", rid)["preview"]

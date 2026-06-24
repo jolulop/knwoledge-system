@@ -159,3 +159,19 @@ def test_does_not_modify_raw_or_normalized(tmp_path):
                   for p in (tmp_path / "normalized" / "markdown").glob("*.md")}
     assert before_raw == after_raw
     assert before_norm == after_norm
+
+
+def test_generate_wiki_skips_misnamed_manifest(tmp_path):
+    # A canonical id in a wrongly-named manifest file must not produce a Source page for that id.
+    import json
+    import shutil
+    shutil.copytree(TEMPLATES, tmp_path / "templates", dirs_exist_ok=True)
+    md = tmp_path / "raw" / "manifests"
+    md.mkdir(parents=True, exist_ok=True)
+    sid = "src_0123456789abcdef"
+    (md / "wrongname.json").write_text(
+        json.dumps({"source_id": sid, "ingestion_status": "extracted"}), encoding="utf-8")
+    res = wiki.generate_wiki(tmp_path, rebuild_index=False, record_job=False)
+    assert res["manifests_skipped_invalid"] == 1   # observable
+    assert res["generated"] == 0
+    assert not (tmp_path / "wiki" / "Sources" / f"{sid}.md").exists()  # no page written for that id

@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.backend.manifests import sha256_file
+from app.backend.manifests import is_source_id, sha256_file
 
 
 def _iso_mtime(path: Path) -> str:
@@ -42,9 +42,26 @@ def _occurrences(manifest: dict) -> list[dict]:
     }]
 
 
+def _safe_under_raw(root: Path, raw_root: Path, rel: str) -> Path | None:
+    """Resolve a manifest `relative_path` under `root/raw`, or None if absolute / `..` / escaping.
+
+    Manifest JSON is untrusted local input (CLAUDE.md rule 2): a hand-edited path must never make the
+    validator read/hash a file outside `raw/` (ADR-0009, mirrors `lint._safe_raw_rel`/`extract`)."""
+    p = Path(rel)
+    if p.is_absolute() or ".." in p.parts:
+        return None
+    resolved = (root / p).resolve()
+    try:
+        resolved.relative_to(raw_root)
+    except ValueError:
+        return None
+    return resolved
+
+
 def main(argv: list[str]) -> int:
     root = Path(argv[0]).resolve() if argv else Path.cwd()
     manifests_dir = root / "raw" / "manifests"
+    raw_root = (root / "raw").resolve()
     if not manifests_dir.exists():
         print("Raw integrity validation passed (no manifests).")
         return 0
@@ -53,18 +70,43 @@ def main(argv: list[str]) -> int:
     missing: list[str] = []
     checked = hashed = 0
 
+    # Pre-pass: count canonical content source_ids so a duplicate across files is detected
+    # order-independently (every copy is flagged, even the correctly-named one).
+    id_counts: dict[str, int] = {}
+    for mp in sorted(manifests_dir.glob("*.json")):
+        try:
+            s = json.loads(mp.read_text(encoding="utf-8")).get("source_id")
+        except (OSError, json.JSONDecodeError):
+            continue
+        if is_source_id(s):
+            id_counts[s] = id_counts.get(s, 0) + 1
+
     for mpath in sorted(manifests_dir.glob("*.json")):
         try:
             manifest = json.loads(mpath.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
         expected_sha = manifest.get("sha256")
+        raw_sid = manifest.get("source_id")
+        # Hard gate: manifests live at raw/manifests/<source_id>.json (ADR-0007). Fail on a non-canonical
+        # id, a filename/id mismatch, or a duplicate id — each is tamper/corruption that creates ambiguous
+        # runtime authority. Diagnostics print a sanitized id only (no leak/log-injection).
+        sid = raw_sid if is_source_id(raw_sid) else "<invalid source_id>"
+        if not is_source_id(raw_sid):
+            mismatches.append(f"{mpath.name}: non-canonical source_id (expected src_<16 hex>)")
+        elif id_counts.get(raw_sid, 0) > 1:
+            mismatches.append(f"{sid}: duplicate source_id across manifests")
+        elif mpath.stem != raw_sid:
+            mismatches.append(f"{mpath.name}: filename does not match source_id {sid}")
         for occ in _occurrences(manifest):
             rel = occ.get("relative_path")
             if not rel:
                 continue
-            path = root / rel
             checked += 1
+            path = _safe_under_raw(root, raw_root, rel)
+            if path is None:  # absolute/escaping path — an integrity violation; never read it, no leak
+                mismatches.append(f"{sid}: manifest relative_path escapes raw/ (rejected)")
+                continue
             if not path.is_file():
                 missing.append(rel)
                 continue

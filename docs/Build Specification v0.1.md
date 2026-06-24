@@ -540,9 +540,16 @@ GET    /evals/results
 POST   /evals/run
 ```
 
-Note: ADR-0036 decision 14 supersedes this API target for the current v0.1 implementation:
-the runtime `/evals/run` job is deferred. Golden-question regression remains covered by
-the CI fake-adapter suites; a real-vault eval corpus is future work.
+Note: this is the original v0.1 API *target*; the phase ADRs supersede it where the implementation
+diverged (the spec is kept as historical intent, not rewritten):
+- **Ingest surface** — `POST /sources/upload`, `POST /sources/rescan`, and `POST /jobs/ingest` were
+  superseded by the file-drop intake model: drop into `raw/inbox/` then `POST /jobs/intake-scan` →
+  `/jobs/extract` → `/jobs/generate-wiki` (ADR-0002/0009/0011). No HTTP upload endpoint exists (uploads
+  would cross the loopback-only, no-auth boundary — ADR-0009).
+- **Eval surface** — both `POST /evals/run` and `GET /evals/results` are **deferred** (ADR-0036
+  decisions 9 + 14): `evals/golden_questions.yaml` is a fake-adapter CI fixture, not a real-vault corpus,
+  so there is no runtime eval job. Golden-question regression stays in the CI suites; a manual real-model
+  smoke recipe lives in `docs/Operations.md`. A real-vault eval corpus + these endpoints are future work.
 
 ---
 

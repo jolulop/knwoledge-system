@@ -70,6 +70,9 @@ class Source(BaseModel):
 
 class SourcesResponse(BaseModel):
     count: int
+    # Count of quarantined manifests (non-canonical id / filename mismatch / duplicate). Count only —
+    # never the skipped filenames or ids (no echo of untrusted input).
+    manifests_skipped_invalid: int = 0
     sources: list[Source]
 
 

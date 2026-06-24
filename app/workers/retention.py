@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from app.backend import db, graph, keyword_index, manifests
-from app.backend.manifests import iso_now, list_manifests, load_manifest
+from app.backend.manifests import iso_now, load_manifest, valid_manifests
 from app.backend.policy import load_yaml
 from app.llm import cache as llm_cache
 from app.workers import reviews, wiki
@@ -121,7 +121,8 @@ def run_stale_check(
         delete_existing: list[str] = []
         archive_detected = delete_detected = considered = 0
 
-        for m in list_manifests(manifests_dir):
+        valid, manifests_skipped_invalid = valid_manifests(manifests_dir)
+        for m in valid:
             sid = m.get("source_id")
             if not sid:
                 continue
@@ -177,6 +178,7 @@ def run_stale_check(
                     priority="low", now=now, filed=cache_purge_filed, existing=cache_purge_existing)
 
         summary = {"considered": considered,
+                   "manifests_skipped_invalid": len(manifests_skipped_invalid),
                    "archive_candidates": archive_detected,
                    "archive_candidates_filed": len(archive_filed),
                    "archive_candidates_existing": len(archive_existing),
@@ -264,6 +266,9 @@ def apply_archive_sources(
             sid = (item.get("subject") or {}).get("source_id")
             if not sid:
                 skipped.append({"review_id": rid, "reason": "missing_subject"})
+                continue
+            if not manifests.is_source_id(sid):  # untrusted review subject — reject before any path use
+                skipped.append({"review_id": rid, "reason": "invalid_source_id"})
                 continue
             m = load_manifest(manifests_dir, sid)
             if m is None:

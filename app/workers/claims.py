@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from app.backend import db, graph
-from app.backend.manifests import get_status, iso_now, list_manifests
+from app.backend.manifests import get_status, iso_now, valid_manifests
 from app.llm import prompts
 from app.llm.client import LLMClient, ParseError
 from app.workers import citations, reviews
@@ -200,7 +200,7 @@ def extract_claims(
     affected: set[str] = set()     # claims whose edges were superseded this run
 
     try:
-        manifests = list_manifests(manifests_dir)
+        manifests, skipped_invalid = valid_manifests(manifests_dir)
         if source_ids is not None:
             wanted = set(source_ids)
             manifests = [m for m in manifests if m.get("source_id") in wanted]
@@ -319,6 +319,7 @@ def extract_claims(
             "claim_pages_tombstoned": pages_tombstoned, "claims_dropped": claims_dropped,
             "skipped_fresh": skipped_fresh, "skipped_not_extracted": skipped_not_extracted,
             "skipped_empty": skipped_empty, "skipped_no_key": skipped_no_key,
+            "manifests_skipped_invalid": len(skipped_invalid),
             "errors": len(errors), "error_details": errors,
             "index_rebuilt": index_rebuilt, "extracted_at": now,
         }

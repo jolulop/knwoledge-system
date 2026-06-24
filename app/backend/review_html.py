@@ -129,7 +129,7 @@ def _stored_proposal(item: dict[str, Any]) -> str:
     return "<h2>Stored proposal</h2>" + _render_value(stored)
 
 
-def _decision_section(review_id: str, item: dict[str, Any]) -> str:
+def _decision_section(review_id: str, item: dict[str, Any], *, invalid_subject: bool = False) -> str:
     # Terminal items (approved/rejected) are immutable — show the recorded decision, not forms that
     # the backend would 409. Forms stay for pending/deferred (deferred is non-terminal).
     status = item.get("status")
@@ -139,12 +139,19 @@ def _decision_section(review_id: str, item: dict[str, Any]) -> str:
         return ("<h2>Decision (recorded)</h2>" + _render_value(meta)
                 + "<p>Effects are applied via <a href='/ui/reviews/apply'>Apply</a>.</p>")
     rid = _h(review_id)
+    # A tampered/malformed subject can never apply — disable Approve (offer only Reject/Defer) and warn.
+    actions = (("reject", "Reject"), ("defer", "Defer")) if invalid_subject else \
+        (("approve", "Approve"), ("reject", "Reject"), ("defer", "Defer"))
     buttons = "".join(
         f"<button type='submit' name='action' value='{a}'>{_h(label)}</button> "
-        for a, label in (("approve", "Approve"), ("reject", "Reject"), ("defer", "Defer")))
+        for a, label in actions)
+    warn = ("<p><strong>⚠ Invalid subject:</strong> this item's source_id is not canonical "
+            "(possible tampering). It cannot be applied; approval is disabled.</p>"
+            if invalid_subject else "")
     return ("<h2>Decision</h2>"
             "<p>Decisions are recorded only; effects are applied later via "
             "<a href='/ui/reviews/apply'>Apply</a>.</p>"
+            f"{warn}"
             f"<form method='post' action='/ui/reviews/{rid}/decide'>"
             "<p><label>Note (optional): <input type='text' name='note' size='50'></label></p>"
             f"{buttons}</form>")
@@ -188,7 +195,7 @@ def render_detail(result: dict[str, Any], *, review_id: str) -> str:
         "<h2>Apply state</h2>", _render_value(apply_rows),
         "<h2>Details</h2>", _render_value(preview.get("details") or {}),
         _stored_proposal(item),
-        _decision_section(review_id, item),
+        _decision_section(review_id, item, invalid_subject=bool(preview.get("invalid_subject"))),
     ]
     return _page(f"Review {review_id}", "".join(body))
 

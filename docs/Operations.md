@@ -8,6 +8,20 @@ but never acts on anything semantic/destructive on its own. Apply happens later,
 
 All commands run from the repo root (`/home/jolulop/code/knowledge-system`).
 
+## Starting the app
+
+The **only supported launch** is the blessed entrypoint, which binds Uvicorn to `APP_HOST` through the
+`assert_safe_bind` loopback guard so the bind can't drift from the check (ADR-0009):
+
+```bash
+uv run python -m app.backend        # or: uv run python scripts/serve.py
+```
+
+**Do not** run `uvicorn app.backend.main:app --host 0.0.0.0` directly — uvicorn's `--host` overrides the
+bind *without* re-checking the guard, exposing the unauthenticated API. There is no app-level auth/CSRF
+(loopback-only posture); `KS_ALLOW_INSECURE_BIND=1` is a narrow internal-transport escape hatch (trusted
+private network / sidecar behind a TLS/auth proxy) and is **not** a substitute for auth.
+
 ## Maintenance passes
 
 | Pass | Endpoint | Script-equivalent | What it does |

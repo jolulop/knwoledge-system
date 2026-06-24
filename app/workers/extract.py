@@ -30,9 +30,9 @@ from app.backend import db
 from app.backend.manifests import (
     apply_extraction_state,
     iso_now,
-    list_manifests,
     save_manifest,
     sha256_file,
+    valid_manifests,
 )
 from app.workers.chunking import assemble
 # Only the lightweight Extraction dataclass is imported eagerly. The per-format
@@ -375,7 +375,7 @@ def extract_sources(
         )
 
     try:
-        manifests = list_manifests(manifests_dir)
+        manifests, skipped_invalid = valid_manifests(manifests_dir)
         if source_ids is not None:
             wanted = set(source_ids)
             manifests = [m for m in manifests if m.get("source_id") in wanted]
@@ -430,6 +430,7 @@ def extract_sources(
             "errors": counts["errors"],
             "skipped_unchanged": counts["skipped_unchanged"],
             "skipped_unsupported": counts["skipped_unsupported"],
+            "manifests_skipped_invalid": len(skipped_invalid),
             "error_details": errors,
             "warnings": warnings,
             "forced": force,

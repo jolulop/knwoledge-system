@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from app.backend import db, graph
-from app.backend.manifests import get_provenance, independent_sources, iso_now, list_manifests
+from app.backend.manifests import get_provenance, independent_sources, iso_now, valid_manifests
 from app.llm import prompts
 from app.llm.client import LLMClient, ParseError
 from app.workers import claims, reviews
@@ -314,7 +314,8 @@ def detect_contradictions(
             affected=affected, now=now)
 
         # 2. Recompute candidate pairs from the current active graph.
-        prov = {m["source_id"]: get_provenance(m) for m in list_manifests(manifests_dir)}
+        _valid, _skipped_invalid = valid_manifests(manifests_dir)
+        prov = {m["source_id"]: get_provenance(m) for m in _valid}
         pairs = candidate_pairs(gconn, prov)
         pair_keys = {(p["claim_a"], p["claim_b"]) for p in pairs}
         active_claims = set(graph.active_node_ids_of_type(gconn, "claim"))
@@ -435,6 +436,7 @@ def detect_contradictions(
             "resolutions_acknowledged": resolution["acknowledged"],
             "resolutions_rejected": resolution["rejected"],
             "supersede_executed": resolution["superseded_executed"],
+            "manifests_skipped_invalid": len(_skipped_invalid),
             "errors": len(errors), "error_details": errors, "detected_at": now,
         }
         if conn is not None:

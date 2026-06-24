@@ -76,27 +76,27 @@ def _approve_archive(tmp_path, sid, rid="rev_arch"):
 
 
 def test_set_get_status_roundtrip(tmp_path):
-    _write_manifest(tmp_path, "src_x")
+    _write_manifest(tmp_path, "src_00000000000000ab")
     md = tmp_path / "raw" / "manifests"
-    assert manifests.get_status(manifests.load_manifest(md, "src_x")) == "active"  # default
-    manifests.set_status(md, "src_x", "archive_candidate")
-    assert manifests.get_status(manifests.load_manifest(md, "src_x")) == "archive_candidate"
-    manifests.set_status(md, "src_x", "active")  # reversible
-    assert manifests.get_status(manifests.load_manifest(md, "src_x")) == "active"
+    assert manifests.get_status(manifests.load_manifest(md, "src_00000000000000ab")) == "active"  # default
+    manifests.set_status(md, "src_00000000000000ab", "archive_candidate")
+    assert manifests.get_status(manifests.load_manifest(md, "src_00000000000000ab")) == "archive_candidate"
+    manifests.set_status(md, "src_00000000000000ab", "active")  # reversible
+    assert manifests.get_status(manifests.load_manifest(md, "src_00000000000000ab")) == "active"
 
 
 def test_set_status_validates(tmp_path):
-    _write_manifest(tmp_path, "src_x")
+    _write_manifest(tmp_path, "src_00000000000000ab")
     with pytest.raises(ValueError):
-        manifests.set_status(tmp_path / "raw" / "manifests", "src_x", "bogus")
-    assert manifests.set_status(tmp_path / "raw" / "manifests", "src_missing", "archived") is None
+        manifests.set_status(tmp_path / "raw" / "manifests", "src_00000000000000ab", "bogus")
+    assert manifests.set_status(tmp_path / "raw" / "manifests", "src_0000000000000015", "archived") is None
 
 
 def test_source_page_renders_manifest_status(tmp_path):
-    m = _write_manifest(tmp_path, "src_x", status="archive_candidate")
+    m = _write_manifest(tmp_path, "src_00000000000000ab", status="archive_candidate")
     page = render_source_page(_TEMPLATE, m, "# t\n\nbody.\n", summary_max=320, summary_min=40)
     assert parse_frontmatter(page)["status"] == "archive_candidate"
-    m2 = _write_manifest(tmp_path, "src_y")  # unset -> default active
+    m2 = _write_manifest(tmp_path, "src_00000000000000cd")  # unset -> default active
     assert parse_frontmatter(render_source_page(
         _TEMPLATE, m2, "# t\n\nbody.\n", summary_max=320, summary_min=40))["status"] == "active"
 
@@ -118,40 +118,40 @@ def _pending(tmp_path, rtype):
 
 
 def test_stale_check_proposes_archive_for_old_active_source(tmp_path):
-    _write_manifest(tmp_path, "src_old", modified_at=OLD)
+    _write_manifest(tmp_path, "src_000000000000001d", modified_at=OLD)
     res = _stale(tmp_path)
     assert res["archive_candidates_filed"] == 1
     item = json.loads(_pending(tmp_path, "archive_source")[0].read_text())
-    assert item["subject"] == {"source_id": "src_old"}
+    assert item["subject"] == {"source_id": "src_000000000000001d"}
     assert item["proposal"]["to_status"] == "archive_candidate" and item["proposal"]["age_days"] > 1000
 
 
 def test_stale_check_skips_recent_source(tmp_path):
-    _write_manifest(tmp_path, "src_new", modified_at=RECENT)
+    _write_manifest(tmp_path, "src_000000000000002e", modified_at=RECENT)
     res = _stale(tmp_path)
     assert res["archive_candidates_filed"] == 0 and _pending(tmp_path, "archive_source") == []
 
 
 def test_stale_check_skips_already_archived(tmp_path):
-    _write_manifest(tmp_path, "src_arch", status="archive_candidate", modified_at=OLD)
+    _write_manifest(tmp_path, "src_00000000000000c0", status="archive_candidate", modified_at=OLD)
     assert _stale(tmp_path)["archive_candidates_filed"] == 0
 
 
 def test_stale_check_skips_deprecated_candidate_source(tmp_path):
-    _write_manifest(tmp_path, "src_dep", status="deprecated_candidate", modified_at=OLD)
+    _write_manifest(tmp_path, "src_00000000000000de", status="deprecated_candidate", modified_at=OLD)
     res = _stale(tmp_path)
     assert res["archive_candidates"] == 0 and _pending(tmp_path, "archive_source") == []
 
 
 def test_stale_check_ephemeral_proposes_delete_candidate(tmp_path):
-    _write_manifest(tmp_path, "src_eph", retention_class="ephemeral", discovered_at=OLD)
+    _write_manifest(tmp_path, "src_00000000000000ef", retention_class="ephemeral", discovered_at=OLD)
     res = _stale(tmp_path)
     assert res["delete_candidates_filed"] == 1
     assert json.loads(_pending(tmp_path, "delete_raw_file")[0].read_text())["proposal"]["record_only"]
 
 
 def test_stale_check_idempotent(tmp_path):
-    _write_manifest(tmp_path, "src_old", modified_at=OLD)
+    _write_manifest(tmp_path, "src_000000000000001d", modified_at=OLD)
     _stale(tmp_path)
     res2 = _stale(tmp_path)
     assert res2["archive_candidates_filed"] == 0 and res2["archive_candidates_existing"] == 1
@@ -168,32 +168,32 @@ def _apply(tmp_path):
 
 
 def test_apply_archive_flips_manifest_page_and_graph(tmp_path):
-    page = _setup_rendered_source(tmp_path, "src_a")
+    page = _setup_rendered_source(tmp_path, "src_000000000000000a")
     # seed a graph source node to mirror
     gdb = tmp_path / "db" / "graph.sqlite"
     gdb.parent.mkdir(parents=True, exist_ok=True)
     graph.init_db(gdb)
     conn = graph.connect(gdb)
-    graph.upsert_node(conn, node_id="src_a", node_type="source", slug="src_a", status="active")
+    graph.upsert_node(conn, node_id="src_000000000000000a", node_type="source", slug="src_000000000000000a", status="active")
     conn.close()
-    _approve_archive(tmp_path, "src_a")
-    raw_before = (tmp_path / "raw" / "inbox" / "src_a.md").read_bytes()
+    _approve_archive(tmp_path, "src_000000000000000a")
+    raw_before = (tmp_path / "raw" / "inbox" / "src_000000000000000a.md").read_bytes()
 
     res = _apply(tmp_path)
-    assert res["applied"] == 1 and res["changed_pages"] == ["Sources/src_a.md"]
+    assert res["applied"] == 1 and res["changed_pages"] == ["Sources/src_000000000000000a.md"]
     md = tmp_path / "raw" / "manifests"
-    assert manifests.get_status(manifests.load_manifest(md, "src_a")) == "archive_candidate"
+    assert manifests.get_status(manifests.load_manifest(md, "src_000000000000000a")) == "archive_candidate"
     assert parse_frontmatter(page.read_text())["status"] == "archive_candidate"
     conn = graph.connect(gdb)
-    assert graph.get_node(conn, "src_a")["status"] == "archive_candidate"
+    assert graph.get_node(conn, "src_000000000000000a")["status"] == "archive_candidate"
     conn.close()
     # raw bytes untouched (the load-bearing invariant)
-    assert (tmp_path / "raw" / "inbox" / "src_a.md").read_bytes() == raw_before
+    assert (tmp_path / "raw" / "inbox" / "src_000000000000000a.md").read_bytes() == raw_before
 
 
 def test_apply_archive_idempotent_noop_when_already_archived(tmp_path):
-    _setup_rendered_source(tmp_path, "src_a")
-    _approve_archive(tmp_path, "src_a")
+    _setup_rendered_source(tmp_path, "src_000000000000000a")
+    _approve_archive(tmp_path, "src_000000000000000a")
     _apply(tmp_path)
     res2 = _apply(tmp_path)            # already archive_candidate -> no-op
     assert res2["applied"] == 0 and res2["changed_pages"] == []
@@ -201,7 +201,7 @@ def test_apply_archive_idempotent_noop_when_already_archived(tmp_path):
 
 def test_apply_archive_source_missing_skipped(tmp_path):
     (tmp_path / "raw" / "manifests").mkdir(parents=True, exist_ok=True)
-    _approve_archive(tmp_path, "src_gone")
+    _approve_archive(tmp_path, "src_0000000000000404")
     res = _apply(tmp_path)
     assert res["applied"] == 0
     assert res["skipped"] == [{"review_id": "rev_arch", "reason": "source_missing"}]
@@ -226,21 +226,21 @@ def client(tmp_path, monkeypatch):
 
 
 def test_api_stale_check(client, tmp_path):
-    _write_manifest(tmp_path, "src_old", modified_at=OLD)
+    _write_manifest(tmp_path, "src_000000000000001d", modified_at=OLD)
     body = client.post("/jobs/stale-check").json()
     assert body["considered"] == 1 and body["archive_candidates_filed"] == 1
     assert len(body["archive_review_items_filed"]) == 1
 
 
 def test_api_apply_archives_source(client, tmp_path):
-    _setup_rendered_source(tmp_path, "src_a")
-    _approve_archive(tmp_path, "src_a")
-    raw_before = (tmp_path / "raw" / "inbox" / "src_a.md").read_bytes()
+    _setup_rendered_source(tmp_path, "src_000000000000000a")
+    _approve_archive(tmp_path, "src_000000000000000a")
+    raw_before = (tmp_path / "raw" / "inbox" / "src_000000000000000a.md").read_bytes()
     body = client.post("/reviews/apply").json()
     assert body["summary"]["archives"]["applied"] == 1
-    page = tmp_path / "wiki" / "Sources" / "src_a.md"
+    page = tmp_path / "wiki" / "Sources" / "src_000000000000000a.md"
     assert parse_frontmatter(page.read_text())["status"] == "archive_candidate"
-    assert (tmp_path / "raw" / "inbox" / "src_a.md").read_bytes() == raw_before  # raw untouched
+    assert (tmp_path / "raw" / "inbox" / "src_000000000000000a.md").read_bytes() == raw_before  # raw untouched
 
 
 # --- review-round fixes ----------------------------------------------------
@@ -254,12 +254,12 @@ def _approve_raw(tmp_path, rid, item):
 
 def test_preview_uses_manifest_authority_over_page_drift(tmp_path):
     # manifest says active, but the page mirror drifted to archive_candidate
-    _write_manifest(tmp_path, "src_a", status="active")
-    page = tmp_path / "wiki" / "Sources" / "src_a.md"
+    _write_manifest(tmp_path, "src_000000000000000a", status="active")
+    page = tmp_path / "wiki" / "Sources" / "src_000000000000000a.md"
     page.parent.mkdir(parents=True, exist_ok=True)
-    page.write_text('---\ntype: source\nsource_id: "src_a"\nstatus: archive_candidate\n---\n',
+    page.write_text('---\ntype: source\nsource_id: "src_000000000000000a"\nstatus: archive_candidate\n---\n',
                     encoding="utf-8")
-    _approve_archive(tmp_path, "src_a")
+    _approve_archive(tmp_path, "src_000000000000000a")
     res = review_read.get_review(tmp_path / "reviews", "rev_arch", wiki_dir=tmp_path / "wiki",
                                  manifests_dir=tmp_path / "raw" / "manifests")
     ap = res["preview"]["apply"]
@@ -269,22 +269,22 @@ def test_preview_uses_manifest_authority_over_page_drift(tmp_path):
 
 
 def test_executor_skips_unexpected_to_status(tmp_path):
-    _setup_rendered_source(tmp_path, "src_a")
+    _setup_rendered_source(tmp_path, "src_000000000000000a")
     _approve_raw(tmp_path, "rev_bad", {
         "review_id": "rev_bad", "type": "archive_source", "status": "approved",
-        "subject": {"source_id": "src_a"}, "proposal": {"to_status": "deleted"}})
+        "subject": {"source_id": "src_000000000000000a"}, "proposal": {"to_status": "deleted"}})
     res = _apply(tmp_path)
     assert res["applied"] == 0
     assert res["skipped"] == [{"review_id": "rev_bad", "reason": "unexpected_to_status"}]
     md = tmp_path / "raw" / "manifests"
-    assert manifests.get_status(manifests.load_manifest(md, "src_a")) == "active"  # untouched
+    assert manifests.get_status(manifests.load_manifest(md, "src_000000000000000a")) == "active"  # untouched
 
 
 def test_executor_skips_non_approved_and_missing_subject(tmp_path):
-    _setup_rendered_source(tmp_path, "src_a")
+    _setup_rendered_source(tmp_path, "src_000000000000000a")
     _approve_raw(tmp_path, "rev_rej", {
         "review_id": "rev_rej", "type": "archive_source", "status": "rejected",
-        "subject": {"source_id": "src_a"}, "proposal": {"to_status": "archive_candidate"}})
+        "subject": {"source_id": "src_000000000000000a"}, "proposal": {"to_status": "archive_candidate"}})
     _approve_raw(tmp_path, "rev_nosub", {
         "review_id": "rev_nosub", "type": "archive_source", "status": "approved",
         "subject": {}, "proposal": {"to_status": "archive_candidate"}})
@@ -295,7 +295,7 @@ def test_executor_skips_non_approved_and_missing_subject(tmp_path):
 
 
 def test_stale_check_file_review_items_false_detects_but_does_not_file(tmp_path):
-    _write_manifest(tmp_path, "src_old", modified_at=OLD)
+    _write_manifest(tmp_path, "src_000000000000001d", modified_at=OLD)
     res = retention.run_stale_check(tmp_path, record_job=False, now=NOW, file_review_items=False)
     assert res["archive_candidates"] == 1 and res["archive_candidates_filed"] == 0
     assert not (tmp_path / "reviews" / "pending").exists() or _pending(tmp_path, "archive_source") == []
@@ -308,7 +308,7 @@ def test_source_status_vocabulary_round_trips(tmp_path):
     _sys.path.insert(0, str(ROOT / "scripts"))
     validate_wiki = importlib.import_module("validate_wiki")
     for status in manifests.SOURCE_STATUSES:
-        m = _write_manifest(tmp_path, "src_v", status=status)
+        m = _write_manifest(tmp_path, "src_0000000000000ec0", status=status)
         page = render_source_page(_TEMPLATE, m, "# t\n\nbody.\n", summary_max=320, summary_min=40)
         assert parse_frontmatter(page)["status"] in validate_wiki._VALID_STATUS, status
     assert manifests.get_status({"status": "deprecated_candidate"}) == "deprecated_candidate"
@@ -328,12 +328,12 @@ def _drift_graph(tmp_path):
 
 
 def test_api_archive_only_proceeds_on_schema_drift(client, tmp_path):
-    _setup_rendered_source(tmp_path, "src_a")
-    _approve_archive(tmp_path, "src_a")
+    _setup_rendered_source(tmp_path, "src_000000000000000a")
+    _approve_archive(tmp_path, "src_000000000000000a")
     _drift_graph(tmp_path)
     body = client.post("/reviews/apply").json()
     assert body["summary"]["archives"]["applied"] == 1   # archive proceeds despite graph drift
-    assert parse_frontmatter((tmp_path / "wiki" / "Sources" / "src_a.md").read_text())["status"] \
+    assert parse_frontmatter((tmp_path / "wiki" / "Sources" / "src_000000000000000a.md").read_text())["status"] \
         == "archive_candidate"
     conn = graph.connect(tmp_path / "db" / "graph.sqlite")
     try:
@@ -354,7 +354,7 @@ def test_api_graph_required_still_503_on_schema_drift(client, tmp_path):
 
 
 def test_api_stale_check_appends_log(client, tmp_path):
-    _write_manifest(tmp_path, "src_old", modified_at=OLD)
+    _write_manifest(tmp_path, "src_000000000000001d", modified_at=OLD)
     client.post("/jobs/stale-check")
     assert "stale-check:" in (tmp_path / "wiki" / "log.md").read_text(encoding="utf-8")
 
@@ -373,7 +373,7 @@ def _write_chunk(tmp_path, sid, text):
 
 
 def test_archive_excluded_from_default_search_but_found_with_explicit_status(tmp_path):
-    sid = "src_q"
+    sid = "src_0000000000000a11"
     _setup_rendered_source(tmp_path, sid, modified_at=OLD)
     _write_chunk(tmp_path, sid, "Quantum revenue strategy for the enterprise.")
     keyword_index.reindex(tmp_path, force=True)
@@ -483,7 +483,7 @@ def test_cache_corrupt_is_warning_not_abort(tmp_path):
     cdb = tmp_path / "db" / "llm_cache.sqlite"
     cdb.parent.mkdir(parents=True, exist_ok=True)
     cdb.write_text("not a sqlite database", encoding="utf-8")
-    _write_manifest(tmp_path, "src_old", modified_at=OLD)  # a source candidate still detected
+    _write_manifest(tmp_path, "src_000000000000001d", modified_at=OLD)  # a source candidate still detected
     res = retention.run_stale_check(tmp_path, record_job=False, now=NOW)
     assert res["cache"]["cache_readable"] is False
     assert "cache_unreadable" in res["warnings"]
@@ -553,3 +553,38 @@ def test_stale_check_cache_warning_persisted_to_job_row(tmp_path):
     job = main_module.db.get_job(conn, res["job_id"])
     conn.close()
     assert "cache_unreadable" in job["warnings"]
+
+
+def test_apply_archive_rejects_invalid_subject_source_id(tmp_path):
+    d = tmp_path / "reviews" / "approved"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "rev_bad.json").write_text(json.dumps({
+        "review_id": "rev_bad", "type": "archive_source", "status": "approved",
+        "subject": {"source_id": "../../etc/passwd"},
+        "proposal": {"to_status": "archive_candidate"}, "context": {}}), encoding="utf-8")
+    res = _apply(tmp_path)
+    assert {"review_id": "rev_bad", "reason": "invalid_source_id"} in res["skipped"]
+    md = tmp_path / "raw" / "manifests"
+    assert (not md.exists()) or list(md.glob("**/*.json")) == []  # no traversal write
+    assert not (tmp_path / "etc").exists()
+
+
+def test_stale_check_reports_skipped_invalid_manifests(tmp_path):
+    md = tmp_path / "raw" / "manifests"
+    md.mkdir(parents=True)
+    (md / "bad.json").write_text(json.dumps(
+        {"source_id": "../../x", "modified_at": OLD}), encoding="utf-8")
+    res = retention.run_stale_check(tmp_path, record_job=False, now=NOW)
+    assert res["manifests_skipped_invalid"] == 1   # observable, not silently dropped
+    assert res["archive_candidates"] == 0          # the tampered manifest drove nothing
+
+
+def test_preview_archive_invalid_subject_is_tamper_signal(tmp_path):
+    item = {"review_id": "r1", "type": "archive_source", "status": "pending",
+            "subject": {"source_id": "../../etc/passwd"}, "proposal": {"reason": "x"}}
+    out = review_read.preview_archive_source(
+        item, gconn=None, wiki_dir=tmp_path / "wiki",
+        manifests_dir=tmp_path / "raw" / "manifests")
+    assert out["invalid_subject"] is True
+    assert out["affected_paths"] == [] and out["node_ids"] == []  # no fake path
+    assert out["apply"]["supported"] is False

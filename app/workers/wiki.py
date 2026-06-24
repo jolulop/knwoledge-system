@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from app.backend import db, graph
-from app.backend.manifests import iso_now, list_manifests
+from app.backend.manifests import iso_now, valid_manifests
 from app.workers import enrichment_artifact, wiki_render
 
 _CLAIM_TEXT_RE = re.compile(r'(?m)^claim_text:\s*"(.*)"\s*$')
@@ -130,7 +130,7 @@ def generate_wiki(
         )
 
     try:
-        manifests = list_manifests(manifests_dir)
+        manifests, skipped_invalid = valid_manifests(manifests_dir)
         if source_ids is not None:
             wanted = set(source_ids)
             manifests = [m for m in manifests if m.get("source_id") in wanted]
@@ -205,6 +205,7 @@ def generate_wiki(
             "generated": generated,
             "skipped_unchanged": skipped_unchanged,
             "skipped_not_extracted": skipped_not_extracted,
+            "manifests_skipped_invalid": len(skipped_invalid),  # quarantined non-canonical ids (tamper)
             "errors": len(errors),
             "error_details": errors,
             "generated_at": now,

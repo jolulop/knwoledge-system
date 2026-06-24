@@ -151,7 +151,7 @@ def test_path_escape_is_rejected(tmp_path):
     # A hand-edited manifest whose raw path escapes raw/ must never be read.
     (tmp_path / "raw" / "manifests").mkdir(parents=True)
     (tmp_path / "outside.md").write_text("secret outside the repo\n", encoding="utf-8")
-    sid = "src_escape0000000"
+    sid = "src_0123456789abcdef"  # canonical id; the path escape (not the id) is under test
     manifests.save_manifest(
         tmp_path / "raw" / "manifests",
         {

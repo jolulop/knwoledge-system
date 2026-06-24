@@ -45,6 +45,9 @@ UNKNOWN = "unknown"               # state absent/inconsistent — never a guess
 # deprecation leaves the world untouched). Distinct from EFFECTED ("the world matches an applied
 # effect") so the UI never shows a misleading "effected" badge on a do-nothing rejection.
 NO_EFFECT_REQUIRED = "no_effect_required"
+# A review subject that can never apply because it is malformed/tampered (e.g. a non-canonical
+# source_id). Surfaced as a tamper signal; apply is unsupported and the UI disables approval.
+INVALID_SUBJECT = "invalid_subject"
 
 # Review types that an explicit POST /reviews/apply executor backs (decide is type-complete; apply
 # is not — ADR-0035 decisions 3-5). Maps type -> the executor name surfaced in the preview.
@@ -262,8 +265,8 @@ def _safe_wiki_subpath(wiki_dir: Path, page: str) -> Path | None:
 
 def _manifest_status(manifests_dir: Path | None, source_id: str | None) -> str | None:
     """A source's lifecycle status from the manifest (the authority, ADR-0036), or None if unreadable."""
-    if manifests_dir is None or not source_id:
-        return None
+    if manifests_dir is None or not manifests.is_source_id(source_id):
+        return None  # never hand an untrusted/non-canonical id to the path layer
     m = manifests.load_manifest(Path(manifests_dir), source_id)
     return manifests.get_status(m) if m is not None else None
 
@@ -561,6 +564,20 @@ def preview_archive_source(item: dict[str, Any], *, gconn: Any, wiki_dir: Path |
     proposal = item.get("proposal") or {}
     sid = subj.get("source_id")
     out = _scaffold(item)
+    if not manifests.is_source_id(sid):
+        # Tampered/malformed subject — emit no fake affected path, mark unappliable. The UI disables
+        # approval; the apply executor independently skips it (defense-in-depth).
+        out["node_ids"] = []
+        out["affected_paths"] = []
+        out["proposed_status"] = "archive_candidate"
+        out["proposed_action"] = "archive source (active -> archive_candidate)"
+        out["summary"] = "Invalid review subject: source_id is not canonical (src_<16 hex>) — cannot apply."
+        out["current_status"] = None
+        out["invalid_subject"] = True
+        out["apply"] = {"supported": False, "executor": EXECUTOR_BY_TYPE["archive_source"],
+                        "effect_status": INVALID_SUBJECT, "effected": False,
+                        "warnings": ["invalid_source_id"]}
+        return out
     out["node_ids"] = [sid] if sid else []
     out["affected_paths"] = [f"Sources/{sid}.md"] if sid else []
     out["proposed_status"] = "archive_candidate"

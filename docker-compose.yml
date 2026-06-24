@@ -1,10 +1,17 @@
 services:
   app:
     build: .
-    # Reserved API port is 18000 (ADR-0005). The container listens on 0.0.0.0 (so the
-    # published port is reachable), but it is published only to host loopback, so the
-    # service is never exposed on LAN/public interfaces (Build Spec: local-only).
-    command: uvicorn app.backend.main:app --host 0.0.0.0 --port 18000 --reload
+    # Reserved API port is 18000 (ADR-0005). Launched via the blessed entrypoint (python -m app.backend),
+    # which binds Uvicorn to APP_HOST through the assert_safe_bind guard (ADR-0009) — never direct uvicorn.
+    # A container is a narrow operational exception (NOT the recommended local launch): it MUST bind
+    # 0.0.0.0 internally to be reachable, so it sets KS_ALLOW_INSECURE_BIND=1; the published port is pinned
+    # to host loopback (127.0.0.1:), so the unauthenticated service is never on a LAN/public interface.
+    # Dropping the `127.0.0.1:` prefix would expose it — do not.
+    command: python -m app.backend
+    environment:
+      APP_HOST: "0.0.0.0"
+      KS_ALLOW_INSECURE_BIND: "1"
+      KS_RELOAD: "1"
     ports:
       - "127.0.0.1:18000:18000"
     volumes:

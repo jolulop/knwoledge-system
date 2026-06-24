@@ -1,18 +1,20 @@
-# Knowledge System Scaffold v0.1
+# Knowledge System v0.1
 
 Local-first, agent-maintained information management system based on the LLM Wiki pattern.
 
-This scaffold implements the first build deliverable:
+**Status: Phases 1–7 complete** (the Build Spec's planned scope). The pipeline runs end-to-end —
+immutable `raw/` intake → extract/normalize → generated wiki → LLM semantic layer (concepts/entities/
+claims/synthesis, grounded) → keyword+vector+graph retrieval → cited `POST /query` → human review UI →
+autonomous detect-and-propose maintenance (lint / retention / reindex, no daemon). The API is
+**loopback-only with no auth** (ADR-0009). New-session orientation: read `REANCHOR.md`, then
+`docs/Operations.md` to run it, `CLAUDE.md` for the rules, `CONTEXT.md` for the glossary.
 
-- Repository layout
-- `CLAUDE.md` and `AGENTS.md`
-- Wiki templates
-- Policy files
-- Evaluation seeds
-- Claude Code skill stubs
-- Deterministic hooks
-- Functional index rebuild and validation scripts
-- Minimal FastAPI backend skeleton
+Implemented surface:
+
+- Repository layout, `CLAUDE.md` / `AGENTS.md`, wiki templates, policy files, evaluation seeds
+- Claude Code skills + deterministic hooks/validators (`scripts/validate_*.py`)
+- FastAPI backend: intake/extract/wiki jobs, `/search`, `/query`, `/reviews` + `/ui/reviews`,
+  `/jobs/{lint,reindex,stale-check}`, graph + sources endpoints
 
 ## Target runtime
 

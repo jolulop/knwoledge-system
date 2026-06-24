@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from app.backend import db, graph, search
-from app.backend.manifests import iso_now, list_manifests
+from app.backend.manifests import iso_now, valid_manifests
 from app.workers import reviews
 from app.workers.wiki_render import NODE_DIR
 
@@ -127,7 +127,9 @@ def _check_missing_raw(manifests_dir: Path, root: Path, reviews_dir: Path, *, fi
     """
     findings: list[dict[str, Any]] = []
     raw_root = (root / "raw").resolve()
-    for m in list_manifests(manifests_dir):
+    # valid_manifests quarantines non-canonical ids; validate_raw_integrity (run via run_validators)
+    # is the loud signal that surfaces such tampering as a lint failure.
+    for m in valid_manifests(manifests_dir)[0]:
         sid = m.get("source_id")
         if not sid:
             continue

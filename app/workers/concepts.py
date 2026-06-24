@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from app.backend import db, graph
-from app.backend.manifests import get_status, iso_now, list_manifests
+from app.backend.manifests import get_status, iso_now, valid_manifests
 from app.llm import prompts
 from app.llm.client import LLMClient, ParseError
 from app.workers import citations, reviews
@@ -296,7 +296,7 @@ def extract_concepts(
             now=now)
 
     try:
-        manifests = list_manifests(manifests_dir)
+        manifests, skipped_invalid = valid_manifests(manifests_dir)
         if source_ids is not None:
             wanted = set(source_ids)
             manifests = [m for m in manifests if m.get("source_id") in wanted]
@@ -379,7 +379,8 @@ def extract_concepts(
             "mentions_written": mentions_written, "node_pages_written": pages_written,
             "node_pages_tombstoned": pages_tombstoned, "skipped_fresh": skipped_fresh,
             "skipped_not_extracted": skipped_not_extracted, "skipped_empty": skipped_empty,
-            "skipped_no_key": skipped_no_key, "errors": len(errors), "error_details": errors,
+            "skipped_no_key": skipped_no_key, "manifests_skipped_invalid": len(skipped_invalid),
+            "errors": len(errors), "error_details": errors,
             "index_rebuilt": index_rebuilt, "extracted_at": now,
         }
         if conn is not None:
