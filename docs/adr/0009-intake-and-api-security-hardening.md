@@ -17,6 +17,13 @@ container deployments bind `0.0.0.0` internally but publish to `127.0.0.1` only,
 the API is never exposed on LAN or public interfaces (Build Spec: local-only, no
 public exposure).
 
+Extending (1) to derived state: the extraction worker re-checks raw-path containment
+on the untrusted manifest `relative_raw_path` via the shared `safe_under` guard
+(`app/backend/paths.py`) at **both** the extract and idempotent-skip paths, before any
+`stat`/read. `relative_raw_path` must be repository-relative (CONTEXT.md); a hand-edited
+absolute or `raw/`-escaping value is a hard `path_escape` error, never a stat probe or a
+silent "unchanged" skip.
+
 Consequences: intake favors safety over completeness — a legitimate symlinked inbox
 file will be skipped, not followed, which is the intended trade for the immutable-raw
 and untrusted-data guarantees. Schema-enforced responses mean new manifest fields

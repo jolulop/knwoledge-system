@@ -261,3 +261,133 @@ def test_raw_files_are_not_modified(tmp_path):
     _run(tmp_path)
     after = {p.name: p.read_bytes() for p in inbox.iterdir() if p.is_file()}
     assert before == after
+
+
+def test_already_extracted_rejects_escaping_path(tmp_path):
+    # The idempotent-skip fast path must enforce the same raw containment as _extract_one (ADR-0009):
+    # a tampered relative_raw_path that escapes raw/ is NOT a valid skip, even when the external file's
+    # size+mtime match the manifest (without the guard this would stat it and skip as "unchanged").
+    outside = tmp_path / "outside.md"
+    outside.write_text("secret outside the repo\n", encoding="utf-8")
+    markdown_dir = tmp_path / "normalized" / "markdown"
+    markdown_dir.mkdir(parents=True)
+    sid = "src_0123456789abcdef"
+    (markdown_dir / f"{sid}.md").write_text("prior extracted output\n", encoding="utf-8")
+    st = outside.stat()
+    manifest = {
+        "source_id": sid,
+        "ingestion_status": "extracted",
+        "relative_raw_path": str(outside),          # absolute path -> escapes <root>/raw
+        "size_bytes": st.st_size,                   # matches the external file...
+        "modified_at": extract._iso_mtime(outside),  # ...as does the mtime -> would skip without the guard
+    }
+    assert extract._already_extracted(manifest, tmp_path, markdown_dir) is False
+
+
+def test_tampered_manifest_after_extraction_is_not_skipped(tmp_path):
+    # End-to-end: a previously-extracted source whose manifest is later tampered to point outside raw/
+    # (at a real file with matching size/mtime) must be diverted from the skip path to a path_escape
+    # error. Prior artifacts + extracted status are preserved and the manifest is NOT rewritten (it is
+    # left as-is, still carrying the tampered path — extraction never mutates the untrusted manifest).
+    _build_project(tmp_path)
+    assert _run(tmp_path)["extracted"] == 5
+
+    manifests_dir = tmp_path / "raw" / "manifests"
+    target = next(m for m in manifests.list_manifests(manifests_dir) if m["original_filename"] == "doc.md")
+    sid = target["source_id"]
+    outside = tmp_path / "outside.md"
+    outside.write_text("secret outside the repo\n", encoding="utf-8")
+    st = outside.stat()
+    target["relative_raw_path"] = str(outside)      # absolute escape, real file, matching metadata
+    target["size_bytes"] = st.st_size
+    target["modified_at"] = extract._iso_mtime(outside)
+    manifests.save_manifest(manifests_dir, target)
+
+    second = _run(tmp_path)  # non-force: the OLD skip path would have stat'd + skipped this
+    assert second["skipped_unchanged"] == 4         # the tampered source is NOT skipped
+    escapes = [e for e in second["error_details"] if e["skip_reason"] == "path_escape"]
+    assert [e["source_id"] for e in escapes] == [sid]
+    assert escapes[0]["preserved_prior"] is True
+    # prior state preserved (persisted=False): ingestion_status NOT flipped to error, markdown intact.
+    # The manifest is not rewritten — it still carries the tampered path; extraction doesn't "fix" it.
+    reloaded = next(m for m in manifests.list_manifests(manifests_dir) if m["source_id"] == sid)
+    assert reloaded["ingestion_status"] == "extracted"
+    assert reloaded["relative_raw_path"] == str(outside)  # untouched (not restored, not rewritten)
+    assert (tmp_path / "normalized" / "markdown" / f"{sid}.md").exists()
+
+
+def test_absolute_relative_raw_path_inside_raw_is_rejected(tmp_path):
+    # Schema hardening: relative_raw_path must be RELATIVE. An absolute path is rejected as path_escape
+    # even when it points at a real file inside root/raw (previously accepted by is_relative_to).
+    _build_project(tmp_path, with_pdf=False)
+    manifests_dir = tmp_path / "raw" / "manifests"
+    target = next(m for m in manifests.list_manifests(manifests_dir) if m["original_filename"] == "doc.md")
+    sid = target["source_id"]
+    abs_inside = (tmp_path / target["relative_raw_path"]).resolve()   # the real raw file, absolute path
+    assert abs_inside.is_file() and abs_inside.is_relative_to((tmp_path / "raw").resolve())
+    target["relative_raw_path"] = str(abs_inside)
+    manifests.save_manifest(manifests_dir, target)
+
+    summary = _run(tmp_path)  # status 'new' -> straight to _extract_one
+    assert any(e["source_id"] == sid and e["skip_reason"] == "path_escape"
+               for e in summary["error_details"])
+
+
+def test_symlink_escape_under_raw_is_rejected(tmp_path):
+    # Extraction's containment is independent of intake's symlink rejection: a manifest pointing at a
+    # symlink UNDER raw/ whose resolved target escapes raw/ must be path_escape (safe_under resolves
+    # before the containment check), and the skip path must not accept it either.
+    inbox = tmp_path / "raw" / "inbox"
+    inbox.mkdir(parents=True)
+    external = tmp_path / "secret.txt"
+    external.write_text("secret outside the repo\n", encoding="utf-8")
+    (inbox / "link.md").symlink_to(external)             # raw/inbox/link.md -> <root>/secret.txt
+    manifests_dir = tmp_path / "raw" / "manifests"
+    manifests_dir.mkdir(parents=True)
+    sid = "src_0123456789abcdef"
+    manifests.save_manifest(manifests_dir, {
+        "source_id": sid, "original_filename": "link.md",
+        "relative_raw_path": "raw/inbox/link.md",        # not absolute / no '..': only resolution escapes
+        "sha256": "0" * 64, "file_extension": ".md", "ingestion_status": "new",
+    })
+    summary = _run(tmp_path)
+    assert any(e["source_id"] == sid and e["skip_reason"] == "path_escape"
+               for e in summary["error_details"])
+    # skip path is independently guarded
+    markdown_dir = tmp_path / "normalized" / "markdown"
+    markdown_dir.mkdir(parents=True, exist_ok=True)
+    (markdown_dir / f"{sid}.md").write_text("prior\n", encoding="utf-8")
+    assert extract._already_extracted(
+        {"source_id": sid, "ingestion_status": "extracted", "relative_raw_path": "raw/inbox/link.md"},
+        tmp_path, markdown_dir) is False
+
+
+def test_missing_relative_raw_path_is_clean_path_escape(tmp_path):
+    # A corrupted manifest with a missing/empty relative_raw_path must fail cleanly as path_escape, not
+    # an unhandled KeyError (the shared resolver uses .get(..., "") -> safe_under -> None).
+    manifests_dir = tmp_path / "raw" / "manifests"
+    manifests_dir.mkdir(parents=True)
+    sid = "src_0123456789abcdef"
+    manifests.save_manifest(manifests_dir, {
+        "source_id": sid, "original_filename": "doc.md",  # relative_raw_path intentionally OMITTED
+        "sha256": "0" * 64, "file_extension": ".md", "ingestion_status": "new",
+    })
+    summary = _run(tmp_path)
+    assert summary["errors"] == 1
+    assert [e["skip_reason"] for e in summary["error_details"]] == ["path_escape"]
+
+
+def test_nested_parent_traversal_is_rejected(tmp_path):
+    # Pin the contract at extraction level: any '..' segment is rejected up-front by safe_under, even one
+    # that resolves to an existing file, surfaced as path_escape.
+    (tmp_path / "outside.md").write_text("secret\n", encoding="utf-8")
+    manifests_dir = tmp_path / "raw" / "manifests"
+    manifests_dir.mkdir(parents=True)
+    sid = "src_0123456789abcdef"
+    manifests.save_manifest(manifests_dir, {
+        "source_id": sid, "original_filename": "outside.md",
+        "relative_raw_path": "raw/inbox/../../outside.md",   # escapes <root>/raw via traversal
+        "sha256": "0" * 64, "file_extension": ".md", "ingestion_status": "new",
+    })
+    summary = _run(tmp_path)
+    assert [e["skip_reason"] for e in summary["error_details"]] == ["path_escape"]

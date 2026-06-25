@@ -34,6 +34,7 @@ from app.backend.manifests import (
     sha256_file,
     valid_manifests,
 )
+from app.backend.paths import safe_under
 from app.workers.chunking import assemble
 # Only the lightweight Extraction dataclass is imported eagerly. The per-format
 # extractor modules (pypdf/python-docx/beautifulsoup4/pandas) are imported lazily in
@@ -172,6 +173,16 @@ def _write_log(dirs: dict[str, Path], source_id: str, log: dict[str, Any]) -> No
 # --- single source ----------------------------------------------------------
 
 
+def _safe_raw_file(root: Path, manifest: dict[str, Any]) -> Path | None:
+    """Resolve a manifest's raw file under ``root/raw``, or ``None`` if the (untrusted) ``relative_raw_path``
+    is absolute, contains ``..``, or escapes ``raw/`` (ADR-0009). Both the extract and idempotent-skip
+    paths route through this so the raw-containment contract is enforced identically — matching
+    ``app.workers.lint`` and ``scripts/validate_raw_integrity.py``, which resolve the same field via
+    ``safe_under``. ``relative_raw_path`` must be repository-relative (CONTEXT.md); an absolute path,
+    even one pointing inside ``raw/``, is rejected."""
+    return safe_under(root, root / "raw", manifest.get("relative_raw_path", ""))
+
+
 def _extract_one(
     manifest: dict[str, Any],
     root: Path,
@@ -190,8 +201,7 @@ def _extract_one(
     """
     source_id = manifest["source_id"]
     started = iso_now()
-    raw_root = (root / "raw").resolve()
-    raw_file = (root / manifest["relative_raw_path"]).resolve()
+    raw_file = _safe_raw_file(root, manifest)
     # A prior successful extraction we must not destroy if this run fails.
     prior_success = (
         manifest.get("ingestion_status") in {"extracted", "partial"}
@@ -216,10 +226,13 @@ def _extract_one(
     }
 
     try:
-        # Manifests are local runtime state; re-check path confinement before reading
-        # so a hand-edited/relative path can never escape the raw repository.
-        if not raw_file.is_relative_to(raw_root):
-            raise ExtractionError("raw path escapes the raw repository", "path_escape")
+        # Manifests are untrusted on-disk data; re-check path confinement before reading so a
+        # hand-edited absolute/relative path can never escape the raw repository (ADR-0009). `None`
+        # means absolute / `..` / outside raw/ — a hard path_escape (the shared `_safe_raw_file` guard).
+        if raw_file is None:
+            raise ExtractionError(
+                "raw path is absolute, contains parent traversal, or escapes the raw repository",
+                "path_escape")
         if not raw_file.is_file():
             raise ExtractionError("raw file not found", "missing_raw_file")
         size = raw_file.stat().st_size
@@ -322,7 +335,11 @@ def _already_extracted(manifest: dict[str, Any], root: Path, markdown_dir: Path)
         return False
     if not (markdown_dir / f"{manifest['source_id']}.md").exists():
         return False
-    raw_file = (root / manifest.get("relative_raw_path", "")).resolve()
+    # An untrusted relative_raw_path that escapes raw/ must NOT be stat'd or treated as a valid skip
+    # (symmetric with _extract_one): fall through so _extract_one rejects it as path_escape (ADR-0009).
+    raw_file = _safe_raw_file(root, manifest)
+    if raw_file is None:
+        return False
     if not raw_file.is_file():
         return False
     try:
