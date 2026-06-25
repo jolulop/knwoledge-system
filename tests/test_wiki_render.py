@@ -176,3 +176,35 @@ def test_unknown_review_status_override_raises():
         wiki_render.render_claim_page(_claim(), review_status="bogus")
     with pytest.raises(ValueError):
         wiki_render.render_concept_page(_concept(), review_status="bogus")
+
+
+def _syn_node(**over):
+    base = {"synthesis_id": "syn_0123456789abcdef", "title": "Test synthesis", "status": "candidate",
+            "summary": "A candidate synthesis.", "synthesis_text": "Body."}
+    base.update(over)
+    return base
+
+
+def test_synthesis_review_status_defaults_to_pending():
+    # No stored value -> derived default `pending` (ADR-0022), same gate as claim/concept.
+    fm = wiki_render.parse_frontmatter(wiki_render.render_synthesis_page(_syn_node()))
+    assert fm["review_status"] == "pending"
+
+
+def test_synthesis_accepts_in_set_review_status():
+    fm = wiki_render.parse_frontmatter(wiki_render.render_synthesis_page(_syn_node(review_status="approved")))
+    assert fm["review_status"] == "approved"
+
+
+def test_synthesis_rejects_out_of_set_review_status():
+    # The closed bypass: a ledger-only `deferred` (or any bogus value) on the node must raise, not render.
+    for bad in ("deferred", "bogus"):
+        with pytest.raises(ValueError):
+            wiki_render.render_synthesis_page(_syn_node(review_status=bad))
+
+
+def test_query_emits_constant_in_set_review_status():
+    # Query is the *constant* emitter (ADR-0022): a fixed in-set `none`, not via the resolver.
+    fm = wiki_render.parse_frontmatter(
+        wiki_render.render_query_page({"query_id": "qry_x", "question": "What?"}))
+    assert fm["review_status"] == "none"

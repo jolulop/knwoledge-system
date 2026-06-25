@@ -519,7 +519,10 @@ def render_synthesis_page(node: dict[str, Any]) -> str:
     syn_id = node["synthesis_id"]
     title = _WS.sub(" ", str(node["title"])).strip()
     status = node["status"]
-    review_status = node.get("review_status", "pending")
+    # Route through the shared gate (ADR-0022) like claim/concept so a synthesis page can never emit a
+    # value outside the page set {none,pending,approved,rejected}; a stored `deferred` (ledger-only) or
+    # bogus value raises rather than silently rendering. No node value -> derived default `pending`.
+    review_status = _resolve_review_status(node.get("review_status"), "pending")
     confidence = node.get("confidence", "low")
     topic_node = node.get("topic_node", "")
     summary = _WS.sub(" ", str(node.get("summary", ""))).strip() or "Candidate cross-source synthesis."

@@ -6,6 +6,13 @@ import re
 import sys
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+# Single source of truth for the PAGE review_status set (ADR-0022): gate exactly what the renderer emits,
+# so producer and validator can't drift. `deferred` is deliberately absent — it is a review-ledger state.
+from app.workers.wiki_render import REVIEW_STATUSES as PAGE_REVIEW_STATUSES  # noqa: E402
+
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 WIKI_SUBDIRS = ["Sources", "Concepts", "Claims", "Entities", "People", "Organizations", "Projects", "Tags", "Synthesis", "Queries"]
 VALID_TYPES = {"source", "concept", "claim", "entity", "person", "organization", "project", "tag", "synthesis", "query"}
@@ -17,16 +24,18 @@ REQUIRED_BY_TYPE = {
         "sha256", "file_type", "status", "ingestion_status", "summary_status",
         "generation_status", "input_fingerprint",
     ],
-    "concept": ["type", "concept_id", "title", "status", "confidence"],
-    "claim": ["type", "claim_id", "status", "confidence"],
-    "entity": ["type", "entity_id", "title", "status", "confidence"],
-    "person": ["type", "person_id", "title", "status", "confidence"],
-    "organization": ["type", "organization_id", "title", "status", "confidence"],
-    "project": ["type", "project_id", "title", "status", "confidence"],
-    "synthesis": ["type", "synthesis_id", "title", "status"],
+    # `review_status` is required on every page type that renders it (ADR-0022) — NOT Source, which
+    # intentionally does not carry it (its review state lives in the ledger, owned by no renderer).
+    "concept": ["type", "concept_id", "title", "status", "confidence", "review_status"],
+    "claim": ["type", "claim_id", "status", "confidence", "review_status"],
+    "entity": ["type", "entity_id", "title", "status", "confidence", "review_status"],
+    "person": ["type", "person_id", "title", "status", "confidence", "review_status"],
+    "organization": ["type", "organization_id", "title", "status", "confidence", "review_status"],
+    "project": ["type", "project_id", "title", "status", "confidence", "review_status"],
+    "synthesis": ["type", "synthesis_id", "title", "status", "review_status"],
     # No wall-clock fields: a saved Query page is a deterministic derived artifact (ADR-0023/0034),
     # like claim/synthesis pages — byte-stable, so no `created`/`last_compiled_at`.
-    "query": ["type", "query_id", "title", "question", "status"],
+    "query": ["type", "query_id", "title", "question", "status", "review_status"],
 }
 
 
@@ -71,6 +80,15 @@ def main(argv: list[str] | None = None) -> int:
             for key in required:
                 if key not in fm or fm[key] == "":
                     errors.append(f"{rel}: missing required frontmatter field `{key}`")
+            # review_status contract (ADR-0022): if present it must be in the PAGE set; `deferred` is a
+            # review-ledger state, never a page value. Source pages must not carry the field at all.
+            rs = fm.get("review_status")
+            if rs and rs not in PAGE_REVIEW_STATUSES:
+                errors.append(f"{rel}: review_status {rs!r} not in {sorted(PAGE_REVIEW_STATUSES)} "
+                              "(ADR-0022; `deferred` is a review-ledger state, not a page value)")
+            if page_type == "source" and "review_status" in fm:
+                errors.append(f"{rel}: Source pages must not carry review_status "
+                              "(review state lives in the ledger, owned by no renderer; ADR-0022)")
             if not has_summary(text):
                 errors.append(f"{rel}: missing > [!summary] callout")
 
