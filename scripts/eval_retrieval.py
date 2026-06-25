@@ -18,6 +18,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import sys
 import tempfile
@@ -47,6 +48,28 @@ def evidence_sources(result: dict[str, Any]) -> list[str]:
         sid = e.get("source_id")
         if sid and sid not in out:
             out.append(sid)
+    return out
+
+
+def _citation_key(source_id: str | None, char_start: Any, char_end: Any) -> str:
+    """The authoritative chunk identity fusion/dedup + citations use: `(source_id, char_start, char_end)`
+    (ADR-0029/0032), rendered as a stable string so chunk-level scoring reuses the source-level
+    `score_case`/`channel_diagnostics` over a set of keys."""
+    return f"{source_id}:{char_start}:{char_end}"
+
+
+def _evidence_citation_key(e: dict[str, Any]) -> str:
+    return _citation_key(e.get("source_id"), e.get("char_start"), e.get("char_end"))
+
+
+def evidence_chunks(result: dict[str, Any]) -> list[str]:
+    """Citation keys in fused-evidence order (first occurrence wins). `fuse_evidence` already dedups by
+    the citation key, so this is the chunk-granular analogue of `evidence_sources`."""
+    out: list[str] = []
+    for e in result.get("evidence", []):
+        key = _evidence_citation_key(e)
+        if key not in out:
+            out.append(key)
     return out
 
 
@@ -118,10 +141,39 @@ def _resolve(names: list[str], fmap: dict[str, str]) -> tuple[set[str], list[str
     return resolved, missing
 
 
-def _best_channel_rank(evidence: list[dict[str, Any]], sources: set[str], channel: str) -> int | None:
-    """Best (lowest) 1-based rank a channel gave any chunk from `sources` — None if it surfaced none."""
+def _source_key(e: dict[str, Any]) -> str | None:
+    return e.get("source_id")
+
+
+def _resolve_chunk(spec: dict[str, Any], fmap: dict[str, str], root: Path) -> tuple[str | None, str | None, str | None]:
+    """Resolve a `{source, contains}` chunk spec (M1) to its authoritative citation key by reading
+    `normalized/chunks/<source_id>.jsonl` and finding the **exactly one** chunk whose text contains the
+    phrase. Returns `(citation_key, source_id, error)`: error is non-None on an unresolved source, a
+    missing chunk file, or 0 / >1 phrase matches (a curation error → caller skips + reports)."""
+    fn, phrase = spec.get("source"), spec.get("contains")
+    sid = fmap.get(fn)
+    if not sid:
+        return None, None, f"unresolved source {fn!r}"
+    if not phrase:
+        return None, sid, f"no contains phrase for {fn!r}"
+    path = root / "normalized" / "chunks" / f"{sid}.jsonl"
+    if not path.exists():
+        return None, sid, f"no chunk file for {fn!r}"
+    matches = [c for c in (json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+                           if line.strip()) if phrase in c.get("text", "")]
+    if len(matches) != 1:
+        return None, sid, f"phrase {phrase!r} matched {len(matches)} chunks in {fn} (need exactly 1)"
+    c = matches[0]
+    return _citation_key(sid, c["char_start"], c["char_end"]), sid, None
+
+
+def _best_channel_rank(evidence: list[dict[str, Any]], keys: set[str], channel: str,
+                       key_of: Any = _source_key) -> int | None:
+    """Best (lowest) 1-based rank a channel gave any evidence hit whose `key_of` is in `keys` — None if
+    it surfaced none. `key_of` is `_source_key` for source-level cases or `_evidence_citation_key` for
+    chunk-level (an intra-doc near-miss shares a source, so it MUST key on the citation key, not the id)."""
     ranks = [e["channels"][channel]["rank"] for e in evidence
-             if e.get("source_id") in sources and channel in (e.get("channels") or {})]
+             if key_of(e) in keys and channel in (e.get("channels") or {})]
     return min(ranks) if ranks else None
 
 
@@ -153,8 +205,9 @@ _CHANNEL_LABELS = {
 
 
 def channel_diagnostics(evidence: list[dict[str, Any]], relevant: set[str],
-                        irrelevant: set[str]) -> dict[str, Any]:
-    """Per-channel source-level best ranks + an interpretive label for a negative case (ADR-0038).
+                        irrelevant: set[str], key_of: Any = _source_key) -> dict[str, Any]:
+    """Per-channel best ranks + an interpretive label for a negative case (ADR-0038). `key_of` selects
+    the granularity: `_source_key` (source-level) or `_evidence_citation_key` (chunk-level, M4).
 
     Read-only over `run_search` `evidence[].channels` — never changes retrieval. Answers whether a
     discrimination failure is **fusion-balance** (one channel ranks relevant first, the other flips it →
@@ -162,8 +215,8 @@ def channel_diagnostics(evidence: list[dict[str, Any]], relevant: set[str],
     """
     d: dict[str, Any] = {}
     for ch in ("keyword", "vector"):
-        d[f"{ch}_relevant_rank"] = _best_channel_rank(evidence, relevant, ch)
-        d[f"{ch}_irrelevant_rank"] = _best_channel_rank(evidence, irrelevant, ch)
+        d[f"{ch}_relevant_rank"] = _best_channel_rank(evidence, relevant, ch, key_of)
+        d[f"{ch}_irrelevant_rank"] = _best_channel_rank(evidence, irrelevant, ch, key_of)
     kw = _channel_pref(d["keyword_relevant_rank"], d["keyword_irrelevant_rank"])
     vec = _channel_pref(d["vector_relevant_rank"], d["vector_irrelevant_rank"])
     d["label"] = _CHANNEL_LABELS.get((kw, vec), "mixed_or_tied")
@@ -181,9 +234,43 @@ def run(root: Path, settings: Any, embedder: Any, cases: list[dict], ks: list[in
     kconn = keyword_index.connect_readonly(kpath) if keyword_readonly else keyword_index.connect(kpath)
     fmap = _filename_to_source(root / "raw" / "manifests")
     rows: list[dict[str, Any]] = []
+    chunk_rows: list[dict[str, Any]] = []
     skipped: list[str] = []
+
+    def _search(case: dict[str, Any]) -> dict[str, Any]:
+        q = case["query"]
+
+        def vector_search(*, limit: int, _q: str = q) -> list[dict[str, Any]]:
+            return vector_index.search(root, embedder.embed([_q])[0], limit=limit, metric=metric)
+
+        return search.run_search(q=q, mode=case.get("mode", "auto"), keyword_conn=kconn,
+                                 graph_conn=gconn, policy=policy, vector_search=vector_search)
+
     try:
         for case in cases:
+            cid = case.get("id")
+            if case.get("chunk"):  # chunk-level case (ADR-0038 M2): scored on citation keys, never the
+                # source headline. The relevant SOURCE is derived from chunk.source (no `relevant:` list).
+                rel_key, rel_sid, err_r = _resolve_chunk(case["chunk"], fmap, root)
+                nm_key, _, err_n = _resolve_chunk(case.get("near_miss") or {}, fmap, root)
+                if err_r or err_n or rel_key == nm_key:
+                    why = err_r or err_n or f"chunk and near_miss resolve to the SAME chunk ({rel_key})"
+                    skipped.append(f"{cid} (chunk unresolved: {why})")
+                    continue
+                res = _search(case)
+                ranked = evidence_chunks(res)
+                ev = res.get("evidence") or []
+                srcs = evidence_sources(res)
+                row = {"id": cid, "category": case.get("category", "?"),
+                       **score_case(ranked, {rel_key}, {nm_key}, ks),
+                       "diag": channel_diagnostics(ev, {rel_key}, {nm_key}, key_of=_evidence_citation_key),
+                       # ## Chunk Source Continuity (M3): was chunk.source retrieved AT ALL? Kept out of
+                       # both headlines so an intra-doc case can't look source-correct while failing chunk.
+                       "source_found": rel_sid in srcs,
+                       "source_rank": (srcs.index(rel_sid) + 1) if rel_sid in srcs else None}
+                chunk_rows.append(row)
+                continue
+            # source-level case
             relevant, miss_r = _resolve(case.get("relevant"), fmap)
             irrelevant, miss_i = _resolve(case.get("irrelevant"), fmap)
             # Skip + report on ANY unresolved judgment (relevant OR irrelevant): a silently-dropped
@@ -192,25 +279,18 @@ def run(root: Path, settings: Any, embedder: Any, cases: list[dict], ks: list[in
             # `miss_r` (a typo'd relevant filename) must skip too, not just `not relevant`/`miss_i`.
             if not relevant or miss_r or miss_i:
                 missing = miss_r + miss_i
-                skipped.append(f"{case.get('id')} (unresolved: {missing})" if missing
-                               else f"{case.get('id')} (no relevant)")
+                skipped.append(f"{cid} (unresolved: {missing})" if missing else f"{cid} (no relevant)")
                 continue
-            q = case["query"]
-
-            def vector_search(*, limit: int, _q: str = q) -> list[dict[str, Any]]:
-                return vector_index.search(root, embedder.embed([_q])[0], limit=limit, metric=metric)
-
-            res = search.run_search(q=q, mode=case.get("mode", "auto"), keyword_conn=kconn,
-                                    graph_conn=gconn, policy=policy, vector_search=vector_search)
+            res = _search(case)
             ranked = evidence_sources(res)
-            row = {"id": case.get("id"), "category": case.get("category", "?"),
+            row = {"id": cid, "category": case.get("category", "?"),
                    **score_case(ranked, relevant, irrelevant, ks)}
             if irrelevant:  # per-channel diagnostics only make sense for negative cases (ADR-0038)
                 row["diag"] = channel_diagnostics(res.get("evidence") or [], relevant, irrelevant)
             rows.append(row)
     finally:
         kconn.close()
-    return {"rows": rows, "skipped": skipped, "rrf_k": policy.cap("rrf_k"),
+    return {"rows": rows, "chunk_rows": chunk_rows, "skipped": skipped, "rrf_k": policy.cap("rrf_k"),
             "graph_present": graph_present}
 
 
@@ -228,6 +308,41 @@ def _aggregate(rows: list[dict[str, Any]], ks: list[int]) -> dict[str, Any]:
     return agg
 
 
+def _chunk_sections(chunk_rows: list[dict[str, Any]], ks: list[int]) -> list[str]:
+    """The three chunk-level report blocks (ADR-0038 M3/M4), kept entirely OUT of the source headline.
+    Metrics reuse `_aggregate` over the citation-key-scored rows, relabelled `chunk_*`."""
+    if not chunk_rows:
+        return []
+    agg = _aggregate(chunk_rows, ks)
+    disc = "n/a" if agg["discrimination"] is None else f"{agg['discrimination']:.3f}"
+    metrics = [("chunk_MRR", "MRR"), *[(f"chunk_recall@{k}", f"recall@{k}") for k in ks],
+               *[(f"chunk_hit@{k}", f"hit@{k}") for k in ks], *[(f"chunk_neg@{k}", f"neg@{k}") for k in ks]]
+    lines = ["", "## Chunk-Level Aggregate (chunk_disambiguation cases only — NOT in the source headline)",
+             "", f"- chunk cases scored: {len(chunk_rows)}", "", "| metric | value |", "|---|---|",
+             *(f"| {label} | {agg[key]:.3f} |" for label, key in metrics),
+             f"| chunk_discrimination (relevant chunk ranks above near_miss) | {disc} |"]
+    lines += ["", "## Chunk Source Continuity (was chunk.source retrieved at all? diagnostic only)", "",
+              "| id | source_found | source_rank | first_chunk_rank | first_near_miss_rank |",
+              "|---|---|---|---|---|"]
+    for r in chunk_rows:
+        lines.append(f"| {r['id']} | {'yes' if r['source_found'] else 'NO'} | {_dash(r['source_rank'])} | "
+                     f"{_dash(r['first_rank'])} | {_dash(r['first_irrel_rank'])} |")
+    # The decisive section (M4): a failed chunk disambiguation labelled
+    # `keyword_prefers_relevant_vector_prefers_irrelevant` is the fusion-balance signal that would
+    # finally justify revisiting weighted RRF; a `*_silent`/`both_prefer_irrelevant` label means the
+    # embedder can't separate the chunks and RRF can't help.
+    failed = [r for r in chunk_rows if not r["discriminated"]]
+    if failed:
+        lines += ["", "## Channel Diagnostics (failed CHUNK disambiguation — the decisive fusion signal)",
+                  "", "| id | kw_rel | kw_irr | vec_rel | vec_irr | label |", "|---|---|---|---|---|---|"]
+        for r in failed:
+            d = r["diag"]
+            lines.append(f"| {r['id']} | {_dash(d['keyword_relevant_rank'])} | "
+                         f"{_dash(d['keyword_irrelevant_rank'])} | {_dash(d['vector_relevant_rank'])} | "
+                         f"{_dash(d['vector_irrelevant_rank'])} | {d['label']} |")
+    return lines
+
+
 def render_report(result: dict[str, Any], *, settings: Any, ks: list[int], source_label: str) -> str:
     rows = result["rows"]
     ks_cols = [f"recall@{k}" for k in ks] + [f"hit@{k}" for k in ks] + [f"neg@{k}" for k in ks]
@@ -241,8 +356,8 @@ def render_report(result: dict[str, Any], *, settings: Any, ks: list[int], sourc
              f"embed_code={vector_index.EMBED_CODE_VERSION} metric={settings.embedding_distance_metric}",
              f"- rrf_k: {result['rrf_k']}   graph_present: {str(result['graph_present']).lower()}   "
              "graph_boosts: none",
-             f"- cases scored: {len(rows)}   skipped: {len(result['skipped'])}   "
-             f"negative cases: {agg['neg_n']}", ""]
+             f"- cases scored: {len(rows)} source-level + {len(result.get('chunk_rows') or [])} chunk-level"
+             f"   skipped: {len(result['skipped'])}   negative cases: {agg['neg_n']}", ""]
     metrics = ["MRR", *[f"recall@{k}" for k in ks], *[f"hit@{k}" for k in ks], *[f"neg@{k}" for k in ks]]
     lines += ["## Aggregate", "", "| metric | value |", "|---|---|",
               *(f"| {m} | {agg[m]:.3f} |" for m in metrics),
@@ -279,6 +394,7 @@ def render_report(result: dict[str, Any], *, settings: Any, ks: list[int], sourc
             lines.append(f"| {r['id']} | {_dash(d['keyword_relevant_rank'])} | "
                          f"{_dash(d['keyword_irrelevant_rank'])} | {_dash(d['vector_relevant_rank'])} | "
                          f"{_dash(d['vector_irrelevant_rank'])} | {d['label']} |")
+    lines += _chunk_sections(result.get("chunk_rows") or [], ks)
     if result["skipped"]:
         lines += ["", "## Skipped (unresolved judgments)", "", *(f"- {s}" for s in result["skipped"])]
     return "\n".join(lines) + "\n"
@@ -399,8 +515,17 @@ def main(argv: list[str] | None = None) -> int:
         args.out.write_text(report, encoding="utf-8")
         print(f"wrote {args.out}")
     agg = _aggregate(result["rows"], ks)
-    print(f"scored {len(result['rows'])} cases | MRR {agg['MRR']:.3f} | "
+    print(f"scored {len(result['rows'])} source-level cases | MRR {agg['MRR']:.3f} | "
           + " | ".join(f"{m} {agg[m]:.3f}" for m in [f"recall@{k}" for k in ks]))
+    chunk_rows = result.get("chunk_rows") or []
+    if chunk_rows:
+        cagg = _aggregate(chunk_rows, ks)
+        cdisc = "n/a" if cagg["discrimination"] is None else f"{cagg['discrimination']:.3f}"
+        print(f"scored {len(chunk_rows)} chunk-level cases | chunk_MRR {cagg['MRR']:.3f} | "
+              + " | ".join(f"chunk_{m} {cagg[m]:.3f}" for m in [f"recall@{k}" for k in ks])
+              + f" | chunk_discrimination {cdisc}")
+    if result["skipped"]:
+        print(f"skipped {len(result['skipped'])}: " + "; ".join(result["skipped"]), file=sys.stderr)
     return 0
 
 

@@ -47,19 +47,41 @@ def test_score_case_no_relevant_found():
     assert s["first_rank"] is None and s["rr"] == 0.0 and s["hit@5"] == 0.0
 
 
+def _corpus_text(fn: str) -> str:
+    return (ROOT / "evals" / "corpus" / fn).read_text(encoding="utf-8")
+
+
+def _assert_chunk_case_coherent(case: dict) -> None:
+    """ADR-0038 M5 coherence we CAN check key-free (no extraction): every `contains:` phrase is literally
+    in its named corpus doc, and `chunk`/`near_miss` use distinct phrases. The stronger guarantee — each
+    phrase resolves to EXACTLY ONE chunk with DISTINCT citation keys — needs extraction and is the
+    runner's eval-time skip-or-report check, not a CI invariant."""
+    cid = case.get("id")
+    chunk, near_miss = case.get("chunk"), case.get("near_miss")
+    assert near_miss, f"{cid}: chunk case must carry a near_miss distractor"
+    for label, spec in (("chunk", chunk), ("near_miss", near_miss)):
+        assert spec.get("source") in _CORPUS, f"{cid}: {label}.source unknown {spec.get('source')!r}"
+        phrase = spec.get("contains")
+        assert phrase, f"{cid}: {label} missing a contains phrase"
+        assert phrase in _corpus_text(spec["source"]), \
+            f"{cid}: {label} phrase {phrase!r} is not a substring of {spec['source']}"
+    assert chunk["contains"] != near_miss["contains"], f"{cid}: chunk and near_miss share a phrase"
+
+
 def test_corpus_and_golden_are_coherent():
     assert _CASES, "golden file has no cases"
     assert len(_CORPUS) >= 6, "corpus should have >= 6 docs (ADR-0038)"
     seen_categories = set()
     for case in _CASES:
-        assert case.get("relevant"), f"{case.get('id')}: missing relevant"
         seen_categories.add(case.get("category"))
+        if case.get("chunk"):  # chunk-level case (ADR-0038 M2): no `relevant:`; relevant source derived
+            _assert_chunk_case_coherent(case)
+            continue
+        assert case.get("relevant"), f"{case.get('id')}: missing relevant"
         for key in ("relevant", "irrelevant"):
             for fn in case.get(key) or []:
                 assert fn in _CORPUS, f"{case.get('id')}: {key} references unknown corpus file {fn!r}"
-        chunk = case.get("chunk")
-        if chunk:
-            assert chunk.get("source") in _CORPUS
+    # the four source-level categories must all be present; chunk_disambiguation is additive (M2)
     assert _CATEGORIES <= seen_categories, f"missing categories: {_CATEGORIES - seen_categories}"
 
 
@@ -120,6 +142,7 @@ def test_runner_plumbing_with_fake_embedder(tmp_path):
         gconn.close()
 
     assert len(result["rows"]) == 3                  # 3 scored
+    assert result["chunk_rows"] == []                # no chunk cases here
     assert len(result["skipped"]) == 3               # unresolved relevant, unresolved irrelevant, partial
     assert any("c_bad_irr" in s and "ghost.md" in s for s in result["skipped"])  # not silently dropped
     assert any("c_partial_rel" in s and "ghost2.md" in s for s in result["skipped"])  # #3: partial skips
@@ -188,6 +211,35 @@ def test_channel_diagnostics_single_channel_failures():
     )["label"] == "keyword_prefers_irrelevant_vector_silent"
 
 
+# --- chunk-level helpers (ADR-0038 M1-M4) ----------------------------------------------------------
+
+def test_citation_key_and_evidence_chunks_dedup():
+    assert er._citation_key("src_a", 0, 10) == "src_a:0:10"
+    res = {"evidence": [
+        {"source_id": "src_a", "char_start": 0, "char_end": 10},
+        {"source_id": "src_a", "char_start": 20, "char_end": 30},
+        {"source_id": "src_a", "char_start": 0, "char_end": 10},   # duplicate citation key
+    ]}
+    assert er.evidence_chunks(res) == ["src_a:0:10", "src_a:20:30"]
+
+
+def test_channel_diagnostics_chunk_granularity_keys_on_citation_key():
+    # Intra-doc near-miss: relevant + distractor chunk share a SOURCE but differ by span. Source-level
+    # keying conflates them; citation-key keying (M4) separates them so the label is meaningful.
+    rel = {"source_id": "src_a", "char_start": 0, "char_end": 10,
+           "channels": {"keyword": {"rank": 1}, "vector": {"rank": 3}}}
+    nm = {"source_id": "src_a", "char_start": 20, "char_end": 30,
+          "channels": {"keyword": {"rank": 2}, "vector": {"rank": 1}}}
+    rel_key, nm_key = er._evidence_citation_key(rel), er._evidence_citation_key(nm)
+    assert rel_key != nm_key
+    d = er.channel_diagnostics([rel, nm], {rel_key}, {nm_key}, key_of=er._evidence_citation_key)
+    # keyword ranks the relevant chunk first, vector ranks the distractor first -> fusion-balance signal
+    assert d["label"] == "keyword_prefers_relevant_vector_prefers_irrelevant"
+    # sanity: with the default SOURCE key both hits collapse to one source and can't be told apart
+    d2 = er.channel_diagnostics([rel, nm], {"src_a"}, {"src_a"}, key_of=er._source_key)
+    assert d2["keyword_relevant_rank"] == d2["keyword_irrelevant_rank"] == 1   # conflated
+
+
 def test_keyword_problems_missing_index_is_read_only(tmp_path):
     # #1: a missing keyword index is REPORTED and NOT created (keyword_index.connect would otherwise
     # mkdir + create an empty SQLite file in the operator vault). _keyword_problems opens read-only.
@@ -243,3 +295,119 @@ def test_keyword_problems_full_consistency_gate(tmp_path):
     db.close()
     problems = er._keyword_problems(work)
     assert any("core table" in p and "evidence" in p and "navigation" in p for p in problems)
+
+
+def test_runner_chunk_plumbing_with_fake_embedder(tmp_path):
+    # Key-free structural test of the CHUNK path (ADR-0038 M3/M4): a tiny two-##-section doc exercises
+    # chunk scoring, the three chunk report blocks, and the skip paths (no-match + same-chunk). Asserts
+    # plumbing + report shape, NOT relevance numbers.
+    pytest.importorskip("lancedb")
+    from app.backend.config import get_settings
+    settings = get_settings(ROOT)
+
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "gamma.md").write_text(
+        "# Gamma\n\n## Section one\n\nThe gamma section one paragraph mentions apples and oranges in "
+        "the morning shipment.\n\n## Section two\n\nThe gamma section two paragraph mentions bananas and "
+        "grapes in the evening shipment.\n", encoding="utf-8")
+    cases = [
+        {"id": "ck_ok", "category": "chunk_disambiguation", "mode": "auto", "query": "apples oranges",
+         "chunk": {"source": "gamma.md", "contains": "apples and oranges"},
+         "near_miss": {"source": "gamma.md", "contains": "bananas and grapes"}},
+        # Deterministic chunk discrimination FAILURE: the query matches the NEAR_MISS section by keyword
+        # (section two), not the relevant section one, so the distractor chunk outranks the relevant one
+        # -> discriminated == 0 -> the failed-CHUNK-diagnostic block (M4's decisive section) must render.
+        {"id": "ck_fail", "category": "chunk_disambiguation", "mode": "auto", "query": "bananas grapes",
+         "chunk": {"source": "gamma.md", "contains": "apples and oranges"},
+         "near_miss": {"source": "gamma.md", "contains": "bananas and grapes"}},
+        # phrase matches no chunk -> curation error -> skip + report (not silently scored)
+        {"id": "ck_skip_nomatch", "category": "chunk_disambiguation", "mode": "auto", "query": "x",
+         "chunk": {"source": "gamma.md", "contains": "no such phrase anywhere in the doc"},
+         "near_miss": {"source": "gamma.md", "contains": "bananas and grapes"}},
+        # chunk and near_miss resolve to the SAME chunk -> skip + report
+        {"id": "ck_skip_same", "category": "chunk_disambiguation", "mode": "auto", "query": "x",
+         "chunk": {"source": "gamma.md", "contains": "apples and oranges"},
+         "near_miss": {"source": "gamma.md", "contains": "apples and oranges"}},
+    ]
+
+    work = tmp_path / "work"
+    work.mkdir()
+    emb = _FakeEmbedder()
+    er._build_corpus_vault(corpus, work, emb, settings)
+    gconn, present, _gtmp = er._open_graph(work, is_vault=False)
+    try:
+        result = er.run(work, settings, emb, cases, ks=[5], gconn=gconn, graph_present=present)
+    finally:
+        gconn.close()
+
+    assert result["rows"] == []                       # no source-level cases -> source headline empty
+    assert len(result["chunk_rows"]) == 2             # ck_ok + ck_fail scored
+    assert {s.split()[0] for s in result["skipped"]} == {"ck_skip_nomatch", "ck_skip_same"}
+    by_id = {r["id"]: r for r in result["chunk_rows"]}
+    for key in ("first_rank", "first_irrel_rank", "discriminated", "diag", "source_found", "source_rank"):
+        assert key in by_id["ck_ok"], key
+    # the deterministic failure trips the discrimination + carries a definite channel label
+    fail = by_id["ck_fail"]
+    assert fail["discriminated"] == 0.0
+    assert fail["diag"]["label"] in set(er._CHANNEL_LABELS.values())
+
+    report = er.render_report(result, settings=settings, ks=[5], source_label="chunktest")
+    for needle in ("## Chunk-Level Aggregate", "chunk_MRR", "## Chunk Source Continuity",
+                   "first_near_miss_rank", "cases scored: 0 source-level + 2 chunk-level",
+                   "## Channel Diagnostics (failed CHUNK disambiguation", "ck_fail", fail["diag"]["label"]):
+        assert needle in report, needle
+
+
+def test_chunk_fixtures_isolated_from_source_level_cases():
+    # ADR-0038 M6: the net-new multi-chunk fixtures must not appear as relevant/irrelevant in ANY
+    # source-level case, so the source-level baseline isn't entangled with the chunk corpus.
+    chunk_sources = set()
+    for case in _CASES:
+        chunk = case.get("chunk")
+        if chunk:
+            chunk_sources.add(chunk.get("source"))
+            chunk_sources.add((case.get("near_miss") or {}).get("source"))
+    chunk_sources.discard(None)
+    assert chunk_sources, "expected chunk fixtures referenced by chunk cases"
+    for case in _CASES:
+        if case.get("chunk"):
+            continue
+        referenced = set(case.get("relevant") or []) | set(case.get("irrelevant") or [])
+        leaked = referenced & chunk_sources
+        assert not leaked, f"{case.get('id')}: source-level case references chunk fixture(s) {leaked}"
+
+
+def test_chunk_cases_schema_coherent():
+    # ADR-0038 M2: a case with `chunk:` is chunk-level -> must be category chunk_disambiguation, must
+    # carry `near_miss:`, and must NOT also carry a source-level `relevant:` list.
+    chunk_cases = [c for c in _CASES if c.get("chunk")]
+    assert chunk_cases, "expected chunk_disambiguation cases in the golden file"
+    for case in chunk_cases:
+        cid = case.get("id")
+        assert case.get("category") == "chunk_disambiguation", f"{cid}: chunk case wrong category"
+        assert case.get("near_miss"), f"{cid}: chunk case missing near_miss"
+        assert not case.get("relevant"), f"{cid}: chunk case must not also carry a relevant list"
+
+
+def test_resolve_chunk_rejects_ambiguous_phrase(tmp_path):
+    # M1/M5: a phrase that appears in MORE THAN ONE chunk is a curation error -> _resolve_chunk reports
+    # it (runner then skips the case), never silently picks one. Covers the >1-match path (the no-match
+    # and same-key paths are covered by the chunk plumbing test's skip set).
+    pytest.importorskip("lancedb")
+    from app.backend.config import get_settings
+    settings = get_settings(ROOT)
+
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "dup.md").write_text(  # "the shared phrase here" appears in BOTH ## sections -> 2 chunks
+        "# Dup\n\n## A\n\nAlpha body with the shared phrase here once.\n\n"
+        "## B\n\nBeta body with the shared phrase here again.\n", encoding="utf-8")
+    work = tmp_path / "work"
+    work.mkdir()
+    er._build_corpus_vault(corpus, work, _FakeEmbedder(), settings)
+    fmap = er._filename_to_source(work / "raw" / "manifests")
+    key, sid, err = er._resolve_chunk(
+        {"source": "dup.md", "contains": "the shared phrase here"}, fmap, work)
+    assert key is None and sid is not None
+    assert "matched 2 chunks" in err

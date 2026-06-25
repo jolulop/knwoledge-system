@@ -72,8 +72,13 @@ raw/permanent/*
 raw/ephemeral/*
 !raw/ephemeral/.gitkeep
 
-# Generated retrieval-relevance reports (ADR-0038); the corpus + golden file ARE committed.
-evals/reports/
+# Generated retrieval-relevance reports (ADR-0038); the corpus + golden file ARE committed. Reports are
+# embedder-dependent + CI-irreproducible so they stay untracked — EXCEPT one explicitly-labeled reference
+# baseline (ADR-0038 decision 6 / M7), tracked as the durable record for the committed decimals. Policy:
+# refresh it only on an explicit baseline RESET, not on every corpus/golden change (avoids churn + does
+# not couple routine commits to a running embedder).
+evals/reports/*
+!evals/reports/reference_baseline.md
 # Windows copy cruft that leaks into evals/corpus/ when docs are copied off NTFS.
 *.Zone.Identifier
 * - Copy.md

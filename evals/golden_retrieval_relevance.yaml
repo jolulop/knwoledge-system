@@ -5,7 +5,8 @@
 #
 # Cases reference corpus docs by FILENAME (the runner maps filename -> source_id via the manifest's
 # original_filename). Parsed by the project's minimal YAML subset: dash-on-own-line sequences, block
-# maps, no inline `[...]`/`{...}`. Categories: exact_anchor | conceptual | multi_source | disambiguation.
+# maps, no inline `[...]`/`{...}`. Source-level categories: exact_anchor | conceptual | multi_source |
+# disambiguation. Chunk-level: chunk_disambiguation (has a `chunk:`+`near_miss:` block, see below).
 version: 1
 cases:
   # --- exact_anchor: a term that appears verbatim in exactly one relevant doc -------------------
@@ -441,3 +442,97 @@ cases:
     query: how can investment firms create value when holding periods are longer?
     relevant:
       - Private_equity_firms.md
+  # --- chunk_disambiguation (ADR-0038 M1-M5): a chunk-level case names its RELEVANT chunk by a
+  # distinctive `contains:` phrase (resolved to the authoritative citation key at eval time) plus a
+  # `near_miss:` distractor chunk. INTRA-DOC near-miss (two adjacent ## sections of ONE doc) is the
+  # headline test. The relevant SOURCE is derived from chunk.source; no `relevant:` list. These score
+  # ONLY the ## Chunk-Level Aggregate / Chunk Source Continuity blocks, never the source headline. The
+  # 3 larkfield_*.md fixtures are net-new + isolated from every source-level case above (M6).
+  -
+    id: chunk_cold_zone_picker_rotation
+    category: chunk_disambiguation
+    mode: auto
+    query: how often do pickers in the cold storage zone rotate out?
+    chunk:
+      source: larkfield_warehouse.md
+      contains: "rotate out every forty minutes"
+    near_miss:
+      source: larkfield_warehouse.md
+      contains: "standard two-hour shifts with no rotation"
+  -
+    id: chunk_ambient_zone_replenishment
+    category: chunk_disambiguation
+    mode: auto
+    query: at what bin level does the ambient storage zone trigger replenishment?
+    chunk:
+      source: larkfield_warehouse.md
+      contains: "bin drops below forty units"
+    near_miss:
+      source: larkfield_warehouse.md
+      contains: "bin drops below twelve"
+  -
+    id: chunk_ambient_zone_scanning
+    category: chunk_disambiguation
+    mode: auto
+    query: how many times are pallets scanned in the ambient zone?
+    chunk:
+      source: larkfield_warehouse.md
+      contains: "scanned only once"
+    near_miss:
+      source: larkfield_warehouse.md
+      contains: "scanned twice"
+  -
+    id: chunk_international_return_window
+    category: chunk_disambiguation
+    mode: auto
+    query: how long do international customers have to start a return?
+    chunk:
+      source: larkfield_returns.md
+      contains: "sixty days to start a return"
+    near_miss:
+      source: larkfield_returns.md
+      contains: "within thirty days of delivery"
+  -
+    id: chunk_domestic_restocking_fee
+    category: chunk_disambiguation
+    mode: auto
+    query: what restocking fee applies to opened electronics on domestic returns?
+    chunk:
+      source: larkfield_returns.md
+      contains: "fifteen percent restocking fee"
+    near_miss:
+      source: larkfield_returns.md
+      contains: "store credit rather than to the original"
+  -
+    id: chunk_international_refund_method
+    category: chunk_disambiguation
+    mode: auto
+    query: how are international refunds issued to the customer?
+    chunk:
+      source: larkfield_returns.md
+      contains: "issued as store credit"
+    near_miss:
+      source: larkfield_returns.md
+      contains: "refunds post back to the original"
+  -
+    id: chunk_premium_reward_points
+    category: chunk_disambiguation
+    mode: auto
+    query: how many reward points do premium members earn per dollar spent?
+    chunk:
+      source: larkfield_membership.md
+      contains: "three reward points per dollar"
+    near_miss:
+      source: larkfield_membership.md
+      contains: "one reward point per dollar"
+  -
+    id: chunk_premium_annual_fee
+    category: chunk_disambiguation
+    mode: auto
+    query: what annual fee do premium members pay?
+    chunk:
+      source: larkfield_membership.md
+      contains: "ninety dollar annual fee"
+    near_miss:
+      source: larkfield_membership.md
+      contains: "pay no annual fee"
