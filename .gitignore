@@ -74,3 +74,6 @@ raw/ephemeral/*
 
 # Generated retrieval-relevance reports (ADR-0038); the corpus + golden file ARE committed.
 evals/reports/
+# Windows copy cruft that leaks into evals/corpus/ when docs are copied off NTFS.
+*.Zone.Identifier
+* - Copy.md

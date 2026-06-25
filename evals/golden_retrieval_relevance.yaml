@@ -37,7 +37,13 @@ cases:
     query: '"partner program"'
     relevant:
       - partner_program.md
-
+  -
+    id: anchor_quantum
+    category: exact_anchor
+    mode: auto
+    query: '"quantum"'
+    relevant:
+      - Quantum_Technology.md
   # --- conceptual / paraphrase: query words are NOT in the relevant doc (vector must carry it) ---
   -
     id: paraphrase_earnings_improved
@@ -83,6 +89,13 @@ cases:
     query: software that figures out the best driving path for many deliveries
     relevant:
       - routeiq_overview.md
+  - 
+    id: paraphrase_private_equity
+    category: conceptual
+    mode: auto
+    query: private equity firms IA usage
+    relevant:
+      - Private_equity_firms.md
 
   # --- multi_source: more than one relevant document --------------------------------------------
   -
@@ -102,7 +115,14 @@ cases:
       - routeiq_overview.md
       - fleetsense_overview.md
       - partner_program.md
-
+  -
+    id: multi_agentic_status
+    category: multi_source
+    mode: auto
+    query: what is the status of agentic AI adoption and software delivery?
+    relevant:
+      - Agentic_1.md
+      - Agentic_2.md
   # --- disambiguation / negative: a near-miss doc must NOT outrank the right one -----------------
   -
     id: disambig_q2_guidance
@@ -140,6 +160,177 @@ cases:
       - q3_report.md
     irrelevant:
       - q2_outlook.md
+  -
+    id: disambig_agentic_business_processes
+    category: disambiguation
+    mode: auto
+    query: which document focuses on redesigning business processes and governance to scale AI agents across the organization?
+    relevant:
+      - Agentic_1.md
+    irrelevant:
+      - Agentic_2.md
+  -
+    id: disambig_agentic_software_delivery_model
+    category: disambiguation
+    mode: auto
+    query: which document focuses on changing software delivery workflows and the development operating model?
+    relevant:
+      - Agentic_2.md
+    irrelevant:
+      - Agentic_1.md
+  -
+    id: disambig_agentic_ceo_leadership
+    category: disambiguation
+    mode: auto
+    query: which document says CEO leadership is needed to scale AI agents?
+    relevant:
+      - Agentic_1.md
+    irrelevant:
+      - Agentic_2.md
+  -
+    id: disambig_agentic_engineer_reskilling
+    category: disambiguation
+    mode: auto
+    query: which document discusses reskilling engineers to supervise AI agents?
+    relevant:
+      - Agentic_2.md
+    irrelevant:
+      - Agentic_1.md
+  -
+    id: disambig_agentic_gen_ai_paradox
+    category: disambiguation
+    mode: auto
+    query: which document explains why generative AI has not yet improved company financial results?
+    relevant:
+      - Agentic_1.md
+    irrelevant:
+      - Agentic_2.md
+  -
+    id: disambig_agentic_machine_readable_handoffs
+    category: disambiguation
+    mode: auto
+    query: which document recommends replacing manual handoffs with machine-readable artifacts?
+    relevant:
+      - Agentic_2.md
+    irrelevant:
+      - Agentic_1.md
+  -
+    id: disambig_agentic_gen_ai_paradox_specific
+    category: disambiguation
+    mode: auto
+    query: which document discusses the gen AI paradox and why generative AI has not improved the bottom line?
+    relevant:
+      - Agentic_1.md
+    irrelevant:
+      - Agentic_2.md
+  -
+    id: disambig_agentic_horizontal_vertical_deployment
+    category: disambiguation
+    mode: auto
+    query: which document contrasts shallow horizontal AI deployments with stalled vertical use cases?
+    relevant:
+      - Agentic_1.md
+    irrelevant:
+      - Agentic_2.md
+  -
+    id: disambig_agentic_ceo_governance_architecture
+    category: disambiguation
+    mode: auto
+    query: which document says scaling AI agents requires CEO leadership, governance, and redesigned enterprise architecture?
+    relevant:
+      - Agentic_1.md
+    irrelevant:
+      - Agentic_2.md
+  -
+    id: disambig_agentic_24_hour_delivery_cycle
+    category: disambiguation
+    mode: auto
+    query: which document describes a 24-hour software delivery cycle where humans and AI agents collaborate continuously?
+    relevant:
+      - Agentic_2.md
+    irrelevant:
+      - Agentic_1.md
+  -
+    id: disambig_agentic_machine_readable_artifacts_specific
+    category: disambiguation
+    mode: auto
+    query: which document recommends eliminating manual software handoffs through machine-readable artifacts?
+    relevant:
+      - Agentic_2.md
+    irrelevant:
+      - Agentic_1.md
+  -
+    id: disambig_agentic_knowledge_graphs_for_agents
+    category: disambiguation
+    mode: auto
+    query: which document says knowledge graphs provide organizational context for AI agents in software development?
+    relevant:
+      - Agentic_2.md
+    irrelevant:
+      - Agentic_1.md
+  -
+    id: disambig_agentic_smaller_delivery_teams
+    category: disambiguation
+    mode: auto
+    query: which document reports smaller delivery teams and reduced delivery effort from agentic software development?
+    relevant:
+      - Agentic_2.md
+    irrelevant:
+      - Agentic_1.md  
+  -
+    id: disambig_private_equity_rollups_vs_agentic_scaling
+    category: disambiguation
+    mode: auto
+    query: which document discusses rolling up smaller companies to gain scale?
+    relevant:
+      - Private_equity_firms.md
+    irrelevant:
+      - Agentic_1.md
+  -
+    id: disambig_private_equity_integration_vs_ai_governance
+    category: disambiguation
+    mode: auto
+    query: which document focuses on integration practices after mergers and acquisitions rather than AI governance?
+    relevant:
+      - Private_equity_firms.md
+    irrelevant:
+      - Agentic_1.md
+  -
+    id: disambig_private_equity_holding_periods_vs_productivity
+    category: disambiguation
+    mode: auto
+    query: which document discusses longer holding periods and lower market multiples?
+    relevant:
+      - Private_equity_firms.md
+    irrelevant:
+      - Agentic_2.md
+  -
+    id: disambig_quantum_secure_communications_vs_ai_agents
+    category: disambiguation
+    mode: auto
+    query: which document discusses secure communications based on quantum technology rather than autonomous AI agents?
+    relevant:
+      - Quantum_Technology.md
+    irrelevant:
+      - Agentic_1.md
+  -
+    id: disambig_quantum_sensing_vs_software_delivery
+    category: disambiguation
+    mode: auto
+    query: which document discusses highly sensitive measurements instead of software delivery workflows?
+    relevant:
+      - Quantum_Technology.md
+    irrelevant:
+      - Agentic_2.md
+  -
+    id: disambig_quantum_infrastructure_challenges_vs_enterprise_architecture
+    category: disambiguation
+    mode: auto
+    query: which document discusses technological and infrastructural barriers to practical applications?
+    relevant:
+      - Quantum_Technology.md
+    irrelevant:
+      - Agentic_1.md
   -
     id: anchor_electric_vans
     category: exact_anchor
@@ -185,3 +376,68 @@ cases:
     relevant:
       - routeiq_overview.md
       - fleetsense_overview.md
+  -
+    id: paraphrase_agentic_workflows
+    category: conceptual
+    mode: auto
+    query: how can autonomous AI systems handle complex business processes?
+    relevant:
+      - Agentic_1.md
+    irrelevant:
+      - Agentic_2.md
+  -
+    id: anchor_gen_ai_paradox
+    category: exact_anchor
+    mode: auto
+    query: '"gen AI paradox"'
+    relevant:
+      - Agentic_1.md
+  -
+    id: paraphrase_agentic_enterprise_change
+    category: conceptual
+    mode: auto
+    query: why are companies not yet seeing financial impact from generative AI?
+    relevant:
+      - Agentic_1.md
+    irrelevant:
+      - Agentic_2.md
+  -
+    id: paraphrase_agentic_software_delivery
+    category: conceptual
+    mode: auto
+    query: how should software teams reorganize around AI agents?
+    relevant:
+      - Agentic_2.md
+    irrelevant:
+      - Agentic_1.md
+  -
+    id: disambig_agentic_business_vs_software
+    category: disambiguation
+    mode: auto
+    query: which document discusses AI agents changing the software development lifecycle?
+    relevant:
+      - Agentic_2.md
+    irrelevant:
+      - Agentic_1.md
+  -
+    id: multi_agentic_operating_model
+    category: multi_source
+    mode: auto
+    query: what organizational changes are needed to scale agentic AI?
+    relevant:
+      - Agentic_1.md
+      - Agentic_2.md
+  -
+    id: anchor_private_equity_m_and_a
+    category: exact_anchor
+    mode: auto
+    query: '"M&A integrations"'
+    relevant:
+      - Private_equity_firms.md
+  -
+    id: paraphrase_private_equity_value_creation
+    category: conceptual
+    mode: auto
+    query: how can investment firms create value when holding periods are longer?
+    relevant:
+      - Private_equity_firms.md
