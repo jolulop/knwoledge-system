@@ -89,8 +89,16 @@ def test_runner_plumbing_with_fake_embedder(tmp_path):
          "relevant": ["alpha.md"]},
         {"id": "c_disambig", "category": "disambiguation", "mode": "auto", "query": "guidance",
          "relevant": ["beta.md"], "irrelevant": ["alpha.md"]},
+        # Deterministic discrimination FAILURE: "revenue" is in alpha (the distractor), not beta — alpha is
+        # found by BOTH channels (keyword+vector) and outranks the vector-only beta, so it must trip the
+        # Channel Diagnostics section.
+        {"id": "c_fail", "category": "disambiguation", "mode": "auto", "query": "revenue",
+         "relevant": ["beta.md"], "irrelevant": ["alpha.md"]},
         {"id": "c_skip", "category": "conceptual", "mode": "auto", "query": "x",
          "relevant": ["nonexistent.md"]},
+        # An unresolved IRRELEVANT filename must skip the whole case (never silently drop the distractor).
+        {"id": "c_bad_irr", "category": "disambiguation", "mode": "auto", "query": "revenue",
+         "relevant": ["alpha.md"], "irrelevant": ["ghost.md"]},
     ]
 
     work = tmp_path / "work"
@@ -107,18 +115,69 @@ def test_runner_plumbing_with_fake_embedder(tmp_path):
     finally:
         gconn.close()
 
-    assert len(result["rows"]) == 2                  # 2 scored
-    assert len(result["skipped"]) == 1               # the unresolved-filename case is skipped, not scored
+    assert len(result["rows"]) == 3                  # 3 scored
+    assert len(result["skipped"]) == 2               # unresolved relevant AND unresolved irrelevant skip
+    assert any("c_bad_irr" in s and "ghost.md" in s for s in result["skipped"])  # not silently dropped
     assert result["graph_present"] is False
 
     # The build path MUST generate Source wiki pages, else the retention filter drops every evidence hit.
     assert list((work / "wiki" / "Sources").glob("*.md")), "no Source pages generated"
-    # Regression guard: with Source pages, the exact-anchor keyword case actually retrieves its source.
     by_id = {r["id"]: r for r in result["rows"]}
-    anchor = by_id["c_anchor"]
-    assert anchor["hit@5"] == 1.0 or anchor["recall@5"] > 0.0, "exact-anchor case scored zero"
+    # Regression guard: with Source pages, the exact-anchor keyword case actually retrieves its source.
+    assert by_id["c_anchor"]["hit@5"] == 1.0 or by_id["c_anchor"]["recall@5"] > 0.0, "exact-anchor zero"
+    # The failure carries a DEFINITE channel-diagnostic label (keyword fired -> never the catch-all),
+    # and that label is what the report prints.
+    fail = by_id["c_fail"]
+    assert fail["discriminated"] == 0.0 and "diag" in fail
+    assert fail["diag"]["label"] in set(er._CHANNEL_LABELS.values())
 
     report = er.render_report(result, settings=settings, ks=[5], source_label="test")
     for needle in ("## Aggregate", "graph_present: false", "graph_boosts: none", "neg@5",
-                   "## Discrimination", "relevant_wins", "negative cases: 1"):
+                   "## Discrimination", "relevant_wins", "negative cases: 2", "## Channel Diagnostics",
+                   fail["diag"]["label"]):
         assert needle in report, needle
+
+
+def _ev(sid, kw=None, vec=None):
+    ch = {}
+    if kw is not None:
+        ch["keyword"] = {"rank": kw, "score": 1.0}
+    if vec is not None:
+        ch["vector"] = {"rank": vec, "score": 1.0}
+    return {"source_id": sid, "channels": ch}
+
+
+def test_channel_diagnostics_labels():
+    # keyword ranks relevant first, vector ranks irrelevant first -> fusion-balance (RRF might help)
+    d = er.channel_diagnostics([_ev("rel", kw=1, vec=3), _ev("irr", kw=2, vec=1)], {"rel"}, {"irr"})
+    assert (d["keyword_relevant_rank"], d["vector_irrelevant_rank"]) == (1, 1)
+    assert d["label"] == "keyword_prefers_relevant_vector_prefers_irrelevant"
+    # both channels rank the distractor first -> semantic ambiguity (RRF can't help)
+    assert er.channel_diagnostics(
+        [_ev("rel", kw=2, vec=2), _ev("irr", kw=1, vec=1)], {"rel"}, {"irr"}
+    )["label"] == "both_prefer_irrelevant"
+    # vector prefers relevant, keyword prefers irrelevant
+    assert er.channel_diagnostics(
+        [_ev("rel", kw=3, vec=1), _ev("irr", kw=1, vec=2)], {"rel"}, {"irr"}
+    )["label"] == "vector_prefers_relevant_keyword_prefers_irrelevant"
+    # neither channel surfaced the relevant or the distractor at all
+    assert er.channel_diagnostics([_ev("other", kw=1, vec=1)], {"rel"}, {"irr"})["label"] \
+        == "no_channel_signal"
+    # both channels prefer the relevant (distractor absent from both)
+    assert er.channel_diagnostics([_ev("rel", kw=1, vec=1)], {"rel"}, {"irr"})["label"] \
+        == "both_prefer_relevant"
+
+
+def test_channel_diagnostics_single_channel_failures():
+    # THE common real failure: keyword silent, vector alone ranks the distractor first -> RRF can't help.
+    assert er.channel_diagnostics(
+        [_ev("rel", vec=3), _ev("irr", vec=1)], {"rel"}, {"irr"}
+    )["label"] == "vector_prefers_irrelevant_keyword_silent"
+    # mirror: keyword silent, vector ranks the relevant first (a single-channel success).
+    assert er.channel_diagnostics(
+        [_ev("rel", vec=1), _ev("irr", vec=3)], {"rel"}, {"irr"}
+    )["label"] == "vector_prefers_relevant_keyword_silent"
+    # vector silent, keyword prefers the distractor.
+    assert er.channel_diagnostics(
+        [_ev("rel", kw=2), _ev("irr", kw=1)], {"rel"}, {"irr"}
+    )["label"] == "keyword_prefers_irrelevant_vector_silent"

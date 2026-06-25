@@ -77,6 +77,10 @@ def _mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
+def _dash(v: Any) -> str:
+    return "-" if v is None else str(v)
+
+
 # --- vault build + run -----------------------------------------------------------------------------
 
 def _build_corpus_vault(corpus_dir: Path, work_root: Path, embedder: Any, settings: Any) -> None:
@@ -114,6 +118,58 @@ def _resolve(names: list[str], fmap: dict[str, str]) -> tuple[set[str], list[str
     return resolved, missing
 
 
+def _best_channel_rank(evidence: list[dict[str, Any]], sources: set[str], channel: str) -> int | None:
+    """Best (lowest) 1-based rank a channel gave any chunk from `sources` — None if it surfaced none."""
+    ranks = [e["channels"][channel]["rank"] for e in evidence
+             if e.get("source_id") in sources and channel in (e.get("channels") or {})]
+    return min(ranks) if ranks else None
+
+
+def _channel_pref(rel: int | None, irr: int | None) -> str:
+    if rel is None and irr is None:
+        return "none"
+    if irr is None:
+        return "relevant"
+    if rel is None:
+        return "irrelevant"
+    return "relevant" if rel < irr else ("irrelevant" if irr < rel else "tie")
+
+
+# (keyword_pref, vector_pref) -> label. The single-channel cases (one channel silent) are the COMMON
+# real failure shape and are decision-relevant: "<active>_prefers_<x>_<other>_silent". RRF re-weighting
+# can only plausibly help the cross-disagreement cases (one channel prefers relevant, the other the
+# distractor); every "prefers_irrelevant" / silent shape means there's no relevant signal to up-weight.
+_CHANNEL_LABELS = {
+    ("relevant", "irrelevant"): "keyword_prefers_relevant_vector_prefers_irrelevant",
+    ("irrelevant", "relevant"): "vector_prefers_relevant_keyword_prefers_irrelevant",
+    ("irrelevant", "irrelevant"): "both_prefer_irrelevant",
+    ("relevant", "relevant"): "both_prefer_relevant",
+    ("none", "none"): "no_channel_signal",
+    ("none", "irrelevant"): "vector_prefers_irrelevant_keyword_silent",
+    ("irrelevant", "none"): "keyword_prefers_irrelevant_vector_silent",
+    ("none", "relevant"): "vector_prefers_relevant_keyword_silent",
+    ("relevant", "none"): "keyword_prefers_relevant_vector_silent",
+}
+
+
+def channel_diagnostics(evidence: list[dict[str, Any]], relevant: set[str],
+                        irrelevant: set[str]) -> dict[str, Any]:
+    """Per-channel source-level best ranks + an interpretive label for a negative case (ADR-0038).
+
+    Read-only over `run_search` `evidence[].channels` — never changes retrieval. Answers whether a
+    discrimination failure is **fusion-balance** (one channel ranks relevant first, the other flips it →
+    weighted RRF *might* help) or **semantic ambiguity** (both channels prefer the distractor → RRF can't).
+    """
+    d: dict[str, Any] = {}
+    for ch in ("keyword", "vector"):
+        d[f"{ch}_relevant_rank"] = _best_channel_rank(evidence, relevant, ch)
+        d[f"{ch}_irrelevant_rank"] = _best_channel_rank(evidence, irrelevant, ch)
+    kw = _channel_pref(d["keyword_relevant_rank"], d["keyword_irrelevant_rank"])
+    vec = _channel_pref(d["vector_relevant_rank"], d["vector_irrelevant_rank"])
+    d["label"] = _CHANNEL_LABELS.get((kw, vec), "mixed_or_tied")
+    return d
+
+
 def run(root: Path, settings: Any, embedder: Any, cases: list[dict], ks: list[int],
         *, gconn: Any, graph_present: bool) -> dict[str, Any]:
     """Score each golden case over `run_search` evidence. The caller owns `gconn` (an empty graph for the
@@ -127,10 +183,14 @@ def run(root: Path, settings: Any, embedder: Any, cases: list[dict], ks: list[in
     try:
         for case in cases:
             relevant, miss_r = _resolve(case.get("relevant"), fmap)
-            if not relevant:  # unresolved/empty judgments — a curation bug for the corpus; skip + report
-                skipped.append(f"{case.get('id')} (unresolved: {miss_r})")
+            irrelevant, miss_i = _resolve(case.get("irrelevant"), fmap)
+            # Skip + report on ANY unresolved judgment (relevant OR irrelevant): a silently-dropped
+            # distractor would make discrimination look better than it is. Never score a partial case.
+            if not relevant or miss_i:
+                missing = miss_r + miss_i
+                skipped.append(f"{case.get('id')} (unresolved: {missing})" if missing
+                               else f"{case.get('id')} (no relevant)")
                 continue
-            irrelevant, _ = _resolve(case.get("irrelevant"), fmap)
             q = case["query"]
 
             def vector_search(*, limit: int, _q: str = q) -> list[dict[str, Any]]:
@@ -139,8 +199,11 @@ def run(root: Path, settings: Any, embedder: Any, cases: list[dict], ks: list[in
             res = search.run_search(q=q, mode=case.get("mode", "auto"), keyword_conn=kconn,
                                     graph_conn=gconn, policy=policy, vector_search=vector_search)
             ranked = evidence_sources(res)
-            rows.append({"id": case.get("id"), "category": case.get("category", "?"),
-                         **score_case(ranked, relevant, irrelevant, ks)})
+            row = {"id": case.get("id"), "category": case.get("category", "?"),
+                   **score_case(ranked, relevant, irrelevant, ks)}
+            if irrelevant:  # per-channel diagnostics only make sense for negative cases (ADR-0038)
+                row["diag"] = channel_diagnostics(res.get("evidence") or [], relevant, irrelevant)
+            rows.append(row)
     finally:
         kconn.close()
     return {"rows": rows, "skipped": skipped, "rrf_k": policy.cap("rrf_k"),
@@ -201,6 +264,17 @@ def render_report(result: dict[str, Any], *, settings: Any, ks: list[int], sourc
         for r in neg_rows:
             lines.append(f"| {r['id']} | {r['first_rank'] or '-'} | {r['first_irrel_rank'] or '-'} | "
                          f"{'yes' if r['discriminated'] else 'NO'} |")
+    # Per-channel diagnostics for the FAILURES (relevant_wins = NO): is it fusion-balance or semantics?
+    failed = [r for r in rows if r.get("has_neg") and not r["discriminated"] and r.get("diag")]
+    if failed:
+        lines += ["", "## Channel Diagnostics (failed disambiguation — fusion-balance vs semantic "
+                  "ambiguity)", "", "| id | kw_rel | kw_irr | vec_rel | vec_irr | label |",
+                  "|---|---|---|---|---|---|"]
+        for r in failed:
+            d = r["diag"]
+            lines.append(f"| {r['id']} | {_dash(d['keyword_relevant_rank'])} | "
+                         f"{_dash(d['keyword_irrelevant_rank'])} | {_dash(d['vector_relevant_rank'])} | "
+                         f"{_dash(d['vector_irrelevant_rank'])} | {d['label']} |")
     if result["skipped"]:
         lines += ["", "## Skipped (unresolved judgments)", "", *(f"- {s}" for s in result["skipped"])]
     return "\n".join(lines) + "\n"
