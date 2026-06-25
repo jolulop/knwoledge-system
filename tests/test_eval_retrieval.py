@@ -99,6 +99,10 @@ def test_runner_plumbing_with_fake_embedder(tmp_path):
         # An unresolved IRRELEVANT filename must skip the whole case (never silently drop the distractor).
         {"id": "c_bad_irr", "category": "disambiguation", "mode": "auto", "query": "revenue",
          "relevant": ["alpha.md"], "irrelevant": ["ghost.md"]},
+        # #3 regression: a PARTIALLY-unresolved relevant list (one good + one typo) must skip, not score
+        # against the smaller {alpha} oracle (which would inflate recall/MRR).
+        {"id": "c_partial_rel", "category": "multi_source", "mode": "auto", "query": "revenue",
+         "relevant": ["alpha.md", "ghost2.md"]},
     ]
 
     work = tmp_path / "work"
@@ -116,8 +120,9 @@ def test_runner_plumbing_with_fake_embedder(tmp_path):
         gconn.close()
 
     assert len(result["rows"]) == 3                  # 3 scored
-    assert len(result["skipped"]) == 2               # unresolved relevant AND unresolved irrelevant skip
+    assert len(result["skipped"]) == 3               # unresolved relevant, unresolved irrelevant, partial
     assert any("c_bad_irr" in s and "ghost.md" in s for s in result["skipped"])  # not silently dropped
+    assert any("c_partial_rel" in s and "ghost2.md" in s for s in result["skipped"])  # #3: partial skips
     assert result["graph_present"] is False
 
     # The build path MUST generate Source wiki pages, else the retention filter drops every evidence hit.
@@ -181,3 +186,60 @@ def test_channel_diagnostics_single_channel_failures():
     assert er.channel_diagnostics(
         [_ev("rel", kw=2), _ev("irr", kw=1)], {"rel"}, {"irr"}
     )["label"] == "keyword_prefers_irrelevant_vector_silent"
+
+
+def test_keyword_problems_missing_index_is_read_only(tmp_path):
+    # #1: a missing keyword index is REPORTED and NOT created (keyword_index.connect would otherwise
+    # mkdir + create an empty SQLite file in the operator vault). _keyword_problems opens read-only.
+    from app.backend import keyword_index
+    assert er._keyword_problems(tmp_path) == ["no keyword index"]
+    assert not (tmp_path / keyword_index.DB_RELPATH).exists()       # crucially, nothing was created
+
+
+def test_keyword_problems_full_consistency_gate(tmp_path):
+    # #2 / Q1: the --vault gate enforces the FULL "usable index" definition (schema + core tables +
+    # fingerprint freshness), not just file existence — reusing keyword_index.consistency_errors so it
+    # can't drift from validate_index_consistency. A stale or table-missing index would otherwise crash
+    # search (`FROM evidence`) or score a stale ranking under a clean-looking report.
+    pytest.importorskip("lancedb")
+    import sqlite3
+
+    from app.backend import keyword_index
+    from app.backend.config import get_settings
+    settings = get_settings(ROOT)
+
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "gamma.md").write_text("# Gamma\n\n## One\n\nApples and oranges in the morning shipment.\n",
+                                     encoding="utf-8")
+    work = tmp_path / "work"
+    work.mkdir()
+    er._build_corpus_vault(corpus, work, _FakeEmbedder(), settings)
+    assert er._keyword_problems(work) == []                          # a freshly built index is usable
+
+    # and a real keyword query runs fine under the READ-ONLY connector (the --vault run() path)
+    gconn, present, _gtmp = er._open_graph(work, is_vault=False)
+    try:
+        ro = er.run(work, settings, _FakeEmbedder(),
+                    [{"id": "ro_q", "category": "exact_anchor", "mode": "auto", "query": "apples",
+                      "relevant": ["gamma.md"]}],
+                    ks=[5], gconn=gconn, graph_present=present, keyword_readonly=True)
+    finally:
+        gconn.close()
+    assert len(ro["rows"]) == 1                                      # keyword SELECT works read-only
+
+    # fingerprint drift: a chunk file changed on disk since indexing -> stale -> rejected
+    sid = next(iter(er._filename_to_source(work / "raw" / "manifests").values()))
+    chunk_file = work / "normalized" / "chunks" / f"{sid}.jsonl"
+    chunk_file.write_text(chunk_file.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    assert any("stale" in p for p in er._keyword_problems(work))
+
+    # missing core tables: search would crash on `FROM evidence` and the retention filter needs
+    # `navigation` (source status) -> both must be rejected, not scored.
+    db = sqlite3.connect(work / keyword_index.DB_RELPATH)
+    db.execute("DROP TABLE evidence")
+    db.execute("DROP TABLE navigation")
+    db.commit()
+    db.close()
+    problems = er._keyword_problems(work)
+    assert any("core table" in p and "evidence" in p and "navigation" in p for p in problems)

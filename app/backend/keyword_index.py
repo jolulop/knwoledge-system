@@ -270,6 +270,16 @@ def connect(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def connect_readonly(db_path: Path) -> sqlite3.Connection:
+    """Open an EXISTING index strictly read-only (``mode=ro`` URI: no create, no parent mkdir, no schema
+    or file mutation — writes raise ``OperationalError``). NOTE: ``mode=ro``, not SQLite ``immutable=1``,
+    which would unsafely assume the file never changes. For callers that must not touch an operator vault —
+    e.g. the opt-in retrieval eval over ``--vault``. Raises if the file is absent, so callers check first."""
+    conn = sqlite3.connect(f"file:{Path(db_path)}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
 def _tables(conn: sqlite3.Connection) -> set[str]:
     return {
         r[0]
@@ -365,6 +375,47 @@ def navigation_pages(root: Path) -> dict[str, Path]:
         if navigation_row(path, root) is not None:
             out[path.relative_to(root).as_posix()] = path
     return out
+
+
+# --------------------------------------------------------------------------- consistency / freshness
+
+# Core tables a usable index must carry; a present DB missing any of these would crash search
+# (`SELECT ... FROM evidence`) or silently lose the retention/navigation filter.
+_REQUIRED_TABLES = ("evidence", "navigation", "source_fingerprints", "nav_fingerprints")
+
+
+def _freshness(label: str, live: dict[str, Path], stored: dict[str, str], indexed: set[str],
+               *, reindex_hint: str) -> list[str]:
+    """Compare a live disk set against the index's fingerprint table, both directions."""
+    errors: list[str] = []
+    if set(indexed) != set(stored):
+        errors.append(f"{label} index internally inconsistent: FTS rows {sorted(indexed)} != "
+                      f"fingerprint table {sorted(stored)}")
+    for key in sorted(set(stored) - set(live)):
+        errors.append(f"{label} index references {key}, which no longer exists on disk ({reindex_hint})")
+    for key, path in sorted(live.items()):
+        if key not in stored:
+            errors.append(f"{label} {key} exists on disk but is not indexed ({reindex_hint})")
+        elif stored[key] != file_fingerprint(path):
+            errors.append(f"{label} index is stale for {key}: it changed since indexing ({reindex_hint})")
+    return errors
+
+
+def consistency_errors(root: Path, conn: sqlite3.Connection, *, reindex_hint: str = "reindex") -> list[str]:
+    """Reasons the keyword index is unsafe to search (ADR-0032 §7): stale schema, missing core tables, or
+    fingerprint drift in either direction (evidence + navigation). Empty list == usable. Pure over
+    ``(disk, conn)`` — the SINGLE definition of "usable keyword index", shared by
+    ``validate_index_consistency.py`` and the retrieval eval's ``--vault`` gate so neither drifts."""
+    version = index_version(conn)
+    if version != INDEX_VERSION:
+        return [f"keyword index schema version {version} != builder version {INDEX_VERSION} (stale schema)"]
+    missing = [t for t in _REQUIRED_TABLES if t not in _tables(conn)]
+    if missing:
+        return [f"keyword index missing core table(s) {missing} ({reindex_hint})"]
+    return (_freshness("evidence", chunk_files(root), stored_source_fingerprints(conn),
+                       indexed_source_ids(conn), reindex_hint=reindex_hint)
+            + _freshness("navigation", navigation_pages(root), stored_nav_fingerprints(conn),
+                         indexed_navigation_paths(conn), reindex_hint=reindex_hint))
 
 
 # --------------------------------------------------------------------------- reindex

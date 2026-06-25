@@ -5,6 +5,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -338,3 +340,17 @@ def test_indexer_indexes_chunks_without_manifests(tmp_path):
         assert "src_orphanaaaaaaaa" in keyword_index.indexed_source_ids(conn)
     finally:
         conn.close()
+
+
+def test_connect_readonly_rejects_writes(tmp_path):
+    # connect_readonly opens mode=ro: an existing index can be read but never written (the eval's
+    # --vault boundary). A write must raise, proving an operator vault is safe under the eval connector.
+    path = tmp_path / keyword_index.DB_RELPATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    keyword_index.connect(path).close()                 # create a real on-disk DB file first
+    ro = keyword_index.connect_readonly(path)
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            ro.execute("CREATE TABLE x (a)")
+    finally:
+        ro.close()

@@ -171,12 +171,14 @@ def channel_diagnostics(evidence: list[dict[str, Any]], relevant: set[str],
 
 
 def run(root: Path, settings: Any, embedder: Any, cases: list[dict], ks: list[int],
-        *, gconn: Any, graph_present: bool) -> dict[str, Any]:
+        *, gconn: Any, graph_present: bool, keyword_readonly: bool = False) -> dict[str, Any]:
     """Score each golden case over `run_search` evidence. The caller owns `gconn` (an empty graph for the
-    committed corpus; the vault's real graph, or a throwaway empty one, for `--vault`)."""
+    committed corpus; the vault's real graph, or a throwaway empty one, for `--vault`). `keyword_readonly`
+    opens the keyword index read-only — set for `--vault` so the eval never mutates an operator vault."""
     metric = settings.embedding_distance_metric
     policy = load_retrieval_policy(settings.retrieval_policy_path)
-    kconn = keyword_index.connect(root / keyword_index.DB_RELPATH)
+    kpath = root / keyword_index.DB_RELPATH
+    kconn = keyword_index.connect_readonly(kpath) if keyword_readonly else keyword_index.connect(kpath)
     fmap = _filename_to_source(root / "raw" / "manifests")
     rows: list[dict[str, Any]] = []
     skipped: list[str] = []
@@ -185,8 +187,10 @@ def run(root: Path, settings: Any, embedder: Any, cases: list[dict], ks: list[in
             relevant, miss_r = _resolve(case.get("relevant"), fmap)
             irrelevant, miss_i = _resolve(case.get("irrelevant"), fmap)
             # Skip + report on ANY unresolved judgment (relevant OR irrelevant): a silently-dropped
-            # distractor would make discrimination look better than it is. Never score a partial case.
-            if not relevant or miss_i:
+            # relevant doc would score against a SMALLER oracle (inflating recall/MRR) and a dropped
+            # distractor would make discrimination look better than it is. Never score a partial case —
+            # `miss_r` (a typo'd relevant filename) must skip too, not just `not relevant`/`miss_i`.
+            if not relevant or miss_r or miss_i:
                 missing = miss_r + miss_i
                 skipped.append(f"{case.get('id')} (unresolved: {missing})" if missing
                                else f"{case.get('id')} (no relevant)")
@@ -299,6 +303,23 @@ def _vector_problems(root: Path, settings: Any) -> list[str]:
     return []
 
 
+def _keyword_problems(root: Path) -> list[str]:
+    """For `--vault`: the keyword index must ALREADY exist AND be usable. The eval is read-only over an
+    operator vault, but `keyword_index.connect` mkdirs + creates an empty SQLite file when the DB is
+    missing — the vault-mutation boundary `_open_graph` guards for the graph. We open strictly read-only
+    and reuse `keyword_index.consistency_errors` — the SAME 'usable index' definition as
+    `validate_index_consistency` (schema + core tables + fingerprint freshness): a missing/stale/
+    incomplete index would otherwise crash search or score a stale ranking under a clean-looking report."""
+    path = root / keyword_index.DB_RELPATH
+    if not path.exists():
+        return ["no keyword index"]
+    conn = keyword_index.connect_readonly(path)  # read-only (mode=ro): never creates/mutates the vault
+    try:
+        return keyword_index.consistency_errors(root, conn)
+    finally:
+        conn.close()
+
+
 def _open_graph(root: Path, *, is_vault: bool) -> tuple[Any, bool, Any]:
     """Return (gconn, graph_present, tmp). For `--vault` with no graph, use a throwaway empty graph so we
     never write `db/graph.sqlite` into the operator's vault. `graph_present` reflects the real state."""
@@ -344,6 +365,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.vault:
             root, label, is_vault = args.vault, f"vault:{args.vault}", True
+            kw_problems = _keyword_problems(root)
+            if kw_problems:
+                print("error: vault keyword index unusable for eval: " + "; ".join(kw_problems)
+                      + " — build it first (`POST /jobs/reindex`). The eval is read-only and will not "
+                      "create indexes in your vault.", file=sys.stderr)
+                return 2
             problems = _vector_problems(root, settings)
             if problems:
                 print("error: vault vector index unusable for eval: " + "; ".join(problems)
@@ -358,7 +385,8 @@ def main(argv: list[str] | None = None) -> int:
         if gtmp is not None:
             cleanups.append(gtmp)
         try:
-            result = run(root, settings, embedder, cases, ks, gconn=gconn, graph_present=graph_present)
+            result = run(root, settings, embedder, cases, ks, gconn=gconn, graph_present=graph_present,
+                         keyword_readonly=is_vault)
         finally:
             gconn.close()
     finally:
