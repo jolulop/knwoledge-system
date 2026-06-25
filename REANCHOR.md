@@ -1,56 +1,64 @@
 # REANCHOR — session status
 
-_Last updated: 2026-06-23. **Reanchor command:** "read REANCHOR.md and reanchor". Read this
+_Last updated: 2026-06-25. **Reanchor command:** "read REANCHOR.md and reanchor". Read this
 first after an app restart, then `wiki/index.md` if working in the vault._
 
 ## Project
 
 Local-first **LLM Wiki** knowledge-system. Immutable `raw/` → derived `normalized/` →
 generated `wiki/` (gitignored, regenerable) → `db/` SQLite (graph, jobs, llm_cache) →
-`reviews/`, `policies/`. ADR-driven (`docs/adr/0001–0036`). See `CLAUDE.md` for the
+`reviews/`, `policies/`. ADR-driven (`docs/adr/0001–0038`). See `CLAUDE.md` for the
 critical rules and `CONTEXT.md` for the glossary.
 
 ## Where we are
 
-- **Branch:** `main`, at **`ad98d4c`** (Phase 7 complete; push pending). The per-slice rhythm: implement
-  → test → external review (user pastes) → analyze+recommend+wait → fix → commit (user says so) → push.
-- **PHASES 1–7 COMPLETE.** 1 intake · 2 extract/normalize · 3 deterministic wiki · 3.5 LLM semantic layer
-  (summaries/tags/concepts/entities/claims/synthesis + grounding) · **4 Search & Graph** (keyword/nav,
-  graph read, router+`/search`, LanceDB vector, RRF fusion+evals) · **5 Query & Cited Answering**
-  (`POST /query`, grounded cited answers, saved Queries, golden evals) · **6 Human Review UI** (read model,
-  decision endpoints, apply executors, hand-rolled HTML `/ui/reviews`) · **7 Autonomous Maintenance**
-  (lint, retention/archive, reindex/cache, cron/no-daemon). 1–6 pushed; **7 committed locally, push pending**.
-- **PHASE 6 (Human Review UI) — COMPLETE + pushed** (ADR-0035 + addenda A1–A8). Governance surface over
-  the `reviews/` ledger; decide/apply **decoupled**: `GET /reviews[/{id}]` read model + per-type projector
-  registry; record-only `POST /reviews/{id}/approve|reject|defer`; `POST /reviews/apply` runs the key-free
-  executors (synthesis/contradiction/promote/deprecate + Phase-7 archive); hand-rolled escaped HTML UI
-  (`review_html.py`, two-step apply, no Jinja2/JS, loopback-only).
-- **PHASE 7 (Autonomous Maintenance) — COMPLETE, push pending** (ADR-0036, decisions 1–14; `docs/Phase 7
-  Plan.md`, `docs/Operations.md`). Deterministic, job-recorded, **detect-and-propose** maintenance; **no
-  scheduler/daemon** (OS cron; contract test guards it); acts autonomously only on safe non-destructive ops.
-  - **7-1 lint** (`app/workers/lint.py`, `POST /jobs/lint`): structural validators as a health report +
-    semantic checks (missing-raw → `missing_raw_source`, under-supported concept → `deprecate_wiki_page`,
-    uncited claim) → governance review items. 3-state health (healthy/degraded/failing); filed-vs-existing
-    item counts; path-confined raw checks; lint-health-is-an-outcome (200, not abort).
-  - **7-2 retention** (`app/workers/retention.py`): **manifest is the durable Source lifecycle authority**
-    (`manifest["status"]`, `manifests.set_status`/`get_status`; Source page reads it → nav index →
-    retrieval; `validate_wiki` enforces page==manifest). `POST /jobs/stale-check` proposes `archive_source`
-    (stale `modified_at`) + `delete_raw_file` (ephemeral, record-only). Reversible **`apply_archive_sources`**
-    executor flips `active → archive_candidate` on manifest+page+graph (raw untouched), wired into
-    `/reviews/apply`. `archive_raw_file → archive_source` rename.
-  - **7-3 reindex/cache/cron** (`POST /jobs/reindex` index+keyword only, no vector; cache-purge candidate
-    detection folded into stale-check → aggregate record-only `purge_response_cache`, counts-only payload;
-    `docs/Operations.md` cron recipe + manual eval smoke; no-daemon contract test). Eval runtime job
-    **deferred** (golden set is a fake CI fixture; `/evals/run` is future work — ADR-0036 decisions 9+14).
-  - **Review-round fixes (post-7-3):** `deprecated_candidate` added to source statuses; archive-only apply
-    won't re-init a schema-drifted graph (promote runs only when graph available); producer source-node
-    upserts mirror manifest status; lint support counts exclude archived/deleted; `Source` model exposes
-    `status`; `response_cache.enabled` honored; job warnings persisted.
-- **Recent commits:** `ad98d4c` Phase 7-3 + review fixes (completes Phase 7) · `583f265` 7-2 retention ·
-  `bcabd23` 7-1 lint · `b441490`/`ebc4312`/`86896dd` Phase 7 design-locks · `0bdabca` Phase 6-4 (last pushed).
-- **Tests/lint green:** `650 passed` (was 591; +Phase 7), ruff clean, **10** validators pass. Newest test
-  files: `tests/test_lint.py`, `tests/test_retention.py`. New deps in Phase 7: none (extraction/enrich/
-  vector extras installed in the venv for the live-vault demo; `uv sync --all-extras`).
+- **Branch:** `main`, **in sync with `origin/main`** (latest push: the ADR-0038 multi-chunk
+  design-lock). The per-slice rhythm: grill (design-lock,
+  docs-only) → implement (on "implement now") → test → external review (user pastes) → analyze+recommend+
+  **wait** → fix → commit (user says so) → push.
+- **PHASES 1–7 COMPLETE + pushed.** 1 intake · 2 extract/normalize · 3 deterministic wiki · 3.5 LLM
+  semantic layer (concepts/entities/claims/synthesis + grounding) · **4 Search & Graph** (keyword/nav,
+  graph read, router+`/search`, LanceDB vector, RRF fusion) · **5 Query & Cited Answering** (`POST /query`,
+  grounded cited answers, saved Queries) · **6 Human Review UI** (read model, decisions, apply executors,
+  hand-rolled HTML `/ui/reviews`) · **7 Autonomous Maintenance** (`/jobs/lint|stale-check|reindex`,
+  reversible `archive_source`, cron/no-daemon; ADR-0036). The Build Spec's planned scope is **met**; work
+  since is follow-on hardening + deferred quality items, each grilled first.
+- **POST-PHASE-7 WORK (all pushed):**
+  - **Security & hygiene hardening (3 rounds, `e2795b7`)** — closed the untrusted-on-disk → filesystem
+    boundary: canonical `source_id` validation (`manifests.is_source_id`; `valid_manifests` quarantines
+    non-canonical / filename-mismatched / duplicate records, surfaced as job-metadata counts), validators
+    fail hard, the shared **`app/backend/paths.py`** (`safe_under` containment + `safe_child` basename-only)
+    used at every untrusted-id→path site, `validate_graph` canonical node-id gate (src_/clm_/syn_). Plus:
+    blessed launch entrypoint `python -m app.backend` (bind can't drift from `assert_safe_bind`), raw bytes
+    gitignored, `watcher.py` removed, Build Spec/README/.env annotations.
+  - **ADR-0037 lint quality heuristics** — deterministic, key-free, **report-only** `/jobs/lint` checks
+    (no review vocabulary/executors, never flip `failing`): `summary_rot` (enrichment-artifact fingerprint
+    drift), `stale_claim_citation` (stored `.claims.json` quote re-grounded vs an active `derived_from`
+    edge), `synthesis_rot` (active synthesis whose topic evidence drifted, via `eligible_topics` +
+    `synthesis._fingerprint`). Coverage findings (`*_unverifiable`) drive `degraded`. `LintFinding.data`
+    carries machine-actionable fields + a stable remediation code (`rerun_enrich`/`rerun_extract_claims`/
+    `rerun_synthesis`). Concept/entity rot **dropped by design** (deterministic projections, owned by
+    `validate_projection`).
+  - **Weighted RRF + graph boosts — DEFERRED (reaffirmed, ADR-0032 addendum 9).** Eval-gated: RRF is
+    weight-free by design and there's no relevance oracle, so tuning weights would be unfalsifiable.
+  - **ADR-0038 retrieval relevance eval — v1 IMPLEMENTED + tuned (the unblocking prerequisite).**
+    `evals/corpus/` (**12** original/fictionalized docs) + `evals/golden_retrieval_relevance.yaml`
+    (**52** cases, reference-by-filename) + opt-in **`scripts/eval_retrieval.py`** (real embedder, no LLM
+    key; builds intake→extract→**generate Source pages**→keyword→vector→empty graph; scores
+    recall@k/MRR/hit@k + neg@k + disambiguation **discrimination** + a **per-channel failure diagnostic**
+    that labels each failure fusion-balance vs semantic-ambiguity from `evidence[].channels`; `--vault`
+    enforces vector staleness + never writes the vault's graph). **Not a CI gate** (fake-embedder
+    structural eval stays the gate; `evals/reports/` gitignored). **Baseline** (`BAAI/bge-m3`): MRR 0.968,
+    recall@5 0.994, discrimination 0.931; the 2 remaining failures both labelled
+    `vector_prefers_irrelevant_keyword_silent` → **semantic ambiguity, not fusion** → weighted RRF cannot
+    help. **Multi-chunk extension design-locked** (ADR-0038 §Multi-chunk, NOT yet implemented): chunk-level
+    cases (`chunk:`/`near_miss:` phrase→citation-key, `chunk_disambiguation`), separate report blocks,
+    chunk-granular per-channel diagnostic — the benchmark layer needed before any fusion tuning.
+- **Recent commits:** `2a0be5e` per-channel failure diagnostics · `82892ea` corpus 22→52 + wrapped-query
+  fix · `746eaea` eval-runner Source-page fix · `4fd4ae5` ADR-0038 v1 impl · `26a5d92` retrieval-eval
+  design-lock · `8958fe3`/`47d7cd1` ADR-0037 lint heuristics · `e2795b7` security hardening.
+- **Tests/lint green:** `703 passed`, ruff clean, **10** validators pass. Newest test files:
+  `tests/test_lint.py`, `tests/test_retention.py`, `tests/test_paths.py`, `tests/test_eval_retrieval.py`.
 
 ## Viewing the vault (Obsidian)
 
@@ -73,22 +81,37 @@ critical rules and `CONTEXT.md` for the glossary.
 | 4 Search & Graph (4a–4e) | **Complete + pushed** |
 | 5 Query & Cited Answering (5-1–5-4) | **Complete + pushed** |
 | 6 Human Review UI (6-1–6-4) | **Complete + pushed** (`0bdabca`) |
-| **7 Autonomous Maintenance (7-1–7-3)** | **Complete** (`ad98d4c`) — push pending |
+| 7 Autonomous Maintenance (7-1–7-3) | **Complete + pushed** (`ad98d4c`) |
+| Post-7: security hardening · ADR-0037 lint heuristics · ADR-0038 retrieval-eval v1 + diagnostics | **Complete + pushed** (`2a0be5e`) |
+| ADR-0038 multi-chunk extension | **Design-locked, NOT implemented** (this is the next slice) |
 
 ## Next step
 
-**Phases 1–7 complete** (the Build Spec's planned phases). Immediate: **push `origin/main`** (currently
-ahead by the Phase 7 commits). Then there is **no further planned phase** — the Build Spec scope is met.
-Open future work, none committed-to: a **real-vault eval corpus** + key-required `/evals/run` (deferred,
-ADR-0036 decisions 9+14); graph-curator duplicate/merge/split detection + executors; physical raw
-archival / `include_raw` backup; auth/CSRF for a non-loopback bind (Phase-8-class). Each would start with
-a `grill-phase` gate (new ADR + plan) before any code.
+**Immediate (active slice): IMPLEMENT the ADR-0038 multi-chunk extension** (design-locked in
+ADR-0038 §Multi-chunk; this thread's next step). The source-level eval is done + tuned (baseline MRR 0.968,
+discrimination 0.931; the 2 failures are `vector_prefers_irrelevant_keyword_silent` = semantic ambiguity,
+**not** fusion — so weighted RRF stays deferred). The corpus is single-chunk, so it can't yet test
+chunk-level fusion. On **"implement now"**: author ~3 `##`-section multi-chunk docs + 6–10
+`chunk_disambiguation` cases (`chunk:`/`near_miss:` phrase locators); add to `scripts/eval_retrieval.py`
+the phrase→**citation-key** resolver (read `normalized/chunks/<sid>.jsonl`; exactly-one + distinct-key
+validation, else skip+report), chunk-level scoring (reuse `score_case`/`channel_diagnostics` keyed on the
+citation key), and the `## Chunk-Level Aggregate` / `## Chunk Source Continuity` / failed-chunk-diagnostic
+report blocks (**source headline uncontaminated**); remove the brittle char-span `chunk:` stub; extend the
+coherence + plumbing tests. Then a real-embedder baseline to see if any chunk failure shows channel
+*disagreement* (the only thing that would re-open weighted RRF).
 
-**Operate it** (`docs/Operations.md` has the cron recipe): maintenance passes `POST /jobs/lint`,
-`POST /jobs/stale-check`, `POST /jobs/reindex` (key-free, detect-and-propose); review at `/ui/reviews`;
-apply approved decisions via `POST /reviews/apply`. **LLM producers** (need `ANTHROPIC_API_KEY` in `.env`,
-cost money): `scripts/extract_claims.py` → `extract_concepts.py` → `promote.py` →
-`detect_contradictions.py` → `generate_synthesis.py`. Validate any time: `scripts/validate_all.py`.
+**Then (decision tree after the multi-chunk baseline):** chunk failure shows
+`keyword_prefers_relevant_vector_prefers_irrelevant` → **grill weighted RRF** with real evidence; else
+**try a stronger embedder** (operator experiment) or keep weighted RRF deferred.
+
+**Other deferred items (each starts with a `grill-phase`):** graph-curator duplicate/merge/split detection
++ executors (highest risk — identity re-keying); answer-quality **`/evals/run`** real-vault corpus
+(ADR-0036 9+14); physical raw archival / `include_raw` backup; auth/CSRF for a non-loopback bind.
+
+**Operate it** (`docs/Operations.md`): `POST /jobs/lint|stale-check|reindex` (key-free, detect-and-propose);
+review at `/ui/reviews`; apply via `POST /reviews/apply`. **LLM producers** (need `ANTHROPIC_API_KEY`):
+`scripts/extract_claims.py` → `extract_concepts.py` → `promote.py` → `detect_contradictions.py` →
+`generate_synthesis.py`. Validate: `scripts/validate_all.py`.
 
 ## Standing rules (do not violate)
 
@@ -114,7 +137,8 @@ cost money): `scripts/extract_claims.py` → `extract_concepts.py` → `promote.
 edges; backlinks derived), 0030 (graph schema), 0031 (3.5c synthesis & contradiction —
 graph-blocked pairing, sorted-pair `contradicts`, per-concept synthesis, review gates),
 0032 (Phase 4 retrieval architecture — evidence vs. answer seam, citable chunks vs. node prose,
-deterministic router + RRF fusion, index storage/lifecycle relayout; **addenda 5–8** = Phase 4e fusion),
+deterministic router + RRF fusion, index storage/lifecycle relayout; **addenda 5–8** = Phase 4e fusion;
+**addendum 9** = weighted RRF + graph boosts stay deferred/eval-gated, prerequisite is ADR-0038),
 0033 (Phase 4d vector retrieval — local `/embeddings` HTTP seam, LanceDB same-citation index,
 config-ref staleness key, explicit-only `mode=vector`, explicit non-hooked reindex),
 0034 (Phase 5 Query & Cited Answering — evidence-id-referenced grounded claims, harness-built anchors
@@ -127,4 +151,15 @@ hand-rolled HTML UI),
 0036 (Phase 7 Autonomous Maintenance — **decisions 1–14**: detect-and-propose maintenance passes, no
 daemon (OS cron), lint-health-as-outcome, manifest is the durable Source lifecycle authority, reversible
 `archive_source` executor (status only, raw untouched), `archive_candidate` v1 terminal, `/jobs/reindex`
-index+keyword-only, aggregate record-only `purge_response_cache`, eval runtime job deferred).
+index+keyword-only, aggregate record-only `purge_response_cache`, eval runtime job deferred),
+0037 (Lint quality heuristics — **decisions 1–6**: deterministic key-free **report-only** `summary_rot` /
+`stale_claim_citation` / `synthesis_rot` checks in `/jobs/lint` (never flip `failing`); governance-decision
+vs maintenance-task boundary; `LintFinding.data` + stable remediation codes; concept/entity rot dropped),
+0038 (Retrieval relevance eval — committed corpus + golden file + opt-in real-embedder runner;
+source-level recall@k/MRR/hit@k + discrimination + **per-channel failure diagnostic** (fusion-balance vs
+semantic ambiguity); NOT a CI gate; unblocks ADR-0032 add.9. **v1 implemented**; **§Multi-chunk extension
+design-locked** — chunk-level cases via `chunk:`/`near_miss:` phrase→citation-key, separate report blocks).
+
+**Path safety:** `app/backend/paths.py` (`safe_under` containment, `safe_child` basename-only) is the
+shared guard at every untrusted-id→path site (manifests, enrichment/claims artifacts, graph node ids);
+validators fail hard, runtime workers quarantine. The API is **loopback-only, no auth** (ADR-0009).

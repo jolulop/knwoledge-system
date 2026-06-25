@@ -1,6 +1,9 @@
 # ADR-0038 — Retrieval relevance eval corpus
 
-**Status:** Accepted (design-locked 2026-06-24 via grill gate). Design only — no code yet.
+**Status:** Accepted. v1 (decisions 1–6) **implemented** + per-channel failure diagnostics added (commits
+through `2a0be5e`); the real-embedder baseline confirmed both current failures are
+`vector_prefers_irrelevant_keyword_silent` (semantic ambiguity, not fusion). The **Multi-chunk extension**
+(below) is design-locked 2026-06-25 via a follow-up grill — design only, not yet implemented.
 **Extends/relates:** ADR-0032 (Phase 4 retrieval; addendum 8 = the fake-embedder *structural* gate,
 addendum 9 = weighted-RRF/graph-boosts deferred *until a real relevance corpus exists* — **this is that
 corpus**), ADR-0033 (vector retrieval + the `local_http` embedder seam), ADR-0036 decisions 9/14 (the
@@ -92,3 +95,63 @@ CI gate.
 - Key-free CI is untouched; the new eval is an opt-in operator/maintainer workflow.
 - The corpus + golden file double as a **regression guard** an operator can run after an
   extractor/embedder/policy change to catch relevance drift.
+
+## Multi-chunk extension (design-locked 2026-06-25 via follow-up grill)
+
+The v1 corpus docs are tiny (one chunk each), so the benchmark only tests **source-level** semantic
+similarity — not the **chunk-level** ranking/fusion that weighted RRF (ADR-0032 add. 9) would tune. This
+extension adds chunk-level cases. No retrieval-logic change; deterministic; key-free CI stays green.
+
+**M1. Chunk locator = a `contains:` phrase resolved to the citation key.** A chunk-level case names its
+chunk by a distinctive substring, *not* char spans (brittle) or `chunk_id` (advisory only, ADR-0029/0032).
+The runner maps `source` filename → `source_id`, reads `normalized/chunks/<source_id>.jsonl`, finds the
+**exactly one** chunk whose text contains the phrase, and resolves it to the **authoritative citation key
+`(source_id, char_start, char_end)`** — the same identity fusion/dedup and citations use. `chunk_id` may
+appear in diagnostics only. The brittle char-span `chunk:` stub from v1 is **removed**.
+
+**M2. Schema: `chunk:` + `near_miss:`; a case is chunk-level iff it has `chunk:`.**
+```yaml
+- id: chunk_ceo_vs_reskilling
+  category: chunk_disambiguation        # new category; the 4 source-level categories are unchanged
+  mode: auto
+  query: which part says CEO leadership is needed to scale AI agents?
+  chunk:                                # the RELEVANT chunk (also fixes the relevant source)
+    source: Agentic_1.md
+    contains: "CEO leadership is needed to scale AI agents"
+  near_miss:                            # the distractor chunk (one in v1; intra-doc is the headline test)
+    source: Agentic_1.md
+    contains: "reskilling engineers to supervise"
+```
+The relevant *source* is derived from `chunk.source` (no duplicate `relevant:`). Existing source-level
+cases (`relevant`/`irrelevant` filename lists) are untouched and scored exactly as before.
+
+**M3. Reporting split — chunk cases never contaminate the source headline.** `## Aggregate` stays
+**source-level cases only**. New `## Chunk-Level Aggregate` covers chunk cases only. A separate, explicitly
+diagnostic `## Chunk Source Continuity` reports whether `chunk.source` was retrieved at all — kept out of
+both headlines, so an intra-doc case can't look "source-correct" while failing the chunk behavior.
+
+**M4. Chunk metrics + chunk-granular diagnostic** (keyed on the citation key, mirroring source-level):
+`chunk_recall@k`, `chunk_hit@k`, `chunk_MRR`, **`chunk_discrimination`** (the relevant chunk ranks above
+`near_miss` — the headline chunk signal), `chunk_neg@k`, per-query `first_chunk_rank` /
+`first_near_miss_rank`. The **per-channel diagnostic is recomputed at chunk granularity** from
+`evidence[].channels` with the same label taxonomy — *this* is the payoff: a chunk failure labelled
+`keyword_prefers_relevant_vector_prefers_irrelevant` is the **fusion-balance** signal that would finally
+justify revisiting weighted RRF; `vector_prefers_irrelevant_keyword_silent` etc. means the embedder can't
+separate the chunks (RRF can't help). The decisive report section is the **failed chunk-disambiguation
+diagnostics**.
+
+**M5. Authoring contract + validation.** Multi-chunk docs use distinct **`##` sections** to force chunk
+boundaries (the chunker is heading-aware: a heading flushes the prior section into its own chunk; keep each
+section under the chunk target so it's one chunk). **Intra-doc near-miss** (two adjacent sections of one
+doc) is the headline benchmark. ~3 new multi-chunk docs, ~6–10 `chunk_disambiguation` cases. The runner
+validates each phrase resolves to **exactly one** chunk *and* that `chunk` and `near_miss` resolve to
+**different citation keys** — 0 matches / >1 matches / same key → curation error → **skip + report** (like
+an unresolved filename). The key-free coherence test checks each `contains:` phrase is a substring of its
+named corpus doc and `chunk.contains != near_miss.contains`; chunk uniqueness/separation needs extraction
+and is the runner's eval-time check. The plumbing test uses a tiny two-`##`-section doc to exercise
+chunk scoring/reporting + the skip path with the fake embedder.
+
+**Success criteria:** the ~3 docs + 6–10 chunk cases exist; the runner resolves/validates and renders the
+three new report blocks with the source headline uncontaminated; coherence + plumbing tests green; key-free
+CI green; the relevance run stays opt-in. **Weighted RRF stays deferred** until a chunk failure surfaces
+channel *disagreement* at the chunk level.
