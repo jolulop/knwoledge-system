@@ -151,7 +151,23 @@ named corpus doc and `chunk.contains != near_miss.contains`; chunk uniqueness/se
 and is the runner's eval-time check. The plumbing test uses a tiny two-`##`-section doc to exercise
 chunk scoring/reporting + the skip path with the fake embedder.
 
-**Success criteria:** the ~3 docs + 6–10 chunk cases exist; the runner resolves/validates and renders the
-three new report blocks with the source headline uncontaminated; coherence + plumbing tests green; key-free
-CI green; the relevance run stays opt-in. **Weighted RRF stays deferred** until a chunk failure surfaces
-channel *disagreement* at the chunk level.
+**M6. Fixtures are net-new, topically-isolated docs (not restructures).** The ~3 multi-chunk docs are
+**brand-new** files on a fresh topic cluster — topically adjacent enough to exercise ambiguity, but
+**isolated from the existing source-level cases**: a new doc must never appear as `relevant`/`irrelevant`
+in any existing source-level case. Existing corpus docs (e.g. `Agentic_1.md`) are **not** restructured into
+`##` sections — that would change one slice's content *and* add chunk behavior at once. The M2/M5 example
+names/phrases above are **illustrative**; once the real fixtures exist, repoint those examples at the actual
+filenames. (Grill follow-up, 2026-06-25.)
+
+**M7. Source-level baseline integrity — content unchanged ≠ rankings unchanged.** Even with the existing 12
+docs byte-identical, adding docs **enlarges the retrieval candidate set**, so existing source-level rankings
+*can* shift. The baseline (MRR 0.968 / recall@5 0.994 / discrimination 0.931) is therefore "content
+unchanged, low expected risk," **not** mathematically invariant. After adding the new docs the runner's
+**source-level headline must be re-run and diffed explicitly** against the recorded pre-add baseline, and any
+movement reported — this is a success criterion, not optional. (Grill follow-up, 2026-06-25.)
+
+**Success criteria:** the ~3 docs + 6–10 chunk cases exist; the new docs are absent from every existing
+source-level case (M6); the runner resolves/validates and renders the three new report blocks with the source
+headline uncontaminated; coherence + plumbing tests green; key-free CI green; the relevance run stays opt-in;
+**the post-add source-level headline is diffed against the pre-add baseline and any movement reported (M7)**.
+**Weighted RRF stays deferred** until a chunk failure surfaces channel *disagreement* at the chunk level.
