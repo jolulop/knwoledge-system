@@ -1,7 +1,10 @@
 # ADR-0040 — Review apply dry-run: sandbox-on-copy mutation preview before commit
 
-**Status:** Accepted. Design-locked 2026-06-26 via a grill gate — **design only, not yet implemented**.
-Scope is narrowed to the dry-run/preview path; the CLI review tool and supersede-via-UI are **deferred**.
+**Status:** Accepted. Design-locked **and implemented** 2026-06-26. `run_apply(settings)` + the
+`GraphUnavailable` gate were extracted in `app/backend/main.py`; the sandbox builder + semantic differ
+live in `app/backend/apply_sandbox.py`; `POST /reviews/apply/dry-run` and the UI gating
+(`render_apply_dry_run`) are wired; covered by `tests/test_apply_dry_run.py`. Scope is narrowed to the
+dry-run/preview path; the CLI review tool and supersede-via-UI are **deferred**.
 **Extends:** ADR-0035 (Phase 6 human review UI; decide/apply decoupling, the per-type `ReviewPreview`
 projector registry), ADR-0036 (Phase 7 maintenance + `archive_source` executor), ADR-0029/0030 (graph is
 the source of truth for edges), ADR-0024/0009 (raw immutability + untrusted on-disk data). Read
@@ -67,6 +70,9 @@ reindex → validator suite (decision 5). It takes an **explicit settings/root o
 - The endpoint decides live-vs-sandbox and response formatting; `run_apply` owns the sequence **and the
   blocking conditions** — in particular the graph-availability gate (decision 6) lives *inside* `run_apply`,
   so live and dry-run refuse on exactly the same condition and only the presentation differs.
+- **`GET /ui/reviews/apply` runs a full dry-run on page load** (intentional, local-first): the step-1 page
+  *is* the preview, so it builds a sandbox and runs the orchestration every load. Acceptable because apply
+  is an explicit, human-triggered, low-frequency action; revisit only if it becomes a hot path.
 
 **4. Output: domain-grouped semantic diff + appliable-items provenance.**
 The dry-run result carries two views — *what* changes in durable state (grouped by domain) and *why* (traced
@@ -76,9 +82,11 @@ to the review item). Shape:
 {
   "diff": {
     "graph": {
-      "edges_added":   [{"src": "...", "rel": "...", "dst": "...", "review_id": "..."}],
-      "edges_removed": [],
-      "nodes_status_changed": [{"id": "...", "type": "...", "from": "...", "to": "...", "review_id": "..."}]
+      "edges_added":          [{"src": "...", "rel": "...", "dst": "...", "status": "...", "review_id": "..."}],
+      "edges_removed":        [{"src": "...", "rel": "...", "dst": "...", "status": "..."}],
+      "edges_status_changed": [{"src": "...", "rel": "...", "dst": "...", "from": "...", "to": "...", "review_id": "..."}],
+      "nodes_status_changed": [{"id": "...", "type": "...", "from": "...", "to": "..."}],
+      "nodes_added":          [{"id": "...", "type": "...", "status": "..."}]
     },
     "wiki":      [{"path": "wiki/Claims/...", "unified_diff": "...", "review_ids": ["..."]}],
     "reviews":   [{"review_id": "...", "from_dir": "pending", "to_dir": "approved"}],
@@ -92,9 +100,13 @@ to the review item). Shape:
 ```
 
 Constraints locked in: `items[]` is **provenance, not the authoritative diff**; `diff.graph` uses **stable
-graph ids + relationship labels** and is **edge/node-semantic, never raw SQLite row diffs**; graph
-**node lifecycle/status changes are semantic and included** (deprecation/synthesis flip claim/concept
-status that has no manifest — distinct from the manifest-owned source status); wiki changes are
+graph ids + relationship labels** and is **edge/node-semantic, never raw SQLite row diffs**. The edge
+snapshot is **keyed by `edge_id` and covers all governed statuses** (`{proposed, active, rejected,
+superseded}`), so a review-driven transition that never touches the *active* set — e.g. a rejected
+contradiction flipping `proposed → rejected`, or an `active → superseded` — still surfaces as an
+`edges_status_changed` entry (not silently dropped). Graph **node lifecycle/status changes are semantic and
+included** (deprecation/synthesis flip claim/concept status that has no manifest — distinct from the
+manifest-owned source status); wiki changes are
 **path-scoped unified text diffs**; review changes are **workflow movement/status** (not raw JSON noise);
 manifest diffs are **field-level, limited to fields the executor is expected to mutate**. Record-only /
 unsupported types produce a clear **`not_appliable`** entry with a reason — never a fabricated diff.

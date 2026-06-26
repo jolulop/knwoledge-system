@@ -228,6 +228,54 @@ def render_apply_confirm(scope: dict[str, Any]) -> str:
     return _page("Apply reviews", "".join(body))
 
 
+def render_apply_dry_run(scope: dict[str, Any], dry: dict[str, Any]) -> str:
+    """Step-1 apply page (ADR-0040): the dry-run mutation preview. Apply is offered ONLY when the
+    preview is clean (`status == "ok"`); a blocked/failed/validation-failed preview withholds it."""
+    status = dry.get("status")
+    body = [
+        _nav(),
+        "<h1>Apply approved reviews — preview</h1>",
+        f"<p>Dry-run status: <code>{_h(status)}</code> "
+        "(no live state was changed by this preview).</p>",
+    ]
+    if dry.get("reason"):
+        body.append(f"<p class='banner'>blocked/failed: {_h(dry.get('reason'))} "
+                    f"{_h(dry.get('error') or '')}</p>")
+    diff = dry.get("diff") or {}
+    graph_diff = diff.get("graph") or {}
+    body.append("<h2>Graph changes</h2>")
+    body.append(_render_value({
+        "edges_added": graph_diff.get("edges_added"), "edges_removed": graph_diff.get("edges_removed"),
+        "edges_status_changed": graph_diff.get("edges_status_changed"),
+        "nodes_status_changed": graph_diff.get("nodes_status_changed"),
+        "nodes_added": graph_diff.get("nodes_added"),
+    }))
+    body.append("<h2>Manifest status changes</h2>")
+    body.append(_render_value(diff.get("manifests") or []))
+    body.append("<h2>Review file moves</h2>")
+    body.append(_render_value(diff.get("reviews") or []))
+    body.append("<h2>Wiki page diffs</h2>")
+    for page in diff.get("wiki") or []:
+        body.append(f"<h3>{_h(page.get('path'))}</h3><pre>{_h(page.get('unified_diff'))}</pre>")
+    body.append("<h2>Per-item provenance <small>(best-effort; the diff above is authoritative)</small></h2>")
+    body.append(_render_value(dry.get("items") or []))
+    body.append("<h2>Not appliable</h2>")
+    body.append(_render_value(dry.get("not_appliable") or []))
+    body.append("<h2>Validators (would pass?)</h2>")
+    body.append(_render_value(dry.get("validators") or {}))
+    if dry.get("warnings"):
+        body.append(f"<p class='banner'>warnings: {_render_value(dry['warnings'])}</p>")
+
+    if status == "ok":
+        body.append(
+            "<form method='post' action='/ui/reviews/apply'>"
+            "<button type='submit'>Apply now</button></form>")
+    else:
+        body.append("<p class='err'>Apply is withheld: the preview is not clean "
+                    f"(status <code>{_h(status)}</code>). Resolve the cause before applying.</p>")
+    return _page("Apply preview", "".join(body))
+
+
 def render_apply_result(result: dict[str, Any]) -> str:
     s = result.get("summary") or {}
     body = [

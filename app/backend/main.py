@@ -19,8 +19,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.backend import (
-    db, embeddings, graph, graph_read, keyword_index, manifests, review_html, review_read,
-    search, vector_index,
+    apply_sandbox, db, embeddings, graph, graph_read, keyword_index, manifests, review_html,
+    review_read, search, vector_index,
 )
 from app.backend.config import get_settings
 from app.backend.models import (
@@ -37,6 +37,7 @@ from app.backend.models import (
     StaleCheckResponse,
     QueryResponse,
     ReviewApplyResponse,
+    ReviewDryRunResponse,
     ReviewDecisionRequest,
     ReviewDecisionResponse,
     ReviewDetailResponse,
@@ -511,23 +512,44 @@ def _unapplied_by_type(reviews_dir: Path) -> list[dict[str, Any]]:
             for t, c in sorted(counts.items())]
 
 
-@app.post("/reviews/apply", response_model=ReviewApplyResponse)
-def apply_reviews() -> dict[str, Any]:
-    """Deterministically apply approved review decisions (ADR-0035 A4/A6). Key-free, raw/-free.
+class GraphUnavailable(Exception):
+    """Raised inside ``run_apply`` when approved graph-required items wait but the graph is unavailable.
+
+    Lives inside the shared orchestration so live apply and dry-run refuse on **exactly** the same
+    condition (ADR-0040 decision 6); each endpoint maps it to its own surface (HTTP 503 vs a structured
+    `blocked` preview).
+    """
+
+
+def _open_graph_safe_at(graph_db: Path) -> Any:
+    """Open the graph at an explicit path, or None if absent/schema-mismatched (never creates it)."""
+    if not Path(graph_db).exists():
+        return None
+    conn = graph.connect(graph_db)
+    if graph.schema_version(conn) != graph.SCHEMA_VERSION:
+        conn.close()
+        return None
+    return conn
+
+
+def run_apply(st: Any) -> dict[str, Any]:
+    """The shared apply orchestration (ADR-0035 A4/A6, extracted per ADR-0040). Key-free, raw/-free.
 
     Composes the existing key-free executors — `apply_resolved_syntheses`,
     `apply_contradiction_decisions`, the scoped `apply_approved_deprecations`, and
     `promote_candidates(rebuild_index=False)` — then rebuilds `wiki/index.md` **once** and runs the full
     validator suite **once**. Non-transactional: effects are written before validation, so a validator
-    failure is reported as `status: "validation_failed"` with **HTTP 200** (never a roll back / 500).
+    failure is reported as `status: "validation_failed"` (never a roll back). Rooted entirely at the
+    given settings `st` (no globals / `cwd`) so the dry-run can run it against a sandbox copy; the
+    graph-availability gate lives here (raises `GraphUnavailable`) so both paths refuse identically.
     """
-    root = settings.root
-    reviews_dir = settings.reviews_dir
-    wiki_dir = settings.wiki_dir
+    root = st.root
+    reviews_dir = st.reviews_dir
+    wiki_dir = st.wiki_dir
     claims_dir = wiki_dir / "Claims"
     synthesis_dir = wiki_dir / "Synthesis"
-    enrichment_dir = settings.normalized_dir / "enrichment"
-    markdown_dir = settings.markdown_dir
+    enrichment_dir = st.normalized_dir / "enrichment"
+    markdown_dir = st.markdown_dir
     now = manifests.iso_now()
 
     syntheses = {"promoted": 0, "rejected": 0}
@@ -539,7 +561,7 @@ def apply_reviews() -> dict[str, Any]:
     # Safe open: None on absent OR schema-mismatch (archive doesn't need the graph, so an unrelated graph
     # problem must not block an archive-only apply). The graph executors + promote run only when the graph
     # is available; 503 only when graph-*required* items are waiting (archive_source is not graph-required).
-    gconn = _open_graph_safe()
+    gconn = _open_graph_safe_at(st.graph_db_path)
     graph_available = gconn is not None
     if gconn is not None:
         try:
@@ -555,11 +577,10 @@ def apply_reviews() -> dict[str, Any]:
             gconn.close()
     elif _approved_graph_backed_count(reviews_dir):
         # The graph is unavailable (absent or schema-mismatched) but approved graph-required decisions
-        # are waiting — fail loudly rather than report a silent "applied" (and BEFORE promote_candidates
+        # are waiting — refuse loudly rather than report a silent "applied" (and BEFORE promote_candidates
         # would init an empty graph). archive_source is NOT graph-required, so it doesn't trigger this.
-        raise HTTPException(
-            status_code=503,
-            detail="graph index unavailable; rebuild db/graph.sqlite before applying reviews")
+        # The gate lives here so live apply (-> 503) and dry-run (-> blocked preview) refuse identically.
+        raise GraphUnavailable()
 
     if graph_available:
         promo = promote.promote_candidates(root, rebuild_index=False, record_job=False)
@@ -567,8 +588,8 @@ def apply_reviews() -> dict[str, Any]:
     # Phase 7: reversible source archive (active -> archive_candidate; ADR-0036). Own graph conn +
     # per-source page re-render; raw bytes untouched.
     archive = retention.apply_archive_sources(
-        root, manifests_dir=settings.manifests_dir, reviews_dir=reviews_dir, wiki_dir=wiki_dir,
-        graph_db=settings.graph_db_path, now=now)
+        root, manifests_dir=st.manifests_dir, reviews_dir=reviews_dir, wiki_dir=wiki_dir,
+        graph_db=st.graph_db_path, now=now)
 
     # pages_changed counts every page write: contradiction re-projections, deprecations, the synthesis
     # pages apply_resolved_syntheses re-rendered, the concept/entity pages promotion rewrote, archives.
@@ -616,6 +637,112 @@ def apply_reviews() -> dict[str, Any]:
             "unapplied": _unapplied_by_type(reviews_dir),
         },
     }
+
+
+@app.post("/reviews/apply", response_model=ReviewApplyResponse)
+def apply_reviews() -> dict[str, Any]:
+    """Apply approved review decisions on the live vault (ADR-0035). Thin wrapper over the shared
+    `run_apply` orchestration; maps the in-orchestration graph gate to HTTP 503."""
+    try:
+        return run_apply(settings)
+    except GraphUnavailable:
+        raise HTTPException(
+            status_code=503,
+            detail="graph index unavailable; rebuild db/graph.sqlite before applying reviews")
+
+
+def _approved_appliable_items(reviews_dir: Path) -> list[dict[str, Any]]:
+    """Provenance scaffold (ADR-0040): each approved item's id/type/targets + appliable flag, read from
+    `approved/` *before* run_apply moves files. `items[]` is provenance, not the authoritative diff."""
+    out: list[dict[str, Any]] = []
+    d = reviews_dir / "approved"
+    for path in sorted(d.glob("*.json")) if d.exists() else []:
+        try:
+            item = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(item, dict):
+            continue
+        subject = item.get("subject") if isinstance(item.get("subject"), dict) else {}
+        targets = [v for k, v in subject.items() if k.endswith("_id") and isinstance(v, str)]
+        out.append({"review_id": item.get("review_id", path.stem), "type": item.get("type"),
+                    "targets": targets, "appliable": item.get("type") in _APPLY_TYPES})
+    return out
+
+
+def _attribute_effects(item: dict[str, Any], diff: dict[str, Any]) -> list[str]:
+    """Best-effort domains touched by one review item (provenance only — never authoritative;
+    the durable diff is the authority). Attributes by review_id (reviews/graph) and target id."""
+    rid, targets = item["review_id"], set(item["targets"])
+    g = diff["graph"]
+    effects: set[str] = set()
+    if any(m["review_id"] == rid for m in diff["reviews"]):
+        effects.add("reviews")
+    if any(e.get("review_id") == rid
+           for e in (*g["edges_added"], *g["edges_status_changed"])):
+        effects.add("graph")
+    if any(m["source_id"] in targets for m in diff["manifests"]):
+        effects.add("manifests")
+    return sorted(effects)
+
+
+@app.post("/reviews/apply/dry-run", response_model=ReviewDryRunResponse)
+def dry_run_apply() -> dict[str, Any]:
+    """Preview what `POST /reviews/apply` would change, with **no** live writes (ADR-0040).
+
+    Builds a fully self-contained sandbox copy, runs the **same** `run_apply` against it, diffs
+    sandbox-vs-live into a semantic mutation plan, and discards the sandbox. The graph gate inside
+    `run_apply` makes this refuse on exactly the conditions live apply 503s on — surfaced here as a
+    structured `blocked` preview. A sandbox executor failure is a structured `failed` preview, never a
+    500; the UI offers Apply only when `status == "ok"`.
+    """
+    try:
+        tmp_root, sandbox = apply_sandbox.build_sandbox(settings)
+    except Exception as exc:  # noqa: BLE001 - inability to produce a preview, not a 500 (ADR-0040 #6)
+        return {
+            "status": "failed", "reason": "sandbox_build_error",
+            "error": f"{type(exc).__name__}: {exc}", "diff": None, "items": [], "not_appliable": [],
+            "validators": {"passed": False, "failures": []}, "warnings": ["sandbox_build_error"],
+        }
+    try:
+        approved = _approved_appliable_items(sandbox.reviews_dir)
+        not_appliable = [{"review_id": it["review_id"], "type": it["type"],
+                          "reason": "no_executor_in_phase_6"}
+                         for it in approved if not it["appliable"]]
+        before = apply_sandbox.snapshot_state(sandbox)
+        try:
+            result = run_apply(sandbox)
+        except GraphUnavailable:
+            blocked = [{"review_id": it["review_id"], "type": it["type"], "reason": "graph_unavailable"}
+                       for it in approved if it["appliable"] and it["type"] in _GRAPH_REQUIRED_TYPES]
+            return {
+                "status": "blocked", "reason": "graph_unavailable",
+                "diff": {"graph": apply_sandbox.empty_graph_diff(), "wiki": [], "reviews": [],
+                         "manifests": []},
+                "items": [], "not_appliable": not_appliable + blocked,
+                "validators": {"passed": False, "failures": []},
+                "warnings": ["graph_unavailable"],
+            }
+        except Exception as exc:  # noqa: BLE001 - a sandbox failure is a failed preview, not a 500
+            return {
+                "status": "failed", "reason": "executor_error", "error": f"{type(exc).__name__}: {exc}",
+                "diff": None, "items": [], "not_appliable": not_appliable,
+                "validators": {"passed": False, "failures": []}, "warnings": ["executor_error"],
+            }
+        after = apply_sandbox.snapshot_state(sandbox)
+        diff = apply_sandbox.diff_states(before, after)
+        items = [{"review_id": it["review_id"], "type": it["type"], "targets": it["targets"],
+                  "effects": _attribute_effects(it, diff)} for it in approved if it["appliable"]]
+        validators_ok = result["validators_ok"]
+        return {
+            "status": "ok" if validators_ok else "validation_failed",
+            "diff": diff, "items": items, "not_appliable": not_appliable,
+            "validators": {"passed": validators_ok, "failures": result["failed_validators"]},
+            "warnings": result["warnings"],
+            "summary": result["summary"],
+        }
+    finally:
+        apply_sandbox.cleanup_sandbox(tmp_root)
 
 
 # --- Phase 7 maintenance passes (detect-and-propose; ADR-0036) -------------
@@ -686,9 +813,11 @@ def ui_review_queue(
 
 @app.get("/ui/reviews/apply", response_class=HTMLResponse)
 def ui_apply_confirm() -> HTMLResponse:
-    """Two-step apply, step 1: a read-only scope-count confirm page (not a dry-run; ADR-0035 A8)."""
+    """Two-step apply, step 1: the dry-run mutation preview (ADR-0040). Renders the semantic diff and
+    offers Apply only when the preview is clean (`status == "ok"`)."""
     scope = review_read.apply_scope_counts(settings.reviews_dir)
-    return HTMLResponse(review_html.render_apply_confirm(scope))
+    dry = dry_run_apply()
+    return HTMLResponse(review_html.render_apply_dry_run(scope, dry))
 
 
 @app.post("/ui/reviews/apply", response_class=HTMLResponse)

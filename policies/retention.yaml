@@ -7,8 +7,10 @@ raw_files:
   older_than_years_archive_candidate: 3
   archive_status: archive_candidate
   backup: false                 # raw bytes excluded from scripts/backup.py by default (ADR-0039)
-  backup_opt_in_env: BACKUP_INCLUDE_RAW  # set truthy to include raw/{permanent,ephemeral,assets,transcripts}/
-  # raw/manifests/ is always backed up (source catalog); raw/inbox/ never (transient staging). ADR-0039.
+  backup_opt_in_env: BACKUP_INCLUDE_RAW  # set truthy to include the manifest-catalogued raw bytes
+  # Inclusion is manifest-driven (ADR-0039): relative_raw_path + every occurrences[].relative_path,
+  # wherever they live under raw/ incl. raw/inbox/ (intake never moves sources out of inbox; ADR-0007).
+  # raw/manifests/ is always backed up; un-manifested staging files are not. NOT a subdir allowlist.
 wiki_pages:
   auto_delete: false
   deprecation_requires_review: true

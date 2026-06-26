@@ -515,3 +515,20 @@ class ReviewApplyResponse(BaseModel):
     failed_validators: list[FailedValidator] = []
     warnings: list[str] = []  # non-fatal post-apply issues, e.g. "index_rebuild_failed"
     summary: dict[str, Any]
+
+
+class ReviewDryRunResponse(BaseModel):
+    # POST /reviews/apply/dry-run (ADR-0040): apply-on-a-copy preview, no live writes. `status` is
+    # "ok" (clean), "validation_failed" (sandbox validators would fail), "blocked" (graph-required items
+    # wait + graph down — mirrors live 503), or "failed" (sandbox build/executor error). `diff` is the
+    # domain-grouped semantic mutation plan (null on failed); `items` is best-effort provenance, NOT
+    # authoritative; `not_appliable` lists record-only/blocked types with a reason.
+    status: str
+    reason: str | None = None          # blocked/failed cause, e.g. "graph_unavailable"
+    error: str | None = None           # diagnostics for status == "failed"
+    diff: dict[str, Any] | None = None
+    items: list[dict[str, Any]] = []
+    not_appliable: list[dict[str, Any]] = []
+    validators: dict[str, Any] = {}
+    warnings: list[str] = []
+    summary: dict[str, Any] | None = None
