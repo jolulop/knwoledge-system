@@ -108,6 +108,22 @@ def test_normalization_apply_when_only_review_status_off(tmp_path):
     assert fm["review_status"] == "approved"
 
 
+def test_graph_only_mirror_update_succeeds_without_page_change(tmp_path):
+    # Regression (ADR-0041 shared recompose seam): page is already canonical (deprecated_candidate +
+    # approved) but the graph node-status mirror is stale (still active). recompose returns "unchanged"
+    # (no page write) yet DOES flip the graph -> must succeed, update the graph, report no skip, and add
+    # no changed_pages.
+    conn = _graph(tmp_path)
+    _write_concept(tmp_path, conn, node_status="deprecated_candidate", review_status="approved")
+    graph.upsert_node(conn, node_id="cpt_x", node_type="concept", slug="thing", status="active")  # stale
+    _approve(tmp_path, node_id="cpt_x", page="Concepts/thing.md", node_type="concept")
+    res = _apply(tmp_path, conn)
+    assert res["skipped"] == []                  # not recorded as a skip
+    assert res["changed_pages"] == []            # page already canonical -> no page write
+    assert res["applied"] == 1 and res["graph_changed"] is True
+    assert graph.get_node(conn, "cpt_x")["status"] == "deprecated_candidate"  # mirror updated
+
+
 def test_legacy_missing_context_node_type_absorbed_not_skipped(tmp_path):
     # an already-effected claim deprecation filed WITHOUT context.node_type (legacy supersede) is
     # absorbed as a no-op via page-dir inference, never skipped with a missing-context reason

@@ -498,6 +498,19 @@ def render_concept_page(node: dict[str, Any], *, review_status: str | None = Non
         "",
         *mentioned,
         "",
+    ]
+    # Body-only `## Duplicates` projection (ADR-0041): rendered ONLY when the node has ≥1 active
+    # `duplicates` edge; omitted otherwise (no placeholder), like the Claim Contradicting-Claims section.
+    # Follows the active edge regardless of either node's lifecycle status; human-navigation only.
+    duplicates = node.get("duplicates") or []
+    if duplicates:
+        body += [
+            "## Duplicates",
+            "",
+            *(f"- [[{NODE_DIR[d['node_type']]}/{d['slug']}]]" for d in duplicates),
+            "",
+        ]
+    body += [
         "## Notes",
         "",
     ]

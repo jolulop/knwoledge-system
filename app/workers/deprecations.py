@@ -134,11 +134,16 @@ def apply_approved_deprecations(
 
         outcome = _deprecate_page(gconn, node_type, nid, wiki_dir=wiki_dir, claims_dir=claims_dir,
                                   reviews_dir=reviews_dir, markdown_dir=markdown_dir, now=now)
-        ok = outcome in _CLAIM_SUCCESS if node_type == "claim" else outcome == "written"
+        # A semantic (concept/entity) recompose returns "unchanged" when the page was already in
+        # canonical form but the graph node-status mirror was stale (ADR-0041): still a SUCCESS — the
+        # mirror ran — it just wrote no page. Treat it as ok; only a real "written" counts a changed page.
+        ok = (outcome in _CLAIM_SUCCESS if node_type == "claim"
+              else outcome in ("written", "unchanged"))
         if not ok:
             skipped.append({"review_id": rid, "reason": outcome})
             continue
-        changed_pages.append(canonical_page)
+        if outcome != "unchanged":
+            changed_pages.append(canonical_page)
         if page_deprecated and graph_deprecated:
             normalized += 1  # page+graph were already deprecated; only review_status needed fixing
         else:

@@ -341,6 +341,31 @@ def incoming_active(conn: sqlite3.Connection, dst_id: str) -> list[dict[str, Any
     ))
 
 
+def active_duplicates(conn: sqlite3.Connection, node_id: str) -> list[dict[str, Any]]:
+    """Partner nodes of active `duplicates` edges touching ``node_id`` (ADR-0041).
+
+    `duplicates` is symmetric + canonical-ordered (src_id < dst_id), so a node's partner can be on
+    either side; this returns the *other* endpoint of each active edge as ``{node_id, node_type, slug}``,
+    deduped and slug-sorted, for the body-only ``## Duplicates`` page projection.
+    """
+    partner_ids: list[str] = []
+    seen: set[str] = set()
+    for e in outgoing_active(conn, node_id):
+        if e["edge_type"] == "duplicates" and e["dst_id"] not in seen:
+            seen.add(e["dst_id"])
+            partner_ids.append(e["dst_id"])
+    for e in incoming_active(conn, node_id):
+        if e["edge_type"] == "duplicates" and e["src_id"] not in seen:
+            seen.add(e["src_id"])
+            partner_ids.append(e["src_id"])
+    partners: list[dict[str, Any]] = []
+    for pid in partner_ids:
+        n = get_node(conn, pid)
+        if n is not None:
+            partners.append({"node_id": pid, "node_type": n["node_type"], "slug": n["slug"]})
+    return sorted(partners, key=lambda d: d["slug"])
+
+
 def claims_for_source(conn: sqlite3.Connection, source_id: str) -> list[str]:
     """Active claim ids derived from a source (for the Source-page Claims projection)."""
     return [

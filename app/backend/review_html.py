@@ -289,6 +289,7 @@ def render_apply_result(result: dict[str, Any]) -> str:
     body.append(_render_value({
         "syntheses": s.get("syntheses"), "promotions": s.get("promotions"),
         "contradictions": s.get("contradictions"), "deprecations": s.get("deprecations"),
+        "duplicates": s.get("duplicates"), "archives": s.get("archives"),
         "pages_changed": s.get("pages_changed"), "index_rebuilt": s.get("index_rebuilt"),
         "unapplied": s.get("unapplied"),
     }))

@@ -1,9 +1,13 @@
 # ADR-0041 — Governance executor risk classification + mark_semantic_duplicate (first non-rekeying executor)
 
-**Status:** Accepted. Design-locked 2026-06-26 via a grill gate — **design only, not yet implemented**.
-This ADR locks (A) the durable risk taxonomy that gates which governance executors are buildable now vs.
-deferred, and (B) the full contract for the first one, `mark_semantic_duplicate`. The identity-surgery
-executors (`merge_entities`, `merge_concepts`, `split_entity`) are **deferred to their own ADR**.
+**Status:** Accepted. Design-locked **and implemented** 2026-06-26. (A) the durable risk taxonomy and
+(B) the first executor, `mark_semantic_duplicate`, are implemented: `app/workers/duplicates.py`
+(`apply_marked_duplicates`, wired into `run_apply`'s graph block + `_APPLY_TYPES`), the body-only
+`## Duplicates` renderer section (`wiki_render.render_concept_page` + `graph.active_duplicates`, threaded
+through every concept-page render), the A1 projector (`review_read.preview_mark_semantic_duplicate` +
+`EXECUTOR_BY_TYPE`), and the two validator extensions (`validate_graph` canonical `duplicates`,
+`validate_projection` both-direction). Covered by `tests/test_duplicates.py`. The identity-surgery
+executors (`merge_entities`, `merge_concepts`, `split_entity`) remain **deferred to their own ADR**.
 **Extends:** ADR-0035 (Phase 6 review UI; decide/apply decoupling, executor-backed vs record-only, the A1
 per-type `ReviewPreview` projector registry), ADR-0029/0030 (graph is the SoT for edges; the `duplicates`
 edge type), ADR-0021 (stable node-id permanence; slug/title may change, id never), ADR-0040 (apply
@@ -80,15 +84,35 @@ graph-backed projection not enforced against the graph.
   canonical-ordering check to `duplicates` — a non-canonical row (`src_id >= dst_id`) is a hard error — so a
   reversed pair can't enter via a tampered DB / raw SQL and pass validation. (Generalizing the check to all
   symmetric edge types is the natural form.)
-- **Scope guards (skip with a reason, never partial-apply or crash — mirrors `apply_archive_sources`):**
-  `malformed_subject` (missing / non-list / wrong-length `node_ids`), `invalid_node_id`, `node_missing`
-  (a node absent from the graph), `type_mismatch` (cross-type forbidden — `duplicates` is SAME_TYPE),
-  `self_duplicate` (a == b). **`invalid_node_id` is defined conservatively** — an unsafe/path-like/empty id
-  (the `safe_child` runtime-guard notion, ADR-0009/0037) — **not** a stricter concept/entity-family prefix
-  grammar, which is **not** validator-fixed today (`validate_graph` defers that grammar) and must not be
-  invented here. Graph existence is the `node_missing` guard.
+- **Graph schema stays graph-wide; only the executor + projection are semantic-only.** `validate_graph`
+  keeps `duplicates` legal for **any** same-type pair (including `source`/`source`), reserved for a future
+  source-duplicate workflow — this ADR does **not** silently narrow the global graph schema (ADR-0030).
+  What is scoped here is the *executor* (`mark_semantic_duplicate` skips non-semantic families with
+  `unsupported_node_type`) and *projection* (`validate_projection` checks only the semantic-page
+  `## Duplicates` sections). A `duplicates(source, source)` edge is therefore validator-legal but has no
+  page projection until a dedicated source-duplicate ADR/executor adds one; no such edge can arise from
+  this slice (the executor refuses it before any write).
+- **Scope guards (skip with a reason, BEFORE any edge write — never partial-apply or crash; mirrors
+  `apply_archive_sources`):** `malformed_subject` (missing / non-list / wrong-length `node_ids`),
+  `invalid_node_id`, `self_duplicate` (a == b), `node_missing` (a node absent from the graph),
+  `type_mismatch` (cross-type forbidden — `duplicates` is SAME_TYPE), `unsupported_node_type` (two
+  same-type nodes of a family with **no `## Duplicates` page projection** — `source`/`query`/`synthesis`/…;
+  guarded before the upsert so an unprojectable edge can never land), and `page_missing`. **`invalid_node_id`
+  is defined conservatively** — an unsafe/path-like/empty id (the `safe_child` runtime-guard notion,
+  ADR-0009/0037) — **not** a stricter concept/entity-family prefix grammar, which is **not** validator-fixed
+  today (`validate_graph` defers that grammar) and must not be invented here. Graph existence is the
+  `node_missing` guard.
 
 **E. Lifecycle + classification.**
+- **Steady-state semantics (approved files are durable records, not a draining queue):** the executor
+  classifies each approved item as **applied** (edge absent/inactive → upsert active + re-render both
+  pages), **normalized** (edge already active but a page's `## Duplicates` projection is missing/stale →
+  re-render only the changed page(s); no graph write), or a **true no-op** (edge active AND both pages
+  already project → **no graph write, no page write, no `changed_pages`**, so a steady-state re-apply forces
+  no rebuild/reindex). `recompose_semantic_node_page` writes **only when content differs**, keeping
+  `changed_pages` honest; it also **preserves page-owned `confidence`**. Return shape:
+  `{applied, normalized, skipped, changed_pages, graph_changed: bool(applied)}` — mirrors the deprecation
+  executor.
 - **Approve →** upsert the active edge + re-render both pages. **Reject →** **no-op** (ledger/audit only):
   the review item *is* the proposal (no producer pre-creates a `proposed` edge), so there is nothing to
   transition and writing a `rejected` row would pollute the graph to record a negative.
@@ -102,11 +126,14 @@ graph-backed projection not enforced against the graph.
   per-item detail hint, NOT a mutation predictor** (the full mutation diff is the ADR-0040 dry-run's job).
   It carries: `proposed_action` ("mark duplicates(a,b)"), `node_ids` `[a, b]`, `affected_paths`
   `[pageA, pageB]` *when the graph nodes resolve to pages*, `apply.supported = true`, and read-only
-  `warnings` for `malformed_subject`, `self_duplicate`, `node_missing`, `type_mismatch`, and
-  **`already_duplicated`** (an active `duplicates(a,b)` edge already exists). It does not enumerate the
-  edge/page writes.
-- **Previewable:** the ADR-0040 dry-run shows `diff.graph.edges_added` for `duplicates(a,b)` active, **two
-  wiki unified diffs** (one per page), and the review-file move under `diff.reviews`.
+  `warnings` for `malformed_subject`, `invalid_node_id`, `self_duplicate`, `graph_unavailable`,
+  `node_missing`, `type_mismatch`, `unsupported_node_type`, and **`already_duplicated`** (an active
+  `duplicates(a,b)` edge already exists) — the same conditions the executor guards on. It does not
+  enumerate the edge/page writes.
+- **Previewable:** the ADR-0040 dry-run shows `diff.graph.edges_added` for `duplicates(a,b)` active and
+  **two wiki unified diffs** (one per page) on first apply. (Apply does **not** move approved review files —
+  executors are idempotent and re-scan `approved/` — so there is no `diff.reviews` entry; a re-apply of an
+  already-projected duplicate yields an empty diff.)
 
 **F. No detector in this slice.** Nothing currently *proposes* `mark_semantic_duplicate`; items are
 human/externally filed (the decide-complete vocabulary already includes the type). An automatic
@@ -129,11 +156,15 @@ duplicate-detection producer, and all rekeying executors (merge/split) to a dedi
 
 - Approve → active `duplicates(min,max)` edge (canonical, `asserted_by=human`), both pages gain a
   `## Duplicates` section; idempotent re-apply writes no duplicate row.
-- Reject → no graph/wiki mutation (ledger move only); `decision_apply_required` approve=True/reject=False.
-- Each scope guard skips with its reason (`malformed_subject`, `invalid_node_id`, `node_missing`,
-  `type_mismatch`, `self_duplicate`) and never partial-applies.
+- **Steady-state re-apply** (edge active + both pages project) → `applied==0`, `normalized==0`, no
+  `changed_pages` → no rebuild/reindex. A stale/missing projection → `normalized` re-renders the page.
+- **Page-owned `confidence` is preserved** across a duplicate-mark re-render.
+- Reject → no graph/wiki mutation; `decision_apply_required` approve=True/reject=False.
+- Each scope guard skips with its reason (`malformed_subject`, `invalid_node_id`, `self_duplicate`,
+  `node_missing`, `type_mismatch`, `unsupported_node_type`) and never partial-applies — in particular two
+  same-type **`source`** nodes skip with `unsupported_node_type` **before** any edge is written.
 - Graph-down apply with an approved item refuses (live 503 / dry-run `blocked`).
-- Dry-run preview shows `edges_added` + two wiki diffs + the review move; live stays byte-identical until
+- Dry-run preview shows `edges_added` + two wiki diffs (no `diff.reviews`); live stays byte-identical until
   apply.
 - The A1 single-item preview reports `apply.supported = true` with `node_ids` + both `affected_paths`, and
   surfaces `already_duplicated` when an active `duplicates(a,b)` edge already exists (read-only; no diff).

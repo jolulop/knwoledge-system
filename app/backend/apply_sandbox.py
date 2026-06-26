@@ -172,7 +172,8 @@ def snapshot_state(settings: Settings) -> StateSnapshot:
 
 
 def diff_states(before: StateSnapshot, after: StateSnapshot) -> dict[str, Any]:
-    """Semantic, deliberately-small diff: graph node lifecycle + active-edge deltas (stable ids), wiki
+    """Semantic, deliberately-small diff: graph node lifecycle + all governed edge status deltas
+    (added/removed/status-changed across {proposed,active,rejected,superseded}, stable ids), wiki
     unified text diffs (path-scoped), review workflow moves, manifest field-level status changes."""
     nodes_status_changed = []
     nodes_added = []

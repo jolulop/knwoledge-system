@@ -53,8 +53,8 @@ from app.llm.adapters import AdapterError
 from app.llm.cache import ResponseCache
 from app.llm.client import ConfigError, ParseError, build_client
 from app.workers import (
-    contradictions, deprecations, extract, intake, lint, promote, query, retention, reviews,
-    synthesis, wiki,
+    contradictions, deprecations, duplicates, extract, intake, lint, promote, query, retention,
+    reviews, synthesis, wiki,
 )
 from app.workers.wiki_render import parse_frontmatter, render_query_page
 
@@ -457,7 +457,7 @@ def defer_review(
 # approved type is reported honestly as `unapplied` (record-only / raw-touching / identity-changing).
 _APPLY_TYPES = frozenset({
     "propose_synthesis", "resolve_contradiction", "promote_candidate_node", "deprecate_wiki_page",
-    "archive_source"})
+    "archive_source", "mark_semantic_duplicate"})
 # Types whose application *requires* the graph (so a missing graph with such approved items -> 503).
 # archive_source is executor-backed but NOT graph-required — its core effect is manifest + Source page;
 # the graph source-node mirror is best-effort (skipped when the graph is absent).
@@ -556,6 +556,7 @@ def run_apply(st: Any) -> dict[str, Any]:
     contra: dict[str, Any] = {"resolution": {"acknowledged": 0, "rejected": 0,
                                              "superseded_executed": 0}, "changed_pages": []}
     deprec: dict[str, Any] = {"applied": 0, "normalized": 0, "skipped": [], "changed_pages": []}
+    dups: dict[str, Any] = {"applied": 0, "normalized": 0, "skipped": [], "changed_pages": []}
     promo = {"promoted": 0}
 
     # Safe open: None on absent OR schema-mismatch (archive doesn't need the graph, so an unrelated graph
@@ -572,6 +573,8 @@ def run_apply(st: Any) -> dict[str, Any]:
             deprec = deprecations.apply_approved_deprecations(
                 gconn, reviews_dir, wiki_dir=wiki_dir, claims_dir=claims_dir,
                 markdown_dir=markdown_dir, now=now)
+            dups = duplicates.apply_marked_duplicates(
+                gconn, reviews_dir, wiki_dir=wiki_dir, now=now)
             gconn.commit()
         finally:
             gconn.close()
@@ -594,8 +597,8 @@ def run_apply(st: Any) -> dict[str, Any]:
     # pages_changed counts every page write: contradiction re-projections, deprecations, the synthesis
     # pages apply_resolved_syntheses re-rendered, the concept/entity pages promotion rewrote, archives.
     pages_changed = (len(contra["changed_pages"]) + len(deprec["changed_pages"])
-                     + len(archive["changed_pages"]) + syntheses["promoted"] + syntheses["rejected"]
-                     + promo["promoted"])
+                     + len(archive["changed_pages"]) + len(dups["changed_pages"])
+                     + syntheses["promoted"] + syntheses["rejected"] + promo["promoted"])
     changed = bool(pages_changed or contra["resolution"]["acknowledged"]
                    or contra["resolution"]["rejected"] or contra["resolution"]["superseded_executed"])
 
@@ -631,6 +634,8 @@ def run_apply(st: Any) -> dict[str, Any]:
             },
             "deprecations": {"applied": deprec["applied"], "normalized": deprec["normalized"],
                              "skipped": deprec["skipped"]},
+            "duplicates": {"applied": dups["applied"], "normalized": dups["normalized"],
+                           "skipped": dups["skipped"]},
             "archives": {"applied": archive["applied"], "skipped": archive["skipped"]},
             "pages_changed": pages_changed,
             "index_rebuilt": index_status == "rebuilt",

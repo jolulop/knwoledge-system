@@ -121,6 +121,7 @@ def promote_candidates(
                             "id_field": _ID_FIELD[node["node_type"]], "title": meta["title"],
                             "aliases": meta["aliases"], "confidence": "low",
                             "source_ids": sources, "status": "active",
+                            "duplicates": graph.active_duplicates(gconn, nid),
                         }), encoding="utf-8")
                     graph.upsert_node(gconn, node_id=nid, node_type=node["node_type"],
                                       slug=node["slug"], status="active", now=now)

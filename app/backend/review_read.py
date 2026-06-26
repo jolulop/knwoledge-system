@@ -28,13 +28,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
 from app.backend import graph, manifests
 from app.workers.reviews import PRIORITIES, REVIEW_STATUSES
-from app.workers.wiki_render import parse_frontmatter
+from app.workers.wiki_render import NODE_DIR, parse_frontmatter
 
 # --- effect-status vocabulary (ADR-0035 A2) --------------------------------
 PENDING_APPLY = "pending_apply"   # supported, but the effect is not (yet) in the world
@@ -60,6 +61,8 @@ EXECUTOR_BY_TYPE = {
     "deprecate_wiki_page": "apply_approved_deprecations",
     # Phase 7: reversible source archive (active -> archive_candidate), ADR-0036 decision 13.
     "archive_source": "apply_archive_sources",
+    # First non-rekeying governance executor (ADR-0041): active symmetric `duplicates` annotation.
+    "mark_semantic_duplicate": "apply_marked_duplicates",
 }
 
 # Wiki subdirs the scoped deprecation executor may touch in v1 (ADR-0035 A5). A deprecate item whose
@@ -590,12 +593,67 @@ def preview_archive_source(item: dict[str, Any], *, gconn: Any, wiki_dir: Path |
     return out
 
 
+# Node families with a `## Duplicates` page projection (ADR-0041) + a conservative id-safety check
+# (unsafe/path-like/empty), matching the executor's guards (app/workers/duplicates.py).
+_DUP_NODE_TYPES = frozenset({"concept", "entity", "person", "organization", "project"})
+_SAFE_NODE_ID = re.compile(r"[A-Za-z0-9_]+")
+
+
+def preview_mark_semantic_duplicate(
+    item: dict[str, Any], *, gconn: Any, wiki_dir: Path | None
+) -> dict[str, Any]:
+    """Lightweight read-only per-item hint for mark_semantic_duplicate (ADR-0041) — NOT a mutation
+    predictor (the full diff is the ADR-0040 dry-run's job). Resolves node_ids -> both page paths when
+    possible and surfaces the same read-only warnings the executor guards on (malformed_subject/
+    invalid_node_id/self_duplicate/node_missing/type_mismatch/unsupported_node_type/already_duplicated/
+    graph_unavailable)."""
+    out = _scaffold(item)
+    subject = item.get("subject") or {}
+    ids = subject.get("node_ids") if isinstance(subject, dict) else None
+    warnings: list[str] = []
+    out["proposed_action"] = "mark duplicates"
+    if not (isinstance(ids, list) and len(ids) == 2 and all(isinstance(x, str) and x for x in ids)):
+        warnings.append("malformed_subject")
+        out["node_ids"] = [x for x in ids if isinstance(x, str)] if isinstance(ids, list) else []
+    elif not all(_SAFE_NODE_ID.fullmatch(x) for x in ids):
+        warnings.append("invalid_node_id")
+        out["node_ids"] = list(ids)
+    else:
+        a, b = sorted(ids)
+        out["node_ids"] = [a, b]
+        out["proposed_action"] = f"mark duplicates({a},{b})"
+        out["summary"] = f"Mark {a} and {b} as duplicates."
+        if a == b:
+            warnings.append("self_duplicate")
+        elif gconn is None:
+            warnings.append("graph_unavailable")
+        else:
+            na, nb = graph.get_node(gconn, a), graph.get_node(gconn, b)
+            if na is None or nb is None:
+                warnings.append("node_missing")
+            elif na["node_type"] != nb["node_type"]:
+                warnings.append("type_mismatch")
+            elif na["node_type"] not in _DUP_NODE_TYPES:
+                warnings.append("unsupported_node_type")
+            else:
+                out["affected_paths"] = [f"{NODE_DIR[na['node_type']]}/{na['slug']}.md",
+                                         f"{NODE_DIR[nb['node_type']]}/{nb['slug']}.md"]
+                if any(p["node_id"] == b for p in graph.active_duplicates(gconn, a)):
+                    warnings.append("already_duplicated")
+    effect_status = EFFECTED if "already_duplicated" in warnings else PENDING_APPLY
+    out["apply"] = _apply_supported(
+        EXECUTOR_BY_TYPE["mark_semantic_duplicate"], effect_status, warnings)
+    out["warnings"] = warnings
+    return out
+
+
 _PROJECTORS = {
     "promote_candidate_node": preview_promote_candidate_node,
     "propose_synthesis": preview_propose_synthesis,
     "resolve_contradiction": preview_resolve_contradiction,
     "deprecate_wiki_page": preview_deprecate_wiki_page,
     "archive_source": preview_archive_source,
+    "mark_semantic_duplicate": preview_mark_semantic_duplicate,
 }
 
 

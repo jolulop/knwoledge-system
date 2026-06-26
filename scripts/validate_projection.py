@@ -191,6 +191,16 @@ def _check(root: Path, db_path: Path) -> list[str]:
                     errors.append(f"{node_id}: active mention from {sid} not linked on page")
                 for sid in linked - active:
                     errors.append(f"{node_id}: linked source {sid} has no active mention edge")
+
+                # Duplicates projection (ADR-0041): the body `## Duplicates` links match active
+                # `duplicates` edges both directions. `duplicates` is SAME_TYPE, so partners share
+                # this page's subdir. (No frontmatter key — body-only, one surface to validate.)
+                linked_dup = _section_link_slugs(text, "Duplicates", subdir)
+                active_dup = {p["slug"] for p in graph.active_duplicates(conn, node_id)}
+                for slug in active_dup - linked_dup:
+                    errors.append(f"{node_id}: active duplicate {slug} not projected on page")
+                for slug in linked_dup - active_dup:
+                    errors.append(f"{node_id}: projected duplicate [[{subdir}/{slug}]] has no active edge")
     finally:
         conn.close()
     return errors
