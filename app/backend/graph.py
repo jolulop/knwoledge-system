@@ -35,7 +35,8 @@ ASSERTED_BY = frozenset({"deterministic", "llm", "human", "authored_wikilink"})
 # mirrors the page/manifest status and is validated against this set.
 NODE_STATUSES = frozenset(
     {"active", "candidate", "stale_candidate", "deprecated_candidate",
-     "archive_candidate", "archived", "delete_candidate", "deleted"}
+     "archive_candidate", "archived", "delete_candidate", "deleted",
+     "hidden"}  # ADR-0043: governance visibility-suppression status (active -> hidden)
 )
 # Endpoint-type contract per edge type (ADR-0030). `None` = unconstrained on that side;
 # SAME_TYPE_EDGES require src and dst to share a node_type. Enforced by validate_graph (not

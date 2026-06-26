@@ -30,7 +30,7 @@ _REQUIRED_FIELDS = (
 # Full lifecycle vocabulary (matches graph NODE_STATUSES + manifests.SOURCE_STATUSES, ADR-0036) so any
 # valid manifest/page status round-trips through the validator.
 _VALID_STATUS = {"active", "candidate", "stale_candidate", "deprecated_candidate", "archive_candidate",
-                 "archived", "delete_candidate", "deleted"}
+                 "archived", "delete_candidate", "deleted", "hidden"}
 _VALID_GENERATION = {"deterministic", "enriched", "human_edited"}
 _VALID_SUMMARY = {"stub", "enriched"}
 _WIKILINK = re.compile(r"\[\[([^\]]+)\]\]")

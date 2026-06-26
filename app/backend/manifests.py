@@ -243,7 +243,7 @@ def set_provenance(manifests_dir: Path, source_id: str, **fields: Any) -> dict[s
 # manifest carries it (default `active`); the Source page reads it and stays a pure projection, so a
 # wiki regen preserves it. Distinct from `retention_class` (policy category). Matches graph NODE_STATUSES.
 SOURCE_STATUSES = ("active", "stale_candidate", "deprecated_candidate", "archive_candidate",
-                   "archived", "delete_candidate", "deleted")
+                   "archived", "delete_candidate", "deleted", "hidden")
 
 
 def get_status(manifest: dict[str, Any]) -> str:

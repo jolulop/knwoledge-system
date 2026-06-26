@@ -1,6 +1,11 @@
 # ADR-0043 — hide_content governance executor: source visibility via a reversible `hidden` status
 
-**Status:** Accepted. Design-locked 2026-06-26 via a grill gate — **design only, not yet implemented**.
+**Status:** Accepted. Design-locked **and implemented** 2026-06-26. `hidden` added to
+`manifests.SOURCE_STATUSES` / `graph.NODE_STATUSES` / `policies/retention.yaml` / `validate_wiki`;
+`apply_hidden_sources` (+ a shared `_apply_source_status_transition` core that `apply_archive_sources` now
+also delegates to) in `app/workers/retention.py`; wired into `run_apply` (+ `_APPLY_TYPES`, NOT
+`_GRAPH_REQUIRED_TYPES`) + summary; `EXECUTOR_BY_TYPE` + `preview_hide_content` projector; covered by
+`tests/test_hide_content.py`.
 The second non-rekeying governance executor (after ADR-0041 `mark_semantic_duplicate`): make the
 record-only `hide_content` review type executor-backed for **sources**, suppressing a source from
 default retrieval + navigation via a new reversible `hidden` lifecycle status — **no id rewrite, no
@@ -103,6 +108,24 @@ one-directional like archive. Reversibility is **preserved** (status can be flip
   (the authority), `invalid_subject` on a non-canonical `source_id`, `effected` when already `hidden`.
 - **Previewable** via the ADR-0040 dry-run: a `diff.manifests` field-level `status: active → hidden` + the
   Source-page wiki diff; live byte-identical until apply.
+- **Stricter reindex posture (stricter than archive).** Apply runs one shared keyword/navigation reindex
+  at the end. For hide, retrieval suppression is the *point*, so a `hide_content` that applied while the
+  reindex **failed** is **not a clean apply**: the manifest/page are `hidden` (authority), but the hidden
+  source may still surface via the stale index until reindex succeeds. `run_apply` therefore returns
+  `status: "validation_failed"` (not `"applied"`) with a `hide_retrieval_suppression_not_guaranteed`
+  warning when `hidden.applied > 0` and the reindex failed — and the ADR-0040 dry-run previews it as
+  non-clean (it keys cleanliness on `run_apply`'s status, including a sandbox reindex failure). Archive
+  keeps its warning-only posture. Re-run `/jobs/reindex` to restore suppression. **Scope:** this strictness
+  is the **keyword/navigation reindex** (the suppression lever) only — a failed `wiki/index.md` *rebuild*
+  (`index_rebuild_failed`) stays **warning-only**, because `index.md` is the static browse-all catalog
+  where hidden sources stay *listed annotated `hidden`* anyway (a stale catalog is a freshness lag, not a
+  retrieval-suppression failure).
+- **Honest `graph_changed`.** The shared executor returns `graph_changed = (a graph mirror was actually
+  written)`, not `bool(applied)` — graph absent / schema-mismatched / node-missing → `applied > 0,
+  graph_changed False`. Applies to both `archive_source` and `hide_content`.
+- **Preview honesty.** `preview_hide_content` adds a `source_not_active` warning when the (approved)
+  source is already non-active (e.g. `archive_candidate`/`deprecated_candidate`), since the active-only
+  executor will no-op it — so the per-item preview doesn't overpromise an apply.
 
 **5. `index.md` — hidden Source pages stay listed, annotated `hidden` (same as archive).**
 The dynamic surfaces (`/query` retrieval, `/search` navigation, `answer_eligible`) exclude hidden by
@@ -127,8 +150,10 @@ still render on other pages (graph traversal stays visible by design, decision 1
 
 - Approve `hide_content{source_id}` → manifest `status: hidden`, Source page re-rendered `status: hidden`,
   graph source-node mirror `hidden` (when graph present); idempotent re-apply is a no-op (already hidden).
-- A hidden source is **excluded from `/query` evidence and `/search` (keyword + navigation)** by default,
-  and **`answer_eligible` is false**; an explicit `source_status=hidden` still finds it.
+- A hidden source is **excluded from `/query` evidence and `/search` (evidence + navigation + graph
+  channels)** by default; an explicit `source_status=hidden` still finds it. (For a *source* the lever is
+  the evidence/nav/graph status filter — **not** `answer_eligible`, which is already false for Source pages
+  regardless of status.)
 - `wiki/index.md` still lists the hidden Source page, annotated `hidden`; raw bytes byte-identical.
 - Scope guards skip with their reason (`invalid_source_id`, `source_missing`, `unexpected_to_status`,
   already-not-active no-op); reject is a no-op (source stays active).

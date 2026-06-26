@@ -209,7 +209,7 @@ def run_stale_check(
             conn.close()
 
 
-def _approved_archive_items(reviews_dir: Path) -> list[dict[str, Any]]:
+def _approved_items_of_type(reviews_dir: Path, review_type: str) -> list[dict[str, Any]]:
     import json
     out: list[dict[str, Any]] = []
     d = reviews_dir / "approved"
@@ -218,29 +218,33 @@ def _approved_archive_items(reviews_dir: Path) -> list[dict[str, Any]]:
             item = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        if isinstance(item, dict) and item.get("type") == "archive_source":
+        if isinstance(item, dict) and item.get("type") == review_type:
             out.append(item)
     return out
 
 
-def apply_archive_sources(
+def _apply_source_status_transition(
     root: Path,
     *,
+    review_type: str,
+    to_status: str,
     manifests_dir: Path,
     reviews_dir: Path,
     wiki_dir: Path,
     graph_db: Path,
     now: str | None = None,
 ) -> dict[str, Any]:
-    """Apply approved `archive_source` decisions: flip active → archive_candidate (ADR-0036 decision 13).
+    """Shared `active → <to_status>` source-lifecycle executor for the reversible status governance
+    types (`archive_source` → archive_candidate, ADR-0036; `hide_content` → hidden, ADR-0043).
 
     Sets the status on the **manifest** (the authority), re-renders the Source page (a projection), and
-    mirrors the graph source node. Reversible, idempotent (only an `active` source transitions), and
-    **never touches raw bytes**. No reindex here — the caller (`/reviews/apply`) owns the single reindex.
-    Returns `{applied, skipped:[{review_id, reason}], changed_pages, graph_changed}`.
+    mirrors the graph source node (best-effort). Reversible, idempotent (only an `active` source
+    transitions), and **never touches raw bytes**. No reindex here — the caller (`/reviews/apply`) owns
+    the single reindex. Returns `{applied, skipped:[{review_id, reason}], changed_pages, graph_changed}`.
     """
     now = now or iso_now()
     applied = 0
+    graph_writes = 0  # actual graph-mirror writes (honest `graph_changed`; 0 when graph absent/missing)
     skipped: list[dict[str, str]] = []
     changed_pages: list[str] = []
     # Schema-safe graph open: only mirror onto a present, matching-schema graph (a wrong-schema graph
@@ -253,14 +257,14 @@ def apply_archive_sources(
         else:
             candidate.close()
     try:
-        for item in _approved_archive_items(reviews_dir):
+        for item in _approved_items_of_type(reviews_dir, review_type):
             rid = str(item.get("review_id", ""))
-            # Scope guard (ADR-0036): only act on a well-formed, approved archive_source item. A
-            # corrupt/unexpected approved file is skipped, never mutates lifecycle state.
+            # Scope guard: only act on a well-formed, approved item. A corrupt/unexpected approved file
+            # is skipped, never mutates lifecycle state.
             if item.get("status") != "approved":
                 skipped.append({"review_id": rid, "reason": "not_approved"})
                 continue
-            if (item.get("proposal") or {}).get("to_status") != "archive_candidate":
+            if (item.get("proposal") or {}).get("to_status") != to_status:
                 skipped.append({"review_id": rid, "reason": "unexpected_to_status"})
                 continue
             sid = (item.get("subject") or {}).get("source_id")
@@ -275,22 +279,49 @@ def apply_archive_sources(
                 skipped.append({"review_id": rid, "reason": "source_missing"})
                 continue
             if manifests.get_status(m) != "active":
-                continue  # idempotent no-op: already archived (or another lifecycle state)
-            manifests.set_status(manifests_dir, sid, "archive_candidate")
+                continue  # idempotent no-op: already in a non-active lifecycle state
+            manifests.set_status(manifests_dir, sid, to_status)
             # Re-render the one Source page from the (now-updated) manifest; pure projection.
             # (generate_wiki opens its own read connection — keep our write conn idle/committed here.)
             wiki.generate_wiki(root, source_ids=[sid], rebuild_index=False, record_job=False)
             if gconn is not None and graph.get_node(gconn, sid) is not None:
                 graph.upsert_node(gconn, node_id=sid, node_type="source", slug=sid,
-                                  status="archive_candidate", now=now)
+                                  status=to_status, now=now)
                 gconn.commit()
+                graph_writes += 1
             applied += 1
             changed_pages.append(f"Sources/{sid}.md")
     finally:
         if gconn is not None:
             gconn.close()
+    # `graph_changed` is honest: True only when a graph mirror was actually written (not merely that an
+    # apply happened). Graph absent / schema-mismatched / node missing -> applied > 0, graph_changed False.
     return {"applied": applied, "skipped": skipped, "changed_pages": changed_pages,
-            "graph_changed": bool(applied)}
+            "graph_changed": graph_writes > 0}
+
+
+def apply_archive_sources(
+    root: Path, *, manifests_dir: Path, reviews_dir: Path, wiki_dir: Path, graph_db: Path,
+    now: str | None = None,
+) -> dict[str, Any]:
+    """Apply approved `archive_source` decisions: flip active → archive_candidate (ADR-0036 decision 13).
+    Thin wrapper over the shared source-status executor."""
+    return _apply_source_status_transition(
+        root, review_type="archive_source", to_status="archive_candidate",
+        manifests_dir=manifests_dir, reviews_dir=reviews_dir, wiki_dir=wiki_dir, graph_db=graph_db,
+        now=now)
+
+
+def apply_hidden_sources(
+    root: Path, *, manifests_dir: Path, reviews_dir: Path, wiki_dir: Path, graph_db: Path,
+    now: str | None = None,
+) -> dict[str, Any]:
+    """Apply approved `hide_content` decisions for sources: flip active → hidden (ADR-0043).
+    Governance suppression (distinct from retention archive); thin wrapper over the shared executor."""
+    return _apply_source_status_transition(
+        root, review_type="hide_content", to_status="hidden",
+        manifests_dir=manifests_dir, reviews_dir=reviews_dir, wiki_dir=wiki_dir, graph_db=graph_db,
+        now=now)
 
 
 def reindex_keyword(root: Path) -> bool:

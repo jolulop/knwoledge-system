@@ -63,6 +63,9 @@ EXECUTOR_BY_TYPE = {
     "archive_source": "apply_archive_sources",
     # First non-rekeying governance executor (ADR-0041): active symmetric `duplicates` annotation.
     "mark_semantic_duplicate": "apply_marked_duplicates",
+    # Governance source hide (ADR-0043): active -> hidden status transition (excluded from default
+    # retrieval + nav), reusing the archive source-status machinery.
+    "hide_content": "apply_hidden_sources",
 }
 
 # Wiki subdirs the scoped deprecation executor may touch in v1 (ADR-0035 A5). A deprecate item whose
@@ -647,6 +650,60 @@ def preview_mark_semantic_duplicate(
     return out
 
 
+def _effect_hide_content(item: dict[str, Any], wiki_dir: Path | None,
+                         manifests_dir: Path | None) -> tuple[str, list[str]]:
+    status = item.get("status")
+    if status not in ("approved", "rejected"):
+        return PENDING_APPLY, []
+    if status == "rejected":
+        return NO_EFFECT_REQUIRED, []  # a rejected hide leaves the source active; nothing to apply
+    sid = (item.get("subject") or {}).get("source_id")
+    ms = _manifest_status(manifests_dir, sid)  # manifest is the source-status authority (ADR-0043)
+    if ms is None:
+        return UNKNOWN, ["manifest_unreadable"]
+    warnings: list[str] = []
+    fm = _page_frontmatter(wiki_dir, f"Sources/{sid}.md") if sid else None
+    if fm is not None and fm.get("status") != ms:
+        warnings.append("page_manifest_drift")
+    # The executor is active-only (ADR-0043): an approved hide of an already non-active source (e.g.
+    # archive_candidate / deprecated_candidate) is a no-op skip — flag it so the preview doesn't overpromise.
+    if ms not in ("active", "hidden"):
+        warnings.append("source_not_active")
+    return (EFFECTED if ms == "hidden" else PENDING_APPLY), warnings
+
+
+def preview_hide_content(item: dict[str, Any], *, gconn: Any, wiki_dir: Path | None,
+                         manifests_dir: Path | None = None) -> dict[str, Any]:
+    """Per-item preview for hide_content (ADR-0043): governance source hide (active -> hidden). Mirrors
+    preview_archive_source (manifest is the status authority)."""
+    subj = item.get("subject") or {}
+    proposal = item.get("proposal") or {}
+    sid = subj.get("source_id")
+    out = _scaffold(item)
+    if not manifests.is_source_id(sid):
+        out["node_ids"] = []
+        out["affected_paths"] = []
+        out["proposed_status"] = "hidden"
+        out["proposed_action"] = "hide source (active -> hidden)"
+        out["summary"] = "Invalid review subject: source_id is not canonical (src_<16 hex>) — cannot apply."
+        out["current_status"] = None
+        out["invalid_subject"] = True
+        out["apply"] = {"supported": False, "executor": EXECUTOR_BY_TYPE["hide_content"],
+                        "effect_status": INVALID_SUBJECT, "effected": False,
+                        "warnings": ["invalid_source_id"]}
+        return out
+    out["node_ids"] = [sid] if sid else []
+    out["affected_paths"] = [f"Sources/{sid}.md"] if sid else []
+    out["proposed_status"] = "hidden"
+    out["proposed_action"] = "hide source (active -> hidden; excluded from default retrieval + navigation)"
+    out["summary"] = f"Hide source {sid} ({proposal.get('reason', 'governance')})."
+    out["current_status"] = _manifest_status(manifests_dir, sid)  # authority, not the page
+    effect_status, warnings = _effect_hide_content(item, wiki_dir, manifests_dir)
+    out["apply"] = _apply_supported(EXECUTOR_BY_TYPE["hide_content"], effect_status, warnings)
+    out["details"] = {"reason": proposal.get("reason")}
+    return out
+
+
 _PROJECTORS = {
     "promote_candidate_node": preview_promote_candidate_node,
     "propose_synthesis": preview_propose_synthesis,
@@ -654,6 +711,7 @@ _PROJECTORS = {
     "deprecate_wiki_page": preview_deprecate_wiki_page,
     "archive_source": preview_archive_source,
     "mark_semantic_duplicate": preview_mark_semantic_duplicate,
+    "hide_content": preview_hide_content,
 }
 
 
@@ -661,11 +719,12 @@ def project_review(item: dict[str, Any], *, gconn: Any, wiki_dir: Path | None,
                    manifests_dir: Path | None = None) -> dict[str, Any]:
     """Build the normalized preview for one item via the per-type registry (record-only fallback).
 
-    Only the archive projector needs the manifest (its status authority); the others read graph/page.
+    Only the archive + hide_content projectors need the manifest (its status authority); the others
+    read graph/page.
     """
     rtype = str(item.get("type"))
     projector = _PROJECTORS.get(rtype, record_only_preview)
-    if rtype == "archive_source":
+    if rtype in ("archive_source", "hide_content"):  # both read the manifest status authority
         return projector(item, gconn=gconn, wiki_dir=wiki_dir, manifests_dir=manifests_dir)
     return projector(item, gconn=gconn, wiki_dir=wiki_dir)
 

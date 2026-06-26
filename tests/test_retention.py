@@ -191,6 +191,17 @@ def test_apply_archive_flips_manifest_page_and_graph(tmp_path):
     assert (tmp_path / "raw" / "inbox" / "src_000000000000000a.md").read_bytes() == raw_before
 
 
+def test_apply_archive_graph_absent_graph_changed_false(tmp_path):
+    # ADR-0043 graph_changed correction (shared executor): with no graph DB, archive still applies but
+    # graph_changed is False (no mirror written) — not bool(applied).
+    _setup_rendered_source(tmp_path, "src_000000000000000a")  # no graph db
+    _approve_archive(tmp_path, "src_000000000000000a")
+    res = _apply(tmp_path)
+    assert res["applied"] == 1 and res["graph_changed"] is False
+    md = tmp_path / "raw" / "manifests"
+    assert manifests.get_status(manifests.load_manifest(md, "src_000000000000000a")) == "archive_candidate"
+
+
 def test_apply_archive_idempotent_noop_when_already_archived(tmp_path):
     _setup_rendered_source(tmp_path, "src_000000000000000a")
     _approve_archive(tmp_path, "src_000000000000000a")

@@ -290,6 +290,7 @@ def render_apply_result(result: dict[str, Any]) -> str:
         "syntheses": s.get("syntheses"), "promotions": s.get("promotions"),
         "contradictions": s.get("contradictions"), "deprecations": s.get("deprecations"),
         "duplicates": s.get("duplicates"), "archives": s.get("archives"),
+        "hidden": s.get("hidden"),
         "pages_changed": s.get("pages_changed"), "index_rebuilt": s.get("index_rebuilt"),
         "unapplied": s.get("unapplied"),
     }))

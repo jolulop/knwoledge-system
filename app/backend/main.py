@@ -462,11 +462,11 @@ def defer_review(
 # approved type is reported honestly as `unapplied` (record-only / raw-touching / identity-changing).
 _APPLY_TYPES = frozenset({
     "propose_synthesis", "resolve_contradiction", "promote_candidate_node", "deprecate_wiki_page",
-    "archive_source", "mark_semantic_duplicate"})
+    "archive_source", "mark_semantic_duplicate", "hide_content"})
 # Types whose application *requires* the graph (so a missing graph with such approved items -> 503).
-# archive_source is executor-backed but NOT graph-required — its core effect is manifest + Source page;
-# the graph source-node mirror is best-effort (skipped when the graph is absent).
-_GRAPH_REQUIRED_TYPES = _APPLY_TYPES - {"archive_source"}
+# archive_source + hide_content are executor-backed but NOT graph-required — their core effect is the
+# manifest status + Source page; the graph source-node mirror is best-effort (skipped when graph absent).
+_GRAPH_REQUIRED_TYPES = _APPLY_TYPES - {"archive_source", "hide_content"}
 
 
 def _rebuild_index_status(root: Path) -> str:
@@ -594,15 +594,21 @@ def run_apply(st: Any) -> dict[str, Any]:
         promo = promote.promote_candidates(root, rebuild_index=False, record_job=False)
 
     # Phase 7: reversible source archive (active -> archive_candidate; ADR-0036). Own graph conn +
-    # per-source page re-render; raw bytes untouched.
+    # per-source page re-render; raw bytes untouched. NOT graph-required.
     archive = retention.apply_archive_sources(
+        root, manifests_dir=st.manifests_dir, reviews_dir=reviews_dir, wiki_dir=wiki_dir,
+        graph_db=st.graph_db_path, now=now)
+    # ADR-0043: governance source hide (active -> hidden). Same reversible status-transition machinery
+    # as archive (manifest authority + page re-render + best-effort graph mirror); NOT graph-required.
+    hidden = retention.apply_hidden_sources(
         root, manifests_dir=st.manifests_dir, reviews_dir=reviews_dir, wiki_dir=wiki_dir,
         graph_db=st.graph_db_path, now=now)
 
     # pages_changed counts every page write: contradiction re-projections, deprecations, the synthesis
     # pages apply_resolved_syntheses re-rendered, the concept/entity pages promotion rewrote, archives.
     pages_changed = (len(contra["changed_pages"]) + len(deprec["changed_pages"])
-                     + len(archive["changed_pages"]) + len(dups["changed_pages"])
+                     + len(archive["changed_pages"]) + len(hidden["changed_pages"])
+                     + len(dups["changed_pages"])
                      + syntheses["promoted"] + syntheses["rejected"] + promo["promoted"])
     changed = bool(pages_changed or contra["resolution"]["acknowledged"]
                    or contra["resolution"]["rejected"] or contra["resolution"]["superseded_executed"])
@@ -613,18 +619,29 @@ def run_apply(st: Any) -> dict[str, Any]:
         warnings.append("index_rebuild_failed")
     # Refresh the keyword/navigation index so page status changes (archive, deprecation) reach the
     # retrieval filter (an archived source must drop out of default retrieval). Caller-owned reindex.
+    reindex_failed = False
     if changed:
         try:
             retention.reindex_keyword(root)
-        except Exception:  # noqa: BLE001 - a reindex failure is a warning, not an apply failure
+        except Exception:  # noqa: BLE001 - a reindex failure is a warning (except for hide, below)
             warnings.append("keyword_reindex_failed")
+            reindex_failed = True
+
+    # ADR-0043 (stricter than archive): a `hide_content` whose retrieval/nav index did NOT refresh is
+    # NOT a clean apply — the manifest/page are hidden (authority), but the hidden source may still
+    # surface via the stale keyword/navigation index until reindex succeeds. Surface it as non-clean so
+    # an operator hiding sensitive content can't read "applied" and assume suppression took effect.
+    hide_retrieval_stale = reindex_failed and hidden["applied"] > 0
+    if hide_retrieval_stale:
+        warnings.append("hide_retrieval_suppression_not_guaranteed")
 
     validators = _run_all_validators(root)
     failed = [v for v in validators if v["returncode"] != 0]
     validators_ok = not failed
+    clean = validators_ok and not hide_retrieval_stale
 
     return {
-        "status": "applied" if validators_ok else "validation_failed",
+        "status": "applied" if clean else "validation_failed",
         "applied": True,
         "validators_ok": validators_ok,
         "failed_validators": failed,
@@ -642,6 +659,7 @@ def run_apply(st: Any) -> dict[str, Any]:
             "duplicates": {"applied": dups["applied"], "normalized": dups["normalized"],
                            "skipped": dups["skipped"]},
             "archives": {"applied": archive["applied"], "skipped": archive["skipped"]},
+            "hidden": {"applied": hidden["applied"], "skipped": hidden["skipped"]},
             "pages_changed": pages_changed,
             "index_rebuilt": index_status == "rebuilt",
             "unapplied": _unapplied_by_type(reviews_dir),
@@ -743,11 +761,13 @@ def dry_run_apply() -> dict[str, Any]:
         diff = apply_sandbox.diff_states(before, after)
         items = [{"review_id": it["review_id"], "type": it["type"], "targets": it["targets"],
                   "effects": _attribute_effects(it, diff)} for it in approved if it["appliable"]]
-        validators_ok = result["validators_ok"]
+        # Overall cleanliness uses run_apply's status (validators AND the ADR-0043 hide-reindex-stale
+        # gate), not just validators_ok — so a sandbox reindex failure on a hide previews as non-clean.
+        clean = result["status"] == "applied"
         return {
-            "status": "ok" if validators_ok else "validation_failed",
+            "status": "ok" if clean else "validation_failed",
             "diff": diff, "items": items, "not_appliable": not_appliable,
-            "validators": {"passed": validators_ok, "failures": result["failed_validators"]},
+            "validators": {"passed": result["validators_ok"], "failures": result["failed_validators"]},
             "warnings": result["warnings"],
             "summary": result["summary"],
         }

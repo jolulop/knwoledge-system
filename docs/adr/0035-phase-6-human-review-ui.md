@@ -65,7 +65,9 @@ summary callouts, mirrors the graph node status, rebuilds the index, runs valida
 and **reports skipped items with reasons** rather than guessing. The deprecation is reversible
 (`deprecated_candidate`, never deleted). `change_entity_subtype` (identity re-keying, merge/split-class
 complexity) and the raw-touching types (`delete_raw_file`/`archive_raw_file`/`hide_content`, no
-producers/executors) stay **record-only / apply-deferred** in v1.
+producers/executors) stay **record-only / apply-deferred** in v1. *(Since superseded: `hide_content`
+became executor-backed for **source** hiding in ADR-0043 — `active → hidden`; `delete_raw_file` stays
+record-only forever.)*
 
 **6. Mandatory proposal preview before approve.** A human must see the item's `subject`, `proposal`,
 `context`, affected pages/nodes, and any winner/loser (contradiction) — the normalized projection of
