@@ -1,19 +1,22 @@
 # REANCHOR — session status
 
-_Last updated: 2026-06-25. **Reanchor command:** "read REANCHOR.md and reanchor". Read this
+_Last updated: 2026-06-26. **Reanchor command:** "read REANCHOR.md and reanchor". Read this
 first after an app restart, then `wiki/index.md` if working in the vault._
+
+> [!warning] This is a periodically-refreshed snapshot and can lag the live state. The authoritative
+> current status is **`git log --oneline`** + the next-work memory tracker (`memory/MEMORY.md`).
 
 ## Project
 
 Local-first **LLM Wiki** knowledge-system. Immutable `raw/` → derived `normalized/` →
 generated `wiki/` (gitignored, regenerable) → `db/` SQLite (graph, jobs, llm_cache) →
-`reviews/`, `policies/`. ADR-driven (`docs/adr/0001–0038`). See `CLAUDE.md` for the
+`reviews/`, `policies/`. ADR-driven (`docs/adr/0001–0042`). See `CLAUDE.md` for the
 critical rules and `CONTEXT.md` for the glossary.
 
 ## Where we are
 
-- **Branch:** `main`, **in sync with `origin/main`** (latest push: the ADR-0038 multi-chunk
-  design-lock). The per-slice rhythm: grill (design-lock,
+- **Branch:** `main`, **in sync with `origin/main`** (latest push: `6e4cfa8` ADR-0042 answer-quality
+  eval). The per-slice rhythm: grill (design-lock,
   docs-only) → implement (on "implement now") → test → external review (user pastes) → analyze+recommend+
   **wait** → fix → commit (user says so) → push.
 - **PHASES 1–7 COMPLETE + pushed.** 1 intake · 2 extract/normalize · 3 deterministic wiki · 3.5 LLM
@@ -83,30 +86,29 @@ critical rules and `CONTEXT.md` for the glossary.
 | 6 Human Review UI (6-1–6-4) | **Complete + pushed** (`0bdabca`) |
 | 7 Autonomous Maintenance (7-1–7-3) | **Complete + pushed** (`ad98d4c`) |
 | Post-7: security hardening · ADR-0037 lint heuristics · ADR-0038 retrieval-eval v1 + diagnostics | **Complete + pushed** (`2a0be5e`) |
-| ADR-0038 multi-chunk extension | **Design-locked, NOT implemented** (this is the next slice) |
+| ADR-0039 backup/restore durability · ADR-0040 apply dry-run preview · ADR-0041 `mark_semantic_duplicate` (first governance executor) · ADR-0042 real-vault answer-quality eval | **Complete + pushed** (`33ae4fc`/`0f5f522`/`cb48a61`/`6e4cfa8`) |
+| ADR-0038 multi-chunk extension | **Design-locked, NOT implemented** (a deferred option, not the active slice) |
 
 ## Next step
 
-**Immediate (active slice): IMPLEMENT the ADR-0038 multi-chunk extension** (design-locked in
-ADR-0038 §Multi-chunk; this thread's next step). The source-level eval is done + tuned (baseline MRR 0.968,
-discrimination 0.931; the 2 failures are `vector_prefers_irrelevant_keyword_silent` = semantic ambiguity,
-**not** fusion — so weighted RRF stays deferred). The corpus is single-chunk, so it can't yet test
-chunk-level fusion. On **"implement now"**: author ~3 `##`-section multi-chunk docs + 6–10
-`chunk_disambiguation` cases (`chunk:`/`near_miss:` phrase locators); add to `scripts/eval_retrieval.py`
-the phrase→**citation-key** resolver (read `normalized/chunks/<sid>.jsonl`; exactly-one + distinct-key
-validation, else skip+report), chunk-level scoring (reuse `score_case`/`channel_diagnostics` keyed on the
-citation key), and the `## Chunk-Level Aggregate` / `## Chunk Source Continuity` / failed-chunk-diagnostic
-report blocks (**source headline uncontaminated**); remove the brittle char-span `chunk:` stub; extend the
-coherence + plumbing tests. Then a real-embedder baseline to see if any chunk failure shows channel
-*disagreement* (the only thing that would re-open weighted RRF).
+**Immediate (active direction): the next non-rekeying governance executor — `hide_content`** (grill-phase
+first). It flips a status/visibility field (no stable-id rewrite), so the crux to grill is the visibility
+model: is hiding *retrieval* visibility, *wiki* visibility, *graph-traversal* visibility, or all three —
+and does it reuse the existing status/eligibility filter (`search.RETENTION_DEFAULT_STATUSES`, indexed-but-
+excluded like `archive`) or a new status? Previewable via the ADR-0040 apply dry-run.
 
-**Then (decision tree after the multi-chunk baseline):** chunk failure shows
-`keyword_prefers_relevant_vector_prefers_irrelevant` → **grill weighted RRF** with real evidence; else
-**try a stronger embedder** (operator experiment) or keep weighted RRF deferred.
+**Deferred options (each starts with a `grill-phase`):**
+- **ADR-0038 multi-chunk retrieval-eval extension** — design-locked, never implemented (we pivoted to
+  ADR-0039–0042). Author `##`-section multi-chunk docs + `chunk_disambiguation` cases + the
+  phrase→citation-key resolver in `scripts/eval_retrieval.py`. Re-opens weighted RRF only if a chunk
+  failure shows channel *disagreement*.
+- **Rekeying governance executors** (`merge_entities`/`merge_concepts`/`split_entity`) — own
+  identity-surgery ADR (id re-keying + backlink/citation rewrites; highest risk).
+- **Phase 8 auth/CSRF/API-worker** — deferred until a concrete non-loopback exposure requirement exists.
+- LLM-as-judge eval "analysis lane", scheduled eval runs, baseline-diff gating (all out of ADR-0042 v1).
 
-**Other deferred items (each starts with a `grill-phase`):** graph-curator duplicate/merge/split detection
-+ executors (highest risk — identity re-keying); answer-quality **`/evals/run`** real-vault corpus
-(ADR-0036 9+14); physical raw archival / `include_raw` backup; auth/CSRF for a non-loopback bind.
+**Closed since this doc last tracked them:** ADR-0039 `include_raw` backup/restore; ADR-0042 real-vault
+answer-quality `/evals/run`; ADR-0041 first governance executor (`mark_semantic_duplicate`).
 
 **Operate it** (`docs/Operations.md`): `POST /jobs/lint|stale-check|reindex` (key-free, detect-and-propose);
 review at `/ui/reviews`; apply via `POST /reviews/apply`. **LLM producers** (need `ANTHROPIC_API_KEY`):

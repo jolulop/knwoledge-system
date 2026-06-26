@@ -546,10 +546,13 @@ diverged (the spec is kept as historical intent, not rewritten):
   superseded by the file-drop intake model: drop into `raw/inbox/` then `POST /jobs/intake-scan` →
   `/jobs/extract` → `/jobs/generate-wiki` (ADR-0002/0009/0011). No HTTP upload endpoint exists (uploads
   would cross the loopback-only, no-auth boundary — ADR-0009).
-- **Eval surface** — both `POST /evals/run` and `GET /evals/results` are **deferred** (ADR-0036
-  decisions 9 + 14): `evals/golden_questions.yaml` is a fake-adapter CI fixture, not a real-vault corpus,
-  so there is no runtime eval job. Golden-question regression stays in the CI suites; a manual real-model
-  smoke recipe lives in `docs/Operations.md`. A real-vault eval corpus + these endpoints are future work.
+- **Eval surface** — `POST /evals/run` + `GET /evals/results` are **implemented** (ADR-0042, the
+  deterministic real-vault answer-quality eval that closed the ADR-0036 decision-14 deferral):
+  key-required, loopback-only, cost-gated (`confirm_cost`/`dry_run`/hard-cap), read-only over vault SoT,
+  scoring the `POST /query` cited answers against a curated **gitignored** local corpus
+  (`evals/golden_answers.local.yaml`; committed `…example.yaml` schema). `evals/golden_questions.yaml`
+  remains the fake-adapter CI fixture (structural regression, key-free). An LLM-as-judge "analysis lane",
+  scheduled runs, and baseline-diff gating are the remaining out-of-scope items.
 
 ---
 
@@ -571,8 +574,8 @@ v0.1 is successful when:
 - Deletion and entity merges cannot happen without approval.
 - Weekly lint produces actionable reports.
 - Monthly stale check identifies archive candidates.
-- At least 20 golden questions run automatically in CI. Runtime `/evals/run` is deferred
-  by ADR-0036 decision 14.
+- At least 20 golden questions run automatically in CI. Runtime `/evals/run` (real-vault
+  answer-quality eval) shipped in ADR-0042, closing the ADR-0036 decision-14 deferral.
 
 ---
 
@@ -593,9 +596,9 @@ prompt-injection surface is introduced.
 | Phase 3.5 | LLM semantic layer: enriched summaries, tags, concepts, entities, claims, synthesis, and bidirectional backlinks. Sub-phased 3.5a/3.5b/3.5c (ADR-0028). | **Complete** — 3.5a (per-source LLM summary + tags), 3.5b (grounding gate, graph store, claim/concept-entity extraction, promotion lifecycle), 3.5c (contradiction detection + supersede executor + cross-source synthesis). |
 | Phase 4 | Search and Graph. | **Complete** — 4a keyword/nav index, 4b graph read API, 4c router + GET /search, 4d LanceDB vector channel, 4e RRF hybrid fusion + retrieval evals (ADR-0032/0033). |
 | Phase 5 | Query and Cited Answering. | **Complete** — 5-1 answer-synthesis core, 5-2 POST /query, 5-3 saved Queries pages, 5-4 golden-question eval harness (ADR-0034). |
-| Phase 6 | Human Review UI. | **Design-locked** (ADR-0035): server-rendered HTML on FastAPI over a deterministic JSON review read model; type-complete record-only decision ledger; explicit deterministic `POST /reviews/apply` (synthesis/promotion/contradiction + scoped deprecation executor); loopback-only safety; key-free tests. |
-| Phase 7 | Autonomous Maintenance. | **Complete** — per ADR-0036: `/jobs/lint`, `/jobs/reindex`, `/jobs/stale-check`, reversible `archive_source`, cache-purge candidate detection, cron/no-daemon operations docs. Runtime `/evals/run` is deferred by decision 14. |
-| Phase 8 | Mobile and Hardening. | Planned |
+| Phase 6 | Human Review UI. | **Complete** (ADR-0035): server-rendered HTML over a deterministic JSON review read model; type-complete record-only decision ledger; deterministic `POST /reviews/apply` (synthesis/promotion/contradiction + scoped deprecation/archive); loopback-only; key-free tests. Extended by the **apply dry-run preview** (ADR-0040) and the first non-rekeying **governance executor** `mark_semantic_duplicate` (ADR-0041). |
+| Phase 7 | Autonomous Maintenance. | **Complete** — per ADR-0036: `/jobs/lint`, `/jobs/reindex`, `/jobs/stale-check`, reversible `archive_source`, cache-purge candidate detection, cron/no-daemon operations docs; lint quality heuristics (ADR-0037); backup/restore durability (ADR-0039). The real-vault answer-quality eval `/evals/run` shipped in **ADR-0042** (the decision-14 deferral is closed). |
+| Phase 8 | Mobile and Hardening (auth / CSRF / API-worker). | **Deferred** — no concrete non-loopback exposure requirement exists; the app is loopback-only (ADR-0009). Picked up only when an exposure path is on the table. |
 
 ---
 
