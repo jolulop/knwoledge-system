@@ -6,6 +6,9 @@ raw_files:
   archive_requires_review: true
   older_than_years_archive_candidate: 3
   archive_status: archive_candidate
+  backup: false                 # raw bytes excluded from scripts/backup.py by default (ADR-0039)
+  backup_opt_in_env: BACKUP_INCLUDE_RAW  # set truthy to include raw/{permanent,ephemeral,assets,transcripts}/
+  # raw/manifests/ is always backed up (source catalog); raw/inbox/ never (transient staging). ADR-0039.
 wiki_pages:
   auto_delete: false
   deprecation_requires_review: true

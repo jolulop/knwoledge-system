@@ -82,9 +82,13 @@ enrichment artifacts) stays `healthy`.
   test). You own the cron/timer.
 - **Vector index** is refreshed only by `scripts/reindex_vector.py` (explicit; needs a configured local
   embedding server). `/jobs/reindex` never touches it.
-- **Raw-file backup is external.** `scripts/backup.py` backs up *manifests*, not the raw bytes (they can
-  be large) — back up `raw/permanent/` yourself, or via your own storage policy. The lint **missing-raw**
-  finding is the safety net that flags a lost raw file.
+- **Raw-byte backup is opt-in.** By default `scripts/backup.py` backs up *manifests*, not the raw bytes
+  (size + the raw-privacy posture). Set `BACKUP_INCLUDE_RAW=1` to include the **manifest-catalogued** raw
+  bytes (`relative_raw_path` + every `occurrences[].relative_path`, wherever they live under `raw/`,
+  including `raw/inbox/`); each is sha256-verified against its manifest and a missing/mismatched catalogued
+  file aborts the backup (ADR-0039). Un-manifested staging is not backed up. Restore is `backup.py
+  --restore <archive>` (guarded in-place; `--force`/`--dry-run`). The lint **missing-raw** finding remains
+  the safety net that flags a lost raw file.
 - **Cache purge is manual.** The `purge_response_cache` review item is record-only — purging
   `db/llm_cache.sqlite` forfeits LLM reproducibility (ADR-0027), so the system never does it for you.
 
