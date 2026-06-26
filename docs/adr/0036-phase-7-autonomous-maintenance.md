@@ -86,7 +86,10 @@ ambiguity, a source archived but still needed as citation evidence).
   ADR-0002).
 - **`mark_semantic_duplicate`, `merge_entities`, `split_entity`, `hide_content` stay record-only** —
   produced where cheap, but identity re-keying (merge/split) and the graph-curator duplicate detector are
-  **deferred** to a later phase (too much risk for Phase 7).
+  **deferred** to a later phase (too much risk for Phase 7). *(Since superseded: `mark_semantic_duplicate`
+  became executor-backed in ADR-0041, and `hide_content` became executor-backed for **source** hiding in
+  ADR-0043 — the `active → hidden` status transition. merge/split remain deferred to an identity-surgery
+  ADR.)*
 
 **6. Retention/stale lifecycle is single-gate (collapse).** The stale-check producer files **one**
 `archive_source` review item proposing `active → archive_candidate`, carrying age/staleness evidence in
