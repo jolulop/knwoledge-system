@@ -517,6 +517,32 @@ class ReviewApplyResponse(BaseModel):
     summary: dict[str, Any]
 
 
+class EvalRunRequest(BaseModel):
+    # POST /evals/run (ADR-0042). A real-LLM, cost-bearing run is refused unless confirm_cost is true;
+    # dry_run validates the corpus with NO LLM call. limit is clamped to the config hard cap; fresh
+    # bypasses the response cache (lookup + write) for a clean provider-drift run.
+    confirm_cost: bool = False
+    dry_run: bool = False
+    fresh: bool = False
+    limit: int | None = None
+
+
+class EvalRunResponse(BaseModel):
+    # status: "completed" | "dry_run" | ... ; the body carries headline counts + per-question scores.
+    # NEVER prompt/evidence/answer prose or absolute paths (privacy, ADR-0042 decision 5).
+    status: str
+    report_path: str | None = None       # repo-relative path to the stored JSON, when a run completed
+    meta: dict[str, Any] = {}
+    summary: dict[str, Any] = {}
+    dry_run: dict[str, Any] | None = None
+
+
+class EvalResultsResponse(BaseModel):
+    # GET /evals/results: list stored runs, or one run's stored report (key-free; loopback-only posture).
+    runs: list[dict[str, Any]] = []
+    report: dict[str, Any] | None = None
+
+
 class ReviewDryRunResponse(BaseModel):
     # POST /reviews/apply/dry-run (ADR-0040): apply-on-a-copy preview, no live writes. `status` is
     # "ok" (clean), "validation_failed" (sandbox validators would fail), "blocked" (graph-required items

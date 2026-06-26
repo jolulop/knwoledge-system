@@ -1,7 +1,12 @@
 # ADR-0042 — Real-vault answer-quality eval: deterministic run/results contract
 
-**Status:** Accepted. Design-locked 2026-06-26 via a grill gate — **design only, not yet implemented**.
-This closes the deferred ADR-0036 decision-14 "answer-quality eval" (`/evals/run`) gap: a key-required,
+**Status:** Accepted. Design-locked **and implemented** 2026-06-26. The key-free core
+`app/workers/eval_answers.py` (corpus loader + deterministic scorer + runner) backs `POST /evals/run` +
+`GET /evals/results` in `app/backend/main.py` (with `_eval_query_fn` reusing the `/query` building blocks,
+`save:false`); config gained `EVAL_MAX_QUESTIONS_DEFAULT`/`_HARD_CAP` + corpus/report paths;
+`evals/golden_answers.example.yaml` (committed) + `.gitignore` for the local corpus; covered by
+`tests/test_eval_answers.py`. This closes the deferred ADR-0036 decision-14 "answer-quality eval"
+(`/evals/run`) gap: a key-required,
 loopback-only, **vault-SoT-read-only** operator workflow (it may write its own eval artifacts + the LLM
 cache, but nothing under `raw/`/`wiki/`/`normalized/`/`reviews/`/`raw/manifests/`/graph — decision 4) that
 measures the cited-answer pipeline against a curated
@@ -62,6 +67,17 @@ browser/JSON route here.
 - **Recorded metadata:** run id, timestamp, scoring version, model provider/ref/config identity,
   questions requested/run/skipped, graph schema version, `cache_mode`, and a **vault root fingerprint /
   system label — never an absolute path** (`/home/...` must not leak into a durable artifact).
+- **Controlled error posture (like `/query`):** any per-case LLM `ParseError`/`AdapterError`/`ConfigError`
+  or search `HTTPException` **aborts the whole run with a controlled `503`** (no raw detail) and writes
+  **no report** — a partial answer-quality snapshot is easy to misread, and all stored reports therefore
+  represent complete runs over the selected valid cases.
+- **Collision-safe `run_id`:** reports are durable snapshots, so a same-second second run gets a distinct
+  `-N`-suffixed `run_id`/files (never an overwrite). A negative `limit` is a `400`.
+- **Mode is curation-validated:** a case `mode` outside the evidence-producing set
+  (`auto`/`keyword`/`vector`) is a **curation skip** (reported), never a silent fallback to `auto`.
+- **Sanitized curation errors:** a non-canonical (untrusted, possibly path-like) source id is reported by
+  **field + index only** — never echoed verbatim — so it can't leak into the durable artifact; a canonical
+  but absent id (a content hash, not a path) is safe to name.
 
 **4. Read-only boundary + caching: `ResponseCache` by default; `fresh` bypasses.**
 **"Read-only" means read-only with respect to the vault source-of-truth + semantic state** — the eval
@@ -76,7 +92,9 @@ hit (free); any retrieval/prompt/grounding change, `model_ref` bump, or vault ch
 fresh answer (and a cache write), so the eval still catches the regressions it exists for. An opt-in
 `fresh: true` / `use_cache: false` **bypasses both cache lookup and write** — a clean provider-drift run
 under an identical `model_ref`, with no cache side effect (still gated by `confirm_cost` + the hard cap).
-Results record `cache_mode` + `cache_hits`/`cache_misses` (no "cache unchanged" promise).
+Results record `cache_mode` + `cache_hits`/`cache_misses` (no "cache unchanged" promise) — the cached
+path wraps the `ResponseCache` in a counting subclass so a replay (`get` returns a row) is a **hit** and a
+`get` miss (the client then generates + `put`s) is a **miss**, recorded per run.
 
 **5. Durable result artifact — scores + ids + flags + metadata only (privacy).**
 `evals/reports/` is durable (may be committed/backed-up/shared), and evidence packs + answer prose can

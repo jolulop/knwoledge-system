@@ -79,6 +79,10 @@ raw/ephemeral/*
 # not couple routine commits to a running embedder).
 evals/reports/*
 !evals/reports/reference_baseline.md
+# Real-vault answer-quality eval (ADR-0042): the local corpus is operator data — private questions +
+# real source_ids — so only the committed example schema (golden_answers.example.yaml) is tracked.
+# Run reports live under evals/reports/answers/ (already covered by evals/reports/* above).
+evals/golden_answers.local.yaml
 # Windows copy cruft that leaks into evals/corpus/ when docs are copied off NTFS.
 *.Zone.Identifier
 * - Copy.md

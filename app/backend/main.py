@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -23,6 +24,7 @@ from app.backend import (
     review_read, search, vector_index,
 )
 from app.backend.config import get_settings
+from app.backend.paths import safe_under
 from app.backend.models import (
     ChunksResponse,
     GraphNeighborhoodResponse,
@@ -36,6 +38,9 @@ from app.backend.models import (
     ReindexResponse,
     StaleCheckResponse,
     QueryResponse,
+    EvalRunRequest,
+    EvalRunResponse,
+    EvalResultsResponse,
     ReviewApplyResponse,
     ReviewDryRunResponse,
     ReviewDecisionRequest,
@@ -53,8 +58,8 @@ from app.llm.adapters import AdapterError
 from app.llm.cache import ResponseCache
 from app.llm.client import ConfigError, ParseError, build_client
 from app.workers import (
-    contradictions, deprecations, duplicates, extract, intake, lint, promote, query, retention,
-    reviews, synthesis, wiki,
+    contradictions, deprecations, duplicates, eval_answers, extract, intake, lint, promote, query,
+    retention, reviews, synthesis, wiki,
 )
 from app.workers.wiki_render import parse_frontmatter, render_query_page
 
@@ -1156,3 +1161,186 @@ def read_index() -> dict[str, str]:
         "path": str(path.relative_to(settings.root)),
         "content": path.read_text(encoding="utf-8"),
     }
+
+
+# --- Real-vault answer-quality eval (ADR-0042) ------------------------------
+# Read-only over vault SoT (raw/normalized/wiki/reviews/manifests/graph); it scores POST /query's
+# cited answers deterministically. It MAY write its own eval artifacts + populate the LLM cache on a
+# miss; it always queries with save:false. Loopback-only + key-required (503) for the run; GET stays
+# key-free. Same no-auth posture as every other route here (ADR-0009): unsafe on a non-loopback bind.
+
+
+class _CountingCache(ResponseCache):
+    """A ResponseCache that counts get hits/misses so the eval can record real cache_hits/cache_misses
+    (ADR-0042 decision 4). A `get` returning a row = a replay (hit); None = a miss (the client then
+    generates + `put`s). Behaviour is otherwise identical to ResponseCache. Note: counting is at the raw
+    `get`, so a (rare) corrupt cached row the client later rejects in schema validation still counts as a
+    hit — acceptable for v1; tighten to post-validation counting only if the metric must mean
+    'provider replay provably avoided'."""
+
+    def __init__(self, db_path: Path) -> None:
+        super().__init__(db_path)
+        self.hits = 0
+        self.misses = 0
+
+    def get(self, key: str) -> dict[str, Any] | None:
+        row = super().get(key)
+        if row is None:
+            self.misses += 1
+        else:
+            self.hits += 1
+        return row
+
+
+def _eval_query_fn(client: Any, cache: _CountingCache | None):
+    """A per-case /query runner for the eval (ADR-0042): reuses the shared retrieval + answer building
+    blocks (so it can't drift from the operator path) with an INJECTED client, save:false, default
+    retention visibility. Returns scoreable signals ONLY (ids/flags/counts) — never prose/prompt/evidence.
+    When a counting cache is present, reports per-case `cache_hit` (None when the case made no LLM call,
+    e.g. an abstention with no evidence)."""
+    statuses = search.parse_statuses(None, graph.NODE_STATUSES, search.RETENTION_DEFAULT_STATUSES)
+
+    def run(case: Any) -> dict[str, Any]:
+        h0, m0 = (cache.hits, cache.misses) if cache is not None else (0, 0)
+        result = _run_search(
+            case.question, mode=case.mode, source_id=None, page_type=None, node_type=None, language=None,
+            source_statuses=statuses, node_statuses=statuses,
+            edge_statuses=graph_read.DEFAULT_EDGE_STATUSES)
+        ans = query.answer_query(
+            question=case.question, evidence_hits=result["evidence"], client=client,
+            model_ref=settings.query_model, markdown_dir=settings.markdown_dir,
+            fallback_text=_no_source_text())
+        cache_hit: bool | None = None
+        if cache is not None:
+            if cache.hits > h0:
+                cache_hit = True
+            elif cache.misses > m0:
+                cache_hit = False
+        return {
+            "abstained": ans.abstained,
+            "cited_source_ids": [c.get("source_id") for c in ans.citations],
+            "unsourced_count": len(ans.unsourced_claims),
+            "security_rejected_count": ans.security_rejected_count,
+            "cache_hit": cache_hit,
+        }
+
+    return run
+
+
+def _vault_fingerprint() -> str:
+    """A stable, non-path-leaking label for the vault root (never an absolute path in a durable artifact)."""
+    return hashlib.sha256(str(settings.root).encode("utf-8")).hexdigest()[:16]
+
+
+def _eval_client(fresh: bool) -> tuple[Any, _CountingCache | None]:
+    """Build the (client, counting-cache) the eval run uses. Indirected so tests can inject a fake.
+    `fresh` -> a cacheless client (bypasses cache lookup + write); else a client over a counting cache."""
+    if fresh:
+        return build_client(settings), None
+    cache = _CountingCache(settings.response_cache_path)
+    return build_client(settings, cache=cache), cache
+
+
+@app.post("/evals/run", response_model=EvalRunResponse)
+def run_eval_endpoint(req: EvalRunRequest) -> dict[str, Any]:
+    """Run the real-vault answer-quality eval (ADR-0042). `dry_run` validates the corpus with NO LLM
+    call; otherwise `confirm_cost` is required (cost-bearing), an unconfigured LLM is a controlled 503,
+    and `limit` is clamped to the config hard cap. Writes a privacy-safe stamped report."""
+    corpus_path = settings.eval_corpus_path
+    if not corpus_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=(f"no eval corpus at {corpus_path.relative_to(settings.root)} — copy "
+                    f"{settings.eval_corpus_example_path.relative_to(settings.root)} and curate it"))
+    if req.limit is not None and req.limit < 0:
+        raise HTTPException(status_code=400, detail="limit must be >= 0")
+    cases = eval_answers.load_corpus(corpus_path.read_text(encoding="utf-8"))
+    known = {m["source_id"] for m in manifests.valid_manifests(settings.manifests_dir)[0]
+             if isinstance(m.get("source_id"), str)}
+    requested = req.limit if req.limit is not None else settings.eval_max_questions_default
+    limit = max(0, min(requested, settings.eval_max_questions_hard_cap))
+
+    if req.dry_run:
+        valid, skipped = [], []
+        for c in cases:
+            errs = eval_answers.validate_case(c, known)
+            (skipped.append({"id": c.id, "reasons": errs}) if errs else valid.append(c))
+        return {"status": "dry_run", "dry_run": {
+            "n_corpus": len(cases), "n_valid": len(valid), "would_run": min(len(valid), limit),
+            "limit": limit, "skipped": skipped}}
+
+    if not req.confirm_cost:
+        raise HTTPException(
+            status_code=400,
+            detail=("POST /evals/run makes real, cost-bearing LLM calls; set confirm_cost=true to "
+                    "proceed (or dry_run=true to validate the corpus with no LLM call)"))
+
+    # Controlled error posture, like /query (ADR-0042): client setup (a malformed QUERY_MODEL / unknown
+    # provider is a ConfigError) AND every per-case LLM/synthesis/search failure are mapped to a
+    # controlled 503 (no raw detail); a partial snapshot is never written.
+    try:
+        client, cache = _eval_client(req.fresh)  # fresh -> cacheless; else a counting cache
+        if not client.provider_available(settings.query_model):
+            raise HTTPException(
+                status_code=503,
+                detail=("answer-quality eval requires a configured LLM; set QUERY_MODEL and the "
+                        "provider credential (GET /evals/results stays available without one)"))
+        report = eval_answers.run_eval(
+            cases, _eval_query_fn(client, cache), limit=limit, known_source_ids=known,
+            cache_mode=("fresh" if req.fresh else "cached"))
+    except HTTPException:
+        raise  # already-controlled (provider unavailable / search-vector 4xx/503) — no raw detail
+    except (ConfigError, ParseError, AdapterError) as exc:
+        logger.warning("POST /evals/run: config/synthesis failed: %s", exc)
+        raise HTTPException(
+            status_code=503, detail="answer-quality eval is temporarily unavailable") from exc
+
+    stamp = manifests.iso_now()
+    # Collision-safe, append-only run id: two runs in the same second get distinct snapshot files.
+    settings.eval_reports_dir.mkdir(parents=True, exist_ok=True)
+    base = "run-" + ("".join(ch for ch in stamp if ch.isdigit())[:14] or "0")
+    run_id, _n = base, 1
+    while (settings.eval_reports_dir / f"{run_id}.json").exists():
+        run_id, _n = f"{base}-{_n}", _n + 1
+    meta = {
+        "run_id": run_id, "created_at": stamp, "scoring_version": eval_answers.SCORING_VERSION,
+        "model_ref": settings.query_model, "model_provider": settings.query_model.split(":", 1)[0],
+        "graph_schema_version": graph.SCHEMA_VERSION, "vault_fingerprint": _vault_fingerprint(),
+        "n_requested": requested, "n_run": report["n_run"], "n_skipped": report["n_skipped"],
+    }
+    report["meta"] = meta
+    json_path = settings.eval_reports_dir / f"{run_id}.json"
+    json_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+    (settings.eval_reports_dir / f"{run_id}.md").write_text(
+        eval_answers.render_markdown(report), encoding="utf-8")
+    return {
+        "status": "completed", "report_path": str(json_path.relative_to(settings.root)), "meta": meta,
+        "summary": {k: report[k] for k in (
+            "n_corpus", "n_valid", "n_run", "n_skipped", "n_passed", "n_failed",
+            "predicate_pass_rates", "cache_mode", "cache_hits", "cache_misses")},
+    }
+
+
+@app.get("/evals/results", response_model=EvalResultsResponse)
+def read_eval_results(run_id: str | None = None) -> dict[str, Any]:
+    """List stored eval runs, or read one run's stored report (ADR-0042). Key-free; the stored artifact
+    holds only ids/flags/scores/metadata (no source text). Loopback-only no-auth posture."""
+    d = settings.eval_reports_dir
+    if run_id is not None:
+        path = safe_under(d, d, f"{run_id}.json")  # untrusted query param: no traversal
+        if path is None:
+            raise HTTPException(status_code=400, detail="invalid run_id")
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail=f"no eval run {run_id!r}")
+        return {"report": json.loads(path.read_text(encoding="utf-8"))}
+    runs: list[dict[str, Any]] = []
+    for p in sorted(d.glob("*.json")) if d.exists() else []:
+        try:
+            rep = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        m = rep.get("meta", {})
+        runs.append({"run_id": m.get("run_id", p.stem), "created_at": m.get("created_at"),
+                     "model_ref": m.get("model_ref"), "n_run": rep.get("n_run"),
+                     "n_passed": rep.get("n_passed"), "cache_mode": rep.get("cache_mode")})
+    return {"runs": runs}

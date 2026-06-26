@@ -1,0 +1,51 @@
+# Real-vault answer-quality eval corpus — EXAMPLE / SCHEMA (ADR-0042).
+#
+# Copy this file to `evals/golden_answers.local.yaml` (gitignored) and curate it against YOUR vault.
+# The local corpus is operator data — its questions can reveal private vault topics, and the
+# source_ids are real — so it is never committed; only this fake-id example is.
+#
+# POST /evals/run scores each case DETERMINISTICALLY (no LLM judge) against the /query cited answer:
+#   - expected_source_ids  : sources the answer MUST cite (citation recall is computed over these)
+#   - forbidden_source_ids : sources the answer must NOT cite (optional)
+#   - should_abstain       : the answer must be the abstention ("No source found in vault.")
+#   - expect_answer        : a non-abstained answer is expected (defaults to `not should_abstain`)
+# Predicates: expected_cited, forbidden_not_cited, abstain_match, no_unsourced_claims,
+#             no_security_rejections, answer_when_expected. All must pass for a case to PASS.
+#
+# Parsed by the project's minimal YAML-subset loader (no PyYAML): dash-on-own-line sequences and
+# block lists only — no inline `[...]`. source_ids must be canonical `src_<16 hex>`.
+version: 1
+cases:
+  # A grounded answer that must cite a specific source.
+  -
+    id: gqa_grounded_single
+    category: grounded_answer
+    question: What does the onboarding guide say about the first week?
+    mode: auto
+    expected_source_ids:
+      - src_0123456789abcdef
+    should_abstain: false
+    expect_answer: true
+
+  # Multi-source answer + a distractor that must NOT be cited.
+  -
+    id: gqa_multi_source
+    category: multi_source
+    question: How do the two policy documents define retention?
+    mode: auto
+    expected_source_ids:
+      - src_0123456789abcdef
+      - src_fedcba9876543210
+    forbidden_source_ids:
+      - src_00000000deadbeef
+    should_abstain: false
+    expect_answer: true
+
+  # Out-of-vault question: the pipeline must abstain (no source found), citing nothing.
+  -
+    id: gqa_abstain_out_of_vault
+    category: abstention
+    question: What is the airspeed velocity of an unladen swallow?
+    mode: auto
+    should_abstain: true
+    expect_answer: false

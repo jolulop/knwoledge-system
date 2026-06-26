@@ -110,4 +110,31 @@ curl -fsS -X POST http://127.0.0.1:18000/query \
   -d '{"question": "what does the vault say about <topic>?", "mode": "auto"}' | python3 -m json.tool
 ```
 
-A real-vault eval corpus (key-required `/evals/run`) is future work.
+### Real-vault answer-quality eval (ADR-0042)
+
+`POST /evals/run` scores the cited-answer pipeline against a curated **real-vault golden Q&A corpus**
+deterministically (no LLM judge): per question it checks expected/forbidden sources cited, abstention
+match, zero unsourced/security-rejected claims, and citation recall/precision. It is **key-required,
+loopback-only, and cost-bearing**, so it is **read-only over vault SoT** (it may write its own reports +
+populate the LLM cache; it always queries with `save:false`) and **gated**: `confirm_cost:true` is required
+(else `400`), `limit` is clamped to `EVAL_MAX_QUESTIONS_HARD_CAP`, and an unconfigured LLM is a `503`.
+
+```bash
+# curate your corpus (gitignored — operator data):
+cp evals/golden_answers.example.yaml evals/golden_answers.local.yaml   # then edit with real src_ ids
+
+# validate the corpus with NO LLM call (key-free):
+curl -fsS -X POST http://127.0.0.1:18000/evals/run \
+  -H 'content-type: application/json' -d '{"dry_run": true}' | python3 -m json.tool
+
+# run it (real LLM, cost-bearing; uses the response cache unless fresh:true):
+curl -fsS -X POST http://127.0.0.1:18000/evals/run \
+  -H 'content-type: application/json' -d '{"confirm_cost": true, "limit": 20}' | python3 -m json.tool
+
+# browse stored runs (key-free):
+curl -fsS http://127.0.0.1:18000/evals/results | python3 -m json.tool
+```
+
+Durable results live under `evals/reports/answers/` (gitignored) and store **only ids/flags/scores/
+metadata** — never the prompt, evidence, answer prose, or any absolute path. The headline is a
+reproducibility-stamped snapshot, **not** a CI gate (answer generation is nondeterministic).

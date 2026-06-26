@@ -95,6 +95,13 @@ class Settings:
     embedding_dimension: int
     embedding_distance_metric: str
     response_cache_path: Path
+    # Real-vault answer-quality eval (ADR-0042). Corpus + reports are gitignored local/operator data;
+    # the example schema is committed. The run is bounded by a default + a hard ceiling.
+    eval_corpus_path: Path
+    eval_corpus_example_path: Path
+    eval_reports_dir: Path
+    eval_max_questions_default: int
+    eval_max_questions_hard_cap: int
     app_host: str
     app_port: int
     app_name: str = "knowledge-system"
@@ -152,6 +159,11 @@ def get_settings(root: Path | None = None) -> Settings:
         embedding_dimension=int(cfg("EMBEDDING_DIMENSION", "1024")),
         embedding_distance_metric=cfg("EMBEDDING_DISTANCE_METRIC", "cosine"),
         response_cache_path=resolved / "db" / "llm_cache.sqlite",
+        eval_corpus_path=resolved / "evals" / "golden_answers.local.yaml",
+        eval_corpus_example_path=resolved / "evals" / "golden_answers.example.yaml",
+        eval_reports_dir=resolved / "evals" / "reports" / "answers",
+        eval_max_questions_default=int(cfg("EVAL_MAX_QUESTIONS_DEFAULT", "20")),
+        eval_max_questions_hard_cap=int(cfg("EVAL_MAX_QUESTIONS_HARD_CAP", "50")),
         app_host=cfg("APP_HOST", "127.0.0.1"),
         app_port=int(cfg("APP_PORT", "18000")),
     )
