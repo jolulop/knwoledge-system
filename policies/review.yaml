@@ -9,7 +9,6 @@ requires_human_approval:
   - split_entity
   - merge_concepts
   - mark_semantic_duplicate
-  - promote_single_source_claim_to_concept
   - hide_content
   - promote_candidate_node      # candidate concept/entity -> active (ADR-0018, Phase 3.5b)
   - change_entity_subtype       # re-keys a node's id; gated like a merge/split

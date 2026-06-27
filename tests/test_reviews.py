@@ -17,6 +17,36 @@ def _pending(reviews_dir):
     return sorted((reviews_dir / "pending").glob("*.json"))
 
 
+_INTENDED_REVIEW_TYPES = frozenset({
+    "delete_raw_file", "archive_source", "deprecate_wiki_page", "resolve_contradiction",
+    "merge_entities", "split_entity", "merge_concepts", "mark_semantic_duplicate", "hide_content",
+    "promote_candidate_node", "change_entity_subtype", "propose_synthesis",
+    "missing_raw_source", "purge_response_cache",
+})
+
+
+def test_review_vocabulary_is_the_intended_set():
+    # Pinned so a stray/removed type can't drift back in. `promote_single_source_claim_to_concept` was
+    # removed as dead vocabulary (no producer/executor); promote_candidate_node is the canonical
+    # early/manual promotion type.
+    assert reviews.REVIEW_TYPES == _INTENDED_REVIEW_TYPES
+    assert "promote_single_source_claim_to_concept" not in reviews.REVIEW_TYPES
+
+
+def test_review_policy_matches_vocabulary():
+    # policies/review.yaml::requires_human_approval must stay in lockstep with REVIEW_TYPES.
+    from app.backend.policy import load_yaml
+    policy = load_yaml((ROOT / "policies" / "review.yaml").read_text(encoding="utf-8"))
+    assert set(policy["requires_human_approval"]) == reviews.REVIEW_TYPES
+
+
+def test_create_review_item_rejects_removed_type(tmp_path):
+    with pytest.raises(ValueError):
+        reviews.create_review_item(tmp_path / "reviews",
+                                   review_type="promote_single_source_claim_to_concept",
+                                   subject={}, proposal={}, now="t")
+
+
 def test_create_review_item_is_idempotent(tmp_path):
     rdir = tmp_path / "reviews"
     rid = reviews.create_review_item(rdir, review_type="promote_candidate_node",

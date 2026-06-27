@@ -30,7 +30,8 @@ private network / sidecar behind a TLS/auth proxy) and is **not** a substitute f
 | **Stale / retention** | `POST /jobs/stale-check` | — | Stale sources → `archive_source` candidates; ephemeral past window → `delete_raw_file` (record-only); **LLM-cache** over TTL/size → `purge_response_cache` (record-only). Reports **live cache stats** every run. |
 | **Reindex** | `POST /jobs/reindex` | `scripts/rebuild_index.py` + `scripts/reindex_keyword.py` | Rebuild `wiki/index.md` + refresh the keyword index. **Never the vector index.** |
 | **Backup** | — | `scripts/backup.py` | Snapshot manifests, db (incl. graph), wiki, reviews, policies. |
-| **Apply** (human-gated) | `POST /reviews/apply` | — | Deterministically apply *approved* decisions (promotion, contradiction, synthesis, deprecation, archive). |
+| **Apply** (human-gated) | `POST /reviews/apply` | — | Deterministically apply *approved* decisions: promotion, contradiction, synthesis, deprecation, **archive** (`active→archive_candidate`), **duplicate annotation** (`mark_semantic_duplicate` → `## Duplicates`, ADR-0041), and **source hide** (`hide_content` → `active→hidden`, excluded from default retrieval/nav, ADR-0043). |
+| **Apply preview** (dry-run) | `POST /reviews/apply/dry-run` | — | Apply-on-a-copy preview (ADR-0040): runs the same executors against a throwaway sandbox and returns the semantic mutation diff (graph/wiki/reviews/manifests) **without touching live state**. `GET /ui/reviews/apply` renders it before enabling Apply. |
 
 Maintenance passes are **key-free**. Only the LLM *producers* (claims/concepts/contradictions/synthesis)
 and `POST /query` need `ANTHROPIC_API_KEY`.
