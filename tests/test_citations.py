@@ -12,7 +12,15 @@ if str(SCRIPTS) not in sys.path:
 
 import validate_citations  # noqa: E402
 
-from app.workers.citations import ground_citation, is_grounded, parse_citations
+from app.workers.citations import ground_citation, is_grounded, is_source_id, parse_citations
+
+
+def test_is_source_id_exact_match():
+    assert is_source_id("src_0123456789abcdef")
+    # exact-match boundaries: trailing newline/space/slash etc. must NOT pass (fullmatch, not `^…$`).
+    for bad in ("src_0123456789abcdef\n", "src_0123456789abcdef ", "src_0123456789abcdef/",
+                " src_0123456789abcdef", "src_0123456789ABCDEF", "not-a-source", "", None):
+        assert not is_source_id(bad), bad
 
 SID = "src_0123456789abcdef"
 MD = "The quick brown fox jumps over the lazy dog.\n"

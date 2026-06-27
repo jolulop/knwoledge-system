@@ -35,7 +35,9 @@ from app.workers.wiki_render import NODE_DIR, parse_frontmatter
 # A well-formed wiki page is exactly `<Dir>/<file>.md` — one directory segment, one filename, no path
 # separators in the name. This rejects traversal (`Claims/../../raw/...`), absolute paths, and nesting
 # before the page is ever read (ADR-0035 A5 / CLAUDE.md rule 1: apply never escapes wiki/ into raw/).
-_WIKI_PAGE_RE = re.compile(r"^[A-Za-z]+/[^/\\]+\.md$")
+# `fullmatch` + a newline-excluding char class: `^…$` + `.match()` accepts a trailing newline (`$`
+# matches before it), and `[^/\\]` alone admits embedded newlines — both undesirable for a path gate.
+_WIKI_PAGE_RE = re.compile(r"[A-Za-z]+/[^/\\\n]+\.md")
 
 # Page directory -> node type (canonical reverse of NODE_DIR; no ad-hoc singularization).
 _DIR_TO_NODE_TYPE = {dir_name: node_type for node_type, dir_name in NODE_DIR.items()}
@@ -99,7 +101,7 @@ def apply_approved_deprecations(
             skipped.append({"review_id": rid, "reason": "missing_subject"})
             continue
         # Path safety BEFORE any read: reject traversal/absolute/nested paths outright (ADR-0035 A5).
-        if not _WIKI_PAGE_RE.match(page):
+        if not _WIKI_PAGE_RE.fullmatch(page):
             skipped.append({"review_id": rid, "reason": "invalid_page_path"})
             continue
         top_dir = page.split("/", 1)[0]

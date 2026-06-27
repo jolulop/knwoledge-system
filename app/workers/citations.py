@@ -18,14 +18,15 @@ import re
 from typing import Any
 
 _WS = re.compile(r"\s+")
-_SOURCE_ID = re.compile(r"^src_[0-9a-f]{16}$")
+_SOURCE_ID = re.compile(r"src_[0-9a-f]{16}")
 _INT = re.compile(r"-?\d+$")
 
 
 def is_source_id(value: Any) -> bool:
     """True iff ``value`` is the canonical ``src_<16 hex>`` source identifier (ADR-0019/0020). The
-    single source of truth shared by citation grounding and query synthesis so the shape can't drift."""
-    return isinstance(value, str) and _SOURCE_ID.match(value) is not None
+    single source of truth shared by citation grounding and query synthesis so the shape can't drift.
+    Uses ``fullmatch`` (not ``match`` + ``^…$``, which accepts a trailing newline)."""
+    return isinstance(value, str) and _SOURCE_ID.fullmatch(value) is not None
 
 
 def _norm(text: str) -> str:

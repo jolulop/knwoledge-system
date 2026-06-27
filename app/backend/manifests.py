@@ -22,12 +22,15 @@ _CHUNK = 1 << 20  # 1 MiB streaming read for checksums
 # durable *untrusted* local input (CLAUDE.md rule 2), so a hostile/hand-edited source_id (absolute path,
 # `..`, slashes) must never reach the filesystem — every manifest path is gated on this shape. Mirrors
 # `app/workers/citations.py:_SOURCE_ID`.
-_SOURCE_ID_RE = re.compile(r"^src_[0-9a-f]{16}$")
+_SOURCE_ID_RE = re.compile(r"src_[0-9a-f]{16}")
 
 
 def is_source_id(value: Any) -> bool:
-    """True iff `value` is a canonical `src_<16 hex>` source id."""
-    return isinstance(value, str) and bool(_SOURCE_ID_RE.match(value))
+    """True iff `value` is a canonical `src_<16 hex>` source id.
+
+    Uses `fullmatch` (NOT `match` + `^…$`, which accepts a trailing newline because `$` matches before
+    it) — this gates untrusted ids before filesystem/graph use, so the whole string must be exact."""
+    return isinstance(value, str) and bool(_SOURCE_ID_RE.fullmatch(value))
 
 
 def _require_source_id(source_id: Any) -> str:

@@ -63,7 +63,11 @@ def test_empty_file_is_flagged(tmp_path):
 import pytest  # noqa: E402
 
 _BAD_IDS = ["../../etc/passwd", "src_../../x", "src_short", "src_ZZZZ012345678901",
-            "/abs/path", "src_0123456789abcdef/extra", "", "nope"]
+            "/abs/path", "src_0123456789abcdef/extra", "", "nope",
+            # exact-match boundaries: trailing newline/space/slash + leading space + uppercase hex must
+            # all be rejected (fullmatch, not `^…$`+match which accepts a trailing newline).
+            "src_0123456789abcdef\n", "src_0123456789abcdef ", "src_0123456789abcdef/",
+            " src_0123456789abcdef", "src_0123456789ABCDEF"]
 
 
 def test_is_source_id():

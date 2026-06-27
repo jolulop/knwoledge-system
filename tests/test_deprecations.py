@@ -155,6 +155,17 @@ def test_page_node_mismatch_wrong_slug_is_skipped(tmp_path):
     assert res["skipped"] == [{"review_id": "rev_d", "reason": "page_node_mismatch"}]
 
 
+def test_trailing_newline_page_is_invalid_page_path(tmp_path):
+    # `_WIKI_PAGE_RE` now uses fullmatch (not `^…$`+match), so a trailing newline in subject.page is
+    # rejected as invalid_page_path, not silently accepted.
+    conn = _graph(tmp_path)
+    _write_concept(tmp_path, conn)
+    _approve(tmp_path, node_id="cpt_x", page="Concepts/thing.md\n", node_type="concept")
+    res = _apply(tmp_path, conn)
+    assert res["skipped"] == [{"review_id": "rev_d", "reason": "invalid_page_path"}]
+    assert graph.get_node(conn, "cpt_x")["status"] == "active"  # untouched
+
+
 def test_malicious_traversal_page_is_invalid_and_never_read(tmp_path):
     # a path-traversal subject.page must be rejected before any read (CLAUDE.md rule 1, ADR-0035 A5)
     conn = _graph(tmp_path)
