@@ -167,6 +167,58 @@ def resolve_review_item(
     return True
 
 
+def reopen_review_item(
+    reviews_dir: Path,
+    review_id: str,
+    *,
+    reason: str,
+    now: str | None = None,
+) -> bool:
+    """Reopen a terminal item: move `approved/`|`rejected/` -> `pending/`, clear the decision fields + the
+    ADR-0044 `winner`, and append a sequence-suffixed reopened audit entry capturing the prior decision
+    (ADR-0045). Returns True iff it reopened this call (False if the item is not in a terminal dir).
+
+    The CALLER gates on the projector `effect_status` (only PENDING_APPLY / NO_EFFECT_REQUIRED reach here)
+    and requires a non-empty `reason`; this primitive just performs the ledger transition + the audit.
+    """
+    reviews_dir = Path(reviews_dir)
+    src: Path | None = None
+    prior_status: str | None = None
+    for decision in ("approved", "rejected"):
+        candidate = reviews_dir / decision / f"{review_id}.json"
+        if candidate.exists():
+            src, prior_status = candidate, decision
+            break
+    if src is None:
+        return False
+    now = now or iso_now()
+    item = json.loads(src.read_text(encoding="utf-8"))
+    prior: dict[str, Any] = {
+        "prior_status": prior_status,
+        "prior_decided_by": item.get("decided_by"),
+        "prior_decided_at": item.get("decided_at"),
+    }
+    if item.get("winner") is not None:
+        prior["prior_winner"] = item["winner"]
+    # Clear terminal fields + the supersede winner; back to pending (re-decidable).
+    for field in ("decided_by", "decided_at", "decision_note", "winner"):
+        item.pop(field, None)
+    item["status"] = "pending"
+    dest = reviews_dir / "pending" / f"{review_id}.json"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(json.dumps(item, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    src.unlink()
+    # Sequence-suffixed so repeated decide->reopen cycles never clobber prior reopened audit (ADR-0045).
+    audit = reviews_dir / "audit_log"
+    audit.mkdir(parents=True, exist_ok=True)
+    seq = 1 + len(list(audit.glob(f"{review_id}-reopened-*.json")))
+    (audit / f"{review_id}-reopened-{seq}.json").write_text(json.dumps({
+        "review_id": review_id, "type": item.get("type"), "event": "reopened",
+        "reopened_at": now, "reason": reason, **prior,
+    }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return True
+
+
 def defer_review_item(
     reviews_dir: Path,
     review_id: str,

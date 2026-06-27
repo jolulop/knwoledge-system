@@ -45,6 +45,8 @@ from app.backend.models import (
     ReviewDryRunResponse,
     ReviewDecisionRequest,
     ReviewDecisionResponse,
+    ReviewReopenRequest,
+    ReviewReopenResponse,
     ReviewDetailResponse,
     ReviewListResponse,
     SearchResponse,
@@ -503,6 +505,43 @@ def defer_review(
     return _record_decision(review_id, "deferred", body)
 
 
+def _reopen_decision(review_id: str, reason: str) -> dict[str, Any]:
+    """Reopen a terminal review item back to pending so it can be re-decided (ADR-0045). Shared by the
+    JSON endpoint + the UI route. Graph-aware (unlike the graph-free approve): it projects the item to
+    read the live effect_status and reopens ONLY when that proves no live effect.
+
+    404 missing; 400 blank reason; 409 if the item is not terminal, or its effect is live / unconfirmable
+    (EFFECTED / UNKNOWN / INVALID_SUBJECT / APPLY_DEFERRED -> reason code). No ledger mutation on refusal.
+    """
+    reason = (reason or "").strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail="reopen requires a non-empty reason")
+    result = review_read.get_review(
+        settings.reviews_dir, review_id, graph_db=settings.graph_db_path,
+        wiki_dir=settings.wiki_dir, manifests_dir=settings.manifests_dir)
+    if result is None or result.get("parse_error") or result.get("schema_error"):
+        raise HTTPException(status_code=404, detail=f"review not found: {review_id}")
+    status = result["item"].get("status")
+    if status not in ("approved", "rejected"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"review {review_id} is not a terminal decision (status: {status}); nothing to reopen")
+    effect_status = (result["preview"].get("apply") or {}).get("effect_status")
+    block = review_read.reopen_block_reason(effect_status)
+    if block is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"cannot reopen {review_id}: {block} (effect_status={effect_status})")
+    reopened = reviews.reopen_review_item(settings.reviews_dir, review_id, reason=reason)
+    return {"review_id": review_id, "reopened": reopened, "status": "pending"}
+
+
+@app.post("/reviews/{review_id}/reopen", response_model=ReviewReopenResponse)
+def reopen_review(review_id: str, body: ReviewReopenRequest) -> dict[str, Any]:
+    """Reopen a not-yet-applied terminal decision back to pending to be re-decided (ADR-0045)."""
+    return _reopen_decision(review_id, body.reason)
+
+
 # Review types POST /reviews/apply has a deterministic executor for (ADR-0035 A4/A5). Any other
 # approved type is reported honestly as `unapplied` (record-only / raw-touching / identity-changing).
 _APPLY_TYPES = frozenset({
@@ -944,6 +983,18 @@ def ui_review_decide(
                 review_html.render_error(400, f"unknown action: {action}"), status_code=400)
     try:
         _record_decision(review_id, decision, ReviewDecisionRequest(note=note, winner=winner))
+    except HTTPException as exc:
+        return _html_error(exc)
+    return RedirectResponse(f"/ui/reviews/{review_id}", status_code=303)
+
+
+@app.post("/ui/reviews/{review_id}/reopen", response_model=None)
+def ui_review_reopen(
+    review_id: str, reason: str = Form(""),
+) -> HTMLResponse | RedirectResponse:
+    """Reopen a terminal item from the detail form, then PRG-redirect to the item detail (ADR-0045)."""
+    try:
+        _reopen_decision(review_id, reason)
     except HTTPException as exc:
         return _html_error(exc)
     return RedirectResponse(f"/ui/reviews/{review_id}", status_code=303)

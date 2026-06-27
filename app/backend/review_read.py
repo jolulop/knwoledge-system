@@ -50,6 +50,29 @@ NO_EFFECT_REQUIRED = "no_effect_required"
 # source_id). Surfaced as a tamper signal; apply is unsupported and the UI disables approval.
 INVALID_SUBJECT = "invalid_subject"
 
+# ADR-0045 reopen gate: a terminal decision may be reopened (moved back to pending to re-decide) ONLY
+# when the projector *proves* there is no live effect to orphan — PENDING_APPLY (effect verified absent
+# in graph/wiki) or NO_EFFECT_REQUIRED (the decision owes no world change). Everything else blocks:
+# EFFECTED (live effect — that's the out-of-scope applied-undo), UNKNOWN (can't confirm — repair the
+# read model first), INVALID_SUBJECT (tampered), and APPLY_DEFERRED (a no-executor record-only type means
+# "not applied *by this system*", NOT "no effect": manual-effect types like delete_raw_file /
+# purge_response_cache run by hand outside /reviews/apply, ADR-0036, and the projector can't detect that).
+REOPENABLE_EFFECT_STATUSES = frozenset({PENDING_APPLY, NO_EFFECT_REQUIRED})
+_REOPEN_BLOCK_REASON = {
+    EFFECTED: "already_applied",
+    UNKNOWN: "effect_unknown_repair_read_model",
+    INVALID_SUBJECT: "invalid_subject",
+    APPLY_DEFERRED: "manual_effect_unknown",
+}
+
+
+def reopen_block_reason(effect_status: str | None) -> str | None:
+    """``None`` if an item with this ``effect_status`` may be reopened (ADR-0045); else a 409 reason code."""
+    if effect_status in REOPENABLE_EFFECT_STATUSES:
+        return None
+    return _REOPEN_BLOCK_REASON.get(effect_status, "not_reopenable")
+
+
 # Review types that an explicit POST /reviews/apply executor backs (decide is type-complete; apply
 # is not — ADR-0035 decisions 3-5). Maps type -> the executor name surfaced in the preview.
 EXECUTOR_BY_TYPE = {

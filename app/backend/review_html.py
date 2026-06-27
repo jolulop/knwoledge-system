@@ -15,6 +15,8 @@ from __future__ import annotations
 import html
 from typing import Any
 
+from app.backend.review_read import reopen_block_reason
+
 _STYLE = (
     "<style>"
     "body{font-family:system-ui,sans-serif;margin:2rem;max-width:60rem;color:#1a1a1a}"
@@ -129,9 +131,28 @@ def _stored_proposal(item: dict[str, Any]) -> str:
     return "<h2>Stored proposal</h2>" + _render_value(stored)
 
 
-def _decision_section(review_id: str, item: dict[str, Any], *, invalid_subject: bool = False) -> str:
+def _reopen_section(review_id: str, effect_status: str | None) -> str:
+    # ADR-0045: a terminal decision can be reopened (back to pending, re-decidable) ONLY while its effect
+    # is provably not live. The button shows only when the projector permits; otherwise the inline reason.
+    rid = _h(review_id)
+    block = reopen_block_reason(effect_status)
+    if block is not None:
+        return ("<h2>Reopen</h2>"
+                f"<p>This decision can’t be reopened (<code>{_h(block)}</code>). Reopen is only for a "
+                "decision whose effect is not yet applied; an applied effect must be reversed separately.</p>")
+    return ("<h2>Reopen</h2>"
+            "<p>Move this decision back to <em>pending</em> to re-decide. Allowed only while the effect "
+            "is not yet applied (it is now). A reason is required and recorded.</p>"
+            f"<form method='post' action='/ui/reviews/{rid}/reopen'>"
+            "<p><label>Reason: <input type='text' name='reason' size='50' required></label></p>"
+            "<button type='submit'>Reopen</button></form>")
+
+
+def _decision_section(review_id: str, item: dict[str, Any], *, invalid_subject: bool = False,
+                      effect_status: str | None = None) -> str:
     # Terminal items (approved/rejected) are immutable — show the recorded decision, not forms that
-    # the backend would 409. Forms stay for pending/deferred (deferred is non-terminal).
+    # the backend would 409. Forms stay for pending/deferred (deferred is non-terminal). A terminal item
+    # also gets the ADR-0045 reopen affordance (gated on effect_status).
     status = item.get("status")
     if status in ("approved", "rejected"):
         meta = {"decision": status, "decided_by": item.get("decided_by"),
@@ -139,7 +160,8 @@ def _decision_section(review_id: str, item: dict[str, Any], *, invalid_subject: 
         if item.get("winner"):  # ADR-0044: the recorded contradiction supersede winner
             meta["winner"] = item["winner"]
         return ("<h2>Decision (recorded)</h2>" + _render_value(meta)
-                + "<p>Effects are applied via <a href='/ui/reviews/apply'>Apply</a>.</p>")
+                + "<p>Effects are applied via <a href='/ui/reviews/apply'>Apply</a>.</p>"
+                + _reopen_section(review_id, effect_status))
     rid = _h(review_id)
     # ADR-0044: a resolve_contradiction offers winner selection — Acknowledge (both stand) /
     # Supersede A|B / Reject / Defer. Each button is one atomic action the decide handler translates.
@@ -217,7 +239,8 @@ def render_detail(result: dict[str, Any], *, review_id: str) -> str:
         "<h2>Apply state</h2>", _render_value(apply_rows),
         "<h2>Details</h2>", _render_value(preview.get("details") or {}),
         _stored_proposal(item),
-        _decision_section(review_id, item, invalid_subject=bool(preview.get("invalid_subject"))),
+        _decision_section(review_id, item, invalid_subject=bool(preview.get("invalid_subject")),
+                          effect_status=ap.get("effect_status")),
     ]
     return _page(f"Review {review_id}", "".join(body))
 

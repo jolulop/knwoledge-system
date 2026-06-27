@@ -429,6 +429,19 @@ class ReviewDecisionResponse(BaseModel):
     apply_required: bool
 
 
+class ReviewReopenRequest(BaseModel):
+    # POST /reviews/{id}/reopen body (ADR-0045). A non-empty reason is REQUIRED (it weakens a terminal
+    # human decision) — a blank/whitespace-only reason is a 400.
+    reason: str
+
+
+class ReviewReopenResponse(BaseModel):
+    # POST /reviews/{id}/reopen — moves a not-yet-applied terminal item back to pending to be re-decided.
+    review_id: str
+    reopened: bool
+    status: str
+
+
 class FailedValidator(BaseModel):
     # One validate_*.py that exited non-zero during POST /reviews/apply (ADR-0035 A6). Tails only —
     # no absolute paths are surfaced (the validators print repo-relative diagnostics).
