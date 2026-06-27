@@ -415,6 +415,9 @@ class ReviewDecisionRequest(BaseModel):
     # Optional body for the decision endpoints (Phase 6 slice 6-2). Loopback single-user, so the
     # decider is server-fixed ("human"); only an optional free-text note is accepted.
     note: str = ""
+    # ADR-0044 supersede-via-UI: on an APPROVE of a resolve_contradiction, the winning claim_id (the
+    # loser is superseded). Valid ONLY for that case — set on any other type / decision -> 400.
+    winner: str | None = None
 
 
 class ReviewDecisionResponse(BaseModel):

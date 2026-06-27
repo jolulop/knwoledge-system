@@ -117,6 +117,7 @@ def resolve_review_item(
     decision: str,
     decided_by: str = "auto",
     note: str = "",
+    winner: str | None = None,
     now: str | None = None,
 ) -> bool:
     """Resolve a pending review item to approved/rejected and append an audit-log entry.
@@ -124,9 +125,16 @@ def resolve_review_item(
     Idempotent: if the item is already in `approved/`/`rejected/` (e.g. a promotion rerun),
     it is a no-op and no duplicate audit entry is written. Returns True if it resolved this
     call, False if it was already resolved or not pending.
+
+    `winner` (ADR-0044): a contradiction supersede sub-outcome. When present it is persisted **both**
+    onto the approved item (`item["winner"]`, which `apply_resolved_contradictions` consumes) and into
+    the terminal audit entry — conditionally, so ordinary approvals/rejections are unchanged. The caller
+    validates that `winner` is valid (approve of a resolve_contradiction, in the pair, claims active).
     """
     if decision not in ("approved", "rejected"):
         raise ValueError(f"decision must be approved|rejected, got {decision!r}")
+    if winner is not None and decision != "approved":  # defensive: winner is an approve-only sub-outcome
+        raise ValueError(f"winner is only valid for an approved decision, got {decision!r}")
     reviews_dir = Path(reviews_dir)
     # Already resolved -> idempotent no-op (no duplicate audit).
     if (reviews_dir / "approved" / f"{review_id}.json").exists() or \
@@ -138,6 +146,8 @@ def resolve_review_item(
     now = now or iso_now()
     item = json.loads(src.read_text(encoding="utf-8"))
     item.update(status=decision, decided_by=decided_by, decided_at=now, decision_note=note)
+    if winner is not None:
+        item["winner"] = winner
     dest_dir = reviews_dir / decision
     dest_dir.mkdir(parents=True, exist_ok=True)
     (dest_dir / f"{review_id}.json").write_text(
@@ -145,11 +155,15 @@ def resolve_review_item(
     src.unlink()
     audit = reviews_dir / "audit_log"
     audit.mkdir(parents=True, exist_ok=True)
-    (audit / f"{review_id}-{decision}.json").write_text(json.dumps({
+    audit_entry = {
         "review_id": review_id, "type": item.get("type"), "decision": decision,
         "decided_by": decided_by, "decided_at": now, "subject": item.get("subject"),
         "note": note,
-    }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    }
+    if winner is not None:
+        audit_entry["winner"] = winner
+    (audit / f"{review_id}-{decision}.json").write_text(
+        json.dumps(audit_entry, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return True
 
 

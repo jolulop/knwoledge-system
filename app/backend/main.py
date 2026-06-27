@@ -58,8 +58,8 @@ from app.llm.adapters import AdapterError
 from app.llm.cache import ResponseCache
 from app.llm.client import ConfigError, ParseError, build_client
 from app.workers import (
-    contradictions, deprecations, duplicates, eval_answers, extract, intake, lint, promote, query,
-    retention, reviews, synthesis, wiki,
+    claims, contradictions, deprecations, duplicates, eval_answers, extract, intake, lint, promote,
+    query, retention, reviews, synthesis, wiki,
 )
 from app.workers.wiki_render import parse_frontmatter, render_query_page
 
@@ -398,6 +398,42 @@ def get_review(review_id: str) -> dict[str, Any]:
     return result
 
 
+def _validate_supersede_winner(decision: str, rtype: str, item: dict[str, Any], winner: str) -> None:
+    """Request-shape validation for a contradiction supersede winner (ADR-0044). 400 on any misuse;
+    never silently ignored. Does NOT read the graph (claims-active is a separate 409 check)."""
+    if decision != "approved":
+        raise HTTPException(status_code=400,
+                            detail="`winner` is only valid on an approve decision")
+    if rtype != "resolve_contradiction":
+        raise HTTPException(status_code=400,
+                            detail="`winner` is only valid for a resolve_contradiction item")
+    subj = item.get("subject") or {}
+    a, b = subj.get("claim_a"), subj.get("claim_b")
+    # Canonical-shape gate FIRST (untrusted ledger): a tampered subject/winner must be 400 before any
+    # page read — a non-canonical id must never be recorded or handed to the executor/filesystem.
+    if not (claims.is_claim_id(a) and claims.is_claim_id(b) and claims.is_claim_id(winner)):
+        raise HTTPException(
+            status_code=400,
+            detail="contradiction claim ids and `winner` must be canonical (clm_<16 hex>)")
+    if winner not in (a, b):
+        raise HTTPException(
+            status_code=400,
+            detail="`winner` must be one of the two contradicting claims (subject.claim_a/claim_b)")
+
+
+def _require_active_claims(item: dict[str, Any]) -> None:
+    """Both contradicting Claim pages must exist with frontmatter status `active` to supersede (ADR-0044).
+    The Claim PAGE frontmatter is the node-status authority (ADR-0022/0030) — graph-free, so this never
+    503s; graph drift after the decision is the dry-run/apply's job. 409 if a claim is missing/non-active."""
+    subj = item.get("subject") or {}
+    for cid in (subj.get("claim_a"), subj.get("claim_b")):
+        fm = review_read._page_frontmatter(settings.wiki_dir, f"Claims/{cid}.md")
+        if fm is None or fm.get("status") != "active":
+            raise HTTPException(
+                status_code=409,
+                detail=f"claim {cid} is no longer active or its page is missing — cannot supersede")
+
+
 def _record_decision(
     review_id: str, decision: str, body: ReviewDecisionRequest | None
 ) -> dict[str, Any]:
@@ -408,23 +444,32 @@ def _record_decision(
     item can be approved/rejected/deferred. Missing/corrupt item -> 404.
     """
     note = body.note if body else ""
+    winner = (body.winner if body else None) or None
     item, error = review_read.find_review(settings.reviews_dir, review_id)
     if item is None:
         raise HTTPException(status_code=404, detail=f"review not found: {review_id}")
     current = item.get("status")
     rtype = str(item.get("type"))
+    # ADR-0044: a `winner` is ONLY valid on an approve of a resolve_contradiction, naming one of the two
+    # contradicting claims. Request-shape violations are 400 (never silently ignored). The claims-active
+    # check (page-frontmatter authority, graph-free) is a 409 and runs only when actually resolving.
+    if winner is not None:
+        _validate_supersede_winner(decision, rtype, item, winner)
     if current in ("approved", "rejected"):
         if current != decision:
             raise HTTPException(
                 status_code=409,
                 detail=f"review {review_id} already decided as {current}; decisions are immutable")
-        recorded, final = False, current  # idempotent: same terminal decision re-sent
+        recorded, final = False, current  # idempotent: same terminal decision re-sent (winner unchanged)
     elif decision == "deferred":
         recorded = reviews.defer_review_item(settings.reviews_dir, review_id, note=note)
         final = "deferred"
     else:
+        if winner is not None:
+            _require_active_claims(item)  # 409 if either Claim page is missing / not active
         recorded = reviews.resolve_review_item(
-            settings.reviews_dir, review_id, decision=decision, decided_by="human", note=note)
+            settings.reviews_dir, review_id, decision=decision, decided_by="human", note=note,
+            winner=winner)
         final = decision
     return {
         "review_id": review_id,
@@ -875,13 +920,30 @@ def ui_review_detail(review_id: str) -> HTMLResponse:
 def ui_review_decide(
     review_id: str, action: str = Form(...), note: str = Form(""),
 ) -> HTMLResponse | RedirectResponse:
-    """Record a decision from the detail form, then PRG-redirect to the item detail (ADR-0035 A8)."""
-    decision = _UI_DECISIONS.get(action)
-    if decision is None:
-        return HTMLResponse(
-            review_html.render_error(400, f"unknown action: {action}"), status_code=400)
+    """Record a decision from the detail form, then PRG-redirect to the item detail (ADR-0035 A8).
+
+    ADR-0044: a resolve_contradiction's `acknowledge`/`supersede_a`/`supersede_b` actions translate to an
+    approve (+ the winning claim_id for supersede); the handler reads the item to resolve A/B -> claim_id.
+    """
+    winner: str | None = None
+    if action in ("supersede_a", "supersede_b"):
+        item, _err = review_read.find_review(settings.reviews_dir, review_id)
+        if item is None:  # route consistency: a missing review is 404, like the other decision paths
+            return HTMLResponse(
+                review_html.render_error(404, f"review not found: {review_id}"), status_code=404)
+        subj = item.get("subject") or {}
+        winner = subj.get("claim_a") if action == "supersede_a" else subj.get("claim_b")
+        if winner is None:
+            return HTMLResponse(
+                review_html.render_error(400, "no claim to supersede"), status_code=400)
+        decision = "approved"
+    else:
+        decision = _UI_DECISIONS.get("approve" if action == "acknowledge" else action)
+        if decision is None:
+            return HTMLResponse(
+                review_html.render_error(400, f"unknown action: {action}"), status_code=400)
     try:
-        _record_decision(review_id, decision, ReviewDecisionRequest(note=note))
+        _record_decision(review_id, decision, ReviewDecisionRequest(note=note, winner=winner))
     except HTTPException as exc:
         return _html_error(exc)
     return RedirectResponse(f"/ui/reviews/{review_id}", status_code=303)

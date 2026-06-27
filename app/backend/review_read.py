@@ -474,13 +474,15 @@ def preview_resolve_contradiction(
     out = _scaffold(item)
     out["node_ids"] = [x for x in (a, b) if x]
     out["affected_paths"] = [f"Claims/{x}.md" for x in (a, b) if x]
-    out["proposed_action"] = "resolve contradiction (acknowledge | supersede | reject)"
+    out["proposed_action"] = ("resolve contradiction — approve to acknowledge (both stand), "
+                              "approve with a winner to supersede (loser deprecated), or reject (ADR-0044)")
     out["summary"] = f"Contradiction between claims {a} and {b}."
     out["details"] = {
         "outcomes": proposal.get("outcomes"),
         "confidence": proposal.get("confidence"),
         "explanation": proposal.get("explanation"),
         "shared_nodes": (item.get("context") or {}).get("shared_nodes"),
+        "winner": item.get("winner"),  # ADR-0044: the recorded supersede sub-outcome (None until chosen)
     }
     effect_status, warnings = _effect_contradiction(item, gconn, wiki_dir)
     out["apply"] = _apply_supported(

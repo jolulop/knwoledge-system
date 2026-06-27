@@ -54,6 +54,20 @@ def _read_status(page_path: Path) -> str | None:
     return m.group(1) if m else None
 
 
+CLAIM_ID_RE = re.compile(r"clm_[0-9a-f]{16}")
+
+
+def is_claim_id(value: Any) -> bool:
+    """True iff `value` is a canonical `clm_<16 hex>` claim id (the shape `claim_id` produces).
+
+    The shape gate for untrusted ledger inputs (e.g. ADR-0044 supersede subject/winner) — claim ids
+    flow into filesystem paths + the graph, so a non-canonical id must be rejected, not consumed.
+    Uses `fullmatch` (NOT `match` + `^…$`, which accepts a trailing newline because `$` matches before
+    it) so the whole string must be exactly the id.
+    """
+    return isinstance(value, str) and bool(CLAIM_ID_RE.fullmatch(value))
+
+
 def claim_id(claim_text: str) -> str:
     """Content-derived, source-agnostic claim id frozen at creation (ADR-0021)."""
     norm = _WS.sub(" ", claim_text).strip()

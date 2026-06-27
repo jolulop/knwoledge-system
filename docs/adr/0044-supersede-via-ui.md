@@ -1,6 +1,12 @@
 # ADR-0044 — Supersede-via-UI: recording the contradiction winner as an approve sub-outcome
 
-**Status:** Accepted. Design-locked 2026-06-27 via a grill gate — **design only, not yet implemented**.
+**Status:** Accepted. Design-locked **and implemented** 2026-06-27. `ReviewDecisionRequest.winner` +
+the decision-time validation (`_validate_supersede_winner` 400s + `_require_active_claims` 409,
+graph-free) in `app/backend/main.py`; `resolve_review_item` gained a `winner` param persisting it to the
+approved item **and** the audit entry; `review_html._decision_section` renders the five-button set +
+the `/ui/reviews/{id}/decide` handler translates `supersede_a/b → approve{winner}`; the
+`preview_resolve_contradiction` projector wording. The supersede executor is **unchanged**. Covered by
+`tests/test_supersede_via_ui.py`.
 Closes the awkward/manual winner-selection step in the existing contradiction-supersede workflow: a human
 reviewing a `resolve_contradiction` item can pick the **winning** claim (the loser is superseded) directly
 in the review UI, recorded deterministically and applied by the **existing** executor.
@@ -49,8 +55,11 @@ an ordinary acknowledge or an error:
   today);
 - the decision is **approve** — `reject`/`defer` carrying a `winner` is a **400** (winner is meaningless
   for them);
-- `winner` ∈ the subject pair `{claim_a, claim_b}` and is **canonical** (a winner outside the pair is a
-  **400**, *not* a silent acknowledge — the executor would otherwise ignore it);
+- **canonical-shape gate FIRST (untrusted ledger):** both subject claim ids `claim_a`/`claim_b` **and**
+  `winner` must match the canonical claim id (`claims.is_claim_id`, `^clm_[0-9a-f]{16}$`) — a non-canonical
+  id is a **400 before any page read**, so a tampered subject/winner can never be recorded or handed to the
+  executor/filesystem (a non-canonical id passing pair-membership would otherwise slip a bad id through);
+- `winner` ∈ the subject pair `{claim_a, claim_b}` (else **400** — *not* a silent acknowledge);
 - **both claims pass the page-frontmatter active check** — `wiki/Claims/<claim_id>.md` must **exist** for
   both claims and each frontmatter `status` must be **`active`**, else **409** ("claim no longer active /
   missing — can't supersede"). The Claim **page frontmatter is the node-status authority** (graph nodes are

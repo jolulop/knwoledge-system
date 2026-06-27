@@ -136,9 +136,31 @@ def _decision_section(review_id: str, item: dict[str, Any], *, invalid_subject: 
     if status in ("approved", "rejected"):
         meta = {"decision": status, "decided_by": item.get("decided_by"),
                 "decided_at": item.get("decided_at"), "note": item.get("decision_note")}
+        if item.get("winner"):  # ADR-0044: the recorded contradiction supersede winner
+            meta["winner"] = item["winner"]
         return ("<h2>Decision (recorded)</h2>" + _render_value(meta)
                 + "<p>Effects are applied via <a href='/ui/reviews/apply'>Apply</a>.</p>")
     rid = _h(review_id)
+    # ADR-0044: a resolve_contradiction offers winner selection — Acknowledge (both stand) /
+    # Supersede A|B / Reject / Defer. Each button is one atomic action the decide handler translates.
+    if item.get("type") == "resolve_contradiction" and not invalid_subject:
+        subj = item.get("subject") or {}
+        a, b = _h(str(subj.get("claim_a"))), _h(str(subj.get("claim_b")))
+        actions = (("acknowledge", "Acknowledge (both claims stand)"),
+                   ("supersede_a", f"Supersede: A wins → deprecate B ({a} beats {b})"),
+                   ("supersede_b", f"Supersede: B wins → deprecate A ({b} beats {a})"),
+                   ("reject", "Reject"), ("defer", "Defer"))
+        buttons = "".join(
+            f"<button type='submit' name='action' value='{act}'>{label}</button> "
+            for act, label in actions)
+        return ("<h2>Decision</h2>"
+                "<p>Decisions are recorded only; effects are applied later via "
+                "<a href='/ui/reviews/apply'>Apply</a>.</p>"
+                "<p><strong>⚠ Supersede is terminal:</strong> the chosen winner can't be changed after "
+                "approval (the loser is deprecated). Review both sides above and choose carefully.</p>"
+                f"<form method='post' action='/ui/reviews/{rid}/decide'>"
+                "<p><label>Note (optional): <input type='text' name='note' size='50'></label></p>"
+                f"{buttons}</form>")
     # A tampered/malformed subject can never apply — disable Approve (offer only Reject/Defer) and warn.
     actions = (("reject", "Reject"), ("defer", "Defer")) if invalid_subject else \
         (("approve", "Approve"), ("reject", "Reject"), ("defer", "Defer"))
