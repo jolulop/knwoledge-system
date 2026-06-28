@@ -89,6 +89,8 @@ EXECUTOR_BY_TYPE = {
     # Governance source hide (ADR-0043): active -> hidden status transition (excluded from default
     # retrieval + nav), reusing the archive source-status machinery.
     "hide_content": "apply_hidden_sources",
+    # ADR-0046: governance semantic-page hide (active -> hidden) via the deprecation render seam.
+    "hide_semantic_page": "apply_hidden_semantic_pages",
 }
 
 # Wiki subdirs the scoped deprecation executor may touch in v1 (ADR-0035 A5). A deprecate item whose
@@ -96,6 +98,10 @@ EXECUTOR_BY_TYPE = {
 # orchestrator; Sources/Queries and any raw-touching deprecation stay record-only.
 DEPRECATION_SCOPE_DIRS = frozenset(
     {"Claims", "Concepts", "Entities", "People", "Organizations", "Projects"})
+# ADR-0046 v1: semantic-page hide covers the concept/entity family only (the single
+# recompose_semantic_node_page seam) — Claims (recompose_claim) + Synthesis are deferred fast-follows.
+HIDE_SEMANTIC_SCOPE_DIRS = frozenset(
+    {"Concepts", "Entities", "People", "Organizations", "Projects"})
 
 # Executor-backed types whose *rejection* still carries a deterministic reject-effect to apply (node
 # -> deprecated_candidate / edge -> rejected). For promote/deprecate a rejection owes no world change.
@@ -568,6 +574,64 @@ def preview_deprecate_wiki_page(
     return out
 
 
+def _effect_hide_semantic(item: dict[str, Any], gconn: Any, wiki_dir: Path | None) -> tuple[str, list[str]]:
+    # ADR-0046 (reopen-safe vs ADR-0045): EFFECTED requires page hidden + review_status approved + graph
+    # node hidden. A PARTIAL live hide (page XOR graph hidden, or both hidden but review_status lagging)
+    # must NOT be plain PENDING_APPLY — reopen treats PENDING_APPLY as "no live effect" and would orphan
+    # the already-hidden page/node — so it is UNKNOWN ("partial_hide_state"), which the reopen gate blocks.
+    # Only when NEITHER page nor graph is hidden is the hide cleanly unapplied (reopenable).
+    status = item.get("status")
+    if status not in ("approved", "rejected"):
+        return PENDING_APPLY, []
+    if status == "rejected":
+        return NO_EFFECT_REQUIRED, []  # a rejected hide leaves the page as-is; nothing to apply
+    subj = item.get("subject") or {}
+    fm = _page_frontmatter(wiki_dir, subj.get("page"))
+    if fm is None:
+        return UNKNOWN, ["page_unreadable"]
+    nid = subj.get("node_id")
+    if gconn is None:
+        return UNKNOWN, ["graph_unavailable"]
+    node = graph.get_node(gconn, nid) if nid else None
+    if node is None:
+        return UNKNOWN, ["node_missing"]
+    page_hidden = fm.get("status") == "hidden"
+    graph_hidden = node["status"] == "hidden"
+    if page_hidden and fm.get("review_status") == "approved" and graph_hidden:
+        return EFFECTED, []                          # fully live + approved
+    if page_hidden or graph_hidden:
+        return UNKNOWN, ["partial_hide_state"]       # part of the hide is live -> NOT reopen-safe
+    # Neither hidden -> cleanly unapplied (reopenable). A non-active node still warns (the executor will
+    # skip it), but reopen stays safe because no hide effect is live.
+    warnings = [] if node["status"] == "active" else ["node_not_active"]
+    return PENDING_APPLY, warnings
+
+
+def preview_hide_semantic_page(
+    item: dict[str, Any], *, gconn: Any, wiki_dir: Path | None
+) -> dict[str, Any]:
+    subj = item.get("subject") or {}
+    proposal = item.get("proposal") or {}
+    page = subj.get("page")
+    top_dir = page.split("/", 1)[0] if page else None
+    out = _scaffold(item)
+    out["node_ids"] = [subj["node_id"]] if subj.get("node_id") else []
+    out["affected_paths"] = [page] if page else []
+    out["proposed_status"] = proposal.get("to_status", "hidden")
+    out["proposed_action"] = "hide semantic page (active -> hidden)"
+    out["summary"] = f"Hide semantic page {page}."
+    fm = _page_frontmatter(wiki_dir, page)
+    out["current_status"] = fm.get("status") if fm else None
+    out["details"] = {"node_type": (item.get("context") or {}).get("node_type")}
+    if top_dir in HIDE_SEMANTIC_SCOPE_DIRS:
+        effect_status, warnings = _effect_hide_semantic(item, gconn, wiki_dir)
+        out["apply"] = _apply_supported(EXECUTOR_BY_TYPE["hide_semantic_page"], effect_status, warnings)
+    else:
+        out["apply"] = _apply_record_only(["out_of_scope_for_hide_semantic_executor"])
+        out["warnings"] = ["apply_deferred"]
+    return out
+
+
 # Per-type projection registry (ADR-0035 A1). Every executor-backed type has a dedicated projector;
 # all other (record-only) types fall through to record_only_preview, so the ledger is type-complete.
 def _effect_archive_source(item: dict[str, Any], wiki_dir: Path | None,
@@ -737,6 +801,7 @@ _PROJECTORS = {
     "archive_source": preview_archive_source,
     "mark_semantic_duplicate": preview_mark_semantic_duplicate,
     "hide_content": preview_hide_content,
+    "hide_semantic_page": preview_hide_semantic_page,
 }
 
 

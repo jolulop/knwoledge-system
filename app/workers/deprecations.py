@@ -48,8 +48,8 @@ _IN_SCOPE_TYPES = frozenset({"claim", "concept", "entity", "person", "organizati
 _CLAIM_SUCCESS = frozenset({"written", "tombstoned"})
 
 
-def _approved_deprecations(reviews_dir: Path) -> list[dict[str, Any]]:
-    """Approved `deprecate_wiki_page` items, malformed-robust (a corrupt file is skipped)."""
+def _approved_items_of_type(reviews_dir: Path, review_type: str) -> list[dict[str, Any]]:
+    """Approved items of a given review type, malformed-robust (a corrupt file is skipped)."""
     out: list[dict[str, Any]] = []
     d = reviews_dir / "approved"
     if not d.exists():
@@ -59,7 +59,7 @@ def _approved_deprecations(reviews_dir: Path) -> list[dict[str, Any]]:
             item = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if isinstance(item, dict) and item.get("type") == "deprecate_wiki_page":
+        if isinstance(item, dict) and item.get("type") == review_type:
             out.append(item)
     return out
 
@@ -89,7 +89,7 @@ def apply_approved_deprecations(
     skipped: list[dict[str, str]] = []
     changed_pages: list[str] = []
 
-    for item in _approved_deprecations(reviews_dir):
+    for item in _approved_items_of_type(reviews_dir, "deprecate_wiki_page"):
         rid = str(item.get("review_id", ""))
         subj = item.get("subject") or {}
         proposal = item.get("proposal") or {}
@@ -150,6 +150,103 @@ def apply_approved_deprecations(
             normalized += 1  # page+graph were already deprecated; only review_status needed fixing
         else:
             applied += 1
+
+    return {"applied": applied, "normalized": normalized, "skipped": skipped,
+            "changed_pages": changed_pages, "graph_changed": bool(applied or normalized)}
+
+
+# v1 semantic-hide scope: the concept/entity family only (the single recompose_semantic_node_page seam).
+# claim (recompose_claim) + synthesis (separate executor) are deferred fast-follows (ADR-0046 decision 1).
+_HIDE_SEMANTIC_SCOPE_TYPES = frozenset({"concept", "entity", "person", "organization", "project"})
+
+
+def apply_hidden_semantic_pages(
+    gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = None,
+) -> dict[str, Any]:
+    """Apply approved `hide_semantic_page` decisions: an **active** concept/entity-family node -> `hidden`
+    (ADR-0046). Mirrors `apply_approved_deprecations`' subject/page/scope/canonical-page guards and the
+    `recompose_semantic_node_page` render seam, but renders at `status='hidden'` + `review_status='approved'`,
+    is **active-only** (a non-active node is a typed `node_not_active` skip), and covers the concept/entity
+    family only (claim/synthesis are deferred fast-follows).
+
+    Graph-REQUIRED (the caller gates a missing graph to 503). Key-free, deterministic, idempotent, never
+    touches `raw/`, no index rebuild (caller-owned). A true no-op (page `hidden`+`approved` and graph node
+    `hidden` already match) is uncounted; a partially-hidden page/graph normalized to consistent is counted
+    `normalized`; an active node hidden is a full `applied`. Returns `{applied, normalized, skipped,
+    changed_pages, graph_changed}`."""
+    now = now or iso_now()
+    applied = normalized = 0
+    skipped: list[dict[str, str]] = []
+    changed_pages: list[str] = []
+
+    for item in _approved_items_of_type(reviews_dir, "hide_semantic_page"):
+        rid = str(item.get("review_id", ""))
+        subj = item.get("subject") or {}
+        proposal = item.get("proposal") or {}
+        page, nid = subj.get("page"), subj.get("node_id")
+        if proposal.get("to_status") != "hidden":
+            skipped.append({"review_id": rid, "reason": "unexpected_to_status"})
+            continue
+        if not page or not nid:
+            skipped.append({"review_id": rid, "reason": "missing_subject"})
+            continue
+        # Path safety BEFORE any read (ADR-0035 A5 / CLAUDE.md rule 1) — reuses the deprecation guard.
+        if not _WIKI_PAGE_RE.fullmatch(page):
+            skipped.append({"review_id": rid, "reason": "invalid_page_path"})
+            continue
+        if _DIR_TO_NODE_TYPE.get(page.split("/", 1)[0]) not in _HIDE_SEMANTIC_SCOPE_TYPES:
+            skipped.append({"review_id": rid, "reason": "out_of_scope"})
+            continue
+        node = graph.get_node(gconn, nid)
+        if node is None:
+            skipped.append({"review_id": rid, "reason": "node_missing"})
+            continue
+        node_type = node["node_type"]
+        if node_type not in _HIDE_SEMANTIC_SCOPE_TYPES:
+            skipped.append({"review_id": rid, "reason": "out_of_scope"})
+            continue
+        # The graph node is authoritative for the page path: subject.page must be EXACTLY the node's
+        # canonical page (no traversal, no page/node mismatch). context.node_type is an advisory cross-check.
+        canonical_page = f"{NODE_DIR[node_type]}/{node['slug']}.md"
+        ctx_type = (item.get("context") or {}).get("node_type")
+        if page != canonical_page or (ctx_type and ctx_type != node_type):
+            skipped.append({"review_id": rid, "reason": "page_node_mismatch"})
+            continue
+
+        page_path = wiki_dir / canonical_page
+        fm = parse_frontmatter(page_path.read_text(encoding="utf-8")) if page_path.exists() else {}
+        page_hidden = fm.get("status") == "hidden"
+        page_approved = fm.get("review_status") == "approved"
+        graph_status = node["status"]
+        # ADR-0046 active-only, EXPLICIT paths (no non-active node's page is ever mutated):
+        #   - fully effected (page hidden+approved AND graph hidden) -> silent no-op;
+        #   - graph ACTIVE -> apply (active -> hidden; also completes a page-hidden/graph-active drift);
+        #   - graph hidden + page hidden (review_status not yet approved) -> normalize review_status;
+        #   - anything else (graph not active: graph-hidden/page-active drift, deprecated, candidate, ...)
+        #     -> node_not_active skip — never recompose a non-active node's page to hidden.
+        if page_hidden and page_approved and graph_status == "hidden":
+            continue
+        if graph_status == "active":
+            counts_as = "applied"
+        elif graph_status == "hidden" and page_hidden:
+            counts_as = "normalized"
+        else:
+            skipped.append({"review_id": rid, "reason": "node_not_active"})
+            continue
+
+        outcome = concepts.recompose_semantic_node_page(
+            gconn, node_id=nid, wiki_dir=wiki_dir, status="hidden", review_status="approved", now=now)
+        # "written" = page changed; "unchanged" = page already matched but the graph-node mirror still
+        # ran (both are SUCCESS — the mirror is the point); anything else is a typed skip reason.
+        if outcome not in ("written", "unchanged"):
+            skipped.append({"review_id": rid, "reason": outcome})
+            continue
+        if outcome != "unchanged":
+            changed_pages.append(canonical_page)
+        if counts_as == "applied":
+            applied += 1      # a real active -> hidden transition
+        else:
+            normalized += 1   # page+graph already hidden; only review_status needed fixing
 
     return {"applied": applied, "normalized": normalized, "skipped": skipped,
             "changed_pages": changed_pages, "graph_changed": bool(applied or normalized)}

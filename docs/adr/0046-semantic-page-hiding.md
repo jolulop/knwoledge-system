@@ -1,6 +1,11 @@
 # ADR-0046 — Semantic-page hiding: hide_semantic_page governance executor
 
-**Status:** Accepted. Design-locked 2026-06-27 via a grill gate — **design only, not yet implemented**.
+**Status:** Accepted. Design-locked **and implemented** 2026-06-27. `deprecations.apply_hidden_semantic_pages`
+(the `recompose_semantic_node_page(status="hidden", review_status="approved")` executor, graph-required,
+active-only, concept/entity family); `review_read._effect_hide_semantic` + `preview_hide_semantic_page` +
+`HIDE_SEMANTIC_SCOPE_DIRS`; `hide_semantic_page` in `REVIEW_TYPES` + `review.yaml` + `EXECUTOR_BY_TYPE`;
+`main.run_apply` wiring (`_APPLY_TYPES`/`_GRAPH_REQUIRED_TYPES`, summary `semantic_hidden`, stricter reindex
+posture). Covered by `tests/test_hide_semantic_page.py`.
 Extends the ADR-0043 source-hide model to **generated semantic node pages**: an approved
 `hide_semantic_page` flips a concept/entity-family node `active → hidden`, suppressing it from default
 retrieval + navigation + the `/search` graph channel and revoking its answer-eligibility — still
@@ -49,12 +54,18 @@ graph-unavailable vault blocks/503s like the other graph-required apply items.
 
 **3. Effect = one status flip; all suppression falls out of existing filters; edges + inspection
 preserved.** `active → hidden` cascades:
-- **answer-eligibility REVOKED** — `answer_eligible` requires `status == "active"`, so the page can no
-  longer be cited as `/query` evidence (the primary new effect vs sources);
-- **keyword-evidence + navigation channels exclude it** (the `RETENTION_DEFAULT_STATUSES` status filter —
-  `hidden` is not in it);
-- **the `/search` graph channel excludes it** as an adjacent/waypoint (`search_subgraph` `node_statuses`
-  filter), so default-search paths *through* a hidden node are cut.
+- **excluded from default `/search` navigation** (the `RETENTION_DEFAULT_STATUSES` node-status filter —
+  `hidden` is not in it), so the page drops out of the discovery channel;
+- **excluded from the `/search` graph channel** as an adjacent/waypoint (`search_subgraph` `node_statuses`
+  filter), so default-search paths *through* a hidden node are cut;
+- its **`answer_eligible` metadata flips false** (`answer_eligible` requires `status == "active"`) —
+  surfaced on `/search` navigation rows + `/graph/*` node metadata, marking the page non-anchoring for
+  synthesis/discovery.
+
+*(`/query` answer-citations are **source-chunk evidence** keyed by `source_id` (ADR-0034) — semantic pages
+are never `/query` citations regardless of status — so hiding a concept changes default `/search`
+discovery, not `/query` source citations. This is the accurate surface; the discovery suppression + graph-
+channel cut are the real effect vs a source hide.)*
 
 **Preserved** (hiding is reversible visibility, **not** graph surgery): the graph node and **all its edges
 stay** (graph is SoT for edges — no edge deletion, no backlink rewrite in v1), and the **raw `/graph/*`
@@ -91,15 +102,23 @@ is a **skip/no-op**, not an error. A rejected `hide_semantic_page` applies nothi
 active`) is deferred** to a separate future slice — it is a new executor *direction* (re-deriving/restoring
 status), unrelated to ADR-0045 reopen (which reverts a *review decision*, not a *status*).
 
-**6. Reopen + dry-run integration is free.** A `hide_semantic_page` projector (`_effect_hide_semantic`,
-mirroring `_effect_deprecate`/`_effect_hide_content`) reports **`EFFECTED` only when ALL of: the page
-`status == hidden`, the page `review_status == approved`, and the graph node `status == hidden`** match
-(consistent with the deprecation contract — a partial state is **not** `EFFECTED`); else `PENDING_APPLY`;
-else `UNKNOWN` (graph absent / node missing). It also adds a **`node_not_active`** warning when an approved
-hide targets a non-active node, so the preview does not overpromise the active-only executor. That feeds
-**both** the ADR-0040 dry-run preview and the ADR-0045 reopen gate automatically: a `PENDING_APPLY` approved
-hide is reopenable; an `EFFECTED` one is not (its visibility effect is live — unhide territory). No new gate
-logic.
+**6. Reopen + dry-run integration is free — and reopen-safe.** A `hide_semantic_page` projector
+(`_effect_hide_semantic`) classifies by how much of the hide is **live**, which the ADR-0045 reopen gate
+consumes directly (reopen is allowed only for `PENDING_APPLY`/`NO_EFFECT_REQUIRED`, blocked for
+`EFFECTED`/`UNKNOWN`):
+- **`EFFECTED`** — page `status: hidden` **+** `review_status: approved` **+** graph node `hidden` (fully
+  live; reopen blocked — that's unhide territory).
+- **`UNKNOWN` (`partial_hide_state`)** — a **partial live hide**: page XOR graph already `hidden`, or both
+  `hidden` but `review_status` not yet approved. Crucially this is **NOT** `PENDING_APPLY`: reopen treats
+  `PENDING_APPLY` as "no live effect to orphan", so a partial hide returning it would let a reopen clear the
+  decision while leaving a hidden page/node behind. `UNKNOWN` blocks reopen ("repair the read model first").
+- **`PENDING_APPLY`** — **neither** page nor graph is `hidden` (cleanly unapplied; reopenable). A non-active
+  node still gets a `node_not_active` warning (the executor will skip it), but reopen stays safe because no
+  hide effect is live.
+- **`UNKNOWN`** — graph absent / node missing (existing) / `rejected` → `NO_EFFECT_REQUIRED`.
+
+The same projector feeds the ADR-0040 dry-run preview. No new gate logic — the reopen-safety follows from
+classifying partial live state as non-`PENDING_APPLY`.
 
 **7. Policy posture (note for future producers).** v1 has **no auto-producer** — `hide_semantic_page` items
 are human-initiated governance proposals (CLAUDE.md rule 9), the same as source `hide_content`.
@@ -121,11 +140,17 @@ identity surgery.
 ## Tests (design intent; written at implementation)
 
 - An approved `hide_semantic_page` for an **active** concept flips the page to `status: hidden` +
-  `review_status: approved` **and** the graph node to `hidden`; the page is excluded from `/query` evidence
-  (answer-ineligible), `/search` navigation, and the `/search` graph channel (not an adjacent); raw
-  `/graph/*` still returns it with `status: hidden`; its edges remain.
+  `review_status: approved` **and** the graph node to `hidden`; the page drops from default `/search`
+  navigation and the `/search` graph channel (not an adjacent), its `answer_eligible` flips false, and an
+  explicit `node_status=hidden` surfaces it again; raw `/graph/*` still returns it with `status: hidden`;
+  its edges remain. (`/query` cites source chunks, not semantic pages — out of scope for this effect.)
+- **Partial/active-only states:** graph `active` + page hidden → apply (completes the transition); graph
+  `hidden` + page `active` → `node_not_active` skip (no page mutation); page+graph `hidden` +
+  `review_status` not approved → normalize.
 - **Projector `EFFECTED` requires all three** — page `status: hidden` **+** page `review_status: approved`
-  **+** graph node `hidden`; any partial state projects `PENDING_APPLY` (not `EFFECTED`).
+  **+** graph node `hidden`; a **partial live hide** (page XOR graph `hidden`, or both `hidden` but
+  `review_status` not approved) projects **`UNKNOWN` (`partial_hide_state`)** — NOT `PENDING_APPLY` — so
+  reopen blocks it; only when **neither** is `hidden` is it `PENDING_APPLY` (reopenable).
 - **Reindex-failure non-clean:** an applied semantic hide + a failed `reindex_keyword` → apply status
   `validation_failed` + warning `semantic_hide_retrieval_suppression_not_guaranteed` (live + dry-run); the
   mutation stays written. A failed `index.md` *rebuild* stays warning-only.
@@ -138,6 +163,10 @@ identity surgery.
   item applies nothing.
 - **Canonical-page + scope guards** (reused from `deprecate_wiki_page`): a `subject.page` ≠ the node's
   canonical page, a traversal path, or an out-of-scope dir → skipped, never read/written.
+- **Reopen-safe (ADR-0045):** a partial live hide (page hidden + graph active, or vice versa, or both
+  hidden + `review_status` pending) → **409** (UNKNOWN `partial_hide_state`), no ledger mutation; a cleanly
+  unapplied hide (neither hidden) reopens; a graph-only completion (page already hidden) still triggers
+  reindex (else a stale nav index could surface the hidden page).
 - **Reopen (ADR-0045):** a `PENDING_APPLY` approved hide reopens (→ pending); an `EFFECTED` one is blocked
   (`already_applied`).
 - Idempotent re-apply of an already-hidden node is a no-op; `hide_content` (source) behavior is unchanged.
