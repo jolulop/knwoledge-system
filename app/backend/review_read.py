@@ -94,6 +94,9 @@ EXECUTOR_BY_TYPE = {
     # ADR-0047: the governed inverse — unhide (hidden -> active).
     "unhide_content": "apply_unhidden_sources",
     "unhide_semantic_page": "apply_unhidden_semantic_pages",
+    # ADR-0048: claim visibility (the evidence-derived recompose_claim seam).
+    "hide_claim": "apply_hidden_claims",
+    "unhide_claim": "apply_unhidden_claims",
 }
 
 # Wiki subdirs the scoped deprecation executor may touch in v1 (ADR-0035 A5). A deprecate item whose
@@ -910,6 +913,92 @@ def preview_unhide_semantic_page(
     return out
 
 
+def _effect_hide_claim(item: dict[str, Any], gconn: Any, wiki_dir: Path | None) -> tuple[str, list[str]]:
+    # ADR-0048: claim hide. EFFECTED iff page AND graph node hidden; a partial live hide (page XOR graph
+    # hidden) -> UNKNOWN partial_hide_state (NOT reopen-safe); else PENDING_APPLY (+ claim_not_active when
+    # the target isn't active, since hide is active-only). Keyed on hidden-ness.
+    status = item.get("status")
+    if status not in ("approved", "rejected"):
+        return PENDING_APPLY, []
+    if status == "rejected":
+        return NO_EFFECT_REQUIRED, []
+    subj = item.get("subject") or {}
+    fm = _page_frontmatter(wiki_dir, subj.get("page"))
+    if fm is None:
+        return UNKNOWN, ["page_unreadable"]
+    nid = subj.get("node_id")
+    if gconn is None:
+        return UNKNOWN, ["graph_unavailable"]
+    node = graph.get_node(gconn, nid) if nid else None
+    if node is None:
+        return UNKNOWN, ["node_missing"]
+    page_hidden = fm.get("status") == "hidden"
+    graph_hidden = node["status"] == "hidden"
+    if page_hidden and fm.get("review_status") == "approved" and graph_hidden:
+        return EFFECTED, []                          # fully hidden + approved
+    if page_hidden or graph_hidden:
+        return UNKNOWN, ["partial_hide_state"]       # partial (incl. both hidden + review pending)
+    warnings = [] if node["status"] == "active" else ["claim_not_active"]
+    return PENDING_APPLY, warnings
+
+
+def _effect_unhide_claim(item: dict[str, Any], gconn: Any, wiki_dir: Path | None) -> tuple[str, list[str]]:
+    # ADR-0048: claim unhide. EFFECTED iff page AND graph are NOT hidden (the re-derived status may be
+    # active OR tombstone — keyed on hidden-ness, not "active"); PENDING_APPLY iff still fully hidden
+    # (reopenable); a partial live unhide (page XOR graph hidden) -> UNKNOWN partial_unhide_state.
+    status = item.get("status")
+    if status not in ("approved", "rejected"):
+        return PENDING_APPLY, []
+    if status == "rejected":
+        return NO_EFFECT_REQUIRED, []
+    subj = item.get("subject") or {}
+    fm = _page_frontmatter(wiki_dir, subj.get("page"))
+    if fm is None:
+        return UNKNOWN, ["page_unreadable"]
+    nid = subj.get("node_id")
+    if gconn is None:
+        return UNKNOWN, ["graph_unavailable"]
+    node = graph.get_node(gconn, nid) if nid else None
+    if node is None:
+        return UNKNOWN, ["node_missing"]
+    page_hidden = fm.get("status") == "hidden"
+    graph_hidden = node["status"] == "hidden"
+    if not page_hidden and not graph_hidden:
+        return EFFECTED, []                          # no longer hidden (active or tombstone)
+    if page_hidden and graph_hidden:
+        return PENDING_APPLY, []                     # still fully hidden -> reopenable
+    return UNKNOWN, ["partial_unhide_state"]
+
+
+def _preview_claim_visibility(item: dict[str, Any], *, gconn: Any, wiki_dir: Path | None,
+                              hide: bool) -> dict[str, Any]:
+    subj = item.get("subject") or {}
+    page = subj.get("page")
+    out = _scaffold(item)
+    out["node_ids"] = [subj["node_id"]] if subj.get("node_id") else []
+    out["affected_paths"] = [page] if page else []
+    out["proposed_status"] = "hidden" if hide else "active"
+    out["proposed_action"] = ("hide claim (active -> hidden)" if hide
+                              else "unhide claim (hidden -> active|tombstone, re-derived from evidence)")
+    out["summary"] = f"{'Hide' if hide else 'Unhide'} claim {page}."
+    fm = _page_frontmatter(wiki_dir, page)
+    out["current_status"] = fm.get("status") if fm else None
+    out["details"] = {"node_type": "claim"}
+    effect = _effect_hide_claim if hide else _effect_unhide_claim
+    rtype = "hide_claim" if hide else "unhide_claim"
+    effect_status, warnings = effect(item, gconn, wiki_dir)
+    out["apply"] = _apply_supported(EXECUTOR_BY_TYPE[rtype], effect_status, warnings)
+    return out
+
+
+def preview_hide_claim(item: dict[str, Any], *, gconn: Any, wiki_dir: Path | None) -> dict[str, Any]:
+    return _preview_claim_visibility(item, gconn=gconn, wiki_dir=wiki_dir, hide=True)
+
+
+def preview_unhide_claim(item: dict[str, Any], *, gconn: Any, wiki_dir: Path | None) -> dict[str, Any]:
+    return _preview_claim_visibility(item, gconn=gconn, wiki_dir=wiki_dir, hide=False)
+
+
 _PROJECTORS = {
     "promote_candidate_node": preview_promote_candidate_node,
     "propose_synthesis": preview_propose_synthesis,
@@ -921,6 +1010,8 @@ _PROJECTORS = {
     "hide_semantic_page": preview_hide_semantic_page,
     "unhide_content": preview_unhide_content,
     "unhide_semantic_page": preview_unhide_semantic_page,
+    "hide_claim": preview_hide_claim,
+    "unhide_claim": preview_unhide_claim,
 }
 
 

@@ -1,9 +1,16 @@
 # ADR-0048 — Claim visibility: hide_claim / unhide_claim without graph surgery
 
-**Status:** Accepted. Design-locked 2026-06-28 via a grill gate — **design only, not yet implemented**.
+**Status:** Accepted. Design-locked **and implemented** 2026-06-28. `recompose_claim` gains the `hidden`
+governance status (precedence + preservation) + the partner-status filter on the contradiction projection;
+`render_claim_page` renders `hidden`; `deprecations._apply_claim_visibility_transition` (+
+`apply_hidden_claims`/`apply_unhidden_claims`, the partner re-render fan-out); `review_read`
+`_effect_hide_claim`/`_effect_unhide_claim` + previews (keyed on hidden-ness); `hide_claim`/`unhide_claim`
+vocab + `run_apply` wiring + the claim-specific reindex warnings. Covered by `tests/test_claim_visibility.py`.
 Extends the ADR-0046/0047 hide/unhide pattern to **claim pages** (the distinct `recompose_claim` seam):
 `hide_claim` (active → hidden) and `unhide_claim` (hidden → evidence-derived) land **together**.
-Visibility-only — **no edge deletion, no change to contradiction/supersede detection**. The claim-specific
+Visibility-only — **no edge deletion**; contradiction detection is **status-filtered, not edge-destructive**
+(a hidden claim falls out of `active_node_ids_of_type("claim")` candidate generation; existing edges stay).
+The claim-specific
 work is the evidence-derived status mechanism + the rendered contradiction/supersede backlink sections on
 **partner** claim pages.
 **Extends:** ADR-0046 (semantic hide, the inspection-vs-discovery split, `partial_hide_state`), ADR-0047
@@ -70,6 +77,12 @@ durable record). Concretely:
 - the **edge stays active** (graph is SoT — no surgery), so raw `/graph/*` inspection still shows the X↔Y
   conflict with `status: hidden`. **Raw graph APIs are unchanged.**
 
+The **Source-page "Claims" section** is the same kind of rendered discovery surface: a hidden claim X is
+**omitted by default** from the Claims section of every Source page that cites it (the `derived_from` edge
+stays active for raw inspection), and a claim hide/unhide **re-renders X's cited Source pages** (its active
+`derived_from` destinations) so they drop/restore X. On unhide, X reappears only if it re-derives `active`
+(still evidenced); a re-derived **tombstone** has no active `derived_from`, so it isn't on any Source page.
+
 **5. No edge surgery; detection is status-filtered, not edge-destructive.** Hiding does **not** mutate or
 delete any existing `contradicts`/`derived_from` edge — they remain as durable graph history and raw
 `/graph/*` still shows them. But because a hidden claim is **no longer active**, it is **excluded from future
@@ -85,9 +98,10 @@ refinement that the *un-hidden* state may be active **or** tombstone, so the pro
 - **hide:** `EFFECTED` = page **and** graph `hidden` (+ `review_status: approved`); `PENDING_APPLY` = neither
   hidden; **partial** (page XOR graph hidden) = `UNKNOWN partial_hide_state`; `claim_not_active` warning on a
   non-active target.
-- **unhide:** `EFFECTED` = neither page nor graph `hidden` (the override is cleared — the re-derived status
-  is irrelevant to "is it still hidden?"); `PENDING_APPLY` = both `hidden`; **partial** = `UNKNOWN
-  partial_unhide_state`; `claim_not_hidden` warning on a non-hidden target.
+- **unhide:** `EFFECTED` = neither page nor graph `hidden` (the override is cleared — the re-derived status,
+  active *or* tombstone, is irrelevant to "is it still hidden?"); `PENDING_APPLY` = both `hidden`;
+  **partial** = `UNKNOWN partial_unhide_state`. (No `claim_not_hidden` warning is needed — a non-hidden
+  target *is* the unhide goal, so it projects `EFFECTED`; the executor treats it as an idempotent no-op.)
 
 Partial live states are **not reopenable** (ADR-0045): part of the visibility change is live, so reopening
 would orphan it.
@@ -118,13 +132,23 @@ identity surgery.
   hidden claim **stays hidden** (never silently re-derived active).
 - **Detection:** after hiding one endpoint, `candidate_pairs` no longer generates a NEW candidate involving
   the hidden claim (active-only gate); the **existing** active `contradicts` edge remains visible via raw
-  `/graph/*`. Unhiding re-admits it to candidate generation.
+  `/graph/*`. Unhiding re-admits it to candidate generation **only if it re-derives `active`** — a
+  re-derived tombstone (evidence lost while hidden) stays excluded.
 - **Backlink omission + re-render:** hiding X re-renders partner Y so Y's **"Contradicting Claims"** section
   drops X; the edge stays active (raw graph shows it); unhiding X re-renders Y so X reappears.
 - **Unhide re-derive:** unhide of a still-evidenced claim → `active` + `review_status: none`; unhide of a
   claim that lost evidence while hidden → tombstone `deprecated_candidate` (never active-with-no-citations).
 - Projector/reopen: hide partial / unhide partial → `UNKNOWN` `partial_*_state` → reopen **409**; fully
-  effected → reopen blocked; from-state → reopen allowed; `claim_not_active` / `claim_not_hidden` skips.
+  effected → reopen blocked; from-state → reopen allowed; `claim_not_active` skip on a non-active hide
+  target (a non-hidden unhide target is `EFFECTED`/idempotent — no `claim_not_hidden` warning).
 - Graph-required: graph absent / node missing → block + 503; dry-run blocked. Reindex failure → non-clean +
   the claim-specific warning (live + dry-run); graph-only completion still reindexes.
-- Detection unchanged: `detect_contradictions` still pairs a hidden claim's active edge.
+- Detection status-filtered (not edge-destructive): after hiding one endpoint, `candidate_pairs`
+  (`active_node_ids_of_type("claim")`) no longer generates a NEW candidate involving the hidden claim,
+  while the **existing** active `contradicts` edge remains in the graph (raw `/graph/*`); unhide re-admits
+  it only if it re-derives active.
+- Validator: a hidden claim that lost all evidence (recomposed while still hidden) renders
+  `status: hidden` + `citations: []` and **passes** `validate_citations` (hidden is no-citation-legal).
+- Partial states are typed skips, never silent: hide with page-active/graph-hidden (or vice versa) →
+  `partial_hide_state` skip; unhide with page-hidden/graph-active → `partial_unhide_state` skip. Both
+  hidden + `review_status: pending` → projector `UNKNOWN` (not `EFFECTED`); the executor normalizes it.

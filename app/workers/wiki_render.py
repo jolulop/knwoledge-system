@@ -333,8 +333,14 @@ def render_claim_page(claim: dict[str, Any], *, review_status: str | None = None
     #    but lost a contradiction review, so it is deprecated_candidate (already decided), with
     #    its evidence and active contradiction backlink still shown;
     #  - otherwise active.
+    # `hidden` (ADR-0048) is a governance status with precedence over the evidence-derived lifecycle: a
+    # hidden claim keeps its evidence/citations rendered but is suppressed from default discovery via the
+    # status frontmatter. The executor only hides an active (evidenced) claim.
+    hidden = bool(claim.get("hidden"))
     deprecated = bool(claim.get("deprecated"))
-    if not active:
+    if hidden:
+        status, derived_review_status = "hidden", "approved"
+    elif not active:
         status, derived_review_status = "deprecated_candidate", "pending"
     elif deprecated:
         status, derived_review_status = "deprecated_candidate", "approved"
@@ -384,7 +390,16 @@ def render_claim_page(claim: dict[str, Any], *, review_status: str | None = None
     fm_lines.append('input_fingerprint: ""')
     fm_lines.append("---")
 
-    if active:
+    if hidden:
+        # ADR-0048: a hidden claim is governance-suppressed regardless of evidence. With evidence it shows
+        # its Evidence table; without it (evidence lost while hidden) it renders an explicit no-evidence
+        # note — NOT the "approved deprecation" prose (it isn't deprecated). hidden + no citations is
+        # validator-legal (scripts/validate_citations.py).
+        label = "Claim hidden — suppressed from default discovery"
+        evidence_section = (["| Source | Char range | Quote |", "|---|---|---|", *evidence_rows] if active
+                            else ["_This claim is hidden (suppressed from default discovery) and currently "
+                                  "has no active source evidence._"])
+    elif active:
         label = ("Claim deprecated — superseded by contradiction review" if deprecated
                  else "Generated claim (unverified)")
         evidence_section = ["| Source | Char range | Quote |", "|---|---|---|", *evidence_rows]

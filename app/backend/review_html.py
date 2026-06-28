@@ -337,6 +337,7 @@ def render_apply_result(result: dict[str, Any]) -> str:
         "duplicates": s.get("duplicates"), "archives": s.get("archives"),
         "hidden": s.get("hidden"), "semantic_hidden": s.get("semantic_hidden"),
         "unhidden": s.get("unhidden"), "semantic_unhidden": s.get("semantic_unhidden"),
+        "claims_hidden": s.get("claims_hidden"), "claims_unhidden": s.get("claims_unhidden"),
         "pages_changed": s.get("pages_changed"), "index_rebuilt": s.get("index_rebuilt"),
         "unapplied": s.get("unapplied"),
     }))

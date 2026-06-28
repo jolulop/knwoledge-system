@@ -13,6 +13,8 @@ requires_human_approval:
   - hide_semantic_page
   - unhide_content
   - unhide_semantic_page
+  - hide_claim
+  - unhide_claim
   - promote_candidate_node      # candidate concept/entity -> active (ADR-0018, Phase 3.5b)
   - change_entity_subtype       # re-keys a node's id; gated like a merge/split
   - propose_synthesis           # candidate synthesis -> active; review-only, NO recurrence (ADR-0031, Phase 3.5c)

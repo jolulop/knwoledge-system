@@ -167,6 +167,10 @@ def generate_wiki(
                     claims = [
                         {"claim_id": cid, "title": _claim_label(claims_dir, cid)}
                         for cid in graph.claims_for_source(gconn, source_id)
+                        # ADR-0048: omit hidden claims from the Source-page Claims section (a rendered
+                        # discovery surface, like the partner contradiction sections) — the derived_from
+                        # edge stays active in the graph for raw inspection.
+                        if (graph.get_node(gconn, cid) or {}).get("status") != "hidden"
                     ]
                     for m in graph.mentions_for_source(gconn, source_id):
                         nt, slug = m["node_type"], m["slug"]

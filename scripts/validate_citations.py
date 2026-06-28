@@ -72,8 +72,10 @@ def _check_claim(root: Path, path: Path) -> list[str]:
     citations = parse_citations(_frontmatter(text))
 
     if not citations:
-        # A tombstone (deprecated/archived) legitimately has no active citations.
-        if status not in _TOMBSTONE_STATUSES and NO_SOURCE not in text:
+        # A tombstone (deprecated/archived) — or a `hidden` governance claim that lost its evidence while
+        # hidden (ADR-0048; hidden has precedence over evidence-derivation) — legitimately has no active
+        # citations.
+        if status not in _TOMBSTONE_STATUSES and status != "hidden" and NO_SOURCE not in text:
             return [f"{sid}: claim has no citations and no '{NO_SOURCE}' marker"]
         return []
 

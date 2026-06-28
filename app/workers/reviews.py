@@ -27,6 +27,7 @@ REVIEW_TYPES = frozenset({
     "delete_raw_file", "archive_source", "deprecate_wiki_page", "resolve_contradiction",
     "merge_entities", "split_entity", "merge_concepts", "mark_semantic_duplicate",
     "hide_content", "hide_semantic_page", "unhide_content", "unhide_semantic_page",
+    "hide_claim", "unhide_claim",
     "promote_candidate_node", "change_entity_subtype", "propose_synthesis",
     # Phase 7 maintenance (ADR-0036): a catalogued raw file gone missing — record-only governance
     # of a broken source record (high-severity lint finding; never auto-remediated).

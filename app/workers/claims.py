@@ -100,7 +100,8 @@ def _write_source_artifact(apath, sid, fingerprint, source_claims, model_ref, no
 
 
 def recompose_claim(gconn, *, cid, claims_dir, reviews_dir, now, markdown_dir, text_hint=None,
-                    contradiction_affected=None, deprecate=False, review_status=None) -> str:
+                    contradiction_affected=None, deprecate=False, review_status=None,
+                    hide=False, unhide=False) -> str:
     """Render a Claim page from its `active` derived_from edges (tombstone if none).
 
     The single, shared claim renderer (used by the claim worker and the contradiction worker):
@@ -112,7 +113,13 @@ def recompose_claim(gconn, *, cid, claims_dir, reviews_dir, now, markdown_dir, t
     invariant local, so the claim CLI stays valid without a separate contradiction pass.
 
     `review_status` overrides the renderer's derived value — the Phase-6 deprecation executor passes
-    `"approved"` so an approved tombstone deprecation isn't rendered as `pending` (ADR-0035 A5)."""
+    `"approved"` so an approved tombstone deprecation isn't rendered as `pending` (ADR-0035 A5).
+
+    ADR-0048: `hide` sets a `hidden` governance status (precedence over evidence-derivation), `unhide`
+    clears it and re-derives, and by default the page's current `hidden` is **preserved** across re-render
+    (exactly like `deprecated_candidate`) — a later evidence-driven recompose never silently un-hides. A
+    hidden **partner** claim is omitted from the rendered Contradicting Claims section (discovery surface;
+    the edge stays active in the graph)."""
     edges = [e for e in graph.outgoing_active(gconn, cid) if e["edge_type"] == "derived_from"]
     page_path = claims_dir / f"{cid}.md"
     claim_text = text_hint or _read_claim_text(page_path)
@@ -126,24 +133,35 @@ def recompose_claim(gconn, *, cid, claims_dir, reviews_dir, now, markdown_dir, t
         quote = md[start:end] if start is not None and end is not None and end <= len(md) else ""
         cites.append({"source_id": src, "char_start": start, "char_end": end, "quote": quote})
     cites.sort(key=lambda c: (c["source_id"], c["char_start"] if c["char_start"] is not None else -1))
+    current_status = _read_status(page_path)
+    # ADR-0048 hidden governance status: precedence over evidence; set by hide, cleared by unhide, else
+    # preserved from the page (the status authority, ADR-0022) so re-render never silently un-hides.
+    hidden = True if hide else (False if unhide else current_status == "hidden")
     # Active contradiction backlinks (ADR-0031) project onto the Claim page; the graph holds the
     # relationship authority, so the single claim renderer reads them here for any caller.
     contradicts = graph.active_contradictions_for_claim(gconn, cid) if cites else []
+    # ADR-0048: omit hidden partner claims from the rendered section (discovery surface only — the
+    # contradicts edge stays active in the graph for raw /graph/* inspection).
+    if contradicts:
+        contradicts = [p for p in contradicts
+                       if (graph.get_node(gconn, p) or {}).get("status") != "hidden"]
     # A claim with evidence is deprecated only by a human supersede decision (slice 1b): set on
     # request, and *preserved* across re-extraction since the page is the status authority
-    # (ADR-0022) — a re-extraction must not silently resurrect a deprecated loser to `active`.
-    deprecated = bool(cites) and (deprecate or _read_status(page_path) == "deprecated_candidate")
+    # (ADR-0022) — a re-extraction must not silently resurrect a deprecated loser to `active`. A hidden
+    # claim is never also deprecated (hide is active-only; hidden has precedence).
+    deprecated = bool(cites) and not hidden and (deprecate or current_status == "deprecated_candidate")
     claims_dir.mkdir(parents=True, exist_ok=True)
     page_path.write_text(
         render_claim_page({"claim_id": cid, "claim_text": claim_text, "confidence": "low",
-                           "citations": cites, "contradicts": contradicts, "deprecated": deprecated},
+                           "citations": cites, "contradicts": contradicts, "deprecated": deprecated,
+                           "hidden": hidden},
                           review_status=review_status),
         encoding="utf-8",
     )
-    # Mirror the page's status into the derived node index (active / deprecated / tombstone).
-    node_status = "deprecated_candidate" if (deprecated or not cites) else "active"
+    # Mirror the page's status into the derived node index (hidden > deprecated/tombstone > active).
+    node_status = "hidden" if hidden else ("deprecated_candidate" if (deprecated or not cites) else "active")
     graph.upsert_node(gconn, node_id=cid, node_type="claim", slug=cid, status=node_status, now=now)
-    if not cites:
+    if not cites and not hidden:
         # Endpoint invariant (ADR-0031): a tombstoned claim can no longer anchor a contradiction,
         # so supersede any contradicts assertions touching it (even an acknowledged/active one)
         # and withdraw their pending reviews. Surviving endpoints are recorded so the caller

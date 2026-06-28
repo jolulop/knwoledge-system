@@ -547,7 +547,7 @@ def reopen_review(review_id: str, body: ReviewReopenRequest) -> dict[str, Any]:
 _APPLY_TYPES = frozenset({
     "propose_synthesis", "resolve_contradiction", "promote_candidate_node", "deprecate_wiki_page",
     "archive_source", "mark_semantic_duplicate", "hide_content", "hide_semantic_page",
-    "unhide_content", "unhide_semantic_page"})
+    "unhide_content", "unhide_semantic_page", "hide_claim", "unhide_claim"})
 # Types whose application *requires* the graph (so a missing graph with such approved items -> 503).
 # archive_source + hide_content + unhide_content are executor-backed but NOT graph-required — their core
 # effect is the manifest status + Source page; the graph source-node mirror is best-effort (skipped when
@@ -650,6 +650,8 @@ def run_apply(st: Any) -> dict[str, Any]:
     dups: dict[str, Any] = {"applied": 0, "normalized": 0, "skipped": [], "changed_pages": []}
     sem_hidden: dict[str, Any] = {"applied": 0, "normalized": 0, "skipped": [], "changed_pages": []}
     sem_unhidden: dict[str, Any] = {"applied": 0, "normalized": 0, "skipped": [], "changed_pages": []}
+    claims_hidden: dict[str, Any] = {"applied": 0, "normalized": 0, "skipped": [], "changed_pages": []}
+    claims_unhidden: dict[str, Any] = {"applied": 0, "normalized": 0, "skipped": [], "changed_pages": []}
     promo = {"promoted": 0}
 
     # Safe open: None on absent OR schema-mismatch (archive doesn't need the graph, so an unrelated graph
@@ -674,6 +676,12 @@ def run_apply(st: Any) -> dict[str, Any]:
             # also graph-REQUIRED.
             sem_unhidden = deprecations.apply_unhidden_semantic_pages(
                 gconn, reviews_dir, wiki_dir=wiki_dir, now=now)
+            # ADR-0048: claim visibility (active <-> hidden) via recompose_claim + partner re-render;
+            # graph-REQUIRED.
+            claims_hidden = deprecations.apply_hidden_claims(
+                gconn, reviews_dir, wiki_dir=wiki_dir, markdown_dir=markdown_dir, now=now)
+            claims_unhidden = deprecations.apply_unhidden_claims(
+                gconn, reviews_dir, wiki_dir=wiki_dir, markdown_dir=markdown_dir, now=now)
             dups = duplicates.apply_marked_duplicates(
                 gconn, reviews_dir, wiki_dir=wiki_dir, now=now)
             gconn.commit()
@@ -706,13 +714,28 @@ def run_apply(st: Any) -> dict[str, Any]:
         root, manifests_dir=st.manifests_dir, reviews_dir=reviews_dir, wiki_dir=wiki_dir,
         graph_db=st.graph_db_path, now=now)
 
+    # ADR-0048: re-render the Source pages whose Claims section is affected by a claim hide/unhide so the
+    # now-hidden claim drops (or a re-derived-active claim restores). Runs AFTER the graph block committed,
+    # so generate_wiki (own read conn) sees the new claim node status; reads the hidden-aware projection.
+    claim_source_ids = sorted(set(claims_hidden.get("affected_sources", []))
+                              | set(claims_unhidden.get("affected_sources", [])))
+    # Only re-render sources that actually have a Source page (nothing to suppress otherwise) — keeps a
+    # minimal/degraded vault from failing the apply on a missing manifest/template.
+    existing_sources = [sid for sid in claim_source_ids
+                        if (wiki_dir / "Sources" / f"{sid}.md").exists()]
+    claim_source_pages: list[str] = []
+    if existing_sources and graph_available:
+        wiki.generate_wiki(root, source_ids=existing_sources, rebuild_index=False, record_job=False)
+        claim_source_pages = [f"Sources/{sid}.md" for sid in existing_sources]
+
     # pages_changed counts every page write: contradiction re-projections, deprecations, the synthesis
     # pages apply_resolved_syntheses re-rendered, the concept/entity pages promotion rewrote, archives.
     pages_changed = (len(contra["changed_pages"]) + len(deprec["changed_pages"])
                      + len(archive["changed_pages"]) + len(hidden["changed_pages"])
                      + len(unhidden["changed_pages"])
                      + len(sem_hidden["changed_pages"]) + len(sem_unhidden["changed_pages"])
-                     + len(dups["changed_pages"])
+                     + len(claims_hidden["changed_pages"]) + len(claims_unhidden["changed_pages"])
+                     + len(claim_source_pages) + len(dups["changed_pages"])
                      + syntheses["promoted"] + syntheses["rejected"] + promo["promoted"])
     # Reindex/index-refresh eligibility: page writes AND status transitions that may NOT re-render a page
     # but still affect retrieval — notably a semantic hide/unhide that only flips the graph node when the
@@ -721,9 +744,12 @@ def run_apply(st: Any) -> dict[str, Any]:
     # keep hiding an unhidden one), with no warning. A dedicated trigger, not overloading pages_changed.
     semantic_hide_work = sem_hidden["applied"] + sem_hidden["normalized"]
     semantic_unhide_work = sem_unhidden["applied"] + sem_unhidden["normalized"]
+    claim_hide_work = claims_hidden["applied"] + claims_hidden["normalized"]
+    claim_unhide_work = claims_unhidden["applied"] + claims_unhidden["normalized"]
     changed = bool(pages_changed or contra["resolution"]["acknowledged"]
                    or contra["resolution"]["rejected"] or contra["resolution"]["superseded_executed"]
-                   or semantic_hide_work or semantic_unhide_work)
+                   or semantic_hide_work or semantic_unhide_work
+                   or claim_hide_work or claim_unhide_work)
 
     warnings: list[str] = []
     index_status = _rebuild_index_status(root) if changed else "skipped"
@@ -762,11 +788,20 @@ def run_apply(st: Any) -> dict[str, Any]:
     if unhide_discovery_stale:
         warnings.append("unhide_discovery_restoration_not_guaranteed")
 
+    # ADR-0048: claim hide/unhide carry the same stale-index risk (claims are an answer-eligible discovery
+    # surface), with claim-specific warnings.
+    claim_hide_stale = reindex_failed and claim_hide_work > 0
+    if claim_hide_stale:
+        warnings.append("claim_hide_retrieval_suppression_not_guaranteed")
+    claim_unhide_stale = reindex_failed and claim_unhide_work > 0
+    if claim_unhide_stale:
+        warnings.append("claim_unhide_discovery_restoration_not_guaranteed")
+
     validators = _run_all_validators(root)
     failed = [v for v in validators if v["returncode"] != 0]
     validators_ok = not failed
     clean = (validators_ok and not hide_retrieval_stale and not semantic_hide_stale
-             and not unhide_discovery_stale)
+             and not unhide_discovery_stale and not claim_hide_stale and not claim_unhide_stale)
 
     return {
         "status": "applied" if clean else "validation_failed",
@@ -794,6 +829,12 @@ def run_apply(st: Any) -> dict[str, Any]:
             "semantic_unhidden": {"applied": sem_unhidden["applied"],
                                   "normalized": sem_unhidden["normalized"],
                                   "skipped": sem_unhidden["skipped"]},
+            "claims_hidden": {"applied": claims_hidden["applied"],
+                              "normalized": claims_hidden["normalized"],
+                              "skipped": claims_hidden["skipped"]},
+            "claims_unhidden": {"applied": claims_unhidden["applied"],
+                                "normalized": claims_unhidden["normalized"],
+                                "skipped": claims_unhidden["skipped"]},
             "pages_changed": pages_changed,
             "index_rebuilt": index_status == "rebuilt",
             "unapplied": _unapplied_by_type(reviews_dir),

@@ -271,3 +271,126 @@ def apply_unhidden_semantic_pages(
     return _apply_semantic_visibility_transition(
         gconn, reviews_dir, review_type="unhide_semantic_page", from_status="hidden", to_status="active",
         to_review_status="none", not_in_from_reason="node_not_hidden", wiki_dir=wiki_dir, now=now)
+
+
+def _apply_claim_visibility_transition(
+    gconn, reviews_dir: Path, *, review_type: str, hide: bool, wiki_dir: Path, markdown_dir: Path,
+    now: str | None = None,
+) -> dict[str, Any]:
+    """Shared CLAIM visibility executor (ADR-0048) for `hide_claim` (hide=True: active -> hidden) and
+    `unhide_claim` (hide=False: hidden -> re-derived active|tombstone). Uses the `recompose_claim` seam
+    (claim status is evidence-derived) and re-renders the target's active contradiction PARTNERS so their
+    "Contradicting Claims" sections drop/restore the target by its new visibility — reusing the
+    `contradiction_affected` fan-out idea. Graph-REQUIRED; never deletes edges. Idempotent: an
+    already-hidden hide / a non-hidden unhide is a silent no-op; hide of a non-active claim is a typed
+    `claim_not_active` skip. Returns `{applied, normalized, skipped, changed_pages, graph_changed}`."""
+    now = now or iso_now()
+    applied = normalized = 0
+    skipped: list[dict[str, str]] = []
+    changed_pages: list[str] = []
+    affected_sources: set[str] = set()   # ADR-0048: Source pages whose Claims section must re-render
+    claims_dir = wiki_dir / "Claims"
+    expected_to = "hidden" if hide else "active"
+
+    for item in _approved_items_of_type(reviews_dir, review_type):
+        rid = str(item.get("review_id", ""))
+        subj = item.get("subject") or {}
+        proposal = item.get("proposal") or {}
+        page, nid = subj.get("page"), subj.get("node_id")
+        if proposal.get("to_status") != expected_to:
+            skipped.append({"review_id": rid, "reason": "unexpected_to_status"})
+            continue
+        if not page or not nid:
+            skipped.append({"review_id": rid, "reason": "missing_subject"})
+            continue
+        if not _WIKI_PAGE_RE.fullmatch(page):
+            skipped.append({"review_id": rid, "reason": "invalid_page_path"})
+            continue
+        if page.split("/", 1)[0] != "Claims":
+            skipped.append({"review_id": rid, "reason": "out_of_scope"})
+            continue
+        node = graph.get_node(gconn, nid)
+        if node is None:
+            skipped.append({"review_id": rid, "reason": "node_missing"})
+            continue
+        if node["node_type"] != "claim":
+            skipped.append({"review_id": rid, "reason": "out_of_scope"})
+            continue
+        canonical_page = f"Claims/{node['slug']}.md"
+        ctx_type = (item.get("context") or {}).get("node_type")
+        if page != canonical_page or (ctx_type and ctx_type != "claim"):
+            skipped.append({"review_id": rid, "reason": "page_node_mismatch"})
+            continue
+
+        # Read BOTH authorities (the page is authoritative; the graph node is the mirror) so a page/graph
+        # disagreement is a typed skip, NEVER a silent no-op (ADR-0048 reopen-safety, mirroring the
+        # semantic executor's explicit page+graph paths).
+        page_path = wiki_dir / canonical_page
+        fm = parse_frontmatter(page_path.read_text(encoding="utf-8")) if page_path.exists() else {}
+        page_hidden = fm.get("status") == "hidden"
+        graph_hidden = node["status"] == "hidden"
+        if page_hidden != graph_hidden:
+            skipped.append({"review_id": rid,
+                            "reason": "partial_hide_state" if hide else "partial_unhide_state"})
+            continue
+        if hide:
+            if page_hidden:                                 # both hidden
+                if fm.get("review_status") == "approved":
+                    continue                                # fully effected -> silent no-op
+                counts_as = "normalized"                    # both hidden, review pending -> fix review_status
+            elif node["status"] == "active":
+                counts_as = "applied"                       # the active -> hidden transition
+            else:
+                skipped.append({"review_id": rid, "reason": "claim_not_active"})  # hide is active-only
+                continue
+        elif not page_hidden:
+            continue                                        # unhide: both not hidden -> already un-hidden
+        else:
+            counts_as = "applied"                           # unhide: both hidden -> re-derive
+
+        # Capture the claim's active contradiction partners + cited sources BEFORE the transition, so we
+        # re-render them afterwards (partner Contradicting Claims sections + Source-page Claims sections
+        # add/drop this claim by its new visibility — both rendered discovery surfaces, ADR-0048).
+        partners = graph.active_contradictions_for_claim(gconn, nid)
+        affected_sources.update(e["dst_id"] for e in graph.outgoing_active(gconn, nid)
+                                if e["edge_type"] == "derived_from")
+        outcome = claims.recompose_claim(
+            gconn, cid=nid, claims_dir=claims_dir, reviews_dir=reviews_dir, markdown_dir=markdown_dir,
+            now=now, hide=hide, unhide=not hide, review_status="approved" if hide else None)
+        if outcome not in ("written", "tombstoned"):
+            skipped.append({"review_id": rid, "reason": outcome})
+            continue
+        changed_pages.append(canonical_page)
+        if counts_as == "applied":
+            applied += 1
+        else:
+            normalized += 1
+        for p in partners:                                  # re-render partners (their sections shift)
+            if claims.recompose_claim(
+                    gconn, cid=p, claims_dir=claims_dir, reviews_dir=reviews_dir,
+                    markdown_dir=markdown_dir, now=now) in ("written", "tombstoned"):
+                changed_pages.append(f"Claims/{p}.md")
+
+    return {"applied": applied, "normalized": normalized, "skipped": skipped,
+            "changed_pages": changed_pages, "graph_changed": applied + normalized > 0,
+            "affected_sources": sorted(affected_sources)}
+
+
+def apply_hidden_claims(
+    gconn, reviews_dir: Path, *, wiki_dir: Path, markdown_dir: Path, now: str | None = None,
+) -> dict[str, Any]:
+    """Apply approved `hide_claim` decisions: an active claim -> hidden (ADR-0048). Thin wrapper over the
+    shared claim visibility executor; graph-REQUIRED."""
+    return _apply_claim_visibility_transition(
+        gconn, reviews_dir, review_type="hide_claim", hide=True, wiki_dir=wiki_dir,
+        markdown_dir=markdown_dir, now=now)
+
+
+def apply_unhidden_claims(
+    gconn, reviews_dir: Path, *, wiki_dir: Path, markdown_dir: Path, now: str | None = None,
+) -> dict[str, Any]:
+    """Apply approved `unhide_claim` decisions: a hidden claim -> re-derived (active if it still has
+    evidence, else tombstone deprecated_candidate) (ADR-0048). Thin wrapper; graph-REQUIRED."""
+    return _apply_claim_visibility_transition(
+        gconn, reviews_dir, review_type="unhide_claim", hide=False, wiki_dir=wiki_dir,
+        markdown_dir=markdown_dir, now=now)
