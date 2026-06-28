@@ -546,11 +546,13 @@ def reopen_review(review_id: str, body: ReviewReopenRequest) -> dict[str, Any]:
 # approved type is reported honestly as `unapplied` (record-only / raw-touching / identity-changing).
 _APPLY_TYPES = frozenset({
     "propose_synthesis", "resolve_contradiction", "promote_candidate_node", "deprecate_wiki_page",
-    "archive_source", "mark_semantic_duplicate", "hide_content", "hide_semantic_page"})
+    "archive_source", "mark_semantic_duplicate", "hide_content", "hide_semantic_page",
+    "unhide_content", "unhide_semantic_page"})
 # Types whose application *requires* the graph (so a missing graph with such approved items -> 503).
-# archive_source + hide_content are executor-backed but NOT graph-required — their core effect is the
-# manifest status + Source page; the graph source-node mirror is best-effort (skipped when graph absent).
-_GRAPH_REQUIRED_TYPES = _APPLY_TYPES - {"archive_source", "hide_content"}
+# archive_source + hide_content + unhide_content are executor-backed but NOT graph-required — their core
+# effect is the manifest status + Source page; the graph source-node mirror is best-effort (skipped when
+# graph absent). The semantic hide/unhide ARE graph-required (page + graph via recompose).
+_GRAPH_REQUIRED_TYPES = _APPLY_TYPES - {"archive_source", "hide_content", "unhide_content"}
 
 
 def _rebuild_index_status(root: Path) -> str:
@@ -647,6 +649,7 @@ def run_apply(st: Any) -> dict[str, Any]:
     deprec: dict[str, Any] = {"applied": 0, "normalized": 0, "skipped": [], "changed_pages": []}
     dups: dict[str, Any] = {"applied": 0, "normalized": 0, "skipped": [], "changed_pages": []}
     sem_hidden: dict[str, Any] = {"applied": 0, "normalized": 0, "skipped": [], "changed_pages": []}
+    sem_unhidden: dict[str, Any] = {"applied": 0, "normalized": 0, "skipped": [], "changed_pages": []}
     promo = {"promoted": 0}
 
     # Safe open: None on absent OR schema-mismatch (archive doesn't need the graph, so an unrelated graph
@@ -666,6 +669,10 @@ def run_apply(st: Any) -> dict[str, Any]:
             # ADR-0046: governance semantic-page hide (active -> hidden) via the deprecation render
             # seam (recompose_semantic_node_page), graph-REQUIRED — so it runs inside the graph block.
             sem_hidden = deprecations.apply_hidden_semantic_pages(
+                gconn, reviews_dir, wiki_dir=wiki_dir, now=now)
+            # ADR-0047: the governed inverse — semantic unhide (hidden -> active), same render seam,
+            # also graph-REQUIRED.
+            sem_unhidden = deprecations.apply_unhidden_semantic_pages(
                 gconn, reviews_dir, wiki_dir=wiki_dir, now=now)
             dups = duplicates.apply_marked_duplicates(
                 gconn, reviews_dir, wiki_dir=wiki_dir, now=now)
@@ -692,22 +699,31 @@ def run_apply(st: Any) -> dict[str, Any]:
     hidden = retention.apply_hidden_sources(
         root, manifests_dir=st.manifests_dir, reviews_dir=reviews_dir, wiki_dir=wiki_dir,
         graph_db=st.graph_db_path, now=now)
+    # ADR-0047: governance source unhide (hidden -> active) — the inverse of hide_content, same shared
+    # source-status machinery (manifest authority + page re-render + best-effort graph mirror); NOT
+    # graph-required.
+    unhidden = retention.apply_unhidden_sources(
+        root, manifests_dir=st.manifests_dir, reviews_dir=reviews_dir, wiki_dir=wiki_dir,
+        graph_db=st.graph_db_path, now=now)
 
     # pages_changed counts every page write: contradiction re-projections, deprecations, the synthesis
     # pages apply_resolved_syntheses re-rendered, the concept/entity pages promotion rewrote, archives.
     pages_changed = (len(contra["changed_pages"]) + len(deprec["changed_pages"])
                      + len(archive["changed_pages"]) + len(hidden["changed_pages"])
-                     + len(sem_hidden["changed_pages"]) + len(dups["changed_pages"])
+                     + len(unhidden["changed_pages"])
+                     + len(sem_hidden["changed_pages"]) + len(sem_unhidden["changed_pages"])
+                     + len(dups["changed_pages"])
                      + syntheses["promoted"] + syntheses["rejected"] + promo["promoted"])
     # Reindex/index-refresh eligibility: page writes AND status transitions that may NOT re-render a page
-    # but still affect retrieval — notably a semantic hide that only flips the graph node when the page was
-    # already hidden (ADR-0046: applied/normalized with empty changed_pages). Without this, reindex would be
-    # skipped and a stale nav index could keep surfacing a hidden page, with no suppression warning. A
-    # dedicated trigger, not overloading pages_changed.
+    # but still affect retrieval — notably a semantic hide/unhide that only flips the graph node when the
+    # page was already at the target status (ADR-0046/0047: applied/normalized with empty changed_pages).
+    # Without this, reindex would be skipped and a stale nav index could keep surfacing a hidden page (or
+    # keep hiding an unhidden one), with no warning. A dedicated trigger, not overloading pages_changed.
     semantic_hide_work = sem_hidden["applied"] + sem_hidden["normalized"]
+    semantic_unhide_work = sem_unhidden["applied"] + sem_unhidden["normalized"]
     changed = bool(pages_changed or contra["resolution"]["acknowledged"]
                    or contra["resolution"]["rejected"] or contra["resolution"]["superseded_executed"]
-                   or semantic_hide_work)
+                   or semantic_hide_work or semantic_unhide_work)
 
     warnings: list[str] = []
     index_status = _rebuild_index_status(root) if changed else "skipped"
@@ -738,10 +754,19 @@ def run_apply(st: Any) -> dict[str, Any]:
     if semantic_hide_stale:
         warnings.append("semantic_hide_retrieval_suppression_not_guaranteed")
 
+    # ADR-0047 (inverse risk): an unhide (source or semantic) that applied while reindex failed is non-clean
+    # too — the page/source IS active on disk (authority correct), but a STALE index can keep HIDING it from
+    # default discovery until reindex succeeds, so the operator shouldn't read "applied" as "discoverable".
+    unhide_discovery_stale = reindex_failed and (
+        unhidden["applied"] + sem_unhidden["applied"] + sem_unhidden["normalized"]) > 0
+    if unhide_discovery_stale:
+        warnings.append("unhide_discovery_restoration_not_guaranteed")
+
     validators = _run_all_validators(root)
     failed = [v for v in validators if v["returncode"] != 0]
     validators_ok = not failed
-    clean = validators_ok and not hide_retrieval_stale and not semantic_hide_stale
+    clean = (validators_ok and not hide_retrieval_stale and not semantic_hide_stale
+             and not unhide_discovery_stale)
 
     return {
         "status": "applied" if clean else "validation_failed",
@@ -763,8 +788,12 @@ def run_apply(st: Any) -> dict[str, Any]:
                            "skipped": dups["skipped"]},
             "archives": {"applied": archive["applied"], "skipped": archive["skipped"]},
             "hidden": {"applied": hidden["applied"], "skipped": hidden["skipped"]},
+            "unhidden": {"applied": unhidden["applied"], "skipped": unhidden["skipped"]},
             "semantic_hidden": {"applied": sem_hidden["applied"], "normalized": sem_hidden["normalized"],
                                 "skipped": sem_hidden["skipped"]},
+            "semantic_unhidden": {"applied": sem_unhidden["applied"],
+                                  "normalized": sem_unhidden["normalized"],
+                                  "skipped": sem_unhidden["skipped"]},
             "pages_changed": pages_changed,
             "index_rebuilt": index_status == "rebuilt",
             "unapplied": _unapplied_by_type(reviews_dir),

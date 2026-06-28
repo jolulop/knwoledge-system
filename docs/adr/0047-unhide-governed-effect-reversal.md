@@ -1,6 +1,13 @@
 # ADR-0047 — Unhide: governed effect-reversal of a live hide (hidden → active)
 
-**Status:** Accepted. Design-locked 2026-06-28 via a grill gate — **design only, not yet implemented**.
+**Status:** Accepted. Design-locked **and implemented** 2026-06-28. `retention.apply_unhidden_sources`
+(via `_apply_source_status_transition` generalized with a `from_status` param) + `deprecations`'
+`_apply_semantic_visibility_transition` shared core with `apply_unhidden_semantic_pages`;
+`review_read._effect_unhide_content`/`_effect_unhide_semantic` + previews (semantic `partial_unhide_state`;
+source manifest-authority); `unhide_content`/`unhide_semantic_page` in vocab + `review.yaml` +
+`EXECUTOR_BY_TYPE`; `run_apply` wiring (`_APPLY_TYPES`/`_GRAPH_REQUIRED_TYPES`, `unhidden`/`semantic_unhidden`
+summary, the `unhide_discovery_restoration_not_guaranteed` non-clean posture). Covered by
+`tests/test_unhide.py`.
 Adds the **inverse** of the ADR-0043/0046 hides: a human-approved `unhide_content` (source) /
 `unhide_semantic_page` (concept/entity-family) review item reverses an **already-live** hide
 (`hidden → active`) through apply — restoring default discovery + answer-eligibility — reusing the hide
@@ -78,14 +85,19 @@ an `index.md` *rebuild* failure stays warning-only.
   original hide was already applied and **stays applied**: the subject simply remains `hidden`, its current
   state, with one fewer pending decision against it. (Reopen never touches a live effect; that is the whole
   ADR-0045 invariant.)
-- **`UNKNOWN` (`partial_unhide_state`)** — a **partial live unhide** (one side `active`, the other still
-  `hidden`; e.g. page active but graph hidden, or source manifest active but page hidden): part of the
-  restoration is live, so it is **NOT** plain `PENDING_APPLY` (reopen would clear the unhide decision while
-  leaving a partially-active subject). `UNKNOWN` blocks reopen ("repair the read model first").
+- **`UNKNOWN` (`partial_unhide_state`)** — **semantic only:** a **partial live unhide** where page XOR
+  graph is `active` (the genuine two-authority split — page frontmatter and graph node are co-authorities).
+  Part of the restoration is live, so it is **NOT** plain `PENDING_APPLY` (reopen would clear the unhide
+  decision while leaving a partially-active node). `UNKNOWN` blocks reopen ("repair the read model first").
 - **`UNKNOWN`** — graph absent / node missing; **`NO_EFFECT_REQUIRED`** — a rejected unhide.
 
-This is why decision 1's separate types matter: the unhide projector is the mirror image of hide's, with
-no `to_status` branching.
+**Source correction (mirrors `_effect_hide_content`):** for **sources** the **manifest is the single
+authority** (the Source page is a *projection*, not a co-authority), so there is **no** source
+`partial_unhide_state` — `_effect_unhide_content` is `EFFECTED` iff the **manifest** is `active`,
+`PENDING_APPLY` iff hidden, and a stale page is a **`page_manifest_drift` warning**, not `UNKNOWN`. (The
+ADR's earlier "source manifest active but page hidden = partial" framing was over-generalized; sources
+follow the shipped manifest-authority model.) This is why decision 1's separate types matter: each unhide
+projector is the clean mirror image of its hide counterpart, with no `to_status` branching.
 
 **7. Guards + producer.** **Hidden-only:** unhide applies only to a currently-**hidden** subject; a
 non-hidden subject is a typed **`source_not_hidden`** (source) / **`node_not_hidden`** (semantic) skip/no-op
@@ -114,8 +126,9 @@ tests. Deferred: claim + synthesis unhide (await their hide), and all identity s
   `answer_eligible` back true. Graph absent / node missing → block + 503. A non-hidden node →
   `node_not_hidden` skip; rejected → no-op.
 - Projector/reopen: fully active → `EFFECTED` (reopen blocked); fully hidden → `PENDING_APPLY` (reopen
-  allowed); partial (page active / graph hidden, or source active / page hidden) → `UNKNOWN`
-  `partial_unhide_state` → reopen **409**, no mutation.
+  allowed); a **semantic** partial (page XOR graph active) → `UNKNOWN partial_unhide_state` → reopen
+  **409**, no mutation. **Source:** `EFFECTED` iff manifest active (page drift is a `page_manifest_drift`
+  warning, never `UNKNOWN`); a non-hidden, non-active source → `source_not_hidden` skip.
 - Reindex: an applied unhide + failed `reindex_keyword` → `validation_failed` +
   `unhide_discovery_restoration_not_guaranteed` (live + dry-run); a graph-only completion still triggers
   reindex. `index.md` lists the page annotated `active` (no `hidden`).

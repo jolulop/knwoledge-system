@@ -232,15 +232,19 @@ def _apply_source_status_transition(
     reviews_dir: Path,
     wiki_dir: Path,
     graph_db: Path,
+    from_status: str = "active",
+    not_in_from_reason: str | None = None,
     now: str | None = None,
 ) -> dict[str, Any]:
-    """Shared `active → <to_status>` source-lifecycle executor for the reversible status governance
-    types (`archive_source` → archive_candidate, ADR-0036; `hide_content` → hidden, ADR-0043).
+    """Shared `<from_status> → <to_status>` source-lifecycle executor for the reversible status governance
+    types (`archive_source` active→archive_candidate, ADR-0036; `hide_content` active→hidden, ADR-0043;
+    `unhide_content` hidden→active, ADR-0047 — the inverse, via `from_status="hidden"`).
 
     Sets the status on the **manifest** (the authority), re-renders the Source page (a projection), and
-    mirrors the graph source node (best-effort). Reversible, idempotent (only an `active` source
-    transitions), and **never touches raw bytes**. No reindex here — the caller (`/reviews/apply`) owns
-    the single reindex. Returns `{applied, skipped:[{review_id, reason}], changed_pages, graph_changed}`.
+    mirrors the graph source node (best-effort). Reversible, idempotent (only a source currently in
+    `from_status` transitions), and **never touches raw bytes**. No reindex here — the caller
+    (`/reviews/apply`) owns the single reindex. Returns
+    `{applied, skipped:[{review_id, reason}], changed_pages, graph_changed}`.
     """
     now = now or iso_now()
     applied = 0
@@ -278,8 +282,16 @@ def _apply_source_status_transition(
             if m is None:
                 skipped.append({"review_id": rid, "reason": "source_missing"})
                 continue
-            if manifests.get_status(m) != "active":
-                continue  # idempotent no-op: already in a non-active lifecycle state
+            current = manifests.get_status(m)
+            if current == to_status:
+                continue  # idempotent no-op: already at the target lifecycle state (silent, not a skip)
+            if current != from_status:
+                # A third state (neither from nor target): the transition can't apply. Emit a typed skip
+                # when the caller names one (ADR-0047: unhide of a non-hidden source -> source_not_hidden),
+                # so the guard failure is operator-visible in the apply summary + dry-run, not silent.
+                if not_in_from_reason is not None:
+                    skipped.append({"review_id": rid, "reason": not_in_from_reason})
+                continue
             manifests.set_status(manifests_dir, sid, to_status)
             # Re-render the one Source page from the (now-updated) manifest; pure projection.
             # (generate_wiki opens its own read connection — keep our write conn idle/committed here.)
@@ -320,6 +332,22 @@ def apply_hidden_sources(
     Governance suppression (distinct from retention archive); thin wrapper over the shared executor."""
     return _apply_source_status_transition(
         root, review_type="hide_content", to_status="hidden",
+        manifests_dir=manifests_dir, reviews_dir=reviews_dir, wiki_dir=wiki_dir, graph_db=graph_db,
+        now=now)
+
+
+def apply_unhidden_sources(
+    root: Path, *, manifests_dir: Path, reviews_dir: Path, wiki_dir: Path, graph_db: Path,
+    now: str | None = None,
+) -> dict[str, Any]:
+    """Apply approved `unhide_content` decisions for sources: flip hidden → active (ADR-0047) — the
+    governed inverse of `hide_content`. Only a currently-hidden source transitions; an already-`active`
+    source is a silent idempotent no-op, and any other non-hidden state (e.g. `archive_candidate`) emits a
+    typed `source_not_hidden` skip. Thin wrapper over the shared source-status executor; NOT
+    graph-required."""
+    return _apply_source_status_transition(
+        root, review_type="unhide_content", from_status="hidden", to_status="active",
+        not_in_from_reason="source_not_hidden",
         manifests_dir=manifests_dir, reviews_dir=reviews_dir, wiki_dir=wiki_dir, graph_db=graph_db,
         now=now)
 

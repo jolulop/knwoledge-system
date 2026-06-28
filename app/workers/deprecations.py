@@ -160,31 +160,35 @@ def apply_approved_deprecations(
 _HIDE_SEMANTIC_SCOPE_TYPES = frozenset({"concept", "entity", "person", "organization", "project"})
 
 
-def apply_hidden_semantic_pages(
-    gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = None,
+def _apply_semantic_visibility_transition(
+    gconn, reviews_dir: Path, *, review_type: str, from_status: str, to_status: str,
+    to_review_status: str, not_in_from_reason: str, wiki_dir: Path, now: str | None = None,
 ) -> dict[str, Any]:
-    """Apply approved `hide_semantic_page` decisions: an **active** concept/entity-family node -> `hidden`
-    (ADR-0046). Mirrors `apply_approved_deprecations`' subject/page/scope/canonical-page guards and the
-    `recompose_semantic_node_page` render seam, but renders at `status='hidden'` + `review_status='approved'`,
-    is **active-only** (a non-active node is a typed `node_not_active` skip), and covers the concept/entity
-    family only (claim/synthesis are deferred fast-follows).
+    """Shared concept/entity-family visibility-transition executor (`<from_status> → <to_status>`) for
+    `hide_semantic_page` (active→hidden, ADR-0046) and `unhide_semantic_page` (hidden→active, ADR-0047 —
+    the inverse). Reuses `apply_approved_deprecations`' subject/page/scope/canonical-page guards and the
+    `recompose_semantic_node_page` render seam (rendering at `to_status` + `to_review_status`).
+
+    EXPLICIT, single-direction paths (no node outside `from_status` ever has its page mutated):
+      - fully effected (page `to_status`+`to_review_status` AND graph `to_status`) -> silent no-op;
+      - graph in `from_status` -> apply (the real transition; also completes a page-ahead/graph-behind drift);
+      - graph `to_status` + page `to_status` (review_status lagging) -> normalize review_status;
+      - anything else (graph not in `from_status`) -> typed `not_in_from_reason` skip.
 
     Graph-REQUIRED (the caller gates a missing graph to 503). Key-free, deterministic, idempotent, never
-    touches `raw/`, no index rebuild (caller-owned). A true no-op (page `hidden`+`approved` and graph node
-    `hidden` already match) is uncounted; a partially-hidden page/graph normalized to consistent is counted
-    `normalized`; an active node hidden is a full `applied`. Returns `{applied, normalized, skipped,
-    changed_pages, graph_changed}`."""
+    touches `raw/`, no index rebuild (caller-owned). Returns
+    `{applied, normalized, skipped, changed_pages, graph_changed}`."""
     now = now or iso_now()
     applied = normalized = 0
     skipped: list[dict[str, str]] = []
     changed_pages: list[str] = []
 
-    for item in _approved_items_of_type(reviews_dir, "hide_semantic_page"):
+    for item in _approved_items_of_type(reviews_dir, review_type):
         rid = str(item.get("review_id", ""))
         subj = item.get("subject") or {}
         proposal = item.get("proposal") or {}
         page, nid = subj.get("page"), subj.get("node_id")
-        if proposal.get("to_status") != "hidden":
+        if proposal.get("to_status") != to_status:
             skipped.append({"review_id": rid, "reason": "unexpected_to_status"})
             continue
         if not page or not nid:
@@ -215,27 +219,21 @@ def apply_hidden_semantic_pages(
 
         page_path = wiki_dir / canonical_page
         fm = parse_frontmatter(page_path.read_text(encoding="utf-8")) if page_path.exists() else {}
-        page_hidden = fm.get("status") == "hidden"
-        page_approved = fm.get("review_status") == "approved"
+        page_at_target = fm.get("status") == to_status
+        page_review_match = fm.get("review_status") == to_review_status
         graph_status = node["status"]
-        # ADR-0046 active-only, EXPLICIT paths (no non-active node's page is ever mutated):
-        #   - fully effected (page hidden+approved AND graph hidden) -> silent no-op;
-        #   - graph ACTIVE -> apply (active -> hidden; also completes a page-hidden/graph-active drift);
-        #   - graph hidden + page hidden (review_status not yet approved) -> normalize review_status;
-        #   - anything else (graph not active: graph-hidden/page-active drift, deprecated, candidate, ...)
-        #     -> node_not_active skip — never recompose a non-active node's page to hidden.
-        if page_hidden and page_approved and graph_status == "hidden":
-            continue
-        if graph_status == "active":
-            counts_as = "applied"
-        elif graph_status == "hidden" and page_hidden:
-            counts_as = "normalized"
+        if page_at_target and page_review_match and graph_status == to_status:
+            continue                                          # fully effected — silent no-op
+        if graph_status == from_status:
+            counts_as = "applied"                             # the real <from> -> <to> transition
+        elif graph_status == to_status and page_at_target:
+            counts_as = "normalized"                          # both at target; only review_status differs
         else:
-            skipped.append({"review_id": rid, "reason": "node_not_active"})
+            skipped.append({"review_id": rid, "reason": not_in_from_reason})
             continue
 
         outcome = concepts.recompose_semantic_node_page(
-            gconn, node_id=nid, wiki_dir=wiki_dir, status="hidden", review_status="approved", now=now)
+            gconn, node_id=nid, wiki_dir=wiki_dir, status=to_status, review_status=to_review_status, now=now)
         # "written" = page changed; "unchanged" = page already matched but the graph-node mirror still
         # ran (both are SUCCESS — the mirror is the point); anything else is a typed skip reason.
         if outcome not in ("written", "unchanged"):
@@ -244,9 +242,32 @@ def apply_hidden_semantic_pages(
         if outcome != "unchanged":
             changed_pages.append(canonical_page)
         if counts_as == "applied":
-            applied += 1      # a real active -> hidden transition
+            applied += 1
         else:
-            normalized += 1   # page+graph already hidden; only review_status needed fixing
+            normalized += 1
 
     return {"applied": applied, "normalized": normalized, "skipped": skipped,
             "changed_pages": changed_pages, "graph_changed": bool(applied or normalized)}
+
+
+def apply_hidden_semantic_pages(
+    gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = None,
+) -> dict[str, Any]:
+    """Apply approved `hide_semantic_page` decisions: an **active** concept/entity-family node -> `hidden`
+    + `review_status: approved` (ADR-0046). Active-only (a non-active node is a typed `node_not_active`
+    skip). Thin wrapper over the shared visibility-transition executor; graph-REQUIRED."""
+    return _apply_semantic_visibility_transition(
+        gconn, reviews_dir, review_type="hide_semantic_page", from_status="active", to_status="hidden",
+        to_review_status="approved", not_in_from_reason="node_not_active", wiki_dir=wiki_dir, now=now)
+
+
+def apply_unhidden_semantic_pages(
+    gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = None,
+) -> dict[str, Any]:
+    """Apply approved `unhide_semantic_page` decisions: a **hidden** concept/entity-family node -> `active`
+    + `review_status: none` — the clean default active state (ADR-0047), the governed inverse of
+    `hide_semantic_page`. Hidden-only (a non-hidden node is a typed `node_not_hidden` skip). Thin wrapper
+    over the shared visibility-transition executor; graph-REQUIRED."""
+    return _apply_semantic_visibility_transition(
+        gconn, reviews_dir, review_type="unhide_semantic_page", from_status="hidden", to_status="active",
+        to_review_status="none", not_in_from_reason="node_not_hidden", wiki_dir=wiki_dir, now=now)

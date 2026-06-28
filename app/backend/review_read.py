@@ -91,6 +91,9 @@ EXECUTOR_BY_TYPE = {
     "hide_content": "apply_hidden_sources",
     # ADR-0046: governance semantic-page hide (active -> hidden) via the deprecation render seam.
     "hide_semantic_page": "apply_hidden_semantic_pages",
+    # ADR-0047: the governed inverse — unhide (hidden -> active).
+    "unhide_content": "apply_unhidden_sources",
+    "unhide_semantic_page": "apply_unhidden_semantic_pages",
 }
 
 # Wiki subdirs the scoped deprecation executor may touch in v1 (ADR-0035 A5). A deprecate item whose
@@ -793,6 +796,120 @@ def preview_hide_content(item: dict[str, Any], *, gconn: Any, wiki_dir: Path | N
     return out
 
 
+def _effect_unhide_content(item: dict[str, Any], wiki_dir: Path | None,
+                           manifests_dir: Path | None) -> tuple[str, list[str]]:
+    # ADR-0047 source unhide (the inverse of _effect_hide_content). The MANIFEST is the single source-status
+    # authority (the page is a projection), so there is no two-authority partial state here: EFFECTED iff
+    # the manifest is `active`; a stale page is a `page_manifest_drift` warning, not UNKNOWN.
+    status = item.get("status")
+    if status not in ("approved", "rejected"):
+        return PENDING_APPLY, []
+    if status == "rejected":
+        return NO_EFFECT_REQUIRED, []  # a rejected unhide leaves the source hidden; nothing to apply
+    sid = (item.get("subject") or {}).get("source_id")
+    ms = _manifest_status(manifests_dir, sid)
+    if ms is None:
+        return UNKNOWN, ["manifest_unreadable"]
+    warnings: list[str] = []
+    fm = _page_frontmatter(wiki_dir, f"Sources/{sid}.md") if sid else None
+    if fm is not None and fm.get("status") != ms:
+        warnings.append("page_manifest_drift")
+    # Hidden-only (ADR-0047): an approved unhide of a non-hidden source (active/archive_candidate/...) is a
+    # no-op skip — flag it so the preview doesn't overpromise the inverse of source_not_active.
+    if ms not in ("active", "hidden"):
+        warnings.append("source_not_hidden")
+    return (EFFECTED if ms == "active" else PENDING_APPLY), warnings
+
+
+def preview_unhide_content(item: dict[str, Any], *, gconn: Any, wiki_dir: Path | None,
+                           manifests_dir: Path | None = None) -> dict[str, Any]:
+    """Per-item preview for unhide_content (ADR-0047): governance source unhide (hidden -> active).
+    Mirrors preview_hide_content; the manifest is the status authority."""
+    subj = item.get("subject") or {}
+    proposal = item.get("proposal") or {}
+    sid = subj.get("source_id")
+    out = _scaffold(item)
+    if not manifests.is_source_id(sid):
+        out["node_ids"] = []
+        out["affected_paths"] = []
+        out["proposed_status"] = "active"
+        out["proposed_action"] = "unhide source (hidden -> active)"
+        out["summary"] = "Invalid review subject: source_id is not canonical (src_<16 hex>) — cannot apply."
+        out["current_status"] = None
+        out["invalid_subject"] = True
+        out["apply"] = {"supported": False, "executor": EXECUTOR_BY_TYPE["unhide_content"],
+                        "effect_status": INVALID_SUBJECT, "effected": False,
+                        "warnings": ["invalid_source_id"]}
+        return out
+    out["node_ids"] = [sid] if sid else []
+    out["affected_paths"] = [f"Sources/{sid}.md"] if sid else []
+    out["proposed_status"] = "active"
+    out["proposed_action"] = "unhide source (hidden -> active; restored to default retrieval + navigation)"
+    out["summary"] = f"Unhide source {sid} ({proposal.get('reason', 'governance')})."
+    out["current_status"] = _manifest_status(manifests_dir, sid)  # authority, not the page
+    effect_status, warnings = _effect_unhide_content(item, wiki_dir, manifests_dir)
+    out["apply"] = _apply_supported(EXECUTOR_BY_TYPE["unhide_content"], effect_status, warnings)
+    out["details"] = {"reason": proposal.get("reason")}
+    return out
+
+
+def _effect_unhide_semantic(item: dict[str, Any], gconn: Any, wiki_dir: Path | None) -> tuple[str, list[str]]:
+    # ADR-0047 semantic unhide — the exact INVERSE of _effect_hide_semantic. EFFECTED iff page AND graph
+    # are active (the unhide is fully live; review_status not in the condition — active's default is none).
+    # A partial live unhide (page XOR graph active) -> UNKNOWN partial_unhide_state (NOT reopen-safe). Only
+    # when still fully hidden is it PENDING_APPLY (reopenable — no restoration effect is live yet).
+    status = item.get("status")
+    if status not in ("approved", "rejected"):
+        return PENDING_APPLY, []
+    if status == "rejected":
+        return NO_EFFECT_REQUIRED, []
+    subj = item.get("subject") or {}
+    fm = _page_frontmatter(wiki_dir, subj.get("page"))
+    if fm is None:
+        return UNKNOWN, ["page_unreadable"]
+    nid = subj.get("node_id")
+    if gconn is None:
+        return UNKNOWN, ["graph_unavailable"]
+    node = graph.get_node(gconn, nid) if nid else None
+    if node is None:
+        return UNKNOWN, ["node_missing"]
+    page_active = fm.get("status") == "active"
+    graph_active = node["status"] == "active"
+    if page_active and graph_active:
+        return EFFECTED, []
+    if page_active or graph_active:
+        return UNKNOWN, ["partial_unhide_state"]   # part of the restoration is live -> NOT reopen-safe
+    # Still fully hidden (neither active) -> no restoration effect live -> reopenable. A non-hidden node
+    # (e.g. deprecated) still warns (the executor will skip it), but reopen stays safe.
+    warnings = [] if node["status"] == "hidden" else ["node_not_hidden"]
+    return PENDING_APPLY, warnings
+
+
+def preview_unhide_semantic_page(
+    item: dict[str, Any], *, gconn: Any, wiki_dir: Path | None
+) -> dict[str, Any]:
+    subj = item.get("subject") or {}
+    proposal = item.get("proposal") or {}
+    page = subj.get("page")
+    top_dir = page.split("/", 1)[0] if page else None
+    out = _scaffold(item)
+    out["node_ids"] = [subj["node_id"]] if subj.get("node_id") else []
+    out["affected_paths"] = [page] if page else []
+    out["proposed_status"] = proposal.get("to_status", "active")
+    out["proposed_action"] = "unhide semantic page (hidden -> active)"
+    out["summary"] = f"Unhide semantic page {page}."
+    fm = _page_frontmatter(wiki_dir, page)
+    out["current_status"] = fm.get("status") if fm else None
+    out["details"] = {"node_type": (item.get("context") or {}).get("node_type")}
+    if top_dir in HIDE_SEMANTIC_SCOPE_DIRS:
+        effect_status, warnings = _effect_unhide_semantic(item, gconn, wiki_dir)
+        out["apply"] = _apply_supported(EXECUTOR_BY_TYPE["unhide_semantic_page"], effect_status, warnings)
+    else:
+        out["apply"] = _apply_record_only(["out_of_scope_for_unhide_semantic_executor"])
+        out["warnings"] = ["apply_deferred"]
+    return out
+
+
 _PROJECTORS = {
     "promote_candidate_node": preview_promote_candidate_node,
     "propose_synthesis": preview_propose_synthesis,
@@ -802,6 +919,8 @@ _PROJECTORS = {
     "mark_semantic_duplicate": preview_mark_semantic_duplicate,
     "hide_content": preview_hide_content,
     "hide_semantic_page": preview_hide_semantic_page,
+    "unhide_content": preview_unhide_content,
+    "unhide_semantic_page": preview_unhide_semantic_page,
 }
 
 
@@ -814,7 +933,7 @@ def project_review(item: dict[str, Any], *, gconn: Any, wiki_dir: Path | None,
     """
     rtype = str(item.get("type"))
     projector = _PROJECTORS.get(rtype, record_only_preview)
-    if rtype in ("archive_source", "hide_content"):  # both read the manifest status authority
+    if rtype in ("archive_source", "hide_content", "unhide_content"):  # read the manifest status authority
         return projector(item, gconn=gconn, wiki_dir=wiki_dir, manifests_dir=manifests_dir)
     return projector(item, gconn=gconn, wiki_dir=wiki_dir)
 
