@@ -77,6 +77,28 @@ def _read_fm_title(page_path: Path) -> str | None:
     return re.sub(r"\\(.)", r"\1", m.group(1)) if m else None
 
 
+def _page_status(synthesis_dir: Path, syn_id: str) -> str | None:
+    """The synthesis PAGE status — the authority (ADR-0049: page frontmatter is authoritative, graph is the
+    mirror). The generate-pass hidden guards check this too, so a page-hidden/graph-active partial state is
+    still preserved (skip-only); drift repair belongs to the visibility executor/validator, not the generator."""
+    p = synthesis_dir / f"{syn_id}.md"
+    return parse_frontmatter(p.read_text(encoding="utf-8")).get("status") if p.exists() else None
+
+
+# Synthesis statuses the generate pass must PRESERVE (never promote/refresh/retract/regenerate): an operator
+# `hidden` (ADR-0049 decision 1) and an evidence-derived `evidence_hidden` (a supporting claim is hidden,
+# decision 10). Both are visibility-suppression states the claim fan-out / hide-unhide executors own.
+_PRESERVED_GENERATE_STATUSES = ("hidden", "evidence_hidden")
+
+
+def _evidence_hidden(gconn, syn_id: str) -> bool:
+    """True iff any active `derived_from` claim of this synthesis is hidden (ADR-0049 decision 10): the
+    synthesis is materially derived from hidden evidence, so its prose is suppressed from default discovery
+    (status `evidence_hidden`) until the evidence is visible again. The edge stays active in the graph."""
+    return any((graph.get_node(gconn, e["dst_id"]) or {}).get("status") == "hidden"
+               for e in graph.outgoing_active(gconn, syn_id) if e["edge_type"] == "derived_from")
+
+
 def _claim_context(gconn, cid: str, *, claims_dir: Path, markdown_dir: Path) -> dict[str, Any] | None:
     """A contributing claim's durable text + citations reconstructed from its active edges; None
     if its page/wording is missing. A claim with no citations is not usable (caller drops it)."""
@@ -200,19 +222,39 @@ def _artifact_fp(enrichment_dir: Path, topic_node_id: str) -> str | None:
 
 
 def _render_page(gconn, *, syn_id, topic_node, title, summary, synthesis_text, confidence,
-                 status, review_status, synthesis_dir: Path, now: str) -> None:
+                 status, review_status, synthesis_dir: Path, now: str) -> bool:
     """Render a synthesis page (filename = syn_id, for cross-type uniqueness): prose from the
-    caller, claim links + disagreements from the graph, so the projection matches the graph."""
+    caller, claim links + disagreements from the graph, so the projection matches the graph.
+
+    CHANGE-DETECTING (ADR-0049): the page is byte-stable (no wall-clock; freshness in input_fingerprint),
+    so the file is rewritten only when its content differs and the graph node status mirror is upserted only
+    when it differs — a re-render of an already-current synthesis is a true no-op (no page churn / reindex,
+    so the claim fan-out can re-reconcile on every apply without steady-state churn). Returns True iff
+    ANYTHING changed — the page file OR the graph node-status mirror — so the caller still triggers a
+    reindex on a graph-mirror-only repair (e.g. a page-correct / graph-stale partial state)."""
+    # ADR-0049: a hidden claim is suppressed from the rendered Supporting Evidence links AND the
+    # derived_from frontmatter (both are default-discovery surfaces on a browsable synthesis page, like
+    # Source-page Claims / contradiction sections) — uniformly, regardless of the synthesis's own status.
+    # The edge stays active in the graph (SoT); raw /graph/* still shows the syn -> hidden-claim edge.
     claim_ids = [e["dst_id"] for e in graph.outgoing_active(gconn, syn_id)
-                 if e["edge_type"] == "derived_from"]
+                 if e["edge_type"] == "derived_from"
+                 and (graph.get_node(gconn, e["dst_id"]) or {}).get("status") != "hidden"]
     disagreements = _disagreement_pairs(gconn, set(claim_ids))
-    synthesis_dir.mkdir(parents=True, exist_ok=True)
-    (synthesis_dir / f"{syn_id}.md").write_text(render_synthesis_page({
+    content = render_synthesis_page({
         "synthesis_id": syn_id, "title": title, "status": status, "review_status": review_status,
         "confidence": confidence, "topic_node": topic_node, "summary": summary,
         "synthesis_text": synthesis_text, "claim_ids": claim_ids, "disagreements": disagreements,
-    }), encoding="utf-8")
-    graph.upsert_node(gconn, node_id=syn_id, node_type="synthesis", slug=syn_id, status=status, now=now)
+    })
+    synthesis_dir.mkdir(parents=True, exist_ok=True)
+    page_path = synthesis_dir / f"{syn_id}.md"
+    page_changed = (not page_path.exists()) or page_path.read_text(encoding="utf-8") != content
+    if page_changed:
+        page_path.write_text(content, encoding="utf-8")
+    node = graph.get_node(gconn, syn_id)
+    graph_changed = node is None or node["status"] != status
+    if graph_changed:
+        graph.upsert_node(gconn, node_id=syn_id, node_type="synthesis", slug=syn_id, status=status, now=now)
+    return page_changed or graph_changed
 
 
 def _withdraw_stale_pending(reviews_dir: Path, topic_node_id: str, keep_fp: str | None, now: str) -> None:
@@ -276,8 +318,14 @@ def apply_resolved_syntheses(gconn, reviews_dir: Path, *, synthesis_dir: Path,
                 continue
             syn_id = synthesis_id(topic_node)
             node = graph.get_node(gconn, syn_id)
-            if node is None or node["status"] == status:
-                continue  # nothing indexed, or already in the target state (idempotent)
+            # ADR-0049: a `hidden`/`evidence_hidden` synthesis is a visibility-suppression state — a lingering
+            # approved/rejected proposal must not flip it active/deprecated. Check the AUTHORITATIVE page
+            # status too, so a page-suppressed/graph-active partial state is also preserved (skip-only; the
+            # unhide executor / claim fan-out / validator owns drift repair, not the generator).
+            if (node is None or node["status"] == status
+                    or node["status"] in _PRESERVED_GENERATE_STATUSES
+                    or _page_status(synthesis_dir, syn_id) in _PRESERVED_GENERATE_STATUSES):
+                continue  # nothing indexed, already in target, or visibility-suppressed (page or graph)
             apath = art.synthesis_artifact_path(enrichment_dir, topic_node)
             if not apath.exists():
                 continue
@@ -288,6 +336,199 @@ def apply_resolved_syntheses(gconn, reviews_dir: Path, *, synthesis_dir: Path,
             promoted += state == "approved"
             rejected += state == "rejected"
     return {"promoted": promoted, "rejected": rejected}
+
+
+_SYN_PAGE_RE = re.compile(r"Synthesis/syn_[0-9a-f]{16}\.md")  # canonical synthesis page shape (untrusted subject)
+
+
+def _apply_synthesis_visibility_transition(
+    gconn, reviews_dir: Path, *, review_type: str, hide: bool, synthesis_dir: Path,
+    enrichment_dir: Path, now: str | None = None,
+) -> dict[str, Any]:
+    """Shared SYNTHESIS visibility executor (ADR-0049) for `hide_synthesis` (hide=True: active -> hidden)
+    and `unhide_synthesis` (hide=False: hidden -> active). Re-renders the page via `_render_page` from the
+    synthesis artifact (the prose record) + the graph (Supporting Evidence / Disagreements), writing the
+    target `status` + `review_status: approved` (an active synthesis is a promoted/approved one — ADR-0049,
+    intentionally unlike concept/claim unhide which restore `none`). Graph-REQUIRED; reads BOTH page + graph
+    so a page/graph disagreement is a typed `partial_*_state` skip (never a silent no-op); never deletes
+    edges. Idempotent: an already-hidden hide / a non-hidden unhide is a silent no-op; hide of a non-active
+    synthesis is a typed `synthesis_not_active` skip. Returns
+    `{applied, normalized, skipped, changed_pages, graph_changed}`."""
+    now = now or iso_now()
+    applied = normalized = 0
+    skipped: list[dict[str, str]] = []
+    changed_pages: list[str] = []
+    expected_to = "hidden" if hide else "active"
+    approved = reviews_dir / "approved"
+
+    for path in sorted(approved.glob("*.json")) if approved.exists() else []:
+        try:
+            item = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if item.get("type") != review_type:
+            continue
+        rid = str(item.get("review_id", ""))
+        subj = item.get("subject") or {}
+        proposal = item.get("proposal") or {}
+        page, nid = subj.get("page"), subj.get("node_id")
+        if proposal.get("to_status") != expected_to:
+            skipped.append({"review_id": rid, "reason": "unexpected_to_status"})
+            continue
+        if not page or not nid:
+            skipped.append({"review_id": rid, "reason": "missing_subject"})
+            continue
+        if not _SYN_PAGE_RE.fullmatch(page):       # path safety BEFORE any read (untrusted subject)
+            skipped.append({"review_id": rid, "reason": "invalid_page_path"})
+            continue
+        node = graph.get_node(gconn, nid)
+        if node is None:
+            skipped.append({"review_id": rid, "reason": "node_missing"})
+            continue
+        if node["node_type"] != "synthesis":
+            skipped.append({"review_id": rid, "reason": "out_of_scope"})
+            continue
+        # The graph node is authoritative for the page path: subject.page must be EXACTLY the node's
+        # canonical page (slug == syn_id). All reads/writes use the canonical page, never raw subject.page.
+        canonical_page = f"Synthesis/{node['slug']}.md"
+        ctx_type = (item.get("context") or {}).get("node_type")
+        if page != canonical_page or (ctx_type and ctx_type != "synthesis"):
+            skipped.append({"review_id": rid, "reason": "page_node_mismatch"})
+            continue
+
+        # Read BOTH authorities (page authoritative, graph node mirrored): a page/graph disagreement is a
+        # typed skip, NEVER a silent no-op (ADR-0049 reopen-safety; mirrors the claim/semantic executors).
+        page_path = synthesis_dir / f"{node['slug']}.md"
+        fm = parse_frontmatter(page_path.read_text(encoding="utf-8")) if page_path.exists() else {}
+        page_hidden = fm.get("status") == "hidden"
+        graph_hidden = node["status"] == "hidden"
+        if page_hidden != graph_hidden:
+            skipped.append({"review_id": rid,
+                            "reason": "partial_hide_state" if hide else "partial_unhide_state"})
+            continue
+        if hide:
+            if page_hidden:                                  # both hidden
+                if fm.get("review_status") == "approved":
+                    continue                                 # fully effected -> silent no-op
+                counts_as = "normalized"                     # both hidden, review pending -> fix review_status
+            elif node["status"] == "active":
+                counts_as = "applied"                        # the active -> hidden transition
+            else:
+                skipped.append({"review_id": rid, "reason": "synthesis_not_active"})  # hide is active-only
+                continue
+        elif not page_hidden:
+            continue                                         # unhide: both not hidden -> already un-hidden
+        else:
+            counts_as = "applied"                            # unhide: both hidden -> active
+
+        # Re-render from the synthesis artifact (the prose record, keyed by topic_node) — the SAME source
+        # apply_resolved_syntheses renders from. topic_node comes from the (UNTRUSTED) page, so BIND it to
+        # this synthesis: synthesis_id(topic_node) MUST equal nid (the deterministic one-per-topic id hash,
+        # ADR-0021/0049). Without this a tampered page could point topic_node at ANOTHER topic's artifact and
+        # re-render THIS page with the wrong title/summary/prose while keeping syn_id + its graph edges. The
+        # artifact's own node_id is a second, defence-in-depth match. Both are typed skips (never silent).
+        topic_node = fm.get("topic_node")
+        if not topic_node or synthesis_id(topic_node) != nid:
+            skipped.append({"review_id": rid, "reason": "synthesis_topic_mismatch"})
+            continue
+        apath = safe_child(enrichment_dir, f"{topic_node}.synthesis.json")
+        if apath is None or not apath.exists():
+            skipped.append({"review_id": rid, "reason": "synthesis_artifact_missing"})
+            continue
+        try:
+            a = json.loads(apath.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            skipped.append({"review_id": rid, "reason": "synthesis_artifact_unreadable"})
+            continue
+        if a.get("node_id") != nid:
+            skipped.append({"review_id": rid, "reason": "synthesis_artifact_mismatch"})
+            continue
+        # Operator hide -> `hidden`. Operator UNHIDE clears the operator hide, but must not re-expose a
+        # synthesis whose evidence is still hidden: restore to `evidence_hidden` if a supporting claim is
+        # still hidden, else `active` (ADR-0049 decision 10 — operator hide wins, but evidence suppression
+        # outlives it).
+        render_status = expected_to if hide else (
+            "evidence_hidden" if _evidence_hidden(gconn, nid) else "active")
+        _render_page(gconn, syn_id=nid, topic_node=topic_node, title=a.get("title", topic_node),
+                     summary=a.get("summary", ""), synthesis_text=a.get("synthesis", ""),
+                     confidence=a.get("confidence", "low"), status=render_status,
+                     review_status="approved", synthesis_dir=synthesis_dir, now=now)
+        changed_pages.append(canonical_page)
+        if counts_as == "applied":
+            applied += 1
+        else:
+            normalized += 1
+
+    return {"applied": applied, "normalized": normalized, "skipped": skipped,
+            "changed_pages": changed_pages, "graph_changed": applied + normalized > 0}
+
+
+def rerender_synthesis_page(gconn, syn_id: str, *, synthesis_dir: Path, enrichment_dir: Path,
+                            now: str | None = None) -> tuple[str, bool] | None:
+    """Re-render an existing synthesis page so its Supporting Evidence + status reflect the current
+    claim-visibility (ADR-0049 claim -> synthesis fan-out). The hidden-claim links/frontmatter are dropped
+    by `_render_page`; the **status** is recomputed by precedence (decision 10) from the **authoritative PAGE
+    status** (NOT the possibly-stale graph mirror — so a page-hidden/graph-active partial state isn't
+    downgraded; the graph mirror is then repaired to match):
+      - page `hidden` (operator hide_synthesis) -> stays `hidden` (operator hide wins over evidence restore);
+      - page `active` / `evidence_hidden` -> `evidence_hidden` if ANY supporting claim is hidden, else
+        `active` (auto-suppress / restore — only `active` is default-discoverable, so only it is suppressed);
+      - page `candidate` / `deprecated_candidate` -> unchanged (already not default-discoverable; no leak).
+    Bound to the node via `synthesis_id(topic_node) == syn_id` + the artifact's own `node_id` (the untrusted
+    -page guard). Returns `(new_status, changed)` — `changed` is True iff the page OR the graph mirror was
+    written (False when already fully current, so the fan-out re-reconciles every apply without steady-state
+    churn; True on a graph-mirror-only repair so the caller still reindexes) — or None if the page is
+    missing/unbindable/artifact-gone (left untouched; the caller treats this as an unreconciled fan-out)."""
+    now = now or iso_now()
+    node = graph.get_node(gconn, syn_id)
+    if node is None:
+        return None
+    page_path = synthesis_dir / f"{syn_id}.md"
+    fm = parse_frontmatter(page_path.read_text(encoding="utf-8")) if page_path.exists() else {}
+    topic_node = fm.get("topic_node")
+    if not topic_node or synthesis_id(topic_node) != syn_id:
+        return None                                      # untrusted/unbindable page -> leave it untouched
+    apath = safe_child(enrichment_dir, f"{topic_node}.synthesis.json")
+    if apath is None or not apath.exists():
+        return None
+    try:
+        a = json.loads(apath.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if a.get("node_id") != syn_id:
+        return None
+    page_status = fm.get("status")                       # PAGE is authoritative (ADR-0049), not the mirror
+    if page_status in ("hidden", "candidate", "deprecated_candidate"):
+        target = page_status                             # operator-hidden / not-default-discoverable -> preserve
+        review_status = fm.get("review_status") or "approved"
+    else:                                                # active / evidence_hidden / unknown -> recompute
+        target = "evidence_hidden" if _evidence_hidden(gconn, syn_id) else "active"
+        review_status = "approved"
+    changed = _render_page(gconn, syn_id=syn_id, topic_node=topic_node, title=a.get("title", topic_node),
+                           summary=a.get("summary", ""), synthesis_text=a.get("synthesis", ""),
+                           confidence=a.get("confidence", "low"), status=target,
+                           review_status=review_status, synthesis_dir=synthesis_dir, now=now)
+    return (target, changed)
+
+
+def apply_hidden_syntheses(
+    gconn, reviews_dir: Path, *, synthesis_dir: Path, enrichment_dir: Path, now: str | None = None,
+) -> dict[str, Any]:
+    """Apply approved `hide_synthesis` decisions: an active synthesis -> hidden (ADR-0049). Thin wrapper
+    over the shared synthesis visibility executor; graph-REQUIRED."""
+    return _apply_synthesis_visibility_transition(
+        gconn, reviews_dir, review_type="hide_synthesis", hide=True, synthesis_dir=synthesis_dir,
+        enrichment_dir=enrichment_dir, now=now)
+
+
+def apply_unhidden_syntheses(
+    gconn, reviews_dir: Path, *, synthesis_dir: Path, enrichment_dir: Path, now: str | None = None,
+) -> dict[str, Any]:
+    """Apply approved `unhide_synthesis` decisions: a hidden synthesis -> active (ADR-0049). Thin wrapper;
+    graph-REQUIRED."""
+    return _apply_synthesis_visibility_transition(
+        gconn, reviews_dir, review_type="unhide_synthesis", hide=False, synthesis_dir=synthesis_dir,
+        enrichment_dir=enrichment_dir, now=now)
 
 
 def generate_syntheses(
@@ -345,11 +586,15 @@ def generate_syntheses(
         # 3. Retract syntheses whose topic is no longer eligible (audited deprecation, keyless).
         retracted = 0
         for syn in graph.nodes_of_type(gconn, "synthesis"):
-            if syn["status"] == "deprecated_candidate":
-                continue
             page = synthesis_dir / f"{syn['node_id']}.md"
-            topic_node = parse_frontmatter(page.read_text(encoding="utf-8")).get("topic_node") \
-                if page.exists() else None
+            page_fm = parse_frontmatter(page.read_text(encoding="utf-8")) if page.exists() else {}
+            # ADR-0049: a `hidden`/`evidence_hidden` synthesis (page authority OR graph mirror) is a
+            # visibility-suppression state — the generate pass NEVER retracts it (a tombstone would re-expose
+            # it: deprecated_candidate is in default retrieval). Skip-only; the executor/fan-out owns drift.
+            if (syn["status"] in ("deprecated_candidate", *_PRESERVED_GENERATE_STATUSES)
+                    or page_fm.get("status") in _PRESERVED_GENERATE_STATUSES):
+                continue
+            topic_node = page_fm.get("topic_node")
             if topic_node not in eligible_ids:
                 _deprecate_synthesis(gconn, syn_id=syn["node_id"], topic_node=topic_node or "",
                                      reviews_dir=reviews_dir, synthesis_dir=synthesis_dir,
@@ -369,6 +614,11 @@ def generate_syntheses(
                 rid = reviews.review_id("propose_synthesis", _review_subject(tid, fp))
                 node = graph.get_node(gconn, syn_id)
                 status = node["status"] if node else None
+                # ADR-0049: never regenerate a `hidden`/`evidence_hidden` synthesis (page authority OR graph
+                # mirror) — no LLM call, no node reset. Skip-only; the executor/claim fan-out owns drift.
+                if (status in _PRESERVED_GENERATE_STATUSES
+                        or _page_status(synthesis_dir, syn_id) in _PRESERVED_GENERATE_STATUSES):
+                    continue
                 art_fp = _artifact_fp(enrichment_dir, tid)
                 rejected_current = (reviews_dir / "rejected" / f"{rid}.json").exists()
 

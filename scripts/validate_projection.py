@@ -116,7 +116,10 @@ def _check(root: Path, db_path: Path) -> list[str]:
                 if fm_slugs != body_slugs:
                     errors.append(f"{sid}: frontmatter {key}={sorted(fm_slugs)} != body "
                                   f"{section} links {sorted(body_slugs)}")
-            active_claims = set(graph.claims_for_source(conn, sid))
+            # ADR-0048: the rendered Source-page Claims section omits hidden claims (wiki.py); the
+            # derived_from edge stays active, so the expected projection is active NON-hidden claims.
+            active_claims = {cid for cid in graph.claims_for_source(conn, sid)
+                             if node_status.get(cid) != "hidden"}
             active_mentions = {(m["node_type"], m["slug"]) for m in graph.mentions_for_source(conn, sid)}
 
             for cid in active_claims:
@@ -147,7 +150,10 @@ def _check(root: Path, db_path: Path) -> list[str]:
 
             # Contradicting-claims projection matches active `contradicts` edges (ADR-0031).
             linked_contra = _section_link_slugs(text, "Contradicting Claims", "Claims")
-            active_contra = set(graph.active_contradictions_for_claim(conn, cid))
+            # ADR-0048: the rendered Contradicting Claims section omits hidden partner claims (claims.py);
+            # the contradicts edge stays active, so the expected projection is active NON-hidden partners.
+            active_contra = {o for o in graph.active_contradictions_for_claim(conn, cid)
+                             if node_status.get(o) != "hidden"}
             for other in active_contra - linked_contra:
                 errors.append(f"{cid}: active contradiction with {other} not projected on Claim page")
             for other in linked_contra - active_contra:
@@ -165,8 +171,11 @@ def _check(root: Path, db_path: Path) -> list[str]:
             _check_status_mirror(errors, syn_id, text, node_status)
             linked = {t.split("/", 1)[1] for t in _targets(text) if t.startswith("Claims/")}
             fm_list = _fm_list(text, "derived_from")
+            # ADR-0049: a hidden claim is suppressed from the rendered Supporting Evidence + derived_from
+            # frontmatter (the synthesis page is a default-discovery surface). The edge stays active in the
+            # graph, so the expected projection is active derived_from edges to NON-hidden claim nodes.
             active = {e["dst_id"] for e in graph.outgoing_active(conn, syn_id)
-                      if e["edge_type"] == "derived_from"}
+                      if e["edge_type"] == "derived_from" and node_status.get(e["dst_id"]) != "hidden"}
             for cid in active - linked:
                 errors.append(f"{syn_id}: active derived_from claim {cid} not linked on Synthesis page")
             for cid in linked - active:

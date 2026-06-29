@@ -21,6 +21,7 @@ _INTENDED_REVIEW_TYPES = frozenset({
     "delete_raw_file", "archive_source", "deprecate_wiki_page", "resolve_contradiction",
     "merge_entities", "split_entity", "merge_concepts", "mark_semantic_duplicate", "hide_content",
     "hide_semantic_page", "unhide_content", "unhide_semantic_page", "hide_claim", "unhide_claim",
+    "hide_synthesis", "unhide_synthesis",
     "promote_candidate_node", "change_entity_subtype", "propose_synthesis",
     "missing_raw_source", "purge_response_cache",
 })

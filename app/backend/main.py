@@ -547,7 +547,8 @@ def reopen_review(review_id: str, body: ReviewReopenRequest) -> dict[str, Any]:
 _APPLY_TYPES = frozenset({
     "propose_synthesis", "resolve_contradiction", "promote_candidate_node", "deprecate_wiki_page",
     "archive_source", "mark_semantic_duplicate", "hide_content", "hide_semantic_page",
-    "unhide_content", "unhide_semantic_page", "hide_claim", "unhide_claim"})
+    "unhide_content", "unhide_semantic_page", "hide_claim", "unhide_claim",
+    "hide_synthesis", "unhide_synthesis"})
 # Types whose application *requires* the graph (so a missing graph with such approved items -> 503).
 # archive_source + hide_content + unhide_content are executor-backed but NOT graph-required — their core
 # effect is the manifest status + Source page; the graph source-node mirror is best-effort (skipped when
@@ -652,6 +653,12 @@ def run_apply(st: Any) -> dict[str, Any]:
     sem_unhidden: dict[str, Any] = {"applied": 0, "normalized": 0, "skipped": [], "changed_pages": []}
     claims_hidden: dict[str, Any] = {"applied": 0, "normalized": 0, "skipped": [], "changed_pages": []}
     claims_unhidden: dict[str, Any] = {"applied": 0, "normalized": 0, "skipped": [], "changed_pages": []}
+    syn_hidden: dict[str, Any] = {"applied": 0, "normalized": 0, "skipped": [], "changed_pages": []}
+    syn_unhidden: dict[str, Any] = {"applied": 0, "normalized": 0, "skipped": [], "changed_pages": []}
+    claim_syn_pages: list[str] = []   # ADR-0049: synthesis pages re-rendered by a claim hide/unhide fan-out
+    syn_evidence_suppressed = syn_evidence_restored = 0   # active <-> evidence_hidden transitions (audit)
+    syn_fanout_unreconciled = 0   # affected syntheses the fan-out couldn't re-render (missing/unbindable)
+    synthesis_fanout_work = 0     # affected syntheses the fan-out re-rendered/repaired (page or graph)
     promo = {"promoted": 0}
 
     # Safe open: None on absent OR schema-mismatch (archive doesn't need the graph, so an unrelated graph
@@ -682,6 +689,36 @@ def run_apply(st: Any) -> dict[str, Any]:
                 gconn, reviews_dir, wiki_dir=wiki_dir, markdown_dir=markdown_dir, now=now)
             claims_unhidden = deprecations.apply_unhidden_claims(
                 gconn, reviews_dir, wiki_dir=wiki_dir, markdown_dir=markdown_dir, now=now)
+            # ADR-0049: explicit synthesis visibility (active <-> hidden) via the synthesis.py / _render_page
+            # seam (artifact-sourced); graph-REQUIRED. Runs AFTER the claim status flips but BEFORE the claim
+            # fan-out, so an operator hide_synthesis applies to a still-`active` synthesis and the final
+            # fan-out then PRESERVES operator `hidden` (decision 10 precedence: operator hidden wins).
+            syn_hidden = synthesis.apply_hidden_syntheses(
+                gconn, reviews_dir, synthesis_dir=synthesis_dir, enrichment_dir=enrichment_dir, now=now)
+            syn_unhidden = synthesis.apply_unhidden_syntheses(
+                gconn, reviews_dir, synthesis_dir=synthesis_dir, enrichment_dir=enrichment_dir, now=now)
+            # ADR-0049 fan-out (FINAL reconciliation): re-render every synthesis citing a hidden/unhidden
+            # claim so its Supporting Evidence drops/restores that claim and its status reconciles to the
+            # current evidence (active <-> evidence_hidden), while PRESERVING operator `hidden`. The edges
+            # stay active in the graph (SoT); only the rendered discovery surface + status change.
+            claim_affected_syn = sorted(set(claims_hidden.get("affected_syntheses", []))
+                                        | set(claims_unhidden.get("affected_syntheses", [])))
+            for _sid in claim_affected_syn:
+                _before = (graph.get_node(gconn, _sid) or {}).get("status")
+                _result = synthesis.rerender_synthesis_page(gconn, _sid, synthesis_dir=synthesis_dir,
+                                                            enrichment_dir=enrichment_dir, now=now)
+                if _result is None:
+                    syn_fanout_unreconciled += 1   # page missing/unbindable/artifact gone -> can't suppress
+                    continue
+                _after, _changed = _result
+                if _changed:                       # page OR graph-mirror changed -> reindex; no churn if not
+                    claim_syn_pages.append(f"Synthesis/{_sid}.md")
+                    synthesis_fanout_work += 1
+                    # ADR-0049 decision 10: audit the active <-> evidence_hidden transitions in the summary.
+                    if _after == "evidence_hidden" and _before != "evidence_hidden":
+                        syn_evidence_suppressed += 1
+                    elif _after == "active" and _before == "evidence_hidden":
+                        syn_evidence_restored += 1
             dups = duplicates.apply_marked_duplicates(
                 gconn, reviews_dir, wiki_dir=wiki_dir, now=now)
             gconn.commit()
@@ -735,6 +772,8 @@ def run_apply(st: Any) -> dict[str, Any]:
                      + len(unhidden["changed_pages"])
                      + len(sem_hidden["changed_pages"]) + len(sem_unhidden["changed_pages"])
                      + len(claims_hidden["changed_pages"]) + len(claims_unhidden["changed_pages"])
+                     + len(syn_hidden["changed_pages"]) + len(syn_unhidden["changed_pages"])
+                     + len(claim_syn_pages)
                      + len(claim_source_pages) + len(dups["changed_pages"])
                      + syntheses["promoted"] + syntheses["rejected"] + promo["promoted"])
     # Reindex/index-refresh eligibility: page writes AND status transitions that may NOT re-render a page
@@ -746,10 +785,13 @@ def run_apply(st: Any) -> dict[str, Any]:
     semantic_unhide_work = sem_unhidden["applied"] + sem_unhidden["normalized"]
     claim_hide_work = claims_hidden["applied"] + claims_hidden["normalized"]
     claim_unhide_work = claims_unhidden["applied"] + claims_unhidden["normalized"]
+    synthesis_hide_work = syn_hidden["applied"] + syn_hidden["normalized"]
+    synthesis_unhide_work = syn_unhidden["applied"] + syn_unhidden["normalized"]
     changed = bool(pages_changed or contra["resolution"]["acknowledged"]
                    or contra["resolution"]["rejected"] or contra["resolution"]["superseded_executed"]
                    or semantic_hide_work or semantic_unhide_work
-                   or claim_hide_work or claim_unhide_work)
+                   or claim_hide_work or claim_unhide_work
+                   or synthesis_hide_work or synthesis_unhide_work)
 
     warnings: list[str] = []
     index_status = _rebuild_index_status(root) if changed else "skipped"
@@ -797,11 +839,32 @@ def run_apply(st: Any) -> dict[str, Any]:
     if claim_unhide_stale:
         warnings.append("claim_unhide_discovery_restoration_not_guaranteed")
 
+    # ADR-0049: synthesis hide/unhide carry the same stale-index risk (synthesis is an answer-eligible
+    # discovery surface), with per-surface warnings — the operator knows which executor caused non-clean.
+    synthesis_hide_stale = reindex_failed and synthesis_hide_work > 0
+    if synthesis_hide_stale:
+        warnings.append("synthesis_hide_discovery_suppression_not_guaranteed")
+    synthesis_unhide_stale = reindex_failed and synthesis_unhide_work > 0
+    if synthesis_unhide_stale:
+        warnings.append("synthesis_unhide_discovery_restoration_not_guaranteed")
+
+    # ADR-0049 decision 10: a claim hide whose affected synthesis suppression isn't guaranteed is NOT a clean
+    # apply. Two causes: (a) the fan-out couldn't re-render the synthesis (page missing/unbindable, artifact
+    # gone) -> it may still surface the hidden claim's content as ordinary discoverable evidence; (b) the
+    # fan-out changed a synthesis (page or graph-mirror repair, e.g. active -> evidence_hidden) but the
+    # keyword/nav reindex failed -> the stale index can keep the synthesis discoverable.
+    synthesis_evidence_stale = (syn_fanout_unreconciled > 0
+                                or (reindex_failed and synthesis_fanout_work > 0))
+    if synthesis_evidence_stale:
+        warnings.append("synthesis_evidence_suppression_not_guaranteed")
+
     validators = _run_all_validators(root)
     failed = [v for v in validators if v["returncode"] != 0]
     validators_ok = not failed
     clean = (validators_ok and not hide_retrieval_stale and not semantic_hide_stale
-             and not unhide_discovery_stale and not claim_hide_stale and not claim_unhide_stale)
+             and not unhide_discovery_stale and not claim_hide_stale and not claim_unhide_stale
+             and not synthesis_hide_stale and not synthesis_unhide_stale
+             and not synthesis_evidence_stale)
 
     return {
         "status": "applied" if clean else "validation_failed",
@@ -835,6 +898,15 @@ def run_apply(st: Any) -> dict[str, Any]:
             "claims_unhidden": {"applied": claims_unhidden["applied"],
                                 "normalized": claims_unhidden["normalized"],
                                 "skipped": claims_unhidden["skipped"]},
+            "synthesis_hidden": {"applied": syn_hidden["applied"],
+                                 "normalized": syn_hidden["normalized"],
+                                 "skipped": syn_hidden["skipped"]},
+            "synthesis_unhidden": {"applied": syn_unhidden["applied"],
+                                   "normalized": syn_unhidden["normalized"],
+                                   "skipped": syn_unhidden["skipped"]},
+            "synthesis_evidence": {"suppressed": syn_evidence_suppressed,
+                                   "restored": syn_evidence_restored,
+                                   "unreconciled": syn_fanout_unreconciled},
             "pages_changed": pages_changed,
             "index_rebuilt": index_status == "rebuilt",
             "unapplied": _unapplied_by_type(reviews_dir),

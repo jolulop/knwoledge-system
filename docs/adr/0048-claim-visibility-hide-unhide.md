@@ -83,6 +83,12 @@ stays active for raw inspection), and a claim hide/unhide **re-renders X's cited
 `derived_from` destinations) so they drop/restore X. On unhide, X reappears only if it re-derives `active`
 (still evidenced); a re-derived **tombstone** has no active `derived_from`, so it isn't on any Source page.
 
+> **Extended by ADR-0049:** the same fan-out reaches **Synthesis** pages — a hidden claim is omitted from
+> the Supporting Evidence of every synthesis that cites it, and a claim hide/unhide re-renders those
+> syntheses (`affected_syntheses` → `rerender_synthesis_page`). The claim executor was deferred from
+> syntheses in v1; ADR-0049 closes that gap so the claim-hide discovery suppression is complete across all
+> rendered surfaces (Source pages, contradiction partners, **and** syntheses).
+
 **5. No edge surgery; detection is status-filtered, not edge-destructive.** Hiding does **not** mutate or
 delete any existing `contradicts`/`derived_from` edge — they remain as durable graph history and raw
 `/graph/*` still shows them. But because a hidden claim is **no longer active**, it is **excluded from future

@@ -15,6 +15,8 @@ requires_human_approval:
   - unhide_semantic_page
   - hide_claim
   - unhide_claim
+  - hide_synthesis              # governance synthesis visibility: active -> hidden (ADR-0049)
+  - unhide_synthesis            # the inverse: hidden -> active (ADR-0049)
   - promote_candidate_node      # candidate concept/entity -> active (ADR-0018, Phase 3.5b)
   - change_entity_subtype       # re-keys a node's id; gated like a merge/split
   - propose_synthesis           # candidate synthesis -> active; review-only, NO recurrence (ADR-0031, Phase 3.5c)

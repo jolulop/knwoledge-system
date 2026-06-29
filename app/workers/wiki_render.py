@@ -539,7 +539,9 @@ def render_synthesis_page(node: dict[str, Any]) -> str:
 
     The LLM supplies only the `summary`/`synthesis` prose; the renderer composes it with the
     graph-backed grounding — a Supporting Evidence section of `[[Claims/…]]` links matching the
-    synthesis's active `derived_from` edges, and a Disagreements section listing the active
+    synthesis's active `derived_from` edges **whose claim endpoint is not hidden** (ADR-0049: hidden
+    claims are suppressed from this default-discovery surface; the edge stays in the graph), and a
+    Disagreements section listing the active
     `contradicts` pairs among those claims. Born `status: candidate` (review-gated, no recurrence
     auto-promote — ADR-0031); `active` once a `propose_synthesis` review is approved, or
     `deprecated_candidate` on rejection / when the topic is no longer eligible. No wall-clock —
@@ -576,8 +578,14 @@ def render_synthesis_page(node: dict[str, Any]) -> str:
         fm_lines.append("derived_from: []")
     fm_lines += ['input_fingerprint: ""', "---"]
 
+    # ADR-0049: `hidden` is a governance visibility-suppression status. A hidden synthesis keeps its
+    # Supporting Evidence + Disagreements sections rendered (the page is the durable inspection record;
+    # graph is SoT) under a prominent suppression banner — hide suppresses *discovery*, not the record.
     label = {"candidate": "Candidate synthesis", "active": "Synthesis",
-             "deprecated_candidate": "Synthesis deprecated — pending review"}.get(status, "Synthesis")
+             "deprecated_candidate": "Synthesis deprecated — pending review",
+             "hidden": "Synthesis hidden — suppressed from default discovery",
+             # ADR-0049: auto-suppressed because a supporting claim is hidden (not an operator hide).
+             "evidence_hidden": "Synthesis suppressed — supporting evidence hidden"}.get(status, "Synthesis")
     body = [
         "",
         f"# {_delink(title)}",

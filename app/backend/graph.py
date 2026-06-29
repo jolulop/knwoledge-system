@@ -36,7 +36,8 @@ ASSERTED_BY = frozenset({"deterministic", "llm", "human", "authored_wikilink"})
 NODE_STATUSES = frozenset(
     {"active", "candidate", "stale_candidate", "deprecated_candidate",
      "archive_candidate", "archived", "delete_candidate", "deleted",
-     "hidden"}  # ADR-0043: governance visibility-suppression status (active -> hidden)
+     "hidden",            # ADR-0043: governance visibility-suppression status (active -> hidden)
+     "evidence_hidden"}   # ADR-0049: synthesis auto-suppressed because a supporting claim is hidden
 )
 # Endpoint-type contract per edge type (ADR-0030). `None` = unconstrained on that side;
 # SAME_TYPE_EDGES require src and dst to share a node_type. Enforced by validate_graph (not

@@ -289,6 +289,7 @@ def _apply_claim_visibility_transition(
     skipped: list[dict[str, str]] = []
     changed_pages: list[str] = []
     affected_sources: set[str] = set()   # ADR-0048: Source pages whose Claims section must re-render
+    affected_syntheses: set[str] = set()  # ADR-0049: syntheses citing this claim must re-render (fan-out)
     claims_dir = wiki_dir / "Claims"
     expected_to = "hidden" if hide else "active"
 
@@ -335,18 +336,30 @@ def _apply_claim_visibility_transition(
             continue
         if hide:
             if page_hidden:                                 # both hidden
-                if fm.get("review_status") == "approved":
-                    continue                                # fully effected -> silent no-op
-                counts_as = "normalized"                    # both hidden, review pending -> fix review_status
+                counts_as = None if fm.get("review_status") == "approved" else "normalized"
+                # approved -> fully effected (no claim change); pending -> fix review_status.
             elif node["status"] == "active":
                 counts_as = "applied"                       # the active -> hidden transition
             else:
                 skipped.append({"review_id": rid, "reason": "claim_not_active"})  # hide is active-only
-                continue
+                continue                                    # not hidden -> nothing for a synthesis to suppress
         elif not page_hidden:
-            continue                                        # unhide: both not hidden -> already un-hidden
+            counts_as = None                                # unhide: both not hidden -> already un-hidden
         else:
             counts_as = "applied"                           # unhide: both hidden -> re-derive
+
+        # ADR-0049: syntheses with an active derived_from edge INTO this claim must re-reconcile so their
+        # Supporting Evidence + status track the claim's CURRENT visibility. Collected on EVERY apply of an
+        # approved item — INCLUDING a fully-effected (no-op) claim — so a fan-out that failed once
+        # (unreconciled: missing artifact/page) is retried after repair ("repair then rerun"). The fan-out
+        # (run_apply -> rerender_synthesis_page) is change-detecting, so a steady-state apply doesn't churn.
+        # Edge stays active (graph SoT). Skipped only for the claim_not_active path above (claim not hidden).
+        affected_syntheses.update(
+            e["src_id"] for e in graph.incoming_active(gconn, nid)
+            if e["edge_type"] == "derived_from"
+            and (graph.get_node(gconn, e["src_id"]) or {}).get("node_type") == "synthesis")
+        if counts_as is None:
+            continue                                        # claim already in target state -> no claim work
 
         # Capture the claim's active contradiction partners + cited sources BEFORE the transition, so we
         # re-render them afterwards (partner Contradicting Claims sections + Source-page Claims sections
@@ -373,7 +386,8 @@ def _apply_claim_visibility_transition(
 
     return {"applied": applied, "normalized": normalized, "skipped": skipped,
             "changed_pages": changed_pages, "graph_changed": applied + normalized > 0,
-            "affected_sources": sorted(affected_sources)}
+            "affected_sources": sorted(affected_sources),
+            "affected_syntheses": sorted(affected_syntheses)}
 
 
 def apply_hidden_claims(

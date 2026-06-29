@@ -200,6 +200,20 @@ def test_hiding_claim_omits_it_from_partner_section_edge_preserved(tmp_path):
     conn.close()
 
 
+def test_validate_projection_passes_with_hidden_partner_on_claim_page(tmp_path):
+    # ADR-0048 (review fix): the rendered Contradicting Claims section omits a hidden partner, so
+    # validate_projection must expect active NON-hidden contradicts — else a real vault validate-fails.
+    import validate_projection
+    conn = _graph(tmp_path)
+    _contradicts(tmp_path, conn)
+    _approve(tmp_path, "hide_claim", CX, to_status="hidden")
+    _apply_hide(tmp_path, conn)                                      # re-renders CY to drop hidden CX
+    conn.commit()
+    conn.close()
+    assert not _cy_lists_cx(tmp_path)
+    assert validate_projection.main([str(tmp_path)]) == 0           # status-aware projection passes
+
+
 def test_unhiding_claim_restores_it_in_partner_section(tmp_path):
     conn = _graph(tmp_path)
     _contradicts(tmp_path, conn)
@@ -246,6 +260,21 @@ def _source_with_claim(tmp_path, conn, text="The sky is blue today."):
                            markdown_dir=tmp_path / "normalized" / "markdown", now="t", text_hint=text)
     conn.commit()
     wiki.generate_wiki(tmp_path, source_ids=[SID], rebuild_index=False, record_job=False)
+
+
+def test_validate_projection_passes_with_hidden_claim_on_source_page(tmp_path):
+    # ADR-0048 (review fix): the Source-page Claims section omits a hidden claim, so validate_projection
+    # must expect active NON-hidden claims — else a real vault with a Source page validate-fails.
+    import validate_projection
+    conn = _graph(tmp_path)
+    _source_with_claim(tmp_path, conn)
+    _approve(tmp_path, "hide_claim", CX, to_status="hidden")
+    _apply_hide(tmp_path, conn)
+    conn.commit()
+    conn.close()
+    wiki.generate_wiki(tmp_path, source_ids=[SID], rebuild_index=False, record_job=False)  # drop hidden CX
+    assert CX not in (tmp_path / "wiki" / "Sources" / f"{SID}.md").read_text()
+    assert validate_projection.main([str(tmp_path)]) == 0
 
 
 def test_source_page_render_omits_hidden_claim(tmp_path):
