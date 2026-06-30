@@ -183,14 +183,14 @@ def test_decision_apply_required_classification():
     assert f("resolve_contradiction", "rejected") is True
     assert f("promote_candidate_node", "rejected") is False
     assert f("deprecate_wiki_page", "rejected") is False
-    # record-only types and deferrals never require apply
-    assert f("merge_entities", "approved") is False
+    # record-only types and deferrals never require apply (split_entity stays record-only — ADR-0050)
+    assert f("split_entity", "approved") is False
     assert f("promote_candidate_node", "deferred") is False
 
 
 def test_record_only_type_is_apply_deferred(tmp_path):
     rv = tmp_path / "reviews"
-    _write_item(rv, "pending", _item("rev_m", "merge_entities",
+    _write_item(rv, "pending", _item("rev_m", "split_entity",
                                      subject={"node_id": "ent_1"}))
     prev = review_read.get_review(rv, "rev_m")["preview"]
     assert prev["apply"]["supported"] is False

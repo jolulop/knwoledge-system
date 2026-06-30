@@ -472,6 +472,41 @@ def render_concept_page(node: dict[str, Any], *, review_status: str | None = Non
     source_ids = node.get("source_ids") or []
     active_mentions = bool(source_ids)
     status = node.get("status") or ("candidate" if active_mentions else "deprecated_candidate")
+    if status == "merged":
+        # ADR-0050 merge tombstone: the absorbed id is kept at its old path (old links resolve here) with
+        # the FULL frontmatter schema preserved + `merged_into`; only the body collapses to a redirect note.
+        merged_into = node.get("merged_into", "")
+        link = node.get("merged_into_link")            # "<Dir>/<survivor-slug>" of the active survivor
+        target = f"[[{link}]]" if link else merged_into
+        fm_lines = [
+            "---",
+            f"type: {node_type}",
+            f'{node["id_field"]}: "{node["node_id"]}"',
+            f'title: "{_fm_quote(title)}"',
+            "status: merged",
+            "review_status: approved",
+            "generation_status: deterministic",
+            f"confidence: {confidence}",
+            f"aliases: {_render_tag_list(aliases)}",
+            f'merged_into: "{merged_into}"',
+            f'merged_at: "{node.get("merged_at", "")}"',
+            f'merge_review_id: "{node.get("merge_review_id", "")}"',
+            'input_fingerprint: ""',
+            "---",
+        ]
+        body = [
+            "",
+            f"# {_delink(title)}",
+            "",
+            f"> [!summary] Merged {node_type}",
+            f"> This {node_type} was merged into {target} — no longer a live identity.",
+            "",
+            f"Merged into {target}.",
+            "",
+        ]
+        draft = "\n".join(fm_lines + body) + "\n"
+        fingerprint = _fingerprint(_FP_LINE.sub("", draft))
+        return draft.replace('input_fingerprint: ""', f'input_fingerprint: "{fingerprint}"', 1)
     derived_review_status = "none" if status == "active" else ("none" if active_mentions else "pending")
     rs = _resolve_review_status(review_status, derived_review_status)
 

@@ -183,7 +183,7 @@ def diff_states(before: StateSnapshot, after: StateSnapshot) -> dict[str, Any]:
         elif before.nodes[nid]["status"] != info["status"]:
             nodes_status_changed.append({"id": nid, "type": info["type"],
                                          "from": before.nodes[nid]["status"], "to": info["status"]})
-    edges_added, edges_removed, edges_status_changed = [], [], []
+    edges_added, edges_removed, edges_status_changed, edges_repointed = [], [], [], []
     for eid in sorted(set(before.edges) | set(after.edges)):
         b, a = before.edges.get(eid), after.edges.get(eid)
         if b is None and a is not None:
@@ -192,10 +192,18 @@ def diff_states(before: StateSnapshot, after: StateSnapshot) -> dict[str, Any]:
         elif a is None and b is not None:
             edges_removed.append({"src": b["src"], "rel": b["rel"], "dst": b["dst"],
                                   "status": b["status"]})
-        elif b is not None and a is not None and b["status"] != a["status"]:
-            edges_status_changed.append({"src": a["src"], "rel": a["rel"], "dst": a["dst"],
-                                         "from": b["status"], "to": a["status"],
-                                         "review_id": a["review_id"] or None})
+        elif b is not None and a is not None:
+            # ADR-0050: an in-place endpoint re-point keeps the SAME edge_id (+ usually status), so it is
+            # invisible to the status-delta check — surface it explicitly so the dry-run exposes the
+            # rekeying itself, not only its tombstone/wiki side effects.
+            if b["src"] != a["src"] or b["dst"] != a["dst"]:
+                edges_repointed.append({"rel": a["rel"], "from_src": b["src"], "from_dst": b["dst"],
+                                        "to_src": a["src"], "to_dst": a["dst"], "status": a["status"],
+                                        "review_id": a["review_id"] or None})
+            if b["status"] != a["status"]:
+                edges_status_changed.append({"src": a["src"], "rel": a["rel"], "dst": a["dst"],
+                                             "from": b["status"], "to": a["status"],
+                                             "review_id": a["review_id"] or None})
 
     wiki = []
     for path in sorted(set(before.wiki) | set(after.wiki)):
@@ -216,19 +224,19 @@ def diff_states(before: StateSnapshot, after: StateSnapshot) -> dict[str, Any]:
 
     return {
         "graph": {"edges_added": edges_added, "edges_removed": edges_removed,
-                  "edges_status_changed": edges_status_changed,
+                  "edges_status_changed": edges_status_changed, "edges_repointed": edges_repointed,
                   "nodes_status_changed": nodes_status_changed, "nodes_added": nodes_added},
         "wiki": wiki, "reviews": reviews, "manifests": manifests,
     }
 
 
 def empty_graph_diff() -> dict[str, list]:
-    return {"edges_added": [], "edges_removed": [], "edges_status_changed": [],
+    return {"edges_added": [], "edges_removed": [], "edges_status_changed": [], "edges_repointed": [],
             "nodes_status_changed": [], "nodes_added": []}
 
 
 def diff_is_empty(diff: dict[str, Any]) -> bool:
     g = diff["graph"]
     return not (g["edges_added"] or g["edges_removed"] or g["edges_status_changed"]
-                or g["nodes_status_changed"] or g["nodes_added"]
+                or g.get("edges_repointed") or g["nodes_status_changed"] or g["nodes_added"]
                 or diff["wiki"] or diff["reviews"] or diff["manifests"])

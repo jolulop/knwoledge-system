@@ -1119,10 +1119,10 @@ def test_apply_is_idempotent(client, tmp_path):
 
 def test_apply_reports_unapplied_record_only_types(client, tmp_path):
     _write_review(tmp_path, "approved", {
-        "review_id": "rev_m", "type": "merge_entities", "status": "approved",
+        "review_id": "rev_m", "type": "split_entity", "status": "approved",
         "subject": {"node_id": "ent_1"}, "proposal": {}, "context": {}})
     body = client.post("/reviews/apply").json()
-    assert {"type": "merge_entities", "count": 1, "reason": "no_executor_in_phase_6"} \
+    assert {"type": "split_entity", "count": 1, "reason": "no_executor_in_phase_6"} \
         in body["summary"]["unapplied"]
 
 

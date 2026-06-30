@@ -37,7 +37,8 @@ NODE_STATUSES = frozenset(
     {"active", "candidate", "stale_candidate", "deprecated_candidate",
      "archive_candidate", "archived", "delete_candidate", "deleted",
      "hidden",            # ADR-0043: governance visibility-suppression status (active -> hidden)
-     "evidence_hidden"}   # ADR-0049: synthesis auto-suppressed because a supporting claim is hidden
+     "evidence_hidden",   # ADR-0049: synthesis auto-suppressed because a supporting claim is hidden
+     "merged"}            # ADR-0050: absorbed identity tombstone (merged_into a same-type survivor)
 )
 # Endpoint-type contract per edge type (ADR-0030). `None` = unconstrained on that side;
 # SAME_TYPE_EDGES require src and dst to share a node_type. Enforced by validate_graph (not
@@ -224,6 +225,56 @@ def set_status(conn: sqlite3.Connection, edge_id: str, status: str, *, now: str 
     if cur.rowcount == 0:
         raise ValueError(f"no edge {edge_id!r}; status transition would be a silent no-op")
     conn.commit()
+
+
+def find_assertion(
+    conn: sqlite3.Connection, *, src_id: str, dst_id: str, edge_type: str, asserted_by: str,
+    evidence_source_id: str | None = None, evidence_char_start: int | None = None,
+    evidence_char_end: int | None = None,
+) -> dict[str, Any] | None:
+    """The edge row matching the FULL assertion identity (`uq_edges_assertion`), in ANY status, or None
+    (ADR-0050 merge collision check — the unique index is status-agnostic, so a re-point can land on an
+    existing inactive row of the same identity)."""
+    row = conn.execute(
+        """SELECT * FROM edges WHERE src_id = ? AND dst_id = ? AND edge_type = ? AND asserted_by = ?
+             AND evidence_source_id IS ? AND evidence_char_start IS ? AND evidence_char_end IS ?""",
+        (src_id, dst_id, edge_type, asserted_by,
+         evidence_source_id, evidence_char_start, evidence_char_end),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def repoint_edge(
+    conn: sqlite3.Connection, edge_id: str, *, new_src: str | None = None, new_dst: str | None = None,
+    now: str | None = None,
+) -> None:
+    """Re-point an existing edge's endpoint(s) IN PLACE (ADR-0050 merge). Preserves the `edge_id` and ALL
+    provenance (`asserted_by`/`review_id`/`job_id`/evidence/`status`/`confidence`); only `src_id`/`dst_id`
+    (+ `updated_at`) change. The caller must first ensure the resulting full assertion identity is free
+    (no `uq_edges_assertion` collision) — otherwise it raises (a collision is the caller's to resolve)."""
+    sets: list[str] = []
+    params: list[Any] = []
+    if new_src is not None:
+        sets.append("src_id = ?")
+        params.append(new_src)
+    if new_dst is not None:
+        sets.append("dst_id = ?")
+        params.append(new_dst)
+    if not sets:
+        return
+    sets.append("updated_at = ?")
+    params.append(now or iso_now())
+    params.append(edge_id)
+    conn.execute(f"UPDATE edges SET {', '.join(sets)} WHERE edge_id = ?", params)
+
+
+def reactivate_edge(conn: sqlite3.Connection, edge_id: str, *, review_id: str,
+                    now: str | None = None) -> None:
+    """Resurrect an inactive edge to `active` + stamp the authorizing `review_id` (ADR-0050 merge
+    `resurrected_target_collision` — the merge, not the row's old proposal, authorizes the active status;
+    asserted_by/evidence/job_id provenance is left untouched)."""
+    conn.execute("UPDATE edges SET status = 'active', review_id = ?, updated_at = ? WHERE edge_id = ?",
+                 (review_id, now or iso_now(), edge_id))
 
 
 def supersede_source_edges(

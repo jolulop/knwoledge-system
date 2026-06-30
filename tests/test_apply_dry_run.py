@@ -270,7 +270,7 @@ def test_dry_run_graph_unavailable_blocked_mirrors_503(client, tmp_path):
 
 
 def test_dry_run_not_appliable_record_only(client, tmp_path):
-    _approve(tmp_path, {"review_id": "rev_m", "type": "merge_entities", "status": "approved",
+    _approve(tmp_path, {"review_id": "rev_m", "type": "split_entity", "status": "approved",
                         "subject": {}, "proposal": {}, "context": {}})
     dry = client.post("/reviews/apply/dry-run").json()
     assert dry["status"] == "ok"

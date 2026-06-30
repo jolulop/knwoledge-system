@@ -37,7 +37,9 @@ def _check(db_path: Path) -> list[str]:
     errors: list[str] = []
     conn = graph.connect(db_path)
     try:
-        node_types = {r["node_id"]: r["node_type"] for r in conn.execute("SELECT node_id, node_type FROM nodes")}
+        node_rows = list(conn.execute("SELECT node_id, node_type, status FROM nodes"))
+        node_types = {r["node_id"]: r["node_type"] for r in node_rows}
+        node_status = {r["node_id"]: r["status"] for r in node_rows}
         for node_id, node_type in node_types.items():
             if node_type not in graph.NODE_TYPES:
                 errors.append(f"node {node_id}: invalid node_type {node_type!r}")
@@ -70,6 +72,15 @@ def _check(db_path: Path) -> list[str]:
                 errors.append(f"edge {ref}: src_id {e['src_id']!r} is not an indexed node")
             if not dst_in:
                 errors.append(f"edge {ref}: dst_id {e['dst_id']!r} is not an indexed node")
+
+            # ADR-0050 merge invariant: no ACTIVE edge may have a `merged` (absorbed-identity) endpoint —
+            # a merge re-points every active edge off the absorbed id, so a live reference to a tombstone
+            # means the rewrite was incomplete.
+            if e["status"] == "active":
+                for endpoint in (e["src_id"], e["dst_id"]):
+                    if node_status.get(endpoint) == "merged":
+                        errors.append(f"edge {ref}: active edge has a merged endpoint {endpoint} "
+                                      f"(ADR-0050: merge must re-point all active edges off the absorbed id)")
 
             # Endpoint-type contract (ADR-0030), checked only when both nodes resolve.
             if src_in and dst_in and edge_type in graph.EDGE_TYPES:

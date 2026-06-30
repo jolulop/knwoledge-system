@@ -1,7 +1,20 @@
 # ADR-0050 — Identity surgery: entity/concept merge (rekeying), tombstone-redirect, forward-only
 
-**Status:** Accepted. Design-locked 2026-06-30 (grill-phase; **docs-only — no code yet**). Implementation
-awaits a separate "implement now". (Refined per review round 1: the edge-collision key is the **full**
+**Status:** Accepted. Design-locked 2026-06-30 (grill-phase, committed `4721c46`); **v1 merge implemented**
+2026-06-30 (`merge_entities` + `merge_concepts`, exact same node_type). `merged` status (graph/validate_wiki/
+retention.yaml, ∉ RETENTION_DEFAULT); `graph.{find_assertion,repoint_edge,reactivate_edge}`; the
+`render_concept_page` merged-tombstone branch; `app/workers/merges.py` (`apply_merges` — two-pass plan/apply,
+the three block gates, edge re-point/normalize, tombstone, alias union, withdraw, audit); `review_read`
+`_effect_merge`/`preview_merge_*` + `EXECUTOR_BY_TYPE`; `run_apply` wiring + `merge_discovery_reindex_not_guaranteed`;
+the `validate_graph` no-active-merged-endpoint invariant + the `validate_projection` merged_into invariant.
+Covered by `tests/test_merge.py` (26). **Implementation review round (6 fixes):** the affected-surface
+re-render (Source pages + duplicate partners) now covers **every** edge action (collapse/resurrect, not just
+re-point); the tombstone carries `merged_at` + `merge_review_id`; the `validate_projection` invariant
+(`merged_into` → active same-type non-self survivor); the subject/proposal matcher scans **both**;
+`_effect_merge` distinguishes a **partial** merge as `UNKNOWN`. **Round 2:** the ADR-0040 dry-run now
+surfaces the re-point itself via a new `diff.graph.edges_repointed` (`from_src/from_dst → to_src/to_dst`,
+same edge_id) attributed to the merge by target id; the audit carries the absorbed `old_status` + both page
+paths + `affected_pages`. (Refined per review round 1: the edge-collision key is the **full**
 assertion identity incl. evidence anchors — distinct-evidence edges coexist; `supersedes` stays **directed**
 — only `{contradicts,duplicates}` re-canonicalize; absorbed edges become `superseded`, **not** deleted;
 re-point preserves edge provenance; pending-subject withdrawal + the merge audit reuse the existing
@@ -9,7 +22,7 @@ re-point preserves edge provenance; pending-subject withdrawal + the merge audit
 schema. Review round 2: the status-agnostic `uq_edges_assertion` means a re-point can collide with an
 **inactive** A row — resurrect on `proposed`/`superseded`, **block** on `rejected` (decision 3); an
 **approved-but-unapplied** B-referencing item **blocks** the merge (decision 6); withdrawal covers `pending`
-**and** `deferred`, matched on structured subject fields only (decision 2); a deterministic alias-union rule.
+**and** `deferred`, matched on structured subject **+ proposal** fields (decision 2); a deterministic alias-union rule.
 Review round 3: the subject matcher includes **`topic_node_id`** (so a `propose_synthesis` proposal for an
 absorbed concept/entity is caught — decision 2/6); resurrecting a `proposed` target edge also **withdraws its
 stale `review_id`** (decision 3); an endpoint-invalid re-point is a **pre-write block** `invalid_repoint_endpoint`
@@ -58,8 +71,11 @@ validators, eligibility, dry-run, future producers), risks drift + double-counti
 relationships point to survivor A; B is no longer a live identity. **Forward-only v1** is the honest safety
 boundary — no live un-merge button; correcting a wrong merge is a **new** governed operation (a future
 split/un-merge), reconstructable from the merge **audit** (decision 5), consistent with ADR-0045 (applied
-effects aren't auto-undone). Reopen is allowed **only while the decision is PENDING**; once applied, the
-projector reports `EFFECTED` → not reopenable.
+effects aren't auto-undone). Reopen is allowed **only while the decision is PENDING_APPLY** (nothing
+merged); a **cleanly applied** merge projects `EFFECTED` (absorbed node + page both `merged`, page
+`merged_into` = survivor, AND no active edge still touches the absorbed id) → not reopenable; a **partial**
+live state (graph XOR page merged, or a stray active edge) projects `UNKNOWN partial_merge_state` → also not
+reopenable (repair the read model first), mirroring the hide/unhide reopen-safety pattern.
 
 **2. Surface taxonomy — what is a "live identity reference" (re-pointed) vs not.**
 - **Graph edges** (`derived_from`/`contradicts`/`mentions`/`duplicates`/`related_to`/`supersedes`, all key
@@ -81,13 +97,13 @@ projector reports `EFFECTED` → not reopenable.
   `reviews/audit_log/<id>-withdrawn-<hex>.json` entry (`decision: "withdrawn"`, `decided_by: "system"`,
   `note: "superseded_by_merge"`). A **real, audited ledger operation**, not an item *status*
   (`REVIEW_STATUSES` stays `pending|approved|rejected|deferred`; a withdrawn item is gone from `pending/`,
-  recorded in `audit_log/`; a human re-files against A if still wanted). **Subject matcher:** exact node-id
-  equality in **structured subject fields** only — `subject.node_id`, `subject.node_ids[]`,
-  `subject.survivor_node_id`/`absorbed_node_id`, **`subject.topic_node_id`** (a `propose_synthesis` subject
-  keys on the topic node — a pending/deferred/approved synthesis proposal whose `topic_node_id == B` must be
-  matched, else it survives the merge pointing at a tombstoned topic), and the canonical **page-path**
-  subject forms — **never** by scanning rendered prose. (This is the single matcher used by both the
-  unresolved-withdrawal and the approved-unapplied gate.) **Approved** (decided) items referencing B are **not** just immutable audit —
+  recorded in `audit_log/`; a human re-files against A if still wanted). **Matcher:** exact node-id equality in
+  structured fields of the **subject OR proposal** — `node_id`, `node_ids[]`, `survivor_node_id`/
+  `absorbed_node_id`, **`topic_node_id`** (a `propose_synthesis` subject keys on the topic node — a
+  pending/deferred/approved synthesis proposal whose `topic_node_id == B` must be matched), and the canonical
+  **page-path** form — **never** by scanning rendered prose. (The single matcher used by both the
+  unresolved-withdrawal and the approved-unapplied gate; scanning the proposal too, not just the subject,
+  catches an item that references B in its proposal payload.) **Approved** (decided) items referencing B are **not** just immutable audit —
   they are executor inputs and are a **pre-merge BLOCK gate** (decision 6); **rejected** items are immutable
   audit, left as-is. (Re-keying a subject is rejected: the subject-hashed `review_id` would change → a
   different item.)

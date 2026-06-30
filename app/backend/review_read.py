@@ -100,6 +100,9 @@ EXECUTOR_BY_TYPE = {
     # ADR-0049: synthesis visibility (the synthesis.py / _render_page seam, artifact-sourced).
     "hide_synthesis": "apply_hidden_syntheses",
     "unhide_synthesis": "apply_unhidden_syntheses",
+    # ADR-0050: identity surgery — entity/concept merge (rekeying), forward-only.
+    "merge_entities": "apply_merges",
+    "merge_concepts": "apply_merges",
 }
 
 # Wiki subdirs the scoped deprecation executor may touch in v1 (ADR-0035 A5). A deprecate item whose
@@ -1092,6 +1095,67 @@ def preview_unhide_synthesis(item: dict[str, Any], *, gconn: Any, wiki_dir: Path
     return _preview_synthesis_visibility(item, gconn=gconn, wiki_dir=wiki_dir, hide=False)
 
 
+def _effect_merge(item: dict[str, Any], gconn: Any, wiki_dir: Path | None) -> tuple[str, list[str]]:
+    # ADR-0050: identity surgery is FORWARD-ONLY. EFFECTED only when the merge is CLEANLY applied — the
+    # absorbed graph node is `merged`, its page is a `merged` tombstone pointing at the survivor, AND no
+    # active edge still touches it. A partial live state (graph XOR page merged, or stray active edges) is
+    # UNKNOWN `partial_merge_state` (reopen-safe: not reopenable until the read model is repaired); only a
+    # fully-clean PENDING_APPLY (nothing merged) is reopenable. An applied merge is never reopenable.
+    status = item.get("status")
+    if status not in ("approved", "rejected"):
+        return PENDING_APPLY, []
+    if status == "rejected":
+        return NO_EFFECT_REQUIRED, []                    # a rejected merge owes no world change
+    subj = item.get("subject") or {}
+    a, b = subj.get("survivor_node_id"), subj.get("absorbed_node_id")
+    if not a or not b:
+        return INVALID_SUBJECT, ["malformed_subject"]
+    if gconn is None:
+        return UNKNOWN, ["graph_unavailable"]
+    nb = graph.get_node(gconn, b)
+    if nb is None:
+        return UNKNOWN, ["node_missing"]
+    graph_merged = nb["status"] == "merged"
+    b_page = f"{NODE_DIR[nb['node_type']]}/{nb['slug']}.md" if nb["node_type"] in NODE_DIR else None
+    fm = _page_frontmatter(wiki_dir, b_page)
+    page_merged = bool(fm and fm.get("status") == "merged" and fm.get("merged_into") == a)
+    no_active_edges = not (graph.outgoing_active(gconn, b) or graph.incoming_active(gconn, b))
+    if graph_merged and page_merged and no_active_edges:
+        return EFFECTED, []
+    if graph_merged or page_merged:
+        return UNKNOWN, ["partial_merge_state"]
+    return PENDING_APPLY, []
+
+
+def _preview_merge(item: dict[str, Any], *, gconn: Any, wiki_dir: Path | None,
+                   rtype: str) -> dict[str, Any]:
+    subj = item.get("subject") or {}
+    a, b = subj.get("survivor_node_id"), subj.get("absorbed_node_id")
+    out = _scaffold(item)
+    out["node_ids"] = [x for x in (a, b) if x]
+    out["proposed_status"] = "merged"
+    out["proposed_action"] = f"merge {b} into {a} (absorbed -> merged tombstone)"
+    out["summary"] = f"Merge {b} into survivor {a}."
+    out["details"] = {"survivor_node_id": a, "absorbed_node_id": b}
+    paths = []
+    for nid in (a, b):
+        n = graph.get_node(gconn, nid) if (gconn and nid) else None
+        if n and n["node_type"] in NODE_DIR:
+            paths.append(f"{NODE_DIR[n['node_type']]}/{n['slug']}.md")
+    out["affected_paths"] = paths
+    effect_status, warnings = _effect_merge(item, gconn, wiki_dir)
+    out["apply"] = _apply_supported(EXECUTOR_BY_TYPE[rtype], effect_status, warnings)
+    return out
+
+
+def preview_merge_entities(item: dict[str, Any], *, gconn: Any, wiki_dir: Path | None) -> dict[str, Any]:
+    return _preview_merge(item, gconn=gconn, wiki_dir=wiki_dir, rtype="merge_entities")
+
+
+def preview_merge_concepts(item: dict[str, Any], *, gconn: Any, wiki_dir: Path | None) -> dict[str, Any]:
+    return _preview_merge(item, gconn=gconn, wiki_dir=wiki_dir, rtype="merge_concepts")
+
+
 _PROJECTORS = {
     "promote_candidate_node": preview_promote_candidate_node,
     "propose_synthesis": preview_propose_synthesis,
@@ -1107,6 +1171,8 @@ _PROJECTORS = {
     "unhide_claim": preview_unhide_claim,
     "hide_synthesis": preview_hide_synthesis,
     "unhide_synthesis": preview_unhide_synthesis,
+    "merge_entities": preview_merge_entities,
+    "merge_concepts": preview_merge_concepts,
 }
 
 

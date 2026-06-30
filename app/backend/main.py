@@ -60,8 +60,8 @@ from app.llm.adapters import AdapterError
 from app.llm.cache import ResponseCache
 from app.llm.client import ConfigError, ParseError, build_client
 from app.workers import (
-    claims, contradictions, deprecations, duplicates, eval_answers, extract, intake, lint, promote,
-    query, retention, reviews, synthesis, wiki,
+    claims, contradictions, deprecations, duplicates, eval_answers, extract, intake, lint, merges,
+    promote, query, retention, reviews, synthesis, wiki,
 )
 from app.workers.wiki_render import parse_frontmatter, render_query_page
 
@@ -548,7 +548,7 @@ _APPLY_TYPES = frozenset({
     "propose_synthesis", "resolve_contradiction", "promote_candidate_node", "deprecate_wiki_page",
     "archive_source", "mark_semantic_duplicate", "hide_content", "hide_semantic_page",
     "unhide_content", "unhide_semantic_page", "hide_claim", "unhide_claim",
-    "hide_synthesis", "unhide_synthesis"})
+    "hide_synthesis", "unhide_synthesis", "merge_entities", "merge_concepts"})
 # Types whose application *requires* the graph (so a missing graph with such approved items -> 503).
 # archive_source + hide_content + unhide_content are executor-backed but NOT graph-required — their core
 # effect is the manifest status + Source page; the graph source-node mirror is best-effort (skipped when
@@ -659,6 +659,7 @@ def run_apply(st: Any) -> dict[str, Any]:
     syn_evidence_suppressed = syn_evidence_restored = 0   # active <-> evidence_hidden transitions (audit)
     syn_fanout_unreconciled = 0   # affected syntheses the fan-out couldn't re-render (missing/unbindable)
     synthesis_fanout_work = 0     # affected syntheses the fan-out re-rendered/repaired (page or graph)
+    merged: dict[str, Any] = {"applied": 0, "skipped": [], "changed_pages": [], "affected_sources": []}
     promo = {"promoted": 0}
 
     # Safe open: None on absent OR schema-mismatch (archive doesn't need the graph, so an unrelated graph
@@ -721,6 +722,10 @@ def run_apply(st: Any) -> dict[str, Any]:
                         syn_evidence_restored += 1
             dups = duplicates.apply_marked_duplicates(
                 gconn, reviews_dir, wiki_dir=wiki_dir, now=now)
+            # ADR-0050: identity-surgery merge (entity/concept), forward-only; re-points active edges +
+            # tombstones the absorbed id + unions aliases. GRAPH-REQUIRED. Source pages whose mentions were
+            # re-pointed are re-rendered after the commit (affected_sources, like the claim fan-out).
+            merged = merges.apply_merges(gconn, reviews_dir, wiki_dir=wiki_dir, now=now)
             gconn.commit()
         finally:
             gconn.close()
@@ -754,8 +759,10 @@ def run_apply(st: Any) -> dict[str, Any]:
     # ADR-0048: re-render the Source pages whose Claims section is affected by a claim hide/unhide so the
     # now-hidden claim drops (or a re-derived-active claim restores). Runs AFTER the graph block committed,
     # so generate_wiki (own read conn) sees the new claim node status; reads the hidden-aware projection.
+    # (ADR-0050: a merge re-points mentions(Src->B) to ...(Src->A); those Source pages re-render here too.)
     claim_source_ids = sorted(set(claims_hidden.get("affected_sources", []))
-                              | set(claims_unhidden.get("affected_sources", [])))
+                              | set(claims_unhidden.get("affected_sources", []))
+                              | set(merged.get("affected_sources", [])))
     # Only re-render sources that actually have a Source page (nothing to suppress otherwise) — keeps a
     # minimal/degraded vault from failing the apply on a missing manifest/template.
     existing_sources = [sid for sid in claim_source_ids
@@ -773,7 +780,7 @@ def run_apply(st: Any) -> dict[str, Any]:
                      + len(sem_hidden["changed_pages"]) + len(sem_unhidden["changed_pages"])
                      + len(claims_hidden["changed_pages"]) + len(claims_unhidden["changed_pages"])
                      + len(syn_hidden["changed_pages"]) + len(syn_unhidden["changed_pages"])
-                     + len(claim_syn_pages)
+                     + len(claim_syn_pages) + len(merged["changed_pages"])
                      + len(claim_source_pages) + len(dups["changed_pages"])
                      + syntheses["promoted"] + syntheses["rejected"] + promo["promoted"])
     # Reindex/index-refresh eligibility: page writes AND status transitions that may NOT re-render a page
@@ -787,11 +794,12 @@ def run_apply(st: Any) -> dict[str, Any]:
     claim_unhide_work = claims_unhidden["applied"] + claims_unhidden["normalized"]
     synthesis_hide_work = syn_hidden["applied"] + syn_hidden["normalized"]
     synthesis_unhide_work = syn_unhidden["applied"] + syn_unhidden["normalized"]
+    merge_work = merged["applied"]
     changed = bool(pages_changed or contra["resolution"]["acknowledged"]
                    or contra["resolution"]["rejected"] or contra["resolution"]["superseded_executed"]
                    or semantic_hide_work or semantic_unhide_work
                    or claim_hide_work or claim_unhide_work
-                   or synthesis_hide_work or synthesis_unhide_work)
+                   or synthesis_hide_work or synthesis_unhide_work or merge_work)
 
     warnings: list[str] = []
     index_status = _rebuild_index_status(root) if changed else "skipped"
@@ -858,13 +866,19 @@ def run_apply(st: Any) -> dict[str, Any]:
     if synthesis_evidence_stale:
         warnings.append("synthesis_evidence_suppression_not_guaranteed")
 
+    # ADR-0050: a merge drops the absorbed id from discovery (status: merged) + re-points its backlinks; a
+    # failed reindex leaves a stale nav index that can still surface the absorbed identity, so it's non-clean.
+    merge_stale = reindex_failed and merge_work > 0
+    if merge_stale:
+        warnings.append("merge_discovery_reindex_not_guaranteed")
+
     validators = _run_all_validators(root)
     failed = [v for v in validators if v["returncode"] != 0]
     validators_ok = not failed
     clean = (validators_ok and not hide_retrieval_stale and not semantic_hide_stale
              and not unhide_discovery_stale and not claim_hide_stale and not claim_unhide_stale
              and not synthesis_hide_stale and not synthesis_unhide_stale
-             and not synthesis_evidence_stale)
+             and not synthesis_evidence_stale and not merge_stale)
 
     return {
         "status": "applied" if clean else "validation_failed",
@@ -907,6 +921,7 @@ def run_apply(st: Any) -> dict[str, Any]:
             "synthesis_evidence": {"suppressed": syn_evidence_suppressed,
                                    "restored": syn_evidence_restored,
                                    "unreconciled": syn_fanout_unreconciled},
+            "merged": {"applied": merged["applied"], "skipped": merged["skipped"]},
             "pages_changed": pages_changed,
             "index_rebuilt": index_status == "rebuilt",
             "unapplied": _unapplied_by_type(reviews_dir),
@@ -953,8 +968,12 @@ def _attribute_effects(item: dict[str, Any], diff: dict[str, Any]) -> list[str]:
     effects: set[str] = set()
     if any(m["review_id"] == rid for m in diff["reviews"]):
         effects.add("reviews")
-    if any(e.get("review_id") == rid
-           for e in (*g["edges_added"], *g["edges_status_changed"])):
+    repointed = g.get("edges_repointed", [])
+    if (any(e.get("review_id") == rid for e in (*g["edges_added"], *g["edges_status_changed"], *repointed))
+            # ADR-0050 merge: a re-pointed edge keeps its ORIGINAL provenance (not the merge rid), and the
+            # absorbed-node tombstone is a node-status change — attribute the graph effect by target id too.
+            or any(e["from_src"] in targets or e["from_dst"] in targets for e in repointed)
+            or any(n["id"] in targets for n in (*g["nodes_status_changed"], *g["nodes_added"]))):
         effects.add("graph")
     if any(m["source_id"] in targets for m in diff["manifests"]):
         effects.add("manifests")

@@ -154,11 +154,11 @@ def test_apply_confirm_shows_dry_run_preview(client, tmp_path):
     # ADR-0040: GET /ui/reviews/apply now renders the dry-run mutation preview, not a scope-count page.
     _approved_concept_deprecation(tmp_path)
     _write_review(tmp_path, "approved", {
-        "review_id": "rev_m", "type": "merge_entities", "status": "approved",
+        "review_id": "rev_m", "type": "split_entity", "status": "approved",
         "subject": {}, "proposal": {}, "context": {}})
     body = client.get("/ui/reviews/apply").text
     assert "deprecate_wiki_page" in body          # executor-backed item / blocked
-    assert "merge_entities" in body               # record-only -> not appliable
+    assert "split_entity" in body                 # record-only -> not appliable
     assert "no live state was changed" in body    # framed as a dry-run preview
     assert "Not appliable" in body
 
