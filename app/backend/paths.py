@@ -3,8 +3,11 @@
 
 Derived local state — manifests, enrichment/claims artifacts, and graph node ids — is untrusted input
 (AGENTS.md): a hand-edited path or a tampered id must never make a worker or validator read/write outside
-its intended directory. `safe_under` is the single containment check used everywhere a path is built from
-such a value (it replaced the duplicated `_safe_raw_rel` / `_safe_under` / `_safe_under_raw` helpers).
+its intended directory. `safe_under`/`safe_child` are the point-of-use containment checks used wherever a
+path is built from such a value (they replaced the duplicated `_safe_raw_rel` / `_safe_under` /
+`_safe_under_raw` helpers). A graph node's `slug` is additionally validated at its source — the graph
+boundary — by `graph.is_safe_slug` (`upsert_node` + the `validate_graph` backstop), so no downstream
+renderer builds an escaping page path from it.
 """
 from __future__ import annotations
 

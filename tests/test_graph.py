@@ -129,6 +129,38 @@ def test_vocabulary_guards(tmp_path):
         graph.upsert_assertion(conn, src_id=SRC, dst_id=CPT, edge_type="mentions", asserted_by="alien")
 
 
+# --- ADR-0009 path-containment at the graph boundary (identity-surgery hardening) ------------------
+
+
+def test_is_safe_slug_predicate():
+    # a legitimate _slug() value is [a-z0-9-]+; a bare-.. filename with no separator is still one component.
+    for good in ("post-merger", "acme", "a", "acme-corp-2", "..foo"):
+        assert graph.is_safe_slug(good)
+    for bad in ("", ".", "..", "a/b", "..\\b", "/etc/passwd", "a\\b", None, 123):
+        assert not graph.is_safe_slug(bad)
+
+
+def test_upsert_node_rejects_unsafe_slug(tmp_path):
+    _, conn = _db(tmp_path)
+    graph.upsert_node(conn, node_id=CPT, node_type="concept", slug="safe-slug", status="active")   # accepted
+    graph.upsert_node(conn, node_id=CPT, node_type="concept", slug=None, status="active")          # None ok
+    for bad in ("../escape", "a/b", "..", ".", "sub\\dir", ""):
+        with pytest.raises(ValueError):
+            graph.upsert_node(conn, node_id=CPT, node_type="concept", slug=bad, status="active")
+
+
+def test_validate_graph_rejects_tampered_unsafe_slug(tmp_path):
+    db_path, conn = _db(tmp_path)
+    conn.commit()
+    conn.close()
+    assert validate_graph.main([str(tmp_path)]) == 0                    # clean graph passes
+    conn = graph.connect(db_path)
+    conn.execute("UPDATE nodes SET slug=? WHERE node_id=?", ("../evil", CPT))  # raw SQL bypasses upsert guard
+    conn.commit()
+    conn.close()
+    assert validate_graph.main([str(tmp_path)]) != 0                    # the backstop catches it
+
+
 def test_reindex_is_deterministic_and_edge_safe(tmp_path):
     _, conn = _db(tmp_path)
     graph.upsert_assertion(conn, src_id=SRC, dst_id=CPT, edge_type="mentions",

@@ -121,6 +121,17 @@ def _has_node(conn: sqlite3.Connection, node_id: str) -> bool:
     return conn.execute("SELECT 1 FROM nodes WHERE node_id = ?", (node_id,)).fetchone() is not None
 
 
+def is_safe_slug(slug: Any) -> bool:
+    """True iff `slug` is a single safe filename component — a non-empty string with no path separators
+    (`/`, `\\`) and not `.`/`..` (ADR-0009 path-containment, at the graph boundary). Downstream renderers
+    build `wiki_dir / NODE_DIR[type] / f"{slug}.md"` from `nodes.slug`, so an unsafe slug could escape the
+    wiki dir; a legitimate `concepts._slug()` value (`[a-z0-9-]+`) always passes. Shared by `upsert_node`
+    (the single normal write into `nodes`) and `validate_graph` (the tampered-DB / raw-SQL backstop) so both
+    enforce the exact same rule. An unsafe slug is structural corruption, never governance business logic."""
+    return (isinstance(slug, str) and bool(slug) and slug not in (".", "..")
+            and "/" not in slug and "\\" not in slug)
+
+
 def upsert_node(
     conn: sqlite3.Connection,
     *,
@@ -135,6 +146,11 @@ def upsert_node(
         raise ValueError(f"unknown node_type {node_type!r}; allowed: {sorted(NODE_TYPES)}")
     if status is not None and status not in NODE_STATUSES:
         raise ValueError(f"unknown node status {status!r}; allowed: {sorted(NODE_STATUSES)}")
+    if slug is not None and not is_safe_slug(slug):
+        # Structural corruption, not business logic — reject at the graph boundary so no downstream
+        # renderer builds an escaping path. Don't echo the (possibly path-like) value into the message.
+        raise ValueError("unsafe node slug; must be a single safe filename component (no path separators, "
+                         "not '.'/'..')")
     conn.execute(
         "INSERT OR REPLACE INTO nodes (node_id, node_type, slug, status, indexed_at) "
         "VALUES (?, ?, ?, ?, ?)",

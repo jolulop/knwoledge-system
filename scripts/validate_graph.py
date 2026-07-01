@@ -37,9 +37,10 @@ def _check(db_path: Path) -> list[str]:
     errors: list[str] = []
     conn = graph.connect(db_path)
     try:
-        node_rows = list(conn.execute("SELECT node_id, node_type, status FROM nodes"))
+        node_rows = list(conn.execute("SELECT node_id, node_type, status, slug FROM nodes"))
         node_types = {r["node_id"]: r["node_type"] for r in node_rows}
         node_status = {r["node_id"]: r["status"] for r in node_rows}
+        node_slugs = {r["node_id"]: r["slug"] for r in node_rows}
         for node_id, node_type in node_types.items():
             if node_type not in graph.NODE_TYPES:
                 errors.append(f"node {node_id}: invalid node_type {node_type!r}")
@@ -47,6 +48,12 @@ def _check(db_path: Path) -> list[str]:
             if prefix and not re.fullmatch(rf"{prefix}_[0-9a-f]{{16}}", node_id):
                 # Sanitize: never echo a path-like/oversized id verbatim.
                 errors.append(f"node of type {node_type!r}: non-canonical id (expected {prefix}_<16 hex>)")
+            # ADR-0009 path-containment backstop (identity-surgery hardening): a raw-SQL/tampered `nodes.slug`
+            # bypasses upsert_node's guard, so re-check the SAME rule here. Renderers build the page path from
+            # this slug, so an unsafe value could escape the wiki dir. Sanitize: don't echo the slug verbatim.
+            slug = node_slugs.get(node_id)
+            if slug is not None and not graph.is_safe_slug(slug):
+                errors.append(f"node {node_id}: unsafe slug (structural corruption — path separator or '.'/'..')")
 
         known = set(node_types)
         for e in conn.execute("SELECT * FROM edges"):
