@@ -1,11 +1,24 @@
 # ADR-0051 — Entity subtype rekey: `change_entity_subtype` as a single-node rekeying executor
 
-**Status:** Accepted. **Design-locked 2026-06-30** (grill-phase, docs-only — **not yet implemented**). This is
+**Status:** Accepted. **Design-locked 2026-06-30** (grill-phase, committed `3ab1577`); **v1 implemented
+2026-07-01** (`app/workers/rekeys.py::apply_rekeys`; `rekeyed` status in graph/validate_wiki/retention.yaml;
+the `render_concept_page` rekeyed-tombstone branch; `review_read` `_effect_rekey`/`preview_change_entity_subtype`
++ `EXECUTOR_BY_TYPE`; `run_apply` wiring + `rekey_discovery_reindex_not_guaranteed`; the `validate_graph`
+no-active-rekeyed-endpoint + `validate_projection` `rekeyed_to` invariants; the producer alignment in
+`concepts.py`). Covered by `tests/test_rekey.py`. **Implementation review round 1 (3 blocking):** the
+`rekeyed_to` validator accepts **active-or-candidate** (a candidate rekey is first-class — it mints a candidate);
+`_effect_rekey` verifies the tombstone's `rekeyed_to` equals the *computed* target and the target node exists +
+is live (a wrong/missing target → `UNKNOWN`, not a false `EFFECTED`); the misleading "duplicate-partner fan-out"
+text was corrected (an active `duplicates` edge **blocks** the rekey — there is no partner fan-out). **Round 2
+(1 blocking):** `_effect_rekey` now reports a **half-mint** (crash between the target mint and the old-id
+tombstone — old id still live but the target node/page already exists) as `UNKNOWN partial_rekey_state`, not
+`PENDING_APPLY`, so reopen refuses (else it would orphan the target); the rekey withdrawal audit uses the
+accurate `superseded_by_rekey` reason. This is
 the **second rekeying governance executor** and the **prefix-changing `change_entity_subtype`** branch that
 ADR-0050 and ADR-0041 explicitly **deferred** to its own follow-up. It wires an executor onto the already-
 registered (but record-only) `change_entity_subtype` review type, reusing ADR-0050's identity-surgery
 machinery (`graph.repoint_edge`, the dry-plan-then-apply two-pass, the `invalid_repoint_endpoint` /
-approved-unapplied block gates, the tombstone render seam, the Source/partner re-render fan-out, the
+approved-unapplied block gates, the tombstone render seam, the Source re-render fan-out, the
 `reviews.withdraw_review_item` withdrawal, the `reviews/audit_log/` audit, the ADR-0040 dry-run). It is a
 **single-node 1:1 relabel** (one logical node changes type → id-prefix → page directory), **NOT** a 2→1
 collapse — so it is genuinely smaller and lower-risk than merge, and it hardens the rekey pattern before
@@ -85,7 +98,8 @@ relax that invariant (it is a real safety check for *actual* merges). Instead a 
   answer-eligibility **for free** (like `merged`).
 - `validate_graph`: **no active edge may have a `rekeyed` endpoint** (verbatim mirror of the `merged`
   invariant — edges must have been re-pointed to the new id).
-- `validate_projection`: a `rekeyed` tombstone's `rekeyed_to` resolves to an **active, *different*-type,
+- `validate_projection`: a `rekeyed` tombstone's `rekeyed_to` resolves to an **active-or-candidate**
+  (the mint preserves the old status — a candidate rekey is first-class, decision D), ***different*-type,
   same-family, indexed, non-self** node — **and** carries the **same name-hash, differing only by prefix**.
 
 `merged` (absorbed into a *different existing node*, lossy) and `rekeyed` (the *same logical node, relabeled*,
@@ -112,9 +126,12 @@ keep `hidden`/`evidence_hidden`/`archive_candidate` distinct rather than overloa
   semantics are added** (v1 keeps it simple — re-proposing the *same* `(node_id, to_type)` is an idempotent
   no-op via the existing filer).
 - **Old id must be canonical (security):** before deriving the new id the executor requires `old_id` to
-  **fullmatch** `^(ent|per|org|prj)_[0-9a-f]{16}$` — a tighter check than merge's `_is_safe_id`, mirroring
-  `claims.CLAIM_ID_RE` / `citations._SOURCE_ID` + the `f5ba86a` fullmatch hardening; a non-canonical or
-  historical/tampered id → typed skip `noncanonical_node_id`, never minting a malformed target.
+  **fullmatch** `^(cpt|ent|per|org|prj)_[0-9a-f]{16}$` — a tighter check than merge's `_is_safe_id`, mirroring
+  `claims.CLAIM_ID_RE` / `citations._SOURCE_ID` + the `f5ba86a` fullmatch hardening; a malformed/historical/
+  tampered id → typed skip `noncanonical_node_id`, never minting a malformed target. The check validates id
+  **shape**, not scope: a well-formed *concept* id (`cpt_…`) passes here and is then caught by the
+  entity-family scope guard as `out_of_scope` — the honest reason (it is a valid id, just not retypable),
+  distinct from a genuinely malformed id.
 - **New-id derivation — prefix substitution on the frozen hash, never re-hashing title/name:**
   `new_id = prefix(to_type) + "_" + old_id.split("_", 1)[1]` (`ent_abc123… → org_abc123…`). This is forced by
   decision B's invariant **and** by ADR-0021's frozen-id model: a node's id-hash is frozen at creation while
@@ -151,7 +168,7 @@ right after `apply_merges`; `change_entity_subtype` added to `EXECUTOR_BY_TYPE` 
 
 - **Subject/derivation guards** (skip-typed, never partial-apply): `invalid_to_type` (`to_type` ∉
   entity-family) · `invalid_subject` · `to_type_mismatch` (`proposal.to_type != subject.to_type`) ·
-  `noncanonical_node_id` (old id ∤ `^(ent|per|org|prj)_[0-9a-f]{16}$`, decision C) · `node_missing` ·
+  `noncanonical_node_id` (old id ∤ `^(cpt|ent|per|org|prj)_[0-9a-f]{16}$`, decision C) · `node_missing` ·
   `out_of_scope` (old node type ∉ entity-family) · **`noop_same_type`** (`to_type == old_type`) — a **typed
   no-op/skip, not an error; it never mutates or blocks other items** · `node_not_retypable`
   (status ∉ {active,candidate}) · idempotent true no-op if the old node is already `rekeyed` · `page_missing`.
@@ -174,15 +191,17 @@ right after `apply_merges`; `change_entity_subtype` added to `EXECUTOR_BY_TYPE` 
   (4) **render the new node's page** — now `graph.sources_for_node(new_id)` is populated; title/aliases/
   confidence copied from the old page; (5) tombstone the old node (`rekeyed` + `rekeyed_to`/`rekeyed_at`/
   `rekey_review_id`, body collapses, graph mirror → `rekeyed`); (6) **fan-out re-render** — affected **Source**
-  pages (`mentions`) + same-type **`duplicates` partner** pages (their *projected* backlinks regenerate
-  pointing at the new id); (7) withdraw pending/deferred old-id subjects (`_withdraw_b_subjects`, incl. a
-  pending promotion + competing retypes); (8) audit `<rid>-rekeyed-<hex>.json` (old/new ids+types+paths,
-  re-pointed edge ids w/ provenance, withdrawn subjects).
-- **`related_to` fan-out — re-render only a partner that actually projects the relation.** `related_to` is
-  **unprojected** (concept→synthesis, ADR-0031): no rendered page surface changes when it re-points, so a
-  re-pointed `related_to` edge is **audited but invents no new projection obligation** (only `mentions` Source
-  pages and `duplicates` partner sections re-render). The rule generalizes: re-render a partner only when its
-  page type has a projection that this relation can change.
+  pages (`mentions`) only (their *projected* backlinks regenerate pointing at the new id); (7) withdraw
+  pending/deferred old-id subjects (`_withdraw_b_subjects`, incl. a pending promotion + competing retypes);
+  (8) audit `<rid>-rekeyed-<hex>.json` (old/new ids+types+paths, re-pointed edge ids w/ provenance, withdrawn
+  subjects).
+- **The only projected fan-out is Source `mentions` pages — there is NO `duplicates` partner fan-out in v1.**
+  A `duplicates` edge is `SAME_TYPE_EDGES`, so a subtype change always makes its endpoints different types →
+  the rekey **blocks** (`invalid_repoint_endpoint`) before any write; there is therefore never a surviving
+  `duplicates` edge whose partner page could re-render. `related_to` re-points freely but is **unprojected**
+  (concept→synthesis, ADR-0031): no rendered surface changes, so it is **audited but invents no projection
+  obligation**. (The general rule: re-render a partner only when its page type projects the re-pointed
+  relation — which, for a rekey, is `mentions` alone.)
 - **Approved-unapplied gate (reused):** an approved-but-unapplied item referencing the old id (about to be
   tombstoned) **blocks** with `approved_unapplied_references_rekeyed` — exactly as merge blocks on its absorbed
   id.
@@ -193,9 +212,15 @@ right after `apply_merges`; `change_entity_subtype` added to `EXECUTOR_BY_TYPE` 
 ### F. Projector, dry-run, reindex, reversibility
 
 - **Projector** `_effect_rekey` + `preview_change_entity_subtype`: `EFFECTED` iff the old node is `rekeyed` +
-  `rekeyed_to` set + the new node present (active/candidate) + the item approved; `PENDING_APPLY` iff the old
-  node is still live at the old id; a **partial** live state (old tombstoned but new missing, or vice-versa) →
-  **`UNKNOWN partial_rekey_state`** (NOT reopenable — else reopen would orphan a half-applied rekey).
+  its page tombstone's `rekeyed_to` equals the **computed** target id + that target node **exists** and is
+  live (active/candidate) + no active edge touches the old id + the item approved (a wrong/missing/inactive
+  target is never a false EFFECTED). `PENDING_APPLY` only when **nothing** is applied — the old id is fully
+  live AND the target does not exist. Every **partial** live state → **`UNKNOWN partial_rekey_state`** (NOT
+  reopenable — else reopen would orphan a half-applied rekey), covering both directions: (a) old tombstoned but
+  the target is missing/wrong/inactive, and (b) the **half-mint** — a crash between the target mint and the
+  old-id tombstone (`upsert_node` commits immediately), so the old id is still live but the target node **or**
+  page already exists. v1 limit: unlike merge, a re-apply does **not** resume a half-mint (it would block on
+  `target_subtype_id_exists`) — the operator reconciles the orphan target manually.
 - **Dry-run** (ADR-0040) surfaces the node mint + `edges_repointed` + the tombstone diff (extends the existing
   `apply_sandbox` merge attribution).
 - **Reindex** runs after apply; failure → **non-clean** `rekey_discovery_reindex_not_guaranteed` (old id may
@@ -215,6 +240,12 @@ right after `apply_merges`; `change_entity_subtype` added to `EXECUTOR_BY_TYPE` 
   alive without expanding into unsafe lifecycle repair.
 - Forward-only keeps v1 bounded; un-rekey, collision-as-merge, concept↔entity moves, and `split_entity` remain
   explicit, documented follow-ups.
+- **Producer (extractor) alignment:** the concept/entity extractor already detects subtype conflicts and files
+  a `change_entity_subtype` review; it now writes the ADR contract `subject {node_id, to_type}` +
+  `proposal {to_type}` (`from`/name → `context`), and **withholds** a *concept↔entity-family* conflict (a
+  cross-family type change, not a subtype rekey — a future `change_node_type`), since filing an
+  always-`out_of_scope`-skipped review would be misleading. Only entity-family↔entity-family conflicts file a
+  review.
 
 ## Tests (design intent; written at implementation)
 
@@ -236,8 +267,9 @@ right after `apply_merges`; `change_entity_subtype` added to `EXECUTOR_BY_TYPE` 
   for a non-family / concept target.
 - Candidate `ent_→org_`: the new node **preserves `candidate`**, a pending `promote_candidate_node` for the
   old id is **withdrawn**, and the **old id does not promote**.
-- Edge re-point: `mentions` (Source-page fan-out), `duplicates` partner re-render, `related_to` audited-but-
-  not-re-rendered (unprojected); `invalid_repoint_endpoint` blocks a `duplicates`-to-same-old-type partner.
+- Edge re-point: `mentions` (Source-page fan-out) and `related_to` audited-but-not-re-rendered (unprojected);
+  an active `duplicates`-to-same-old-type edge **blocks** the rekey (`invalid_repoint_endpoint`) — asserting
+  there is NO surviving-duplicates partner fan-out in v1.
 - Withdrawal of a pending/deferred old-id subject (incl. `promote_candidate_node`); `approved_unapplied_
   references_rekeyed` blocks an approved-but-unapplied old-id reference.
 - Renamed-node rekey: the new id derives from the **frozen hash**, not the current title.
@@ -246,5 +278,5 @@ right after `apply_merges`; `change_entity_subtype` added to `EXECUTOR_BY_TYPE` 
 - Projector `EFFECTED`/`PENDING_APPLY`/`partial_rekey_state`; reopen excluded on partial; dry-run mint +
   `edges_repointed` + tombstone diff; reindex-failure → non-clean `rekey_discovery_reindex_not_guaranteed`.
 - Validators: `validate_graph` rejects an active edge with a `rekeyed` endpoint; `validate_projection` rejects
-  a `rekeyed_to` that is same-type, non-active, cross-family, self, or a different name-hash (a malformed
+  a `rekeyed_to` that is same-type, neither-active-nor-candidate, cross-family, self, or a different name-hash (a malformed
   same-hash case, not only wrong lifecycle/type).

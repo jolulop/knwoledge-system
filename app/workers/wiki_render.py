@@ -507,6 +507,42 @@ def render_concept_page(node: dict[str, Any], *, review_status: str | None = Non
         draft = "\n".join(fm_lines + body) + "\n"
         fingerprint = _fingerprint(_FP_LINE.sub("", draft))
         return draft.replace('input_fingerprint: ""', f'input_fingerprint: "{fingerprint}"', 1)
+    if status == "rekeyed":
+        # ADR-0051 subtype-rekey tombstone: the old-subtype id is kept at its old path (old links resolve
+        # here) with the FULL frontmatter schema preserved + `rekeyed_to`; only the body collapses to a
+        # redirect note that KEEPS the required `> [!summary]` callout (like the merged tombstone).
+        rekeyed_to = node.get("rekeyed_to", "")
+        link = node.get("rekeyed_to_link")             # "<Dir>/<new-slug>" of the active new-subtype node
+        target = f"[[{link}]]" if link else rekeyed_to
+        fm_lines = [
+            "---",
+            f"type: {node_type}",
+            f'{node["id_field"]}: "{node["node_id"]}"',
+            f'title: "{_fm_quote(title)}"',
+            "status: rekeyed",
+            "review_status: approved",
+            "generation_status: deterministic",
+            f"confidence: {confidence}",
+            f"aliases: {_render_tag_list(aliases)}",
+            f'rekeyed_to: "{rekeyed_to}"',
+            f'rekeyed_at: "{node.get("rekeyed_at", "")}"',
+            f'rekey_review_id: "{node.get("rekey_review_id", "")}"',
+            'input_fingerprint: ""',
+            "---",
+        ]
+        body = [
+            "",
+            f"# {_delink(title)}",
+            "",
+            f"> [!summary] Retyped {node_type}",
+            f"> This {node_type} was retyped into {target} — no longer a live identity at this id.",
+            "",
+            f"Retyped into {target}.",
+            "",
+        ]
+        draft = "\n".join(fm_lines + body) + "\n"
+        fingerprint = _fingerprint(_FP_LINE.sub("", draft))
+        return draft.replace('input_fingerprint: ""', f'input_fingerprint: "{fingerprint}"', 1)
     derived_review_status = "none" if status == "active" else ("none" if active_mentions else "pending")
     rs = _resolve_review_status(review_status, derived_review_status)
 

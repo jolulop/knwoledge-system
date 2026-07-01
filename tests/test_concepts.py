@@ -223,7 +223,25 @@ def test_subtype_conflict_keeps_existing_node_and_files_review(tmp_path):
     # No second (person) node minted; the existing organization node is kept.
     assert not (tmp_path / "wiki" / "People" / "acme.md").exists()
     assert (tmp_path / "wiki" / "Organizations" / "acme.md").exists()
-    assert any(r["type"] == "change_entity_subtype" for r in _pending_reviews(tmp_path))
+    # ADR-0051 producer contract: subject {node_id, to_type} + proposal {to_type} (both entity-family).
+    revs = [r for r in _pending_reviews(tmp_path) if r["type"] == "change_entity_subtype"]
+    assert len(revs) == 1
+    org_id = concepts.node_id("organization", "Acme")
+    assert revs[0]["subject"] == {"node_id": org_id, "to_type": "person"}
+    assert revs[0]["proposal"] == {"to_type": "person"}
+    assert revs[0]["context"]["from_type"] == "organization"
+
+
+def test_concept_entity_conflict_withholds_rekey_review(tmp_path):
+    # ADR-0051: a concept<->entity conflict is a cross-family type change (a future change_node_type), so the
+    # producer WITHHOLDS a change_entity_subtype review (it could only ever skip out_of_scope).
+    a, b = _two_sources(tmp_path)
+    _extract(tmp_path, FakeAdapter(payload={"concepts": [{"name": "Acme", "aliases": []}], "entities": []}),
+             source_ids=[a])
+    assert (tmp_path / "wiki" / "Concepts" / "acme.md").exists()
+    _extract(tmp_path, FakeAdapter(payload={"concepts": [], "entities": [
+        {"name": "Acme", "entity_type": "organization", "aliases": []}]}), source_ids=[b])
+    assert not any(r["type"] == "change_entity_subtype" for r in _pending_reviews(tmp_path))
 
 
 def test_candidate_promotion_review_items_are_filed(tmp_path):

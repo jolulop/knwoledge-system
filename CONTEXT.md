@@ -127,8 +127,8 @@ subtype, and therefore its **id-prefix and page directory** (`ent_`/`per_`/`org_
 `Organizations`/`Projects`, ADR-0021) — a **rekey**, not the id-preserving change ADR-0041 classed non-rekeying,
 and **not** a merge (no 2→1 collapse, no source-set union). Wires an executor onto the registered-but-record-only
 `change_entity_subtype` review type, **reusing ADR-0050 machinery** (`graph.repoint_edge`, dry-plan-then-apply,
-`invalid_repoint_endpoint` + approved-unapplied block gates, tombstone render seam, Source/`duplicates`-partner
-re-render fan-out, `reviews.withdraw_review_item`, `reviews/audit_log/`, the ADR-0040 dry-run). **Scope v1:**
+`invalid_repoint_endpoint` + approved-unapplied block gates, tombstone render seam, Source re-render fan-out,
+`reviews.withdraw_review_item`, `reviews/audit_log/`, the ADR-0040 dry-run). **Scope v1:**
 entity-family **only** (`entity ↔ person ↔ organization ↔ project`, any direction); **concept and any
 concept↔entity move excluded** (a cross-family *type* change — a future `change_node_type`); `split_entity`,
 cross-type merge, **collision-as-merge**, and a live **un-rekey** deferred (forward-only, auditable not
@@ -138,9 +138,10 @@ approved/**rejected**, permanently lock a node out of *any* future retype once o
 **proposal** `{to_type}` (**must equal `subject.to_type`** else `to_type_mismatch`); `_subject_references`
 still keys on `subject.node_id` so withdrawal/approved-gate work + **applying one retype withdraws competing
 pending/deferred retypes of the same node**; **no proposal-update/supersede semantics** (re-proposing the same
-pair is an idempotent no-op). **Old id must be CANONICAL** (`noncanonical_node_id` skip if it doesn't fullmatch
-`^(ent|per|org|prj)_[0-9a-f]{16}$` — tighter than merge's `_is_safe_id`, mirrors `CLAIM_ID_RE`/`_SOURCE_ID` +
-the `f5ba86a` hardening) before deriving the new id. **New id = prefix substitution on the FROZEN hash, never
+pair is an idempotent no-op). **Old id must be a CANONICAL shape** (`noncanonical_node_id` skip if it doesn't
+fullmatch `^(cpt|ent|per|org|prj)_[0-9a-f]{16}$` — tighter than merge's `_is_safe_id`, mirrors `CLAIM_ID_RE`/
+`_SOURCE_ID` + the `f5ba86a` hardening; a well-formed `cpt_` concept id passes shape and is then caught by the
+family guard as `out_of_scope`, the honest reason) before deriving the new id. **New id = prefix substitution on the FROZEN hash, never
 re-hashing title/name** — `new_id = prefix(to_type) + "_" + old_id.split("_",1)[1]` (`ent_abc… → org_abc…`):
 forced both by the validator invariant and by ADR-0021's frozen-id model (a renamed node's title no longer
 hashes to its id), and **tamper-proof** (no untrusted name feeds the id). The new node copies title/aliases/
@@ -161,8 +162,9 @@ the standard `> [!summary]` callout — `> [!summary] Retyped <type>` + "Retyped
 `merged` tombstone);
 **`merged` is NOT generalized** (it stays strict same-type — `merged` = absorbed into a different node, lossy;
 `rekeyed` = same logical node relabeled, 1:1). `validate_graph`: no active edge may touch a `rekeyed` endpoint.
-`validate_projection`: `rekeyed_to` → active, **different-type**, same-family, non-self, indexed — **and same
-name-hash, prefix-only delta** (a sharper check than merge's same-type rule can express). **Crux D — retypable iff
+`validate_projection`: `rekeyed_to` → **active-or-candidate** (the mint preserves the old status),
+**different-type**, same-family, non-self, indexed — **and same name-hash, prefix-only delta** (a sharper
+check than merge's same-type rule can express). **Crux D — retypable iff
 `status ∈ {active, candidate}`** (the new node **preserves** the old status; **diverges from merge's active-only**
 because a 1:1 relabel carries the same mentions/sources → no promotion-accounting hazard, and the dominant
 trigger — correcting a classifier-default generic `ent_` candidate — happens *before* promotion); all other
@@ -171,9 +173,10 @@ statuses skip `node_not_retypable`; a pending `promote_candidate_node` for the o
 merge — in a consistent graph the virgin target has no edges so the `find_assertion` check never fires, and on
 drift it BLOCKs rather than collapse/resurrect):** dry-plan + 3 gates → **upsert bare new node** → `repoint_edge`
 old→new (provenance preserved, re-canonicalize `{contradicts,duplicates}`) → **render new page** (`sources_for_
-node(new_id)` now populated) → tombstone old → fan-out re-render (Source `mentions` + `duplicates` partners;
-**`related_to` is unprojected (ADR-0031) → audited but no re-render**, no invented projection obligation) →
-withdraw old-id subjects (incl. competing retypes) → audit. `noop_same_type` is a
+node(new_id)` now populated) → tombstone old → fan-out re-render (**Source `mentions` pages only** — an
+active `duplicates` edge BLOCKS the rekey via `invalid_repoint_endpoint` [SAME_TYPE_EDGES broken by the type
+change], so no partner ever survives to re-render; `related_to` is unprojected (ADR-0031) → audited, no
+re-render) → withdraw old-id subjects (incl. competing retypes) → audit. `noop_same_type` is a
 **typed no-op** (mutates/blocks nothing); `invalid_repoint_endpoint` blocks a `duplicates`-to-same-old-type
 partner (resolve the duplicate first); **no global literal-link rewrite** (literal `[[Entities/slug]]` resolves to
 the tombstone redirect). **Projector** `_effect_rekey`: `EFFECTED` (old `rekeyed`+`rekeyed_to`+new present+approved)

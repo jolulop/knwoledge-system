@@ -349,8 +349,11 @@ def apply_merges(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = 
             "graph_changed": applied > 0, "affected_sources": sorted(affected_sources)}
 
 
-def _withdraw_b_subjects(reviews_dir: Path, b: str, b_page: str, now: str) -> list[str]:
-    """Withdraw every unresolved item in pending/ (status pending OR deferred) referencing B."""
+def _withdraw_b_subjects(reviews_dir: Path, b: str, b_page: str, now: str,
+                         *, reason: str = "superseded_by_merge") -> list[str]:
+    """Withdraw every unresolved item in pending/ (status pending OR deferred) referencing B. `reason` is
+    the audited withdrawal cause — the ADR-0051 rekey reuse passes `superseded_by_rekey` for an accurate
+    audit trail (merge keeps the default `superseded_by_merge`)."""
     withdrawn: list[str] = []
     pend = Path(reviews_dir) / "pending"
     for path in sorted(pend.glob("*.json")) if pend.exists() else []:
@@ -360,6 +363,6 @@ def _withdraw_b_subjects(reviews_dir: Path, b: str, b_page: str, now: str) -> li
             continue
         rid = item.get("review_id") if isinstance(item, dict) else None
         if rid and _item_references(item, b, b_page):
-            if reviews.withdraw_review_item(reviews_dir, rid, reason="superseded_by_merge", now=now):
+            if reviews.withdraw_review_item(reviews_dir, rid, reason=reason, now=now):
                 withdrawn.append(rid)
     return withdrawn

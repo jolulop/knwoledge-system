@@ -29,6 +29,7 @@ from app.workers.wiki_render import NODE_DIR, parse_frontmatter
 
 _LINK = re.compile(r"\[\[([^\]]+)\]\]")
 _DIR_TYPE = {NODE_DIR[t]: t for t in ("concept", "entity", "person", "organization", "project")}
+_ENTITY_FAMILY = frozenset({"entity", "person", "organization", "project"})  # ADR-0051 subtype-rekey family
 # Source frontmatter array <-> body section <-> link-target directory (advisory projection
 # mirror; the id-keyed graph remains the relationship authority — ADR-0030).
 _FM_SECTIONS = [
@@ -213,6 +214,33 @@ def _check(root: Path, db_path: Path) -> list[str]:
                     elif node_type_of.get(surv) != node_type:
                         errors.append(f"{node_id}: merged_into survivor {surv} is a different node_type "
                                       f"({node_type_of.get(surv)} != {node_type})")
+                    continue
+                # ADR-0051: a `rekeyed` tombstone must point rekeyed_to an ACTIVE-or-CANDIDATE (the mint
+                # preserves the old status), DIFFERENT-type, SAME-(entity-)family node sharing the SAME
+                # name-hash (prefix-only delta); no Mentioned-by projection to check. The same-hash check
+                # proves it is a lawful subtype relabel.
+                if fm.get("status") == "rekeyed":
+                    tgt = fm.get("rekeyed_to")
+                    if not tgt:
+                        errors.append(f"{node_id}: rekeyed page is missing rekeyed_to")
+                    elif tgt == node_id:
+                        errors.append(f"{node_id}: rekeyed page points rekeyed_to at itself")
+                    elif tgt not in node_status:
+                        errors.append(f"{node_id}: rekeyed_to {tgt} is not an indexed node")
+                    elif node_status.get(tgt) not in ("active", "candidate"):
+                        # ADR-0051 D: the new-subtype node PRESERVES the old node's status, so the target is
+                        # active OR candidate (a candidate rekey is a supported first-class use case).
+                        errors.append(f"{node_id}: rekeyed_to {tgt} is not active/candidate "
+                                      f"(status {node_status.get(tgt)!r})")
+                    elif node_type_of.get(tgt) == node_type:
+                        errors.append(f"{node_id}: rekeyed_to {tgt} must be a DIFFERENT node_type "
+                                      f"(both {node_type})")
+                    elif node_type not in _ENTITY_FAMILY or node_type_of.get(tgt) not in _ENTITY_FAMILY:
+                        errors.append(f"{node_id}: rekeyed_to {tgt} must stay within the entity family "
+                                      f"({node_type} -> {node_type_of.get(tgt)})")
+                    elif node_id.split("_", 1)[-1] != tgt.split("_", 1)[-1]:
+                        errors.append(f"{node_id}: rekeyed_to {tgt} must share the same name-hash "
+                                      f"(prefix-only delta)")
                     continue
                 linked = _sources_links(_targets(text))
                 active = set(graph.sources_for_node(conn, node_id))

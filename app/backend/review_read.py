@@ -103,6 +103,8 @@ EXECUTOR_BY_TYPE = {
     # ADR-0050: identity surgery — entity/concept merge (rekeying), forward-only.
     "merge_entities": "apply_merges",
     "merge_concepts": "apply_merges",
+    # ADR-0051: identity surgery — single-node entity subtype rekey (id-prefix change), forward-only.
+    "change_entity_subtype": "apply_rekeys",
 }
 
 # Wiki subdirs the scoped deprecation executor may touch in v1 (ADR-0035 A5). A deprecate item whose
@@ -1156,6 +1158,69 @@ def preview_merge_concepts(item: dict[str, Any], *, gconn: Any, wiki_dir: Path |
     return _preview_merge(item, gconn=gconn, wiki_dir=wiki_dir, rtype="merge_concepts")
 
 
+def _effect_rekey(item: dict[str, Any], gconn: Any, wiki_dir: Path | None) -> tuple[str, list[str]]:
+    # ADR-0051: subtype rekey is FORWARD-ONLY. EFFECTED only when CLEANLY applied — the old node is
+    # `rekeyed`, its page is a tombstone pointing rekeyed_to the EXPECTED (prefix-substituted) new id, that
+    # target node EXISTS and is live (active/candidate — the mint preserves the old status), AND no active
+    # edge still touches the old id. Any partial live state — graph XOR page rekeyed, a wrong/missing target,
+    # or stray active edges — is UNKNOWN `partial_rekey_state` (reopen-safe: not reopenable until the read
+    # model is repaired), so reopen/approved-unapplied gating can't be fooled by a half-applied rekey. Only a
+    # fully-clean PENDING_APPLY (nothing rekeyed) is reopenable; an applied rekey is never reopenable.
+    from app.workers import concepts                      # lazy: reuse the canonical prefix map, no cycle
+    status = item.get("status")
+    if status not in ("approved", "rejected"):
+        return PENDING_APPLY, []
+    if status == "rejected":
+        return NO_EFFECT_REQUIRED, []                    # a rejected rekey owes no world change
+    subj = item.get("subject") or {}
+    old, to_type = subj.get("node_id"), subj.get("to_type")
+    if not old or "_" not in old or to_type not in concepts._TYPE_PREFIX:
+        return INVALID_SUBJECT, ["malformed_subject"]
+    if gconn is None:
+        return UNKNOWN, ["graph_unavailable"]
+    new = f"{concepts._TYPE_PREFIX[to_type]}_{old.split('_', 1)[1]}"   # expected target (frozen-hash swap)
+    n_old = graph.get_node(gconn, old)
+    if n_old is None:
+        return UNKNOWN, ["node_missing"]
+    graph_rekeyed = n_old["status"] == "rekeyed"
+    old_page = f"{NODE_DIR[n_old['node_type']]}/{n_old['slug']}.md" if n_old["node_type"] in NODE_DIR else None
+    fm = _page_frontmatter(wiki_dir, old_page)
+    page_rekeyed = bool(fm and fm.get("status") == "rekeyed" and fm.get("rekeyed_to") == new)
+    n_new = graph.get_node(gconn, new)
+    target_live = bool(n_new and n_new["status"] in ("active", "candidate"))
+    no_active_edges = not (graph.outgoing_active(gconn, old) or graph.incoming_active(gconn, old))
+    if graph_rekeyed and page_rekeyed and target_live and no_active_edges:
+        return EFFECTED, []
+    if graph_rekeyed or page_rekeyed:
+        return UNKNOWN, ["partial_rekey_state"]
+    # A half-applied mint (crash between the target mint and the old-id tombstone, since `upsert_node`
+    # commits immediately): the old id is untouched but the target node/page already exists. NOT
+    # PENDING_APPLY — reopening would strand the orphan target, and a re-apply would then block on
+    # `target_subtype_id_exists`. Report the partial state so reopen refuses (409); operator reconciles.
+    new_page = f"{NODE_DIR[to_type]}/{n_old['slug']}.md" if to_type in NODE_DIR else None
+    if n_new is not None or _page_frontmatter(wiki_dir, new_page) is not None:
+        return UNKNOWN, ["partial_rekey_state"]
+    return PENDING_APPLY, []
+
+
+def preview_change_entity_subtype(item: dict[str, Any], *, gconn: Any,
+                                  wiki_dir: Path | None) -> dict[str, Any]:
+    subj = item.get("subject") or {}
+    old, to_type = subj.get("node_id"), subj.get("to_type")
+    out = _scaffold(item)
+    out["node_ids"] = [x for x in (old,) if x]
+    out["proposed_status"] = "rekeyed"
+    out["proposed_action"] = f"retype {old} -> subtype {to_type} (old id -> rekeyed tombstone)"
+    out["summary"] = f"Retype {old} to subtype {to_type}."
+    out["details"] = {"node_id": old, "to_type": to_type}
+    n = graph.get_node(gconn, old) if (gconn and old) else None
+    out["affected_paths"] = ([f"{NODE_DIR[n['node_type']]}/{n['slug']}.md"]
+                             if n and n["node_type"] in NODE_DIR else [])
+    effect_status, warnings = _effect_rekey(item, gconn, wiki_dir)
+    out["apply"] = _apply_supported(EXECUTOR_BY_TYPE["change_entity_subtype"], effect_status, warnings)
+    return out
+
+
 _PROJECTORS = {
     "promote_candidate_node": preview_promote_candidate_node,
     "propose_synthesis": preview_propose_synthesis,
@@ -1173,6 +1238,7 @@ _PROJECTORS = {
     "unhide_synthesis": preview_unhide_synthesis,
     "merge_entities": preview_merge_entities,
     "merge_concepts": preview_merge_concepts,
+    "change_entity_subtype": preview_change_entity_subtype,
 }
 
 

@@ -341,7 +341,7 @@ def render_apply_result(result: dict[str, Any]) -> str:
         "synthesis_hidden": s.get("synthesis_hidden"),
         "synthesis_unhidden": s.get("synthesis_unhidden"),
         "synthesis_evidence": s.get("synthesis_evidence"),
-        "merged": s.get("merged"),
+        "merged": s.get("merged"), "rekeyed": s.get("rekeyed"),
         "pages_changed": s.get("pages_changed"), "index_rebuilt": s.get("index_rebuilt"),
         "unapplied": s.get("unapplied"),
     }))

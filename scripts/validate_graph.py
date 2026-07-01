@@ -73,14 +73,18 @@ def _check(db_path: Path) -> list[str]:
             if not dst_in:
                 errors.append(f"edge {ref}: dst_id {e['dst_id']!r} is not an indexed node")
 
-            # ADR-0050 merge invariant: no ACTIVE edge may have a `merged` (absorbed-identity) endpoint —
-            # a merge re-points every active edge off the absorbed id, so a live reference to a tombstone
-            # means the rewrite was incomplete.
+            # ADR-0050/0051 identity-surgery invariant: no ACTIVE edge may have a `merged` (absorbed) or
+            # `rekeyed` (old-subtype) tombstone endpoint — a merge/rekey re-points every active edge off the
+            # tombstoned id, so a live reference to a tombstone means the rewrite was incomplete.
             if e["status"] == "active":
                 for endpoint in (e["src_id"], e["dst_id"]):
-                    if node_status.get(endpoint) == "merged":
+                    es = node_status.get(endpoint)
+                    if es == "merged":
                         errors.append(f"edge {ref}: active edge has a merged endpoint {endpoint} "
                                       f"(ADR-0050: merge must re-point all active edges off the absorbed id)")
+                    elif es == "rekeyed":
+                        errors.append(f"edge {ref}: active edge has a rekeyed endpoint {endpoint} "
+                                      f"(ADR-0051: subtype rekey must re-point all active edges off the old id)")
 
             # Endpoint-type contract (ADR-0030), checked only when both nodes resolve.
             if src_in and dst_in and edge_type in graph.EDGE_TYPES:

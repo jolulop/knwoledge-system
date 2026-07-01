@@ -42,6 +42,8 @@ _TITLE_RE = re.compile(r'(?m)^title:\s*"(.*)"\s*$')
 # Type -> id prefix and frontmatter id field (ADR-0021); page directory is NODE_DIR.
 _TYPE_PREFIX = {"concept": "cpt", "entity": "ent", "person": "per",
                 "organization": "org", "project": "prj"}
+# The entity family, within which `change_entity_subtype` re-keys (ADR-0051); concept is a separate family.
+_ENTITY_FAMILY = frozenset({"entity", "person", "organization", "project"})
 ID_FIELD = {"concept": "concept_id", "entity": "entity_id", "person": "person_id",
             "organization": "organization_id", "project": "project_id"}
 
@@ -290,12 +292,18 @@ def extract_concepts(
         source_nodes.append({"node_id": nid, "node_type": used_type, "name": name,
                              "aliases": clean_aliases})
 
-        if subtype_conflict is not None:
+        # ADR-0051: file a rekey review ONLY for an ENTITY-FAMILY subtype conflict (both sides in
+        # entity/person/organization/project) — its executor contract is subject {node_id, to_type} (so the
+        # review_id keys on the proposed identity change, not just the node: a rejected retype to one subtype
+        # must not lock out retyping to another) + proposal {to_type}; `from` type + display name are
+        # informational context. A concept<->entity conflict is a cross-family *type* change (a future
+        # `change_node_type`), so it is WITHHELD — filing an always-skipped review would be misleading.
+        if subtype_conflict is not None and set(subtype_conflict) <= _ENTITY_FAMILY:
             reviews.create_review_item(
                 reviews_dir, review_type="change_entity_subtype",
-                subject={"node_id": nid, "name": name},
-                proposal={"from": subtype_conflict[0], "to": subtype_conflict[1]},
-                context={"source_id": sid}, now=now)
+                subject={"node_id": nid, "to_type": subtype_conflict[1]},
+                proposal={"to_type": subtype_conflict[1]},
+                context={"source_id": sid, "name": name, "from_type": subtype_conflict[0]}, now=now)
         # B3: the candidate's promotion is the review-gated semantic act (recurrence may
         # auto-resolve it in slice 5). Idempotent per node id.
         reviews.create_review_item(
