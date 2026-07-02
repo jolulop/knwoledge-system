@@ -92,13 +92,17 @@ This is the Phase-6 surface — **decide and apply are deliberately decoupled**:
    **non-transactional**: if a validator fails afterward you get `status: validation_failed` (HTTP 200,
    not a rollback) so you can see what to fix.
 
-Some review types are **record-only in v1** (e.g. `change_entity_subtype`, raw-deletion types): you can
-decide them, but Apply reports them under `unapplied` rather than actioning them.
+Some review types are still **record-only** (e.g. raw-deletion types): you can decide them, but Apply
+reports them under `unapplied` rather than actioning them. (The identity-surgery types now have
+executors and ARE applied: `merge_entities`/`merge_concepts` (ADR-0050), `change_entity_subtype`
+(ADR-0051), and `split_entity` (ADR-0052).)
 
 ### Using the UI
-Start the app, then browse (loopback only):
+Start the app via the blessed entrypoint (it binds through the `assert_safe_bind` loopback guard —
+**do not** run `uvicorn … --host …` directly, which bypasses the guard; see `docs/Operations.md`),
+then browse (loopback only):
 ```
-uv run uvicorn app.backend.main:app --host 127.0.0.1 --port 18000
+uv run python -m app.backend        # or: uv run python scripts/serve.py
 ```
 - **`/ui/reviews`** — the queue (filter by status; counts by type).
 - **`/ui/reviews/{id}`** — an item's **Preview** + full **Stored proposal** + the decision buttons.

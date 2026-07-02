@@ -574,8 +574,13 @@ v0.1 is successful when:
 - Deletion and entity merges cannot happen without approval.
 - Weekly lint produces actionable reports.
 - Monthly stale check identifies archive candidates.
-- At least 20 golden questions run automatically in CI. Runtime `/evals/run` (real-vault
-  answer-quality eval) shipped in ADR-0042, closing the ADR-0036 decision-14 deferral.
+- **Superseded/deferred** (the phase ADRs diverged from this v0.1 target — kept as historical intent):
+  the original "≥20 golden questions run automatically in CI" criterion is superseded by the shipped
+  two-eval architecture — a **7-case key-free structural fake-adapter fixture**
+  (`evals/golden_questions.yaml`, run by `pytest` as the local gate) + the opt-in real-vault
+  answer-quality eval (`/evals/run`, ADR-0042, closing the ADR-0036 decision-14 deferral). There is
+  **no in-repo CI runner yet** — the `pytest`/`ruff`/`validate_all` gate is enforced locally by the
+  working rhythm; a CI workflow is a separate operations slice, not yet built.
 
 ---
 

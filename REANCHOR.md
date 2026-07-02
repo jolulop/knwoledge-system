@@ -1,10 +1,12 @@
 # REANCHOR — session status
 
-_Last updated: 2026-06-26. **Reanchor command:** "read REANCHOR.md and reanchor". Read this
+_Last updated: 2026-07-02. **Reanchor command:** "read REANCHOR.md and reanchor". Read this
 first after an app restart, then `wiki/index.md` if working in the vault._
 
 > [!warning] This is a periodically-refreshed snapshot and can lag the live state. The authoritative
-> current status is **`git log --oneline`** + the next-work memory tracker (`memory/MEMORY.md`).
+> on-disk status is **`git log --oneline`** + the ADRs (`docs/adr/`) + `CONTEXT.md` + the current repo
+> files. (A Claude Code session may additionally surface a private per-project next-work memory tracker
+> from its `~/.claude` memory — that is external session state, not a repo-relative canonical path.)
 
 ## Project
 
@@ -15,8 +17,8 @@ critical rules and `CONTEXT.md` for the glossary.
 
 ## Where we are
 
-- **Branch:** `main`, **in sync with `origin/main`** (latest push: `6e4cfa8` ADR-0042 answer-quality
-  eval). The per-slice rhythm: grill (design-lock,
+- **Branch:** `main`, **in sync with `origin/main`** (latest push: `4d352b4` ADR-0052 entity split
+  `split_entity`). The per-slice rhythm: grill (design-lock,
   docs-only) → implement (on "implement now") → test → external review (user pastes) → analyze+recommend+
   **wait** → fix → commit (user says so) → push.
 - **PHASES 1–7 COMPLETE + pushed.** 1 intake · 2 extract/normalize · 3 deterministic wiki · 3.5 LLM
@@ -24,8 +26,14 @@ critical rules and `CONTEXT.md` for the glossary.
   graph read, router+`/search`, LanceDB vector, RRF fusion) · **5 Query & Cited Answering** (`POST /query`,
   grounded cited answers, saved Queries) · **6 Human Review UI** (read model, decisions, apply executors,
   hand-rolled HTML `/ui/reviews`) · **7 Autonomous Maintenance** (`/jobs/lint|stale-check|reindex`,
-  reversible `archive_source`, cron/no-daemon; ADR-0036). The Build Spec's planned scope is **met**; work
-  since is follow-on hardening + deferred quality items, each grilled first.
+  reversible `archive_source`, cron/no-daemon; ADR-0036). The Build Spec's planned *feature* scope is
+  **met**; work since is follow-on hardening + deferred quality items, each grilled first. One §16
+  success criterion is **not** literally satisfied (reconciled in the Build Spec): the "≥20 golden
+  questions in CI" target is superseded by the shipped two-eval architecture — a **7-case key-free
+  structural fake-adapter fixture** (`evals/golden_questions.yaml`, run by `pytest`) + the opt-in
+  real-vault answer-quality eval (`/evals/run`, ADR-0042) — and there is **no in-repo CI runner yet**
+  (the `pytest`/`ruff`/`validate_all` gate is enforced locally by the working rhythm; adding CI is a
+  separate operations slice).
 - **POST-PHASE-7 WORK (all pushed):**
   - **Security & hygiene hardening (3 rounds, `e2795b7`)** — closed the untrusted-on-disk → filesystem
     boundary: canonical `source_id` validation (`manifests.is_source_id`; `valid_manifests` quarantines
@@ -60,8 +68,8 @@ critical rules and `CONTEXT.md` for the glossary.
 - **Recent commits:** `2a0be5e` per-channel failure diagnostics · `82892ea` corpus 22→52 + wrapped-query
   fix · `746eaea` eval-runner Source-page fix · `4fd4ae5` ADR-0038 v1 impl · `26a5d92` retrieval-eval
   design-lock · `8958fe3`/`47d7cd1` ADR-0037 lint heuristics · `e2795b7` security hardening.
-- **Tests/lint green:** `703 passed`, ruff clean, **10** validators pass. Newest test files:
-  `tests/test_lint.py`, `tests/test_retention.py`, `tests/test_paths.py`, `tests/test_eval_retrieval.py`.
+- **Tests/lint green:** `1117 passed`, ruff clean, **10** validators pass. Newest test files:
+  `tests/test_merge.py`, `tests/test_rekey.py`, `tests/test_split.py` (the identity-surgery family).
 
 ## Viewing the vault (Obsidian)
 
@@ -87,28 +95,31 @@ critical rules and `CONTEXT.md` for the glossary.
 | 7 Autonomous Maintenance (7-1–7-3) | **Complete + pushed** (`ad98d4c`) |
 | Post-7: security hardening · ADR-0037 lint heuristics · ADR-0038 retrieval-eval v1 + diagnostics | **Complete + pushed** (`2a0be5e`) |
 | ADR-0039 backup/restore durability · ADR-0040 apply dry-run preview · ADR-0041 `mark_semantic_duplicate` (first governance executor) · ADR-0042 real-vault answer-quality eval | **Complete + pushed** (`33ae4fc`/`0f5f522`/`cb48a61`/`6e4cfa8`) |
+| Visibility family — ADR-0043 `hide_content` (source) · 0044 supersede-via-UI · 0045 reopen/re-decide · 0046 `hide_semantic_page` · 0047 `unhide_content`/`unhide_semantic_page` · 0048 claim hide/unhide · 0049 synthesis hide/unhide (+`evidence_hidden`) | **Complete + pushed** (visibility lifecycle now symmetric across sources/semantic/claims/synthesis) |
+| Identity-surgery family — ADR-0050 `merge_entities`/`merge_concepts` · 0051 `change_entity_subtype` (subtype rekey) · 0052 `split_entity` | **Complete + pushed** (`ce80064`/`152704d`/`4d352b4`; the rekeying class deferred by ADR-0041 is now shipped) |
 | ADR-0038 multi-chunk extension | **Design-locked, NOT implemented** (a deferred option, not the active slice) |
 
 ## Next step
 
-**Immediate (active direction): the next non-rekeying governance executor — `hide_content`** (grill-phase
-first). It flips a status/visibility field (no stable-id rewrite), so the crux to grill is the visibility
-model: is hiding *retrieval* visibility, *wiki* visibility, *graph-traversal* visibility, or all three —
-and does it reuse the existing status/eligibility filter (`search.RETENTION_DEFAULT_STATUSES`, indexed-but-
-excluded like `archive`) or a new status? Previewable via the ADR-0040 apply dry-run.
+**No active slice in flight.** The two big families the recent work pursued are both **complete**: the
+**visibility family** (hide/unhide across sources, semantic pages, claims, synthesis — ADR-0043–0049) and the
+**identity-surgery family** (merge / subtype-rekey / split — ADR-0050–0052). Pick the next slice from the
+deferred list below with a fresh `grill-phase`.
 
 **Deferred options (each starts with a `grill-phase`):**
-- **ADR-0038 multi-chunk retrieval-eval extension** — design-locked, never implemented (we pivoted to
-  ADR-0039–0042). Author `##`-section multi-chunk docs + `chunk_disambiguation` cases + the
-  phrase→citation-key resolver in `scripts/eval_retrieval.py`. Re-opens weighted RRF only if a chunk
-  failure shows channel *disagreement*.
-- **Rekeying governance executors** (`merge_entities`/`merge_concepts`/`split_entity`) — own
-  identity-surgery ADR (id re-keying + backlink/citation rewrites; highest risk).
+- **Identity-surgery follow-ups** — cross-type merge, live un-merge / un-split, N-way split (>2), a
+  subtype-differing spin-off, moving non-`mentions` edges to a spin-off, a `rename_node` executor (ADR-0017
+  rename is design-locked-but-unimplemented and currently bounds split/merge), a `split_from` graph
+  edge / lineage query.
+- **ADR-0038 multi-chunk retrieval-eval extension** — design-locked, never implemented. Author `##`-section
+  multi-chunk docs + `chunk_disambiguation` cases + the phrase→citation-key resolver in
+  `scripts/eval_retrieval.py`. Re-opens weighted RRF only if a chunk failure shows channel *disagreement*.
 - **Phase 8 auth/CSRF/API-worker** — deferred until a concrete non-loopback exposure requirement exists.
 - LLM-as-judge eval "analysis lane", scheduled eval runs, baseline-diff gating (all out of ADR-0042 v1).
 
-**Closed since this doc last tracked them:** ADR-0039 `include_raw` backup/restore; ADR-0042 real-vault
-answer-quality `/evals/run`; ADR-0041 first governance executor (`mark_semantic_duplicate`).
+**Closed since this doc last tracked them:** the whole ADR-0043–0052 arc (visibility + identity-surgery
+families). Round-by-round detail may additionally live in a Claude Code session's private per-project
+memory tracker (external session state, not a repo path); the on-disk authority is `git log` + the ADRs.
 
 **Operate it** (`docs/Operations.md`): `POST /jobs/lint|stale-check|reindex` (key-free, detect-and-propose);
 review at `/ui/reviews`; apply via `POST /reviews/apply`. **LLM producers** (need `ANTHROPIC_API_KEY`):
@@ -161,6 +172,12 @@ vs maintenance-task boundary; `LintFinding.data` + stable remediation codes; con
 source-level recall@k/MRR/hit@k + discrimination + **per-channel failure diagnostic** (fusion-balance vs
 semantic ambiguity); NOT a CI gate; unblocks ADR-0032 add.9. **v1 implemented**; **§Multi-chunk extension
 design-locked** — chunk-level cases via `chunk:`/`near_miss:` phrase→citation-key, separate report blocks).
+
+0039–0042 (backup/restore · apply dry-run preview · `mark_semantic_duplicate` · answer-quality eval),
+0043–0049 (**visibility family**: source/semantic/claim/synthesis hide-unhide, supersede-via-UI,
+reopen/re-decide, `evidence_hidden`), 0050–0052 (**identity-surgery family**: merge, subtype-rekey, split) —
+full glossary entries in `CONTEXT.md` (round-by-round history may additionally be in a Claude Code
+session's private per-project memory tracker — external session state, not a repo path).
 
 **Path safety:** `app/backend/paths.py` (`safe_under` containment, `safe_child` basename-only) is the
 shared guard at every untrusted-id→path site (manifests, enrichment/claims artifacts, graph node ids);
