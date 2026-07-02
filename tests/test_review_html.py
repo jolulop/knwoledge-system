@@ -158,7 +158,7 @@ def test_apply_confirm_shows_dry_run_preview(client, tmp_path):
         "subject": {}, "proposal": {}, "context": {}})
     body = client.get("/ui/reviews/apply").text
     assert "deprecate_wiki_page" in body          # executor-backed item / blocked
-    assert "split_entity" in body                 # record-only -> not appliable
+    assert "split_entity" in body                 # executor-backed; empty subject/proposal -> scope-guard skip -> not appliable
     assert "no live state was changed" in body    # framed as a dry-run preview
     assert "Not appliable" in body
 

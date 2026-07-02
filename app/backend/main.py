@@ -543,7 +543,7 @@ def reopen_review(review_id: str, body: ReviewReopenRequest) -> dict[str, Any]:
 
 
 # Review types POST /reviews/apply has a deterministic executor for (ADR-0035 A4/A5). Any other
-# approved type is reported honestly as `unapplied` (record-only / raw-touching / identity-changing).
+# approved type is reported honestly as `unapplied` (record-only / raw-touching).
 _APPLY_TYPES = frozenset({
     "propose_synthesis", "resolve_contradiction", "promote_candidate_node", "deprecate_wiki_page",
     "archive_source", "mark_semantic_duplicate", "hide_content", "hide_semantic_page",

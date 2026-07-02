@@ -155,7 +155,7 @@ uv run python scripts/detect_contradictions.py
 uv run python scripts/generate_synthesis.py
 
 # serve + review
-uv run uvicorn app.backend.main:app --host 127.0.0.1 --port 18000   # → http://127.0.0.1:18000/ui/reviews
+uv run python -m app.backend   # blessed entrypoint (loopback-guarded; see docs/Operations.md) → http://127.0.0.1:18000/ui/reviews
 # decide items in the UI, then hit Apply
 
 # browse the vault

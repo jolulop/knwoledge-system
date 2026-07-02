@@ -47,3 +47,40 @@ def test_env_example_documents_query_model():
     # The POST /query 503 tells operators to set QUERY_MODEL — it must be documented in .env.example
     # so that guidance isn't a dead end (ADR-0034 operational drift).
     assert "QUERY_MODEL=" in (ROOT / ".env.example").read_text(encoding="utf-8")
+
+
+# Runbook/operational docs may WARN against a bare uvicorn launch, but must never RECOMMEND one: the
+# blessed ``python -m app.backend`` entrypoint is the only launch routed through the assert_safe_bind
+# loopback guard (ADR-0009). A direct ``uvicorn app.backend.main:app --host ...`` overrides the bind
+# without re-checking the guard. This mirrors test_api.py's docker-compose guard for prose docs.
+RUNBOOK_DOCS = [
+    ROOT / "README.md",
+    ROOT / "docs" / "Operations.md",
+    ROOT / "docs" / "Workflow.md",
+]
+
+_UVICORN_DIRECT_RE = re.compile(r"uvicorn\s+app\.backend\.main:app")
+
+
+def _recommends_direct_uvicorn(line: str) -> bool:
+    # A *recommended* invocation is a runnable command line (optionally via ``uv run``) — not prose that
+    # names uvicorn inside a "do not run ..." warning. Warning lines start with the prose, not the tool.
+    stripped = line.strip().lstrip("$").strip().strip("`").strip()
+    return bool(_UVICORN_DIRECT_RE.search(line)) and bool(
+        re.match(r"^(uv run\s+)?uvicorn\b", stripped))
+
+
+def test_runbook_docs_do_not_recommend_bare_uvicorn():
+    offenders: list[str] = []
+    checked = 0
+    for doc in RUNBOOK_DOCS:
+        if not doc.exists():
+            continue
+        checked += 1
+        for lineno, line in enumerate(doc.read_text(encoding="utf-8").splitlines(), start=1):
+            if _recommends_direct_uvicorn(line):
+                offenders.append(f"{doc.relative_to(ROOT)}:{lineno}: {line.strip()}")
+    assert checked > 0, "expected runbook docs to scan"
+    assert not offenders, (
+        "runbook docs recommend a bare uvicorn launch (use `uv run python -m app.backend`; ADR-0009):\n"
+        + "\n".join(offenders))

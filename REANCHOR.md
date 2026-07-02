@@ -12,13 +12,14 @@ first after an app restart, then `wiki/index.md` if working in the vault._
 
 Local-first **LLM Wiki** knowledge-system. Immutable `raw/` → derived `normalized/` →
 generated `wiki/` (gitignored, regenerable) → `db/` SQLite (graph, jobs, llm_cache) →
-`reviews/`, `policies/`. ADR-driven (`docs/adr/0001–0042`). See `CLAUDE.md` for the
+`reviews/`, `policies/`. ADR-driven (`docs/adr/0001–0052`). See `CLAUDE.md` for the
 critical rules and `CONTEXT.md` for the glossary.
 
 ## Where we are
 
-- **Branch:** `main`, **in sync with `origin/main`** (latest push: `4d352b4` ADR-0052 entity split
-  `split_entity`). The per-slice rhythm: grill (design-lock,
+- **Branch:** `main` — **docs/governance-sync commits sit unpushed on top of `origin/main`** (last
+  *pushed* tip: `4d352b4` ADR-0052 `split_entity`; run `git log --oneline origin/main..HEAD` for the
+  live unpushed set). The per-slice rhythm: grill (design-lock,
   docs-only) → implement (on "implement now") → test → external review (user pastes) → analyze+recommend+
   **wait** → fix → commit (user says so) → push.
 - **PHASES 1–7 COMPLETE + pushed.** 1 intake · 2 extract/normalize · 3 deterministic wiki · 3.5 LLM
