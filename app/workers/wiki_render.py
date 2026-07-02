@@ -556,6 +556,10 @@ def render_concept_page(node: dict[str, Any], *, review_status: str | None = Non
         "generation_status: deterministic",
         f"confidence: {confidence}",
         f"aliases: {_render_tag_list(aliases)}",
+        # ADR-0052: page-preserved split lineage on a spin-off — optional, so a non-split node emits
+        # nothing (byte-stable, no fingerprint churn) and any re-render must thread these through.
+        *([f'split_from: "{node["split_from"]}"'] if node.get("split_from") else []),
+        *([f'split_review_id: "{node["split_review_id"]}"'] if node.get("split_review_id") else []),
         'input_fingerprint: ""',
         "---",
     ]

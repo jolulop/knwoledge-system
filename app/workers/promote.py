@@ -50,9 +50,12 @@ def _read_meta(page_path: Path) -> dict[str, Any] | None:
     m = _TITLE_RE.search(text)
     if not m:
         return None
-    aliases = parse_frontmatter(text).get("aliases")
+    fm = parse_frontmatter(text)
+    aliases = fm.get("aliases")
     return {"title": re.sub(r"\\(.)", r"\1", m.group(1)),
-            "aliases": aliases if isinstance(aliases, list) else []}
+            "aliases": aliases if isinstance(aliases, list) else [],
+            # ADR-0052: preserve a spin-off's split lineage when the promote pass re-renders it active.
+            "split_from": fm.get("split_from"), "split_review_id": fm.get("split_review_id")}
 
 
 def _rebuild_index(root: Path) -> bool:
@@ -122,6 +125,8 @@ def promote_candidates(
                             "aliases": meta["aliases"], "confidence": "low",
                             "source_ids": sources, "status": "active",
                             "duplicates": graph.active_duplicates(gconn, nid),
+                            "split_from": meta.get("split_from"),        # ADR-0052: preserve spin-off lineage
+                            "split_review_id": meta.get("split_review_id"),
                         }), encoding="utf-8")
                     graph.upsert_node(gconn, node_id=nid, node_type=node["node_type"],
                                       slug=node["slug"], status="active", now=now)

@@ -61,7 +61,7 @@ from app.llm.cache import ResponseCache
 from app.llm.client import ConfigError, ParseError, build_client
 from app.workers import (
     claims, contradictions, deprecations, duplicates, eval_answers, extract, intake, lint, merges,
-    promote, query, rekeys, retention, reviews, synthesis, wiki,
+    promote, query, rekeys, retention, reviews, splits, synthesis, wiki,
 )
 from app.workers.wiki_render import parse_frontmatter, render_query_page
 
@@ -549,7 +549,7 @@ _APPLY_TYPES = frozenset({
     "archive_source", "mark_semantic_duplicate", "hide_content", "hide_semantic_page",
     "unhide_content", "unhide_semantic_page", "hide_claim", "unhide_claim",
     "hide_synthesis", "unhide_synthesis", "merge_entities", "merge_concepts",
-    "change_entity_subtype"})
+    "change_entity_subtype", "split_entity"})
 # Types whose application *requires* the graph (so a missing graph with such approved items -> 503).
 # archive_source + hide_content + unhide_content are executor-backed but NOT graph-required — their core
 # effect is the manifest status + Source page; the graph source-node mirror is best-effort (skipped when
@@ -662,6 +662,7 @@ def run_apply(st: Any) -> dict[str, Any]:
     synthesis_fanout_work = 0     # affected syntheses the fan-out re-rendered/repaired (page or graph)
     merged: dict[str, Any] = {"applied": 0, "skipped": [], "changed_pages": [], "affected_sources": []}
     rekeyed: dict[str, Any] = {"applied": 0, "skipped": [], "changed_pages": [], "affected_sources": []}
+    split_res: dict[str, Any] = {"applied": 0, "skipped": [], "changed_pages": [], "affected_sources": []}
     promo = {"promoted": 0}
 
     # Safe open: None on absent OR schema-mismatch (archive doesn't need the graph, so an unrelated graph
@@ -732,6 +733,11 @@ def run_apply(st: Any) -> dict[str, Any]:
             # new-subtype node + re-points the old node's active edges + tombstones the old id. GRAPH-REQUIRED.
             # Source pages whose mentions were re-pointed re-render after the commit (affected_sources).
             rekeyed = rekeys.apply_rekeys(gconn, reviews_dir, wiki_dir=wiki_dir, now=now)
+            # ADR-0052: identity-surgery entity split (inverse of merge), forward-only; mints the spin-off +
+            # re-points the human-partitioned mentions + re-renders the primary. GRAPH-REQUIRED. The moved
+            # sources' Source pages re-render after the commit (affected_sources). Runs before promote_
+            # candidates (below) so a spin-off with >=2 independent sources can promote in the same apply.
+            split_res = splits.apply_splits(gconn, reviews_dir, wiki_dir=wiki_dir, now=now)
             gconn.commit()
         finally:
             gconn.close()
@@ -769,7 +775,8 @@ def run_apply(st: Any) -> dict[str, Any]:
     claim_source_ids = sorted(set(claims_hidden.get("affected_sources", []))
                               | set(claims_unhidden.get("affected_sources", []))
                               | set(merged.get("affected_sources", []))
-                              | set(rekeyed.get("affected_sources", [])))
+                              | set(rekeyed.get("affected_sources", []))
+                              | set(split_res.get("affected_sources", [])))
     # Only re-render sources that actually have a Source page (nothing to suppress otherwise) — keeps a
     # minimal/degraded vault from failing the apply on a missing manifest/template.
     existing_sources = [sid for sid in claim_source_ids
@@ -788,6 +795,7 @@ def run_apply(st: Any) -> dict[str, Any]:
                      + len(claims_hidden["changed_pages"]) + len(claims_unhidden["changed_pages"])
                      + len(syn_hidden["changed_pages"]) + len(syn_unhidden["changed_pages"])
                      + len(claim_syn_pages) + len(merged["changed_pages"]) + len(rekeyed["changed_pages"])
+                     + len(split_res["changed_pages"])
                      + len(claim_source_pages) + len(dups["changed_pages"])
                      + syntheses["promoted"] + syntheses["rejected"] + promo["promoted"])
     # Reindex/index-refresh eligibility: page writes AND status transitions that may NOT re-render a page
@@ -803,11 +811,13 @@ def run_apply(st: Any) -> dict[str, Any]:
     synthesis_unhide_work = syn_unhidden["applied"] + syn_unhidden["normalized"]
     merge_work = merged["applied"]
     rekey_work = rekeyed["applied"]
+    split_work = split_res["applied"]
     changed = bool(pages_changed or contra["resolution"]["acknowledged"]
                    or contra["resolution"]["rejected"] or contra["resolution"]["superseded_executed"]
                    or semantic_hide_work or semantic_unhide_work
                    or claim_hide_work or claim_unhide_work
-                   or synthesis_hide_work or synthesis_unhide_work or merge_work or rekey_work)
+                   or synthesis_hide_work or synthesis_unhide_work or merge_work or rekey_work
+                   or split_work)
 
     warnings: list[str] = []
     index_status = _rebuild_index_status(root) if changed else "skipped"
@@ -887,13 +897,19 @@ def run_apply(st: Any) -> dict[str, Any]:
     if rekey_stale:
         warnings.append("rekey_discovery_reindex_not_guaranteed")
 
+    # ADR-0052: a split re-points the primary's mentions + re-renders the moved sources' Source pages; a
+    # failed reindex leaves a stale nav/keyword index that may still surface the pre-split projection.
+    split_stale = reindex_failed and split_work > 0
+    if split_stale:
+        warnings.append("split_discovery_reindex_not_guaranteed")
+
     validators = _run_all_validators(root)
     failed = [v for v in validators if v["returncode"] != 0]
     validators_ok = not failed
     clean = (validators_ok and not hide_retrieval_stale and not semantic_hide_stale
              and not unhide_discovery_stale and not claim_hide_stale and not claim_unhide_stale
              and not synthesis_hide_stale and not synthesis_unhide_stale
-             and not synthesis_evidence_stale and not merge_stale and not rekey_stale)
+             and not synthesis_evidence_stale and not merge_stale and not rekey_stale and not split_stale)
 
     return {
         "status": "applied" if clean else "validation_failed",
@@ -938,6 +954,7 @@ def run_apply(st: Any) -> dict[str, Any]:
                                    "unreconciled": syn_fanout_unreconciled},
             "merged": {"applied": merged["applied"], "skipped": merged["skipped"]},
             "rekeyed": {"applied": rekeyed["applied"], "skipped": rekeyed["skipped"]},
+            "split": {"applied": split_res["applied"], "skipped": split_res["skipped"]},
             "pages_changed": pages_changed,
             "index_rebuilt": index_status == "rebuilt",
             "unapplied": _unapplied_by_type(reviews_dir),

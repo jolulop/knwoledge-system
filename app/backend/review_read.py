@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from app.backend import graph, manifests
-from app.workers.reviews import PRIORITIES, REVIEW_STATUSES
+from app.workers.reviews import PRIORITIES, REVIEW_STATUSES, review_id
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter
 
 # --- effect-status vocabulary (ADR-0035 A2) --------------------------------
@@ -105,6 +105,8 @@ EXECUTOR_BY_TYPE = {
     "merge_concepts": "apply_merges",
     # ADR-0051: identity surgery — single-node entity subtype rekey (id-prefix change), forward-only.
     "change_entity_subtype": "apply_rekeys",
+    # ADR-0052: identity surgery — entity split (id-spawning; inverse of merge), forward-only.
+    "split_entity": "apply_splits",
 }
 
 # Wiki subdirs the scoped deprecation executor may touch in v1 (ADR-0035 A5). A deprecate item whose
@@ -1221,6 +1223,81 @@ def preview_change_entity_subtype(item: dict[str, Any], *, gconn: Any,
     return out
 
 
+def _mentioner_sources(gconn: Any, dst: str) -> set[str]:
+    return {e["src_id"] for e in graph.incoming_active(gconn, dst) if e["edge_type"] == "mentions"}
+
+
+def _promote_item_present(wiki_dir: Path | None, node_id: str) -> bool:
+    """True if a `promote_candidate_node` for `node_id` exists in ANY state (pending/approved/rejected) — i.e.
+    the promotion ledger slot is NOT missing (ADR-0052). A missing slot while B is candidate is a half-mint
+    (the split rendered B but hadn't yet filed its promote), which is a partial, not-effected state."""
+    if wiki_dir is None:
+        return False
+    reviews_dir = Path(wiki_dir).parent / "reviews"
+    rid = review_id("promote_candidate_node", {"node_id": node_id})
+    return any((reviews_dir / st / f"{rid}.json").exists() for st in ("pending", "approved", "rejected"))
+
+
+def _effect_split(item: dict[str, Any], gconn: Any, wiki_dir: Path | None) -> tuple[str, list[str]]:
+    # ADR-0052: split is FORWARD-ONLY. EFFECTED only when CLEANLY applied — the spin-off B exists
+    # (candidate|active), its page carries `split_from == A` + `split_review_id == rid`, each `spinoff_source`
+    # now actively mentions B and no longer A, A retains >=1 active mention, AND B's promotion is accounted for
+    # (a promote_candidate_node for B exists, or B is already active). PENDING_APPLY only when NOTHING is
+    # applied (B absent, sources still on A). Any partial — incl. a half-mint (B minted / mentions moved but
+    # the promote item not yet filed) — is UNKNOWN `partial_split_state` (reopen-safe).
+    status = item.get("status")
+    if status not in ("approved", "rejected"):
+        return PENDING_APPLY, []
+    if status == "rejected":
+        return NO_EFFECT_REQUIRED, []                    # a rejected split owes no world change
+    subj = item.get("subject") or {}
+    proposal = item.get("proposal") or {}
+    a, b = subj.get("node_id"), subj.get("spinoff_node_id")
+    srcs = {s for s in (proposal.get("spinoff_sources") or []) if isinstance(s, str)}
+    if not a or not b:
+        return INVALID_SUBJECT, ["malformed_subject"]
+    if gconn is None:
+        return UNKNOWN, ["graph_unavailable"]
+    n_b = graph.get_node(gconn, b)
+    a_mentioners = _mentioner_sources(gconn, a)
+    b_page = (f"{NODE_DIR[n_b['node_type']]}/{n_b['slug']}.md"
+              if n_b and n_b["node_type"] in NODE_DIR else None)
+    fm_b = _page_frontmatter(wiki_dir, b_page)
+    b_ok = bool(n_b and n_b["status"] in ("candidate", "active") and fm_b
+                and fm_b.get("split_from") == a and fm_b.get("split_review_id") == item.get("review_id"))
+    b_mentioners = _mentioner_sources(gconn, b) if n_b else set()
+    partition_moved = bool(srcs) and srcs <= b_mentioners and not (srcs & a_mentioners)
+    promo_ok = (n_b is not None and n_b["status"] == "active") or _promote_item_present(wiki_dir, b)
+    if b_ok and partition_moved and a_mentioners and promo_ok:
+        return EFFECTED, []
+    if n_b is None and srcs <= a_mentioners:              # nothing applied yet — reopenable
+        return PENDING_APPLY, []
+    return UNKNOWN, ["partial_split_state"]               # any half-applied state — not reopenable
+
+
+def preview_split_entity(item: dict[str, Any], *, gconn: Any, wiki_dir: Path | None) -> dict[str, Any]:
+    subj = item.get("subject") or {}
+    proposal = item.get("proposal") or {}
+    a, b = subj.get("node_id"), subj.get("spinoff_node_id")
+    out = _scaffold(item)
+    out["node_ids"] = [x for x in (a, b) if x]
+    out["proposed_status"] = "split"
+    out["proposed_action"] = f"split {a}: spin off {b} ({proposal.get('spinoff_name')!r})"
+    out["summary"] = f"Split {a} — move {len(proposal.get('spinoff_sources') or [])} source(s) to new {b}."
+    out["details"] = {"node_id": a, "spinoff_node_id": b, "spinoff_name": proposal.get("spinoff_name"),
+                      "spinoff_sources": proposal.get("spinoff_sources"),
+                      "spinoff_aliases": proposal.get("spinoff_aliases")}
+    paths = []
+    for nid in (a, b):
+        n = graph.get_node(gconn, nid) if (gconn and nid) else None
+        if n and n["node_type"] in NODE_DIR:
+            paths.append(f"{NODE_DIR[n['node_type']]}/{n['slug']}.md")
+    out["affected_paths"] = paths
+    effect_status, warnings = _effect_split(item, gconn, wiki_dir)
+    out["apply"] = _apply_supported(EXECUTOR_BY_TYPE["split_entity"], effect_status, warnings)
+    return out
+
+
 _PROJECTORS = {
     "promote_candidate_node": preview_promote_candidate_node,
     "propose_synthesis": preview_propose_synthesis,
@@ -1239,6 +1316,7 @@ _PROJECTORS = {
     "merge_entities": preview_merge_entities,
     "merge_concepts": preview_merge_concepts,
     "change_entity_subtype": preview_change_entity_subtype,
+    "split_entity": preview_split_entity,
 }
 
 

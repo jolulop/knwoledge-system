@@ -1,6 +1,8 @@
 # ADR-0052 — Entity split: `split_entity` as the id-spawning rekeying executor
 
-**Status:** Accepted. **Design-locked 2026-07-01** (grill-phase, docs-only — **not yet implemented**). This is
+**Status:** Accepted. **Design-locked 2026-07-01** (grill-phase, docs-only); **implemented 2026-07-02**
+(`app/workers/splits.py::apply_splits` + projector `review_read._effect_split`; review round 2 added the
+repair-safe idempotency + malformed-artifact guards below). This is
 the **last and highest-blast-radius identity-surgery executor**, the `split_entity` branch deferred by
 ADR-0041 and ADR-0050. It wires an executor onto the already-registered (but record-only) `split_entity`
 review type, reusing the merge/rekey machinery. Split is the **inverse of merge**: one entity-family node's
@@ -159,7 +161,9 @@ a dry plan (all guards + block gates, never partial), then apply. **No new lifec
 - **Projector `_effect_split`** — `EFFECTED` iff **all** hold: B graph node exists (`candidate` or already
   `active`); B page exists with `split_from == A` and `split_review_id == rid`; **each** `spinoff_source` now
   actively mentions B and **no longer** actively mentions A; A retains ≥1 active mention; **and B's promotion
-  is accounted for** — a pending/approved promote_candidate_node for B exists, or B is already `active`.
+  is accounted for** — a pending/approved/**rejected** promote_candidate_node for B exists, or B is already
+  `active` (a terminal *rejected* promote is a deliberate human accounting — "split done, chose not to promote
+  B" — a filled ledger slot, **not** a partial split, so it counts as accounted).
   `PENDING_APPLY` iff nothing is applied (B absent, A retains all sources + aliases). **Any** partial —
   including a half-mint (B rendered + mentions moved but the promote item not yet filed, since `upsert_node`
   commits immediately) — → **`UNKNOWN partial_split_state`** (not reopenable; reopen would strand a

@@ -229,7 +229,8 @@ B's `promote_candidate_node`** (enters the promotion ledger) → fan-out re-rend
 pages** (the only fan-out) → audit. **No pending-review withdrawal** (nothing is retired — the clean contrast
 with merge/rekey). **Projector `_effect_split` — `EFFECTED` iff:** B node exists (candidate|active) + B page
 `split_from==A`+`split_review_id==rid` + each spinoff_source now mentions B and not A + A retains ≥1 mention +
-**B's promotion is accounted for** (pending/approved promote item exists, or B already active); a half-mint
+**B's promotion is accounted for** (pending/approved/rejected promote item exists — a terminal *rejected*
+promote is a filled ledger slot, deliberate human accounting, not a partial — or B already active); a half-mint
 (e.g. mentions moved + B rendered but promote item not yet filed) → **`UNKNOWN partial_split_state`** (not
 reopenable, mirrors rekey half-mint safety). Reindex-failure → non-clean `split_discovery_reindex_not_guaranteed`.
 Forward-only/auditable; inverse = `merge_entities(spin-off → primary)`. Previewable via the [[apply-dry-run]].
