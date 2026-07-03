@@ -36,6 +36,28 @@ private network / sidecar behind a TLS/auth proxy) and is **not** a substitute f
 Maintenance passes are **key-free**. Only the LLM *producers* (claims/concepts/contradictions/synthesis)
 and `POST /query` need `ANTHROPIC_API_KEY`.
 
+### Executor-backed review types (`POST /reviews/apply`)
+
+Every review type below has a deterministic, key-free executor (the canonical set is `_APPLY_TYPES` in
+`app/backend/main.py`; a parity test keeps this table in sync). Any other approved type is reported
+honestly under `unapplied` (record-only / raw-touching).
+
+| Review type | ADR | Effect on apply |
+|---|---|---|
+| `promote_candidate_node` | 0018/0035 | Candidate concept/entity → `active`. |
+| `resolve_contradiction` | 0031 | Acknowledge / supersede / reject a `contradicts` edge. |
+| `propose_synthesis` | 0031 | Activate a `candidate` synthesis node. |
+| `deprecate_wiki_page` | 0035 | Scoped page deprecation → `deprecated_candidate`. |
+| `archive_source` | 0036 | Source `active` → `archive_candidate` (raw bytes untouched; manifest status flips). |
+| `mark_semantic_duplicate` | 0041 | `## Duplicates` annotation edge (no id rewrite). |
+| `hide_content` / `unhide_content` | 0043 / 0047 | Hide / unhide a source. |
+| `hide_semantic_page` / `unhide_semantic_page` | 0046 / 0047 | Hide / unhide a concept/entity page. |
+| `hide_claim` / `unhide_claim` | 0048 | Hide / unhide a claim. |
+| `hide_synthesis` / `unhide_synthesis` | 0049 | Hide / unhide a synthesis (`evidence_hidden`). |
+| `merge_entities` / `merge_concepts` | 0050 | Merge two same-type nodes (survivor + tombstone). |
+| `change_entity_subtype` | 0051 | Entity subtype rekey (id-prefix + directory change). |
+| `split_entity` | 0052 | Split an entity into a surviving primary + a minted spin-off. |
+
 ## Cron recipe (example)
 
 Run the app on loopback, then drive the passes with `curl`. Adjust cadence to taste — the Build Spec
@@ -96,7 +118,8 @@ enrichment artifacts) stays `healthy`.
 ## Manual answer-quality smoke (optional, key-required)
 
 There is **no automated eval job** in v1 — `evals/golden_questions.yaml` is a fake-adapter CI fixture, not
-a real-vault corpus (ADR-0036 decision 14). The structural regression gate is the CI suites:
+a real-vault corpus (ADR-0036 decision 14). The structural regression **pytest suites** are the local
+gate, run by the working rhythm — there is **no in-repo CI runner yet** (see Build Spec §16):
 
 ```bash
 uv run pytest -q tests/test_query_evals.py tests/test_retrieval_evals.py

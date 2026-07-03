@@ -87,9 +87,11 @@ This is the Phase-6 surface — **decide and apply are deliberately decoupled**:
    yet**. Defer keeps it in `pending/` flagged `deferred`.
 2. **Apply** (explicit, deterministic, key-free): `POST /reviews/apply` (or the UI's **Apply** page)
    runs the verified executors over `approved/` — promotions, contradiction resolutions, synthesis
-   activations, and scoped page **deprecations** — then re-renders pages, mirrors the graph, rebuilds
-   `wiki/index.md`, and runs validators. It's **idempotent**, **never touches `raw/`**, and is
-   **non-transactional**: if a validator fails afterward you get `status: validation_failed` (HTTP 200,
+   activations, scoped page **deprecations**, source **archive**, **duplicate annotation**, and the
+   **visibility family** (hide/unhide across sources, semantic pages, claims, and synthesis) — then
+   re-renders pages, mirrors the graph, rebuilds `wiki/index.md`, and runs validators. It's
+   **idempotent**, **never touches raw bytes** (source lifecycle changes may update `raw/manifests/`), and
+   is **non-transactional**: if a validator fails afterward you get `status: validation_failed` (HTTP 200,
    not a rollback) so you can see what to fix.
 
 Some review types are still **record-only** (e.g. raw-deletion types): you can decide them, but Apply

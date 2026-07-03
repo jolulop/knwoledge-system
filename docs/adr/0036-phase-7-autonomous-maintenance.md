@@ -122,7 +122,8 @@ effect.
 report-only job over `evals/golden_questions.yaml`, but that file is a **fake-adapter CI fixture**, not a
 real-vault corpus — see decision 14. v1 ships **no eval job** and **no `/evals/run`** endpoint (a
 documented deviation from Build Spec §13.5); the regression gate stays the CI suites + a manual smoke
-recipe. A real-vault eval is future work.
+recipe. A real-vault eval is future work. _(Editorial update: these "CI suites" are the structural
+`pytest` gate run **locally by the working rhythm** — there is no in-repo CI runner; see Build Spec §16.)_
 
 **10. Cache purge = candidate detection only.** The retention pass detects expired/oversize
 `db/llm_cache.sqlite` entries (per `policies/retention.yaml` `cache_ttl_days`/`cache_max_mb`) and files a
@@ -169,7 +170,8 @@ separate curator store**.
   real-vault eval job**, and no real-vault golden corpus exists. 7-3 ships **no eval job**: the structural
   regression stays gated by the CI suites (`test_query_evals`, `test_retrieval_evals`), and a **manual,
   opt-in real-model smoke recipe lives in `docs/Operations.md`**. A real-vault eval (new golden Q&A corpus,
-  key-required) is future work.
+  key-required) is future work. _(Editorial update: the "CI suites" gate runs **locally by the working
+  rhythm** — no in-repo CI runner ships; see Build Spec §16.)_
 - **`POST /jobs/reindex`** — a job-recorded pass that runs **`rebuild_index.py` + `reindex_keyword.py`
   only** (cheap, deterministic, key-free). The **vector** index stays the explicit `reindex_vector.py`
   (ADR-0033) — **no `vector` parameter** on the endpoint, so maintenance never triggers a surprise

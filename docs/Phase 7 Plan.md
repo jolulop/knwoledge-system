@@ -85,8 +85,9 @@ A job-recorded health pass that **completes and reports**, even when health fail
   deterministic, key-free). **No `vector` parameter** — the vector index stays the explicit
   `reindex_vector.py` (ADR-0033), so maintenance never triggers an embedding-server side effect.
 - **Eval job — deferred (over-scoped).** `golden_questions.yaml` is a fake-adapter CI fixture, so it can't
-  run as a real-vault eval; the regression stays gated by the CI suites (`test_query_evals`,
-  `test_retrieval_evals`), with a **manual opt-in real-model smoke recipe in `docs/Operations.md`**. A
+  run as a real-vault eval; the regression stays gated by the local structural **pytest suites**
+  (`test_query_evals`, `test_retrieval_evals`) — run by the working rhythm, no in-repo CI runner —
+  with a **manual opt-in real-model smoke recipe in `docs/Operations.md`**. A
   real-vault eval corpus is future work.
 - **Cache-purge candidates** — **one aggregate, record-only `purge_response_cache`** review item (stable
   subject `{"scope": "response_cache"}`), folded into **`/jobs/stale-check`**. Filed when
@@ -115,7 +116,8 @@ A job-recorded health pass that **completes and reports**, even when health fail
   pass, not an aborted run).
 - Idempotency: producers over the existing large pending queue file no duplicates on rerun.
 - Cache-retention: expired/oversize cache → review-gated purge candidate; **no automatic purge**.
-- Eval job: deferred by ADR-0036 decision 14; CI fake-adapter evals remain the regression gate.
+- Eval job: deferred by ADR-0036 decision 14; the fake-adapter **pytest evals** remain the local
+  regression gate (no in-repo CI runner ships).
 - **No-daemon contract test:** importing/serving the API starts no scheduler/background thread.
 - Lint LLM-free where possible (the semantic checks reuse the graph, not new LLM calls); any LLM-touching
   check is fake-adapter-gated like prior phases.

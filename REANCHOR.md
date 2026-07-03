@@ -17,9 +17,9 @@ critical rules and `CONTEXT.md` for the glossary.
 
 ## Where we are
 
-- **Branch:** `main` — **docs/governance-sync commits sit unpushed on top of `origin/main`** (last
-  *pushed* tip: `4d352b4` ADR-0052 `split_entity`; run `git log --oneline origin/main..HEAD` for the
-  live unpushed set). The per-slice rhythm: grill (design-lock,
+- **Branch:** `main` — **docs/governance-sync commits may sit unpushed on top of `origin/main`**; run
+  `git log --oneline origin/main..HEAD` for the live unpushed set (this snapshot deliberately does not
+  pin a tip SHA — it would go stale on the next push). The per-slice rhythm: grill (design-lock,
   docs-only) → implement (on "implement now") → test → external review (user pastes) → analyze+recommend+
   **wait** → fix → commit (user says so) → push.
 - **PHASES 1–7 COMPLETE + pushed.** 1 intake · 2 extract/normalize · 3 deterministic wiki · 3.5 LLM
