@@ -17,9 +17,10 @@ critical rules and `CONTEXT.md` for the glossary.
 
 ## Where we are
 
-- **Branch:** `main` — **in sync with `origin/main`** (local and remote tips aligned); run
-  `git log --oneline origin/main..HEAD` to confirm the live unpushed set (this snapshot deliberately
-  does not pin a tip SHA — it goes stale on the next commit). The per-slice rhythm: grill (design-lock,
+- **Branch:** `main` — **local commits may sit unpushed on top of `origin/main`** (currently the
+  UAT-docs slice `8a641f4`); run `git log --oneline origin/main..HEAD` for the live unpushed set
+  (this snapshot deliberately avoids pinning further — it goes stale on the next commit/push).
+  The per-slice rhythm: grill (design-lock,
   docs-only) → implement (on "implement now") → test → external review (user pastes) → analyze+recommend+
   **wait** → fix → commit (user says so) → push.
 - **PHASES 1–7 COMPLETE + pushed.** 1 intake · 2 extract/normalize · 3 deterministic wiki · 3.5 LLM
@@ -66,14 +67,15 @@ critical rules and `CONTEXT.md` for the glossary.
     help. **Multi-chunk extension design-locked** (ADR-0038 §Multi-chunk, NOT yet implemented): chunk-level
     cases (`chunk:`/`near_miss:` phrase→citation-key, `chunk_disambiguation`), separate report blocks,
     chunk-granular per-channel diagnostic — the benchmark layer needed before any fusion tuning.
-- **Recent commits (all pushed to `origin/main`, tip `006e44a`):** `006e44a` **ADR-0053 in-process
+- **Recent commits (local tip `8a641f4`, UNPUSHED — `origin/main` at `006e44a`):** `8a641f4` UAT Guide
+  disposable-vault rework + doc-drift/security guards · `006e44a` **ADR-0053 in-process
   FlagEmbedding BGE-M3 embedder** (supersedes ADR-0033 decision 1: TEI/Candle fell back to CPU on the
   RTX 5090; in-process torch+FlagEmbedding is the default GPU backend, `local_http` stays as CPU/HTTP
   fallback; torch overlay deliberately out-of-lock) · `c15bdd9` docs executor/CI-gate drift reconcile +
   operational-drift test guards · `cb586d2`/`42078a0` docs & governance sync · `4d352b4`/`16ddae8`
   ADR-0052 `split_entity` · `4db3f58` graph-boundary slug path-containment hardening ·
   `152704d`/`3ab1577` ADR-0051 subtype rekey · `ce80064`/`4721c46` ADR-0050 merge (identity surgery).
-- **Tests/lint green:** `1146 passed, 2 skipped` (the opt-in `gpu`/`model` marks, ADR-0053), ruff clean,
+- **Tests/lint green:** `1147 passed, 2 skipped` (the opt-in `gpu`/`model` marks, ADR-0053), ruff clean,
   **10** validators pass. Newest test files: `tests/test_flagembedding_provider.py` (ADR-0053, torch-free
   unit layer) and the identity-surgery family (`test_merge.py`/`test_rekey.py`/`test_split.py`);
   `tests/test_operational_refs.py` carries the `_APPLY_TYPES`↔docs parity, no-CI-claim, wrapper-agnostic
@@ -112,23 +114,30 @@ critical rules and `CONTEXT.md` for the glossary.
 
 ## Next step
 
-**Last shipped:** ADR-0053 (`006e44a`, pushed) — the in-process FlagEmbedding BGE-M3 embedder replacing
-the TEI GPU path (see Recent commits above). Before it, `c15bdd9` — a docs/CI-gate drift reconciliation +
-operational-drift test-guard slice.
+**Last shipped (LOCAL, unpushed):** the UAT-docs slice `8a641f4` — `docs/UAT Guide.md` rewritten as a
+**thin disposable-vault-default checklist** (fresh-clone procedure with a `KNOWLEDGE_SYSTEM_HOME`
+copy-`.env` warning, ADR-0053 embedding wording, EMBEDDING_-prefix-strip clean pytest env, scope-checked
+`/reviews/apply` via dry-run `items[]`, job-count acceptance for unsupported files, separate live-vault
+smoke path), `docs/README.md` synced, REANCHOR refreshed, and the UAT-Guide drift guards in
+`tests/test_operational_refs.py`. External review round 2 caught + fixed an env-value print leak
+(`env | sort | grep '^EMBEDDING_'` could echo `EMBEDDING_API_KEY` → names-only `grep -o`) and hardened
+the guards (method-aware curl↔route parity; fail-closed operator-doc no-env-value-print security lint).
+**Push when the user says.** Before it (pushed): ADR-0053 `006e44a`.
 
-**In flight (uncommitted working tree):** a docs+tests UAT slice from an architecture-review round —
-`docs/UAT Guide.md` rewritten as a **thin disposable-vault-default checklist** (fresh-clone procedure with
-a `KNOWLEDGE_SYSTEM_HOME` copy-`.env` warning, ADR-0053 embedding wording, EMBEDDING_-prefix-strip clean
-pytest env, scope-checked `/reviews/apply` discipline via dry-run `items[]`, job-count acceptance for
-unsupported files, separate live-vault smoke path), `docs/README.md` synced, and UAT-Guide drift
-guards added to `tests/test_operational_refs.py`. A second external review round then caught + fixed an
-env-value print leak (`env | sort | grep '^EMBEDDING_'` could echo `EMBEDDING_API_KEY` → names-only
-`grep -o`), and hardened the guards (method-aware curl↔route parity; a fail-closed operator-doc
-no-env-value-print security lint). Review findings left **open by decision-pending**:
-Dockerfile CMD binds `0.0.0.0` via bare uvicorn (bypasses `assert_safe_bind` on plain `docker run`),
-HF first-run weight download ungated by `EMBEDDING_ALLOW_CLOUD`, dead surface (5 unused `templates/*.md`,
-`app/frontend/`, `indexes/graph/`, compose `qdrant`), Build-Spec §6 annotation for never-produced
-`supports` edges / non-graph `query`/`tag` nodes.
+**In flight (uncommitted):** the review-disposition slice — **Dockerfile CMD flipped to the blessed
+`python -m app.backend`** (a bare `docker run` now binds loopback inside the container: fail-closed
+unreachable instead of silently exposing the no-auth API; compose stays the explicit
+`APP_HOST=0.0.0.0`+`KS_ALLOW_INSECURE_BIND=1`+loopback-publish exception; `test_dockerfile_uses_blessed_
+entrypoint` guard added in `test_api.py`) + **Build Spec §6 implementation annotations** (`supports`
+schema-reserved/no producer; `needs_review` realized as review status not an edge, ADR-0030; `query`/`tag`
+navigation-only wiki surfaces, no graph producer — `eligibility.py`).
+
+**Remaining review findings — user decisions 2026-07-04:** HF first-run weight download → post-UAT design
+decision (do **not** overload `EMBEDDING_ALLOW_CLOUD` — weights-in ≠ content-out; likely an ADR-0053
+addendum with an explicit offline/model-download knob). Dead surface → one post-UAT cleanup slice (bias:
+remove or mark reserved — 5 unused `templates/*.md`, empty `app/frontend/`, compose `qdrant`;
+`indexes/graph/` stays documented-reserved; the slice must also align the CLAUDE.md/AGENTS.md "use
+templates" wording and add a template-consumption guard).
 
 **Otherwise no feature slice in flight.** The two big families the recent work pursued are both **complete**: the
 **visibility family** (hide/unhide across sources, semantic pages, claims, synthesis — ADR-0043–0049) and the

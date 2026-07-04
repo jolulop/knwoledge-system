@@ -1213,6 +1213,18 @@ def test_docker_compose_uses_blessed_entrypoint_and_loopback_port():
             assert "127.0.0.1:18000:18000" in line, line
 
 
+def test_dockerfile_uses_blessed_entrypoint():
+    # The image default must also route through the guard: the old CMD ran uvicorn --host 0.0.0.0
+    # directly, so a plain `docker run` (no compose override) bound all interfaces while the
+    # import-time assert_safe_bind — which checks APP_HOST, default loopback — passed. With the
+    # blessed CMD a bare run binds loopback inside the container (fail-closed, unreachable from the
+    # host); compose remains the explicit reachability exception (guard above).
+    import pathlib
+    text = (pathlib.Path(__file__).resolve().parents[1] / "Dockerfile").read_text(encoding="utf-8")
+    assert 'CMD ["python", "-m", "app.backend"]' in text  # blessed entrypoint
+    assert "app.backend.main:app" not in text             # never a direct uvicorn bind
+
+
 def test_sources_quarantines_invalid_manifests(client, tmp_path):
     md = tmp_path / "raw" / "manifests"
     md.mkdir(parents=True, exist_ok=True)

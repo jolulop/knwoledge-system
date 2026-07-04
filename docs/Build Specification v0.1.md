@@ -307,6 +307,13 @@ knowledge-system/
 | `query` | Saved user question and answer. |
 | `synthesis` | Higher-level analysis across multiple sources. |
 
+Note: this is the original v0.1 node-type *target*; per the §15 convention the implementation
+annotation is recorded here rather than rewriting the table. All ten types are allowed in the graph
+schema (`app/backend/graph.py` `NODE_TYPES`), but **`query` and `tag` are wiki/navigation surfaces
+only** — no producer upserts them as graph nodes; `wiki/Queries/` and `wiki/Tags/` pages exist
+without graph presence by design (`app/backend/eligibility.py`: source/query/tag pages are
+navigation aids, not answer-eligible semantic nodes).
+
 ### 6.2 Relationship Types
 
 | Edge Type | Meaning |
@@ -319,6 +326,14 @@ knowledge-system/
 | `derived_from` | A wiki page, claim, or synthesis is derived from a source. |
 | `related_to` | General semantic relation. |
 | `needs_review` | The relationship or node requires human review. |
+
+Note: implementation annotations (original v0.1 target kept as historical intent):
+- **`supports` is schema-reserved, not currently produced** — allowed edge vocabulary
+  (`app/backend/graph.py` `EDGE_TYPES`) with no producer yet; reserved for future claim-support
+  edges. All other edge types above (except `needs_review`) are actively produced.
+- **`needs_review` is not an edge type in the implementation** — review-pending state is realized
+  as node/edge *status* plus the `reviews/` ledger (ADR-0030; `graph.py`: "review is a status, not
+  a relationship").
 
 ---
 
