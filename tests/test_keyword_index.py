@@ -271,6 +271,40 @@ def test_validator_passes_on_fresh_index(tmp_path):
     assert validate_index_consistency.main([str(tmp_path)]) == 0
 
 
+def test_validator_passes_zero_chunk_source(tmp_path):
+    _seed(tmp_path)
+    zero = tmp_path / "normalized" / "chunks" / "src_0000000000000000.jsonl"
+    zero.parent.mkdir(parents=True, exist_ok=True)
+    zero.write_text("", encoding="utf-8")
+
+    keyword_index.reindex(tmp_path, force=True)
+    conn = _conn(tmp_path)
+    try:
+        assert "src_0000000000000000" in keyword_index.stored_source_fingerprints(conn)
+        assert "src_0000000000000000" not in keyword_index.indexed_source_ids(conn)
+    finally:
+        conn.close()
+    assert validate_index_consistency.main([str(tmp_path)]) == 0
+
+
+def test_validator_fails_when_fts_rows_tampered_away(tmp_path):
+    _seed(tmp_path)
+    keyword_index.reindex(tmp_path, force=True)
+    # Drop a source's FTS rows but keep its fingerprint. The chunk file still parses to citable
+    # rows, so this is genuine internal inconsistency — the zero-citable-row allowance (for
+    # partial/OCR sources) must NOT excuse it. This branch is the only detector for this
+    # corruption class since the blanket indexed==stored check was relaxed.
+    conn = _conn(tmp_path)
+    try:
+        conn.execute("DELETE FROM evidence WHERE source_id = ?", ("src_bbbbbbbbbbbbbbbb",))
+        conn.commit()
+        errors = keyword_index.consistency_errors(tmp_path, conn)
+        assert any("citable chunk row(s) on disk but no FTS rows" in e for e in errors)
+    finally:
+        conn.close()
+    assert validate_index_consistency.main([str(tmp_path)]) == 1
+
+
 def test_validator_passes_when_no_index(tmp_path):
     _seed(tmp_path)  # no reindex -> no index file
     assert validate_index_consistency.main([str(tmp_path)]) == 0

@@ -401,6 +401,43 @@ def _freshness(label: str, live: dict[str, Path], stored: dict[str, str], indexe
     return errors
 
 
+def _evidence_freshness(live: dict[str, Path], stored: dict[str, str], indexed: set[str],
+                        *, reindex_hint: str) -> list[str]:
+    """Evidence freshness with a zero-citable-row allowance.
+
+    A partial/OCR-needed source can have a valid ``src_*.jsonl`` chunk file that parses to zero citable
+    rows. The indexer still stores its fingerprint so incremental reindex does not revisit it forever,
+    but the FTS table correctly has no evidence row for that source.
+    """
+    errors: list[str] = []
+    extra_rows = set(indexed) - set(stored)
+    if extra_rows:
+        errors.append(
+            "evidence index internally inconsistent: FTS rows without fingerprint table entries "
+            f"{sorted(extra_rows)}"
+        )
+
+    for key in sorted(set(stored) - set(indexed)):
+        path = live.get(key)
+        if path is None:
+            continue  # reported below as a stored fingerprint for a missing chunk file
+        rows, _, _ = _evidence_rows(path)
+        if rows:
+            errors.append(
+                f"evidence index internally inconsistent: {key} has {len(rows)} citable chunk row(s) "
+                "on disk but no FTS rows"
+            )
+
+    for key in sorted(set(stored) - set(live)):
+        errors.append(f"evidence index references {key}, which no longer exists on disk ({reindex_hint})")
+    for key, path in sorted(live.items()):
+        if key not in stored:
+            errors.append(f"evidence {key} exists on disk but is not indexed ({reindex_hint})")
+        elif stored[key] != file_fingerprint(path):
+            errors.append(f"evidence index is stale for {key}: it changed since indexing ({reindex_hint})")
+    return errors
+
+
 def consistency_errors(root: Path, conn: sqlite3.Connection, *, reindex_hint: str = "reindex") -> list[str]:
     """Reasons the keyword index is unsafe to search (ADR-0032 §7): stale schema, missing core tables, or
     fingerprint drift in either direction (evidence + navigation). Empty list == usable. Pure over
@@ -412,8 +449,8 @@ def consistency_errors(root: Path, conn: sqlite3.Connection, *, reindex_hint: st
     missing = [t for t in _REQUIRED_TABLES if t not in _tables(conn)]
     if missing:
         return [f"keyword index missing core table(s) {missing} ({reindex_hint})"]
-    return (_freshness("evidence", chunk_files(root), stored_source_fingerprints(conn),
-                       indexed_source_ids(conn), reindex_hint=reindex_hint)
+    return (_evidence_freshness(chunk_files(root), stored_source_fingerprints(conn),
+                                indexed_source_ids(conn), reindex_hint=reindex_hint)
             + _freshness("navigation", navigation_pages(root), stored_nav_fingerprints(conn),
                          indexed_navigation_paths(conn), reindex_hint=reindex_hint))
 
