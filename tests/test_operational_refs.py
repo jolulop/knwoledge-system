@@ -23,6 +23,7 @@ OPERATIONAL_FILES = [
     ROOT / ".claude" / "skills" / "vault-ingest" / "SKILL.md",
     ROOT / ".claude" / "skills" / "vault-maintenance" / "SKILL.md",
     ROOT / "README.md",
+    ROOT / "docs" / "UAT Guide.md",
 ]
 
 SCRIPT_REF_RE = re.compile(r"scripts/([A-Za-z0-9_./-]+\.py)")
@@ -145,6 +146,150 @@ _CI_GATE_CLAIM_RES = [
     re.compile(r"gated by the CI", re.IGNORECASE),
     re.compile(r"\bCI\b[^.\n]*regression gate", re.IGNORECASE),
 ]
+
+
+# --- UAT Guide drift guards (added after the ADR-0053 review round) -------------------------------
+#
+# The UAT Guide drifted twice in one slice: its curl targets referenced the pre-implementation API
+# shape, and its "clean embedding environment" ritual enumerated the pre-ADR-0053 EMBEDDING_* vars
+# (missing the six new keys). These guards make both drifts structural test failures.
+
+_UAT_GUIDE = ROOT / "docs" / "UAT Guide.md"
+# curl targets appear as "$APP/<path>" (after `export APP=http://127.0.0.1:18000`) or as literal
+# loopback URLs. Query strings stop the capture ('?' is outside the class); mermaid labels and prose
+# never carry either prefix, so only runnable targets are collected.
+_UAT_ROUTE_RES = [
+    re.compile(r"\$APP(/[A-Za-z0-9_\-/.{}<>]*)"),
+    re.compile(r"127\.0\.0\.1:18000(/[A-Za-z0-9_\-/.{}<>]*)"),
+]
+
+
+def _doc_path_matches_route(doc_path: str, route_path: str) -> bool:
+    doc_segs = doc_path.strip("/").split("/")
+    route_segs = route_path.strip("/").split("/")
+    if len(doc_segs) != len(route_segs):
+        return False
+    for doc_seg, route_seg in zip(doc_segs, route_segs):
+        if route_seg.startswith("{") and route_seg.endswith("}"):
+            continue  # route param matches any doc segment, incl. `<review_id>` placeholders
+        if doc_seg != route_seg:
+            return False
+    return True
+
+
+_CURL_METHOD_RE = re.compile(r"-X\s+([A-Z]+)")
+
+
+def _uat_http_targets(text: str) -> set[tuple[str, str]]:
+    # (method, path) per target. Backslash-continued curl commands are joined first so `-X POST`
+    # and the URL always land on one logical line. Method: explicit `-X <M>` wins, `--get` and
+    # plain curls (and bare browser URLs) are GET.
+    joined = re.sub(r"\\\n\s*", " ", text)
+    targets: set[tuple[str, str]] = set()
+    for line in joined.splitlines():
+        paths = {m for rx in _UAT_ROUTE_RES for m in rx.findall(line) if m != "/"}
+        if not paths:
+            continue
+        method_match = _CURL_METHOD_RE.search(line) if "curl" in line else None
+        method = method_match.group(1) if method_match else "GET"
+        targets.update((method, p) for p in paths)
+    return targets
+
+
+def test_uat_guide_curl_targets_are_real_routes():
+    # Every runnable HTTP target in the UAT Guide must resolve to a registered FastAPI route WITH a
+    # matching method, so a renamed/removed endpoint or a GET/POST drift can't silently strand the
+    # operator checklist.
+    from app.backend.main import app as fastapi_app
+
+    routes = [
+        (getattr(r, "path", ""), getattr(r, "methods", None) or set())
+        for r in fastapi_app.routes
+    ]
+    targets = _uat_http_targets(_UAT_GUIDE.read_text(encoding="utf-8"))
+    assert targets, "expected the UAT Guide to reference API routes"
+    missing = [
+        f"{method} {path}"
+        for method, path in sorted(targets)
+        if not any(
+            _doc_path_matches_route(path, route_path) and method in route_methods
+            for route_path, route_methods in routes
+        )
+    ]
+    assert not missing, (
+        "docs/UAT Guide.md curls method+route pairs the app does not serve:\n" + "\n".join(missing))
+
+
+# Operator docs must never instruct printing environment VALUES: the operator's env can hold secrets
+# (ANTHROPIC_API_KEY, EMBEDDING_API_KEY — config.py reads them) and AGENTS.md "Do not expose secrets" /
+# policies/security.yaml forbid exposure. This is the regression guard for the UAT-Guide
+# `env | sort | grep '^EMBEDDING_'` leak (printed EMBEDDING_API_KEY's value). Fails CLOSED: any
+# `env`/`printenv` dump or `echo $..KEY/TOKEN/SECRET` is an offender unless the line carries a
+# value-stripping idiom from the tight allowlist below.
+_SECURITY_DOCS = [
+    ROOT / "README.md",
+    *sorted((ROOT / "docs").glob("*.md")),  # top-level operator docs; docs/adr/ = historical records
+    *sorted((ROOT / ".claude" / "skills").glob("*/SKILL.md")),
+]
+_ENV_DUMP_RE = re.compile(r"(?:^|[\s|&$(])(?:env|printenv)\s*\|")
+_PRINTENV_ARG_RE = re.compile(r"printenv\s+[A-Za-z_]")
+_ECHO_SECRET_RE = re.compile(r'echo\s+"?\$\{?[A-Za-z_]*(?:KEY|TOKEN|SECRET)', re.IGNORECASE)
+# Idioms that provably strip values before printing: name-only extraction (`grep -o '^NAME'`,
+# `cut -d= -f1`, `awk -F=` on $1) and the pytest preflight's sed loop that emits `-u NAME` flags.
+_VALUE_STRIP_CUES = ("grep -o '^", "cut -d= -f1", "awk -F=", "/-u \\1/")
+
+
+def test_operator_docs_never_print_env_values():
+    offenders: list[str] = []
+    checked = 0
+    for doc in _SECURITY_DOCS:
+        if not doc.exists():
+            continue
+        checked += 1
+        for lineno, line in enumerate(doc.read_text(encoding="utf-8").splitlines(), start=1):
+            dump = _ENV_DUMP_RE.search(line) or _PRINTENV_ARG_RE.search(line)
+            if dump and not any(cue in line for cue in _VALUE_STRIP_CUES):
+                offenders.append(f"{doc.relative_to(ROOT)}:{lineno}: {line.strip()}")
+            elif _ECHO_SECRET_RE.search(line):
+                offenders.append(f"{doc.relative_to(ROOT)}:{lineno}: {line.strip()}")
+    assert checked > 0, "expected operator docs to scan"
+    assert not offenders, (
+        "operator docs print environment values (secrets like *_KEY may be set; list names only — "
+        "AGENTS.md / policies/security.yaml):\n" + "\n".join(offenders))
+
+
+_CFG_KEY_RE = re.compile(r'cfg\(\s*"([A-Z0-9_]+)"')
+
+
+def test_embedding_env_keys_all_carry_the_embedding_prefix():
+    # The UAT Guide's preflight strips embedding config by PREFIX (`env -u` over every EMBEDDING_*
+    # shell var) instead of enumerating keys, so it cannot go stale the way the pre-ADR-0053 list
+    # did. That only holds while every embedding-related env key config.py reads actually carries
+    # the EMBEDDING_ prefix — this guard pins that invariant.
+    src = (ROOT / "app" / "backend" / "config.py").read_text(encoding="utf-8")
+    keys = set(_CFG_KEY_RE.findall(src))
+    assert "EMBEDDING_PROVIDER" in keys, "config.py key scan failed to find the embedding block"
+    offenders = sorted(k for k in keys if "EMBEDDING" in k and not k.startswith("EMBEDDING_"))
+    assert not offenders, (
+        "embedding env keys outside the EMBEDDING_ prefix break the UAT Guide's prefix-strip "
+        "preflight:\n" + "\n".join(offenders))
+
+
+def test_stripping_embedding_prefix_yields_unconfigured_embedding(monkeypatch, tmp_path):
+    # Functional half of the same contract: with every EMBEDDING_* shell var stripped and no .env
+    # at the root (the fresh-clone posture the UAT Guide prescribes), the embedding layer must
+    # resolve to cleanly-unconfigured — no client, no staleness identity.
+    import os
+
+    for key in list(os.environ):
+        if key.startswith("EMBEDDING_"):
+            monkeypatch.delenv(key)
+    from app.backend.config import get_settings
+    from app.backend.embeddings import client_from_settings, resolve_model_ref
+
+    settings = get_settings(tmp_path)
+    assert client_from_settings(settings) is None
+    assert resolve_model_ref(settings) is None
 
 
 def test_operator_docs_dont_claim_ci_gate_when_no_ci_runner():

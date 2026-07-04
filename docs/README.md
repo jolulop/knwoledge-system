@@ -13,7 +13,17 @@ This folder contains the working documentation for the local-first agentic infor
 3. **Architecture Overview v0.1.md**  
    High-level architecture, design principles, runtime split, data flow, and retrieval model.
 
-4. **Phase 1 Plan.md**  
+4. **Workflow.md**  
+   Practical operator guide for day-to-day ingest, enrichment, review, and query workflows.
+
+5. **Operations.md**  
+   Maintenance and runtime operations guide.
+
+6. **UAT Guide.md**  
+   Thin user-acceptance checklist — disposable-vault by default, scope-checked review apply; links
+   to Workflow.md/Operations.md for canonical behavior.
+
+7. **Phase 1 Plan.md**  
    Implementation plan for File Intake and Raw Repository.
 
 ## Current working assumptions
