@@ -52,8 +52,14 @@ def write_docx(path: Path) -> Path:
     return path
 
 
-def make_pdf_bytes(pages: list[str]) -> bytes:
-    """Build a minimal multi-page PDF whose pages carry the given text via a Tj op."""
+def make_pdf_bytes(pages: list[str | list[str]]) -> bytes:
+    """Build a minimal multi-page PDF whose pages carry the given text via Tj ops.
+
+    A page given as a plain string renders as one text line. A page given as a list of
+    strings renders one Tj per line at descending y positions, which pypdf extracts with
+    ``\\n`` between lines — the shape needed to exercise line-break-sensitive extraction
+    behavior such as de-hyphenation (ADR-0054).
+    """
     objects: dict[int, bytes] = {}
     n = len(pages)
     kid_ids = [4 + 2 * i for i in range(n)]
@@ -63,8 +69,12 @@ def make_pdf_bytes(pages: list[str]) -> bytes:
     objects[3] = b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
     for i, text in enumerate(pages):
         pid, cid = 4 + 2 * i, 5 + 2 * i
-        esc = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
-        stream = f"BT /F1 24 Tf 72 700 Td ({esc}) Tj ET".encode()
+        lines = [text] if isinstance(text, str) else text
+        ops = []
+        for j, line in enumerate(lines):
+            esc = line.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+            ops.append(f"{'72 700 Td' if j == 0 else '0 -28 Td'} ({esc}) Tj")
+        stream = ("BT /F1 24 Tf " + " ".join(ops) + " ET").encode()
         objects[pid] = (
             f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
             f"/Contents {cid} 0 R /Resources << /Font << /F1 3 0 R >> >> >>"
@@ -89,6 +99,6 @@ def make_pdf_bytes(pages: list[str]) -> bytes:
     return bytes(out)
 
 
-def write_pdf(path: Path, pages: list[str]) -> Path:
+def write_pdf(path: Path, pages: list[str | list[str]]) -> Path:
     path.write_bytes(make_pdf_bytes(pages))
     return path

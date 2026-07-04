@@ -15,7 +15,7 @@ from pathlib import Path
 from pypdf import PdfReader
 
 from app.workers.chunking import Element
-from app.workers.extractors import Extraction, paragraphs_from_text, pkg_version
+from app.workers.extractors import Extraction, dehyphenate, paragraphs_from_text, pkg_version
 
 # Average chars/page below this on a paginated source means "no real embedded text".
 _NEEDS_OCR_CHARS_PER_PAGE = 16
@@ -29,7 +29,9 @@ def extract(path: Path) -> Extraction:
     elements: list[Element] = []
     total_chars = 0
     for index, page in enumerate(pages, start=1):
-        text = page.extract_text() or ""
+        # De-hyphenation must precede the paragraph reflow: the line-break signal (-\n) is the
+        # only mechanical marker of a hyphenation split and reflow collapses it (ADR-0054).
+        text = dehyphenate(page.extract_text() or "")
         for para in paragraphs_from_text(text):
             total_chars += len(para)
             elements.append(Element(kind="prose", text=para, page=index))

@@ -12,14 +12,14 @@ first after an app restart, then `wiki/index.md` if working in the vault._
 
 Local-first **LLM Wiki** knowledge-system. Immutable `raw/` → derived `normalized/` →
 generated `wiki/` (gitignored, regenerable) → `db/` SQLite (graph, jobs, llm_cache) →
-`reviews/`, `policies/`. ADR-driven (`docs/adr/0001–0053`). See `CLAUDE.md` for the
+`reviews/`, `policies/`. ADR-driven (`docs/adr/0001–0054`). See `CLAUDE.md` for the
 critical rules and `CONTEXT.md` for the glossary.
 
 ## Where we are
 
-- **Branch:** `main` — **local commits may sit unpushed on top of `origin/main`** (currently the
-  UAT-docs slice `8a641f4`); run `git log --oneline origin/main..HEAD` for the live unpushed set
-  (this snapshot deliberately avoids pinning further — it goes stale on the next commit/push).
+- **Branch:** `main` — local commits may sit unpushed on top of `origin/main`; run
+  `git log --oneline origin/main..HEAD` for the live unpushed set (pushed tip at refresh time:
+  `5f109b8`; the ADR-0054 slice below lands on top of it).
   The per-slice rhythm: grill (design-lock,
   docs-only) → implement (on "implement now") → test → external review (user pastes) → analyze+recommend+
   **wait** → fix → commit (user says so) → push.
@@ -67,7 +67,10 @@ critical rules and `CONTEXT.md` for the glossary.
     help. **Multi-chunk extension design-locked** (ADR-0038 §Multi-chunk, NOT yet implemented): chunk-level
     cases (`chunk:`/`near_miss:` phrase→citation-key, `chunk_disambiguation`), separate report blocks,
     chunk-granular per-channel diagnostic — the benchmark layer needed before any fusion tuning.
-- **Recent commits (local tip `8a641f4`, UNPUSHED — `origin/main` at `006e44a`):** `8a641f4` UAT Guide
+- **Recent commits (all pushed, tip `5f109b8`):** `5f109b8` keyword-index zero-citable-row consistency
+  fix (the first UAT-found product bug: a `partial`/`needs_ocr` 0-chunk source failed the validator AND
+  degraded the runtime search gate) · `99c3d15` Dockerfile blessed-entrypoint CMD + Build Spec §6
+  implementation annotations · `8a641f4` UAT Guide
   disposable-vault rework + doc-drift/security guards · `006e44a` **ADR-0053 in-process
   FlagEmbedding BGE-M3 embedder** (supersedes ADR-0033 decision 1: TEI/Candle fell back to CPU on the
   RTX 5090; in-process torch+FlagEmbedding is the default GPU backend, `local_http` stays as CPU/HTTP
@@ -75,8 +78,9 @@ critical rules and `CONTEXT.md` for the glossary.
   operational-drift test guards · `cb586d2`/`42078a0` docs & governance sync · `4d352b4`/`16ddae8`
   ADR-0052 `split_entity` · `4db3f58` graph-boundary slug path-containment hardening ·
   `152704d`/`3ab1577` ADR-0051 subtype rekey · `ce80064`/`4721c46` ADR-0050 merge (identity surgery).
-- **Tests/lint green:** `1147 passed, 2 skipped` (the opt-in `gpu`/`model` marks, ADR-0053), ruff clean,
-  **10** validators pass. Newest test files: `tests/test_flagembedding_provider.py` (ADR-0053, torch-free
+- **Tests/lint green:** `1166 passed, 2 skipped` (the opt-in `gpu`/`model` marks, ADR-0053), ruff clean,
+  **10** validators pass. Newest test files: `tests/test_dehyphenation.py` (ADR-0054 contract matrix +
+  e2e anchor-contract run), `tests/test_flagembedding_provider.py` (ADR-0053, torch-free
   unit layer) and the identity-surgery family (`test_merge.py`/`test_rekey.py`/`test_split.py`);
   `tests/test_operational_refs.py` carries the `_APPLY_TYPES`↔docs parity, no-CI-claim, wrapper-agnostic
   bare-uvicorn (ADR-0009), and UAT-Guide drift guards (script refs, **method-aware** curl-target↔route
@@ -114,32 +118,36 @@ critical rules and `CONTEXT.md` for the glossary.
 
 ## Next step
 
-**Last shipped (LOCAL, unpushed):** the UAT-docs slice `8a641f4` — `docs/UAT Guide.md` rewritten as a
-**thin disposable-vault-default checklist** (fresh-clone procedure with a `KNOWLEDGE_SYSTEM_HOME`
-copy-`.env` warning, ADR-0053 embedding wording, EMBEDDING_-prefix-strip clean pytest env, scope-checked
-`/reviews/apply` via dry-run `items[]`, job-count acceptance for unsupported files, separate live-vault
-smoke path), `docs/README.md` synced, REANCHOR refreshed, and the UAT-Guide drift guards in
-`tests/test_operational_refs.py`. External review round 2 caught + fixed an env-value print leak
-(`env | sort | grep '^EMBEDDING_'` could echo `EMBEDDING_API_KEY` → names-only `grep -o`) and hardened
-the guards (method-aware curl↔route parity; fail-closed operator-doc no-env-value-print security lint).
-**Push when the user says.** Before it (pushed): ADR-0053 `006e44a`.
+**Last shipped (all pushed, tip `5f109b8`):** the keyword-index **zero-citable-row consistency fix** —
+the first real product bug found by disposable-vault UAT (`src_3c3da984d6489006`, a scanned
+`needs_ocr` PDF with 0 chunks failed `validate_index_consistency` and degraded the runtime
+unsafe-to-search gate; `_evidence_freshness` now allows fingerprint-without-FTS-rows only when the
+live chunk file re-parses to zero citable rows; a tamper regression pins the corruption branch).
+Before it: `99c3d15` (Dockerfile blessed CMD + Build Spec §6 annotations) · `8a641f4` (UAT Guide
+disposable-vault rework + doc-drift/security guards, incl. the env-value-print security lint).
 
-**In flight (uncommitted):** the review-disposition slice — **Dockerfile CMD flipped to the blessed
-`python -m app.backend`** (a bare `docker run` now binds loopback inside the container: fail-closed
-unreachable instead of silently exposing the no-auth API; compose stays the explicit
-`APP_HOST=0.0.0.0`+`KS_ALLOW_INSECURE_BIND=1`+loopback-publish exception; `test_dockerfile_uses_blessed_
-entrypoint` guard added in `test_api.py`) + **Build Spec §6 implementation annotations** (`supports`
-schema-reserved/no producer; `needs_review` realized as review status not an edge, ADR-0030; `query`/`tag`
-navigation-only wiki surfaces, no graph producer — `eligibility.py`).
+**Latest slice: ADR-0054 de-hyphenation — grilled, design-locked and IMPLEMENTED (this slice's
+commit; check `git log`/`git status` for its push state).** UAT root cause: pypdf preserves `con-\ntributions`; the paragraph
+reflow collapsed it to `con- tributions` → exact-phrase keyword miss. In-tree: `dehyphenate()` in
+`app/workers/extractors/__init__.py` (ADR-0054 contract: Unicode word-chars, both-lowercase → drop
+hyphen, otherwise keep it; U+00AD strip; paragraph-bounded; accepted `best-\nknown`→`bestknown` error
+pinned), applied in the PDF extractor before reflow; `EXTRACT_CODE_VERSION = 1` recorded in every
+extraction log (observability only); multi-line PDF test fixture; `tests/test_dehyphenation.py`
+(contract matrix incl. both soft-hyphen branches + error-path log marker + e2e incl. the
+`markdown[start:end]==chunk.text` anchor check). **Verified against
+the originating UAT document** — the exact sentence now extracts verbatim. Docs in the same slice:
+ADR-0054, CONTEXT.md Extraction Log entry, UAT Guide step-8 notes (query-needs-key/503 detail,
+ranked-top-20, grep-normalized-before-phrase-search). Operator repair after commit is **opt-in**
+(ADR-0054 §3): `extract_sources.py --force` → `generate_wiki.py` → `reindex_keyword.py` →
+`rebuild_index.py` → `validate_all.py`; vector/enrich/claims follow-ups stay separate and
+cost-bearing; the ADR-0038 baseline needs re-recording after the eval corpus re-extracts.
 
-**Remaining review findings — user decisions 2026-07-04:** HF first-run weight download → post-UAT design
-decision (do **not** overload `EMBEDDING_ALLOW_CLOUD` — weights-in ≠ content-out; likely an ADR-0053
-addendum with an explicit offline/model-download knob). Dead surface → one post-UAT cleanup slice (bias:
-remove or mark reserved — 5 unused `templates/*.md`, empty `app/frontend/`, compose `qdrant`;
-`indexes/graph/` stays documented-reserved; the slice must also align the CLAUDE.md/AGENTS.md "use
-templates" wording and add a template-consumption guard).
-
-**Otherwise no feature slice in flight.** The two big families the recent work pursued are both **complete**: the
+**Post-UAT queue (user decisions 2026-07-04):** HF weight-download/offline policy (own knob, **not**
+`EMBEDDING_ALLOW_CLOUD` — likely an ADR-0053 addendum); dead-surface cleanup slice (5 unused
+`templates/*.md`, empty `app/frontend/`, compose `qdrant`; `indexes/graph/` stays documented-reserved;
+must align the CLAUDE.md/AGENTS.md "use templates" wording + add a template-consumption guard);
+plus ADR-0054's named deferrals (glued-word/extractor-evaluation slice, key-free repair script,
+extractor-version lint). The two big families the recent work pursued are both **complete**: the
 **visibility family** (hide/unhide across sources, semantic pages, claims, synthesis — ADR-0043–0049) and the
 **identity-surgery family** (merge / subtype-rekey / split — ADR-0050–0052). Pick the next slice from the
 deferred list below with a fresh `grill-phase`.
@@ -216,7 +224,10 @@ design-locked** — chunk-level cases via `chunk:`/`near_miss:` phrase→citatio
 reopen/re-decide, `evidence_hidden`), 0050–0052 (**identity-surgery family**: merge, subtype-rekey, split),
 0053 (**in-process FlagEmbedding BGE-M3** — supersedes ADR-0033 decision 1 for the GPU path; dense-only
 dim-1024, `flagembedding_bge_m3:<model_id>:<fp16|fp32>` staleness ref, lifespan warmup + fail-fast only
-when selected, torch overlay out-of-lock, `scripts/check_embedding.py` smoke CLI) —
+when selected, torch overlay out-of-lock, `scripts/check_embedding.py` smoke CLI),
+0054 (**PDF de-hyphenation at extraction** — two-branch line-break hyphen repair + U+00AD strip in the
+PDF path before reflow, forced there by the ADR-0012 anchor contract; opt-in re-extract rollout, no
+automation; `extract_code_version` extraction-log marker, observability only) —
 full glossary entries in `CONTEXT.md` (round-by-round history may additionally be in a Claude Code
 session's private per-project memory tracker — external session state, not a repo path).
 

@@ -42,6 +42,12 @@ from app.workers.chunking import assemble
 # extraction extras installed.
 from app.workers.extractors import Extraction  # noqa: F401  (re-exported for callers)
 
+# Extractor implementation provenance, recorded in every extraction log (ADR-0054 decision 4).
+# Observability only — nothing gates, lints, or auto-reextracts on it; old logs are never mutated,
+# and a missing field means "pre-marker / older extractor". Increment on any behavior change to
+# extraction output (v1 = PDF line-break de-hyphenation + soft-hyphen strip).
+EXTRACT_CODE_VERSION = 1
+
 # Extension -> extractor module name under app.workers.extractors (loaded lazily).
 _TEXT_FORMATS = {
     ".pdf": "pdf",
@@ -213,6 +219,7 @@ def _extract_one(
         "status": "error",
         "tool": None,
         "tool_version": None,
+        "extract_code_version": EXTRACT_CODE_VERSION,
         "started_at": started,
         "finished_at": started,
         "input_size_bytes": 0,

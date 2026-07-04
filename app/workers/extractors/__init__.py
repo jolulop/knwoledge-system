@@ -46,6 +46,36 @@ def collapse_ws(text: str) -> str:
     return _WS.sub(" ", text).strip()
 
 
+# Line-break hyphenation repair (ADR-0054). Word-char = Unicode alphanumeric ([^\W_], underscore
+# excluded per the contract); the hyphen class includes U+00AD so a discretionary soft hyphen at a
+# line break repairs like a hard one. The single \n keeps the repair paragraph-bounded by
+# construction: a blank line (\n\n) can never match. Group 2 is a lookahead capture so consecutive
+# hyphenated lines (in-\nter-\nnal) repair in one pass without overlapping matches.
+_SOFT_HYPHEN = "\u00ad"
+_LINEBREAK_HYPHEN = re.compile(r"([^\W_])[-\u00ad][ \t]*\n[ \t]*(?=([^\W_]))")
+
+
+def dehyphenate(text: str) -> str:
+    """Repair PDF line-break hyphenation splits before paragraph reflow (ADR-0054).
+
+    Must run while ``-\\n`` is still visible — ``paragraphs_from_text`` destroys the signal when it
+    collapses newlines to spaces. Two total, deterministic branches: both boundary chars lowercase
+    letters → typographic hyphenation, drop hyphen and break (``con-\\ntributions`` →
+    ``contributions``); otherwise → keep the hyphen, drop only the break (``COVID-\\n19`` →
+    ``COVID-19``). Accepted error class: a lowercase compound split at its real hyphen loses it
+    (``best-\\nknown`` → ``bestknown``) — avoiding that needs dictionary segmentation, excluded by
+    design. Remaining soft hyphens (U+00AD) are stripped everywhere afterward.
+    """
+
+    def _join(match: re.Match[str]) -> str:
+        before, after = match.group(1), match.group(2)
+        if before.islower() and after.islower():
+            return before
+        return before + "-"
+
+    return _LINEBREAK_HYPHEN.sub(_join, text).replace(_SOFT_HYPHEN, "")
+
+
 def paragraphs_from_text(text: str) -> list[str]:
     """Split free text into paragraphs on blank lines, collapsing inline whitespace.
 

@@ -179,10 +179,21 @@ curl -fsS -X POST "$APP/query" \
   | python3 -m json.tool
 ```
 
+Notes:
+
+- `POST /query` is LLM-backed and needs `ANTHROPIC_API_KEY` (same as step 6). Without a key it
+  returns **503 with an actionable message** — drop curl's `-f` flag to see the detail body.
+- `/search` returns **ranked top evidence**, not an exhaustive list of every matching document
+  (caps come from `policies/retrieval.yaml`: by default 20 evidence + 20 navigation hits).
+- Exact-phrase keyword search matches the **normalized Markdown**, not the PDF's visual text —
+  verify a phrase with `grep -ril "the phrase" normalized/markdown/` before treating a miss as
+  a search failure (PDF extraction artifacts such as line-break hyphenation can split words).
+
 Acceptance checks:
 
 - `/search` returns citable evidence for terms present in the documents.
 - `/query` either cites retrieved evidence or abstains with `No source found in vault.`
+  (with no key configured, a 503 with guidance is the expected behavior).
 - Citations point to real `source_id` values and character anchors.
 
 ## 9. Review — scope-checked apply
