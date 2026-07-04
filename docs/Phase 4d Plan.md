@@ -4,17 +4,24 @@
 `mode=auto` blend remain Phase 4e.
 **Governing ADR:** [ADR-0033](adr/0033-phase-4d-vector-retrieval.md). Read it first — this plan is
 the operational breakdown of its decisions.
+**Embedding backend update:** ADR-0033 decision 1 (HTTP-only embedder) is **superseded for GPU by
+[ADR-0053](adr/0053-in-process-flagembedding-backend.md)** — the default backend is now in-process
+FlagEmbedding + PyTorch CUDA (BAAI/bge-m3, `EMBEDDING_PROVIDER=flagembedding_bge_m3`); the LanceDB index,
+staleness key, and explicit-reindex mechanics here are unchanged (the embedder is swapped behind the same
+`Embedder` seam).
 **Predecessors:** 4a (keyword + navigation index), 4b (graph read API), 4c (router + `GET /search`).
 Phase 4d adds the vector channel; **4e** adds RRF fusion + the retrieval eval harness.
 
 > [!summary]
-> Phase 4d adds the semantic retrieval channel: an `EmbeddingClient` that calls an OpenAI-compatible
-> **local `/embeddings` HTTP server** (no Torch/GPU in the repo), a **LanceDB** index over the same
-> per-source chunks carrying the identical structured citation, a complete **config-ref staleness
+> Phase 4d adds the semantic retrieval channel behind a small `Embedder` seam — a **LanceDB** index over
+> the same per-source chunks carrying the identical structured citation, a complete **config-ref staleness
 > key** with `--force`-gated full rebuild, and an **explicit** `scripts/reindex_vector.py`. It wires
 > `mode=vector` in `GET /search` to return vector evidence **standalone** (same `evidence[]` shape,
 > `retrieval_path: ["vector"]`) — RRF fusion and the `auto` blend stay 4e. First slice with new
-> dependencies (LanceDB); tests use a deterministic fake embedder, key-free.
+> dependencies (LanceDB); tests use a deterministic fake embedder, key-free. **The embedder itself is now
+> the in-process FlagEmbedding + PyTorch CUDA backend (BAAI/bge-m3, ADR-0053)** — the original HTTP
+> `/embeddings` seam (ADR-0033 dec.1) is retained as a CPU fallback; the LanceDB index + staleness
+> contract are unchanged.
 
 ---
 

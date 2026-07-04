@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -103,7 +104,24 @@ def assert_safe_bind(host: str, allow_insecure: bool) -> None:
 
 settings = get_settings()
 assert_safe_bind(settings.app_host, os.environ.get("KS_ALLOW_INSECURE_BIND") == "1")
-app = FastAPI(title="Knowledge System", version=settings.app_version)
+
+
+@contextlib.asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    """Startup warmup (ADR-0053 decision 6): load the in-process embedding backend once and fail fast
+    ONLY when ``EMBEDDING_PROVIDER=flagembedding_bge_m3`` is selected. Every other provider (and the
+    light install) skips this entirely — no Torch import — so ingest/review/lint stay GPU-independent.
+    A warmup failure (CUDA requested-but-unavailable, or model load) aborts startup by design."""
+    info = embeddings.warmup_provider(settings)
+    if info is not None:
+        logger.info(
+            "embedding backend ready: %s",
+            {k: info.get(k) for k in ("model_ref", "device", "cuda_device_name", "model_loaded")},
+        )
+    yield
+
+
+app = FastAPI(title="Knowledge System", version=settings.app_version, lifespan=_lifespan)
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -1252,9 +1270,10 @@ def _vector_capability(
     except embeddings.EmbeddingError as exc:
         return None, f"embedding config error: {exc}", True
     if embedder is None:
-        return None, "no embedder configured (set EMBEDDING_BASE_URL + EMBEDDING_MODEL_REF)", False
+        return None, ("no embedder configured (set EMBEDDING_BASE_URL + EMBEDDING_MODEL_REF, or "
+                      "EMBEDDING_PROVIDER=flagembedding_bge_m3)"), False
     expected = vector_index.VectorMeta(
-        embedding_model_ref=settings.embedding_model_ref,
+        embedding_model_ref=embeddings.resolve_model_ref(settings),
         embedding_code_version=vector_index.EMBED_CODE_VERSION,
         distance_metric=settings.embedding_distance_metric,
         dimension=settings.embedding_dimension,

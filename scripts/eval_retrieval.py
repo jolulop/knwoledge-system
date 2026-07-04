@@ -121,7 +121,7 @@ def _build_corpus_vault(corpus_dir: Path, work_root: Path, embedder: Any, settin
     wiki.generate_wiki(work_root, jobs_db=jobs, templates_dir=ROOT / "templates",
                        rebuild_index=False, record_job=False)
     keyword_index.reindex(work_root, force=True)
-    vector_index.reindex(work_root, embedder, embedding_model_ref=settings.embedding_model_ref,
+    vector_index.reindex(work_root, embedder, embedding_model_ref=embeddings.resolve_model_ref(settings),
                          distance_metric=settings.embedding_distance_metric, force=True)
     graph.init_db(work_root / "db" / "graph.sqlite")  # empty graph: relevance scores evidence only
 
@@ -351,7 +351,7 @@ def render_report(result: dict[str, Any], *, settings: Any, ks: list[int], sourc
     lines = ["# Retrieval relevance report (ADR-0038)", "",
              f"- generated: {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
              f"- corpus: {source_label}",
-             f"- embedding_model_ref: {settings.embedding_model_ref}",
+             f"- embedding_model_ref: {embeddings.resolve_model_ref(settings)}",
              f"- index: vector_schema={vector_index.INDEX_SCHEMA_VERSION} "
              f"embed_code={vector_index.EMBED_CODE_VERSION} metric={settings.embedding_distance_metric}",
              f"- rrf_k: {result['rrf_k']}   graph_present: {str(result['graph_present']).lower()}   "
@@ -404,7 +404,7 @@ def _vector_problems(root: Path, settings: Any) -> list[str]:
     """Reuse /search's vector-index freshness checks (ADR-0033): for `--vault` the index must be present,
     coherent, model-matched, and not stale — otherwise the eval would compare a stale ranking."""
     expected = vector_index.VectorMeta(
-        embedding_model_ref=settings.embedding_model_ref,
+        embedding_model_ref=embeddings.resolve_model_ref(settings),
         embedding_code_version=vector_index.EMBED_CODE_VERSION,
         distance_metric=settings.embedding_distance_metric,
         dimension=settings.embedding_dimension,
@@ -471,8 +471,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: embedding config invalid: {exc}", file=sys.stderr)
         return 2
     if embedder is None:
-        print("error: no embedder configured. Set EMBEDDING_BASE_URL + EMBEDDING_MODEL_REF (a running "
-              "local embedding server). This eval is opt-in and needs real semantics.", file=sys.stderr)
+        print("error: no embedder configured. Set EMBEDDING_PROVIDER=flagembedding_bge_m3 (in-process "
+              "BGE-M3, ADR-0053) or EMBEDDING_BASE_URL + EMBEDDING_MODEL_REF (a running local embedding "
+              "server). This eval is opt-in and needs real semantics.", file=sys.stderr)
         return 2
 
     cases = (load_yaml(args.golden.read_text(encoding="utf-8")) or {}).get("cases") or []

@@ -22,9 +22,26 @@ enrich-openai = ["openai>=1.40.0"]
 # LanceDB-backed tests are skipped unless this extra is installed; the full suite runs under
 # `uv pip install '.[dev,vector]'`. The embedding adapter uses stdlib urllib (no HTTP dep).
 vector = ["lancedb>=0.33.0"]
+# In-process GPU embedding backend (ADR-0053; EMBEDDING_PROVIDER=flagembedding_bge_m3). Torch +
+# FlagEmbedding are DELIBERATELY NOT a locked optional-dependency group: the stack is hardware-bound,
+# large, and CUDA-wheel-index-specific, so it is a **local accelerator overlay installed out-of-lock**,
+# not a portable PyPI extra (this keeps uv.lock portable for normal ingest/review/test workflows). Torch
+# must come from the CUDA 12.8 wheel index (a plain PyPI resolve pulls a CPU/other-CUDA build); do NOT add
+# torchvision/torchaudio (they caused a torchvision::nms error). Install path (source of truth —
+# docs/Environment Setup §14.1):
+#   uv pip install torch --index-url https://download.pytorch.org/whl/cu128
+#   uv pip install -U FlagEmbedding sentence-transformers transformers accelerate
+# Startup validation (EMBEDDING_PROVIDER=flagembedding_bge_m3 + EMBEDDING_DEVICE=cuda) fails loudly on a
+# misbuilt env; app/backend/embeddings.py imports Torch lazily, so the light install stays Torch-free.
 
 [tool.ruff]
 line-length = 100
+
+[tool.pytest.ini_options]
+markers = [
+  "gpu: real BGE-M3 CUDA smoke; skipped unless torch.cuda.is_available() (ADR-0053)",
+  "model: loads a real embedding model on CPU; skipped unless FlagEmbedding/torch are importable (ADR-0053)",
+]
 
 [tool.ruff.lint.per-file-ignores]
 # These modules insert the repo root on sys.path before importing app.*,

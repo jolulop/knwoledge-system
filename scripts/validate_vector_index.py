@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.backend import vector_index
+from app.backend import embeddings, vector_index
 from app.backend.config import get_settings
 
 
@@ -30,13 +30,15 @@ def _expected_meta(root: Path) -> vector_index.VectorMeta | None:
     """The intended index identity from the embedding config, or None if no embedder is configured.
 
     When configured, the validator compares the index's stored model_ref/dimension/distance_metric
-    against this (a mismatch is a hard failure — the index is unsafe to query).
+    against this (a mismatch is a hard failure — the index is unsafe to query). The model_ref is
+    resolved torch-free via ``embeddings.resolve_model_ref`` so this stays offline even for the
+    in-process FlagEmbedding backend (ADR-0053).
     """
     s = get_settings(root)
-    if not s.embedding_model_ref:
+    if not embeddings.provider_configured(s):
         return None
     return vector_index.VectorMeta(
-        embedding_model_ref=s.embedding_model_ref,
+        embedding_model_ref=embeddings.resolve_model_ref(s),
         embedding_code_version=vector_index.EMBED_CODE_VERSION,
         distance_metric=s.embedding_distance_metric,
         dimension=s.embedding_dimension,

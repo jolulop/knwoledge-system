@@ -27,3 +27,6 @@ This folder contains the working documentation for the local-first agentic infor
 - Future MCP port: `18001`
 - Future web UI port: `13000`
 - Project Python: Python `3.12.x`, pinned with `uv`
+- Embedding backend: in-process **FlagEmbedding + PyTorch CUDA** running **BAAI/bge-m3** (dense, dim 1024)
+  on the RTX 5090 (ADR-0053); the TEI/`local_http` HTTP embedder is a CPU-fallback option only. Setup +
+  smoke: see *Environment Setup v0.1.md* §14.1.

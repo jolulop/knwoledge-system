@@ -14,6 +14,16 @@ load-bearing decisions for the vector channel itself. Slicing and column layouts
 
 ## The load-bearing decisions
 
+> **Superseded for the GPU path by [ADR-0053](0053-in-process-flagembedding-backend.md) (2026-07-04).**
+> Decision 1 below (HTTP-only, no in-process Torch) was reversed because **TEI/Candle falls back to CPU
+> on the RTX 5090**: the default GPU backend is now **in-process FlagEmbedding + PyTorch CUDA** (BAAI/bge-m3),
+> selected via `EMBEDDING_PROVIDER=flagembedding_bge_m3`. ADR-0053 preserves this ADR's light-CI intent —
+> Torch lives in an optional extra, is imported lazily, and is reached only under the opt-in provider — so
+> the default/`local_http`/fake-embedder path stays Torch-free. **This ADR's decisions 2–5 stand unchanged**
+> (LanceDB same-citation index; `embedding_model_ref` staleness + `--force` rebuild; explicit-only
+> `mode=vector`; explicit non-hooked reindex). The `local_http` HTTP seam below is retained as an optional
+> CPU fallback.
+
 **1. Embeddings run behind an OpenAI-compatible local HTTP `/embeddings` adapter; the repo owns no
 GPU runtime and pulls no Torch into the core environment.** This mirrors the ADR-0025 LLM seam (a
 thin provider-agnostic adapter, lazy/standard HTTP, dependency-light by hand-rolling rather than

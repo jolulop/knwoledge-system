@@ -43,13 +43,16 @@ python3 scripts/reindex_keyword.py .
 python3 scripts/validate_index_consistency.py .
 ```
 
-Vector search (Phase 4d) is opt-in and refreshed explicitly — install the extra and run the
-reindexer deliberately (it needs a local embedding server; it is **not** wired into the per-file
-hook):
+Vector search (Phase 4d) is opt-in and refreshed explicitly — install the `vector` extra + the GPU
+embedding stack and run the reindexer deliberately (it is **not** wired into the per-file hook). The
+default embedder is **in-process FlagEmbedding + PyTorch CUDA** (BAAI/bge-m3, `EMBEDDING_PROVIDER=`
+`flagembedding_bge_m3`, ADR-0053); the TEI/`local_http` HTTP server is a CPU-fallback option. GPU stack
+setup + smoke: *docs/Environment Setup v0.1.md* §14.1.
 
 ```bash
-uv pip install '.[vector]'
-python3 scripts/reindex_vector.py . --force   # needs EMBEDDING_BASE_URL + EMBEDDING_MODEL_REF
+uv pip install '.[vector]'                    # LanceDB (the GPU embedder is a separate out-of-lock install)
+python3 scripts/check_embedding.py .          # validate torch/CUDA + BGE-M3 → dense_vecs shape: (3, 1024)
+python3 scripts/reindex_vector.py . --force
 python3 scripts/validate_vector_index.py .
 ```
 

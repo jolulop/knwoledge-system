@@ -30,6 +30,12 @@ def _load_env_file(root: Path) -> dict[str, str]:
     return env
 
 
+def _resolve_under(root: Path, value: str) -> Path:
+    """Resolve a configured path: absolute as-is, otherwise relative to the project root."""
+    p = Path(value)
+    return p.resolve() if p.is_absolute() else (root / p)
+
+
 def _resolve_root() -> Path:
     """Environment wins, then .env at the derived root, then the derived root."""
     env_root = os.environ.get("KNOWLEDGE_SYSTEM_HOME")
@@ -85,7 +91,7 @@ class Settings:
     openai_api_key: str | None
     openai_base_url: str | None
     # Phase 4d vector embeddings (ADR-0033). Default local_http, loopback/LAN-only; cloud is an
-    # explicit three-leg gate. embedding_model_ref is the staleness identity.
+    # explicit three-leg gate. embedding_model_ref is the staleness identity for local_http/cloud.
     embedding_provider: str
     embedding_base_url: str | None
     embedding_model_ref: str | None
@@ -94,6 +100,16 @@ class Settings:
     embedding_allow_model_mismatch: bool
     embedding_dimension: int
     embedding_distance_metric: str
+    # In-process FlagEmbedding backend (ADR-0053; provider = flagembedding_bge_m3). Torch/FlagEmbedding
+    # are read lazily; these fields are inert unless that provider is selected.
+    embedding_model_id: str
+    embedding_device: str
+    embedding_use_fp16: bool
+    embedding_batch_size: int
+    embedding_max_length: int
+    # None → let FlagEmbedding/HuggingFace use its default cache (~/.cache/huggingface). Set a project
+    # path to override. Kept optional so the default never depends on a repo-local dir being writable.
+    embedding_cache_dir: Path | None
     response_cache_path: Path
     # Real-vault answer-quality eval (ADR-0042). Corpus + reports are gitignored local/operator data;
     # the example schema is committed. The run is bounded by a default + a hard ceiling.
@@ -116,6 +132,7 @@ def get_settings(root: Path | None = None) -> Settings:
         return os.environ.get(key) or file_env.get(key) or default
 
     normalized = resolved / "normalized"
+    embedding_cache_raw = cfg("EMBEDDING_CACHE_DIR", "").strip()
     return Settings(
         root=resolved,
         inbox_dir=resolved / "raw" / "inbox",
@@ -158,6 +175,12 @@ def get_settings(root: Path | None = None) -> Settings:
         in {"1", "true", "yes", "on"},
         embedding_dimension=int(cfg("EMBEDDING_DIMENSION", "1024")),
         embedding_distance_metric=cfg("EMBEDDING_DISTANCE_METRIC", "cosine"),
+        embedding_model_id=cfg("EMBEDDING_MODEL_ID", "BAAI/bge-m3"),
+        embedding_device=cfg("EMBEDDING_DEVICE", "cuda"),
+        embedding_use_fp16=cfg("EMBEDDING_USE_FP16", "true").lower() in {"1", "true", "yes", "on"},
+        embedding_batch_size=int(cfg("EMBEDDING_BATCH_SIZE", "16")),
+        embedding_max_length=int(cfg("EMBEDDING_MAX_LENGTH", "8192")),
+        embedding_cache_dir=(_resolve_under(resolved, embedding_cache_raw) if embedding_cache_raw else None),
         response_cache_path=resolved / "db" / "llm_cache.sqlite",
         eval_corpus_path=resolved / "evals" / "golden_answers.local.yaml",
         eval_corpus_example_path=resolved / "evals" / "golden_answers.example.yaml",

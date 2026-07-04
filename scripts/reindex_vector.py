@@ -2,18 +2,22 @@
 """Build the vector index over chunk evidence (Phase 4d-2, ADR-0033).
 
 Thin CLI over ``app.backend.vector_index``. Embeds the per-source chunks into the LanceDB store at
-``indexes/vector/`` via the configured local embedding server. This is an **explicit** step — it is
-NOT wired into the per-file change hook (embedding is GPU/latency-heavy and must not make ordinary
-editing depend on the embedding server). Run it deliberately after ingest batches or before
-retrieval evals; the keyword index stays the cheap always-fresh channel.
+``indexes/vector/`` via the configured embedder — by default the **in-process FlagEmbedding + PyTorch
+CUDA** backend (BAAI/bge-m3, ``EMBEDDING_PROVIDER=flagembedding_bge_m3``, ADR-0053); the TEI/``local_http``
+HTTP server is a CPU-fallback option. This is an **explicit** step — it is NOT wired into the per-file
+change hook (embedding is GPU/latency-heavy and must not make ordinary editing depend on it). Run it
+deliberately after ingest batches or before retrieval evals; the keyword index stays the cheap
+always-fresh channel. Validate the embedder first with ``scripts/check_embedding.py``.
 
 Usage:
     reindex_vector.py [ROOT] [--force]
 
 ``--force`` fully rebuilds (atomic temp-dir swap); otherwise only changed/added/removed chunks are
 re-embedded. An index-level staleness mismatch (model_ref / code / metric / dimension / schema)
-refuses an incremental run and asks for ``--force``. Requires a configured embedder
-(EMBEDDING_BASE_URL + EMBEDDING_MODEL_REF) and the ``vector`` extra (LanceDB) installed.
+refuses an incremental run and asks for ``--force`` — note switching embedding backends changes the
+model_ref, so the first run after a switch needs ``--force``. Requires a configured embedder
+(``EMBEDDING_PROVIDER=flagembedding_bge_m3``, or ``EMBEDDING_BASE_URL`` + ``EMBEDDING_MODEL_REF`` for the
+HTTP fallback) and the ``vector`` extra (LanceDB) installed.
 """
 from __future__ import annotations
 
@@ -26,7 +30,7 @@ if str(ROOT) not in sys.path:
 
 from app.backend import vector_index
 from app.backend.config import get_settings
-from app.backend.embeddings import EmbeddingError, client_from_settings
+from app.backend.embeddings import EmbeddingError, client_from_settings, resolve_model_ref
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -46,13 +50,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: embedding configuration invalid: {exc}", file=sys.stderr)
         return 2
     if embedder is None:
-        print("error: no embedder configured (set EMBEDDING_BASE_URL and EMBEDDING_MODEL_REF)", file=sys.stderr)
+        print("error: no embedder configured (set EMBEDDING_BASE_URL and EMBEDDING_MODEL_REF, or "
+              "EMBEDDING_PROVIDER=flagembedding_bge_m3)", file=sys.stderr)
         return 2
 
     try:
         stats = vector_index.reindex(
             root, embedder,
-            embedding_model_ref=settings.embedding_model_ref,
+            embedding_model_ref=resolve_model_ref(settings),
             distance_metric=settings.embedding_distance_metric,
             force=force,
         )

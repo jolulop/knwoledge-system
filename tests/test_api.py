@@ -1220,3 +1220,26 @@ def test_sources_quarantines_invalid_manifests(client, tmp_path):
     (md / "wrongname.json").write_text('{"source_id": "src_0123456789abcdef"}', encoding="utf-8")
     body = client.get("/sources").json()
     assert body["count"] == 0 and body["manifests_skipped_invalid"] == 1
+
+
+# --------------------------------------------------------------------------- startup warmup (ADR-0053)
+# These exercise the FastAPI lifespan directly (context-manager form), overriding the autouse
+# conftest no-op with a spy/raiser to prove the wiring the global no-op otherwise hides.
+
+
+def test_lifespan_invokes_embedding_warmup(monkeypatch):
+    calls = []
+    monkeypatch.setattr(main_module.embeddings, "warmup_provider", lambda s: calls.append(s) or None)
+    with TestClient(main_module.app):
+        pass
+    assert len(calls) == 1  # lifespan called warmup_provider once at startup
+
+
+def test_lifespan_failfast_aborts_startup(monkeypatch):
+    def boom(_settings):
+        raise main_module.embeddings.EmbeddingError("cuda unavailable")
+
+    monkeypatch.setattr(main_module.embeddings, "warmup_provider", boom)
+    with pytest.raises(main_module.embeddings.EmbeddingError):
+        with TestClient(main_module.app):
+            pass  # a warmup failure must abort app startup (fail-fast), not be swallowed

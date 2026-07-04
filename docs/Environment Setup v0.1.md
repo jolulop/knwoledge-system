@@ -345,6 +345,76 @@ The GPU is not required for Phase 1, but it will be useful later for:
 - Local rerankers.
 - Local LLM experiments.
 
+### 14.1 Embedding backend — BGE-M3 on CUDA (ADR-0053)
+
+The default GPU embedding backend is **in-process FlagEmbedding + PyTorch CUDA** running **BAAI/bge-m3**
+(`EMBEDDING_PROVIDER=flagembedding_bge_m3`). We moved off the TEI/Candle HTTP embedder because **TEI/Candle
+falls back to CPU on the RTX 5090** even though its container sees the GPU via `nvidia-smi`; PyTorch +
+FlagEmbedding runs BGE-M3 on CUDA in-process. The old TEI (`local_http`) seam remains supported as an
+**optional CPU fallback only** (ADR-0033), never the default.
+
+**Install (uv, Python 3.12).** `torch` must come from the **CUDA 12.8** wheel index — a plain PyPI resolve
+pulls a CPU/other-CUDA build. Do **not** install `torchvision`/`torchaudio` (they caused a
+`torchvision::nms` import error and are not needed):
+
+```bash
+cd ~/code/knowledge-system
+source .venv/bin/activate
+
+uv pip uninstall -y torchvision torchaudio          # ensure they are absent
+
+uv pip install torch --index-url https://download.pytorch.org/whl/cu128
+uv pip install -U FlagEmbedding sentence-transformers transformers accelerate
+```
+
+This GPU stack is a **local accelerator overlay installed out-of-lock** — it is intentionally **not** a
+`pyproject`/`uv.lock` dependency group (a cu128 Torch build can't be locked from PyPI without pinning the whole
+lock to one GPU platform). The commands above are the source of truth; `uv sync` for the normal ingest/review/
+test workflows stays portable and Torch-free.
+
+PyTorch's official installer says to select the CUDA compute-platform suited to the machine and use the
+generated wheel command; CUDA 12.8 (`cu128`) is one of the available options and matches this box.
+
+**Verify torch + CUDA:**
+
+```bash
+uv run python - <<'PY'
+import torch
+print("torch:", torch.__version__)
+print("cuda available:", torch.cuda.is_available())
+print("cuda version:", torch.version.cuda)
+print("device:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else None)
+PY
+```
+
+**BGE-M3 dense smoke** (expect `dense_vecs shape: (3, 1024)`):
+
+```bash
+uv run python - <<'PY'
+from FlagEmbedding import BGEM3FlagModel
+model = BGEM3FlagModel("BAAI/bge-m3", use_fp16=True, device="cuda")
+out = model.encode(
+    ["hello world", "hola mundo", "semantic search over enterprise documents"],
+    batch_size=3, max_length=8192,
+    return_dense=True, return_sparse=False, return_colbert_vecs=False,
+)
+print("dense_vecs shape:", out["dense_vecs"].shape)
+PY
+```
+
+Or, the repeatable project entry point (reads the `EMBEDDING_*` config, fails fast if CUDA is requested but
+unavailable, prints the same shape; `--json` emits a health block):
+
+```bash
+uv run python scripts/check_embedding.py            # → dense_vecs shape: (3, 1024)
+```
+
+When `EMBEDDING_PROVIDER=flagembedding_bge_m3` and `EMBEDDING_DEVICE=cuda`, the FastAPI app **loads BGE-M3
+once at startup and fails fast** if CUDA/model load fails; non-vector app roles (ingest/review/lint) never
+import Torch. `EMBEDDING_CACHE_DIR` is unset by default → the HuggingFace cache (`~/.cache/huggingface`) is
+used; the repo `.cache/` here is root-owned (a docker leftover) so point a repo-local cache elsewhere only
+after `chown`-ing it.
+
 ---
 
 ## 15. Scaffold Validation Commands

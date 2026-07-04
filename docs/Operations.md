@@ -103,8 +103,12 @@ enrichment artifacts) stays `healthy`.
 
 - **No scheduler ships.** Importing or serving the app starts no background thread (guarded by a contract
   test). You own the cron/timer.
-- **Vector index** is refreshed only by `scripts/reindex_vector.py` (explicit; needs a configured local
-  embedding server). `/jobs/reindex` never touches it.
+- **Vector index** is refreshed only by `scripts/reindex_vector.py` (explicit; needs a configured embedder).
+  The default embedder is the **in-process FlagEmbedding + PyTorch CUDA** backend running BAAI/bge-m3
+  (`EMBEDDING_PROVIDER=flagembedding_bge_m3`, ADR-0053) — validate it with `python scripts/check_embedding.py`
+  before a reindex. The old TEI (`local_http`) HTTP server is a CPU-fallback option only. Switching backends
+  changes the `embedding_model_ref` identity, so the first reindex after a switch needs
+  `scripts/reindex_vector.py --force`. `/jobs/reindex` never touches the vector index.
 - **Raw-byte backup is opt-in.** By default `scripts/backup.py` backs up *manifests*, not the raw bytes
   (size + the raw-privacy posture). Set `BACKUP_INCLUDE_RAW=1` to include the **manifest-catalogued** raw
   bytes (`relative_raw_path` + every `occurrences[].relative_path`, wherever they live under `raw/`,
