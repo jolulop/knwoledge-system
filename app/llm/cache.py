@@ -74,13 +74,17 @@ def _canonical(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, ensure_ascii=False).encode("utf-8")
 
 
+def _version_bytes(value: Any) -> bytes:
+    return b"" if value is None else str(value).encode("utf-8")
+
+
 def cache_key(
     messages: list[dict[str, Any]],
     model_ref: str,
     schema: dict[str, Any],
     *,
-    schema_version: str | None = None,
-    prompt_version: str | None = None,
+    schema_version: Any = None,
+    prompt_version: Any = None,
 ) -> str:
     """Stable key over everything that should force a fresh model call."""
     h = hashlib.sha256()
@@ -88,8 +92,8 @@ def cache_key(
         _canonical(messages),
         model_ref.encode("utf-8"),
         _canonical(schema),
-        (schema_version or "").encode("utf-8"),
-        (prompt_version or "").encode("utf-8"),
+        _version_bytes(schema_version),
+        _version_bytes(prompt_version),
     ):
         h.update(part)
         h.update(b"\0")

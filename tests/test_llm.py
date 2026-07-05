@@ -87,6 +87,12 @@ def test_cache_key_includes_every_component():
     assert base != cache_key(msgs2, "anthropic:m1", SCHEMA, schema_version="v1", prompt_version="p1")
 
 
+def test_cache_key_accepts_integer_versions():
+    assert cache_key(MESSAGES, "anthropic:m1", SCHEMA, schema_version=1, prompt_version=1) == cache_key(
+        MESSAGES, "anthropic:m1", SCHEMA, schema_version="1", prompt_version="1"
+    )
+
+
 # --- client behaviour -------------------------------------------------------
 
 
