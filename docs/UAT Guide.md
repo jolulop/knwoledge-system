@@ -47,17 +47,66 @@ All commands below run from the clone root (`/tmp/ks-uat`).
 
 Configuration in the clone:
 
-- A fresh clone has **no `.env`** (it is gitignored), so the clone itself is the vault root and all
-  config comes from your shell environment.
+- A fresh clone has **no `.env`** (it is gitignored), so the clone itself is the vault root. Create
+  the clone's own `.env` (§1.2 below), or export only what a step needs in your shell:
+  `ANTHROPIC_API_KEY` for step 6 (enrich), `EMBEDDING_*` for step 5 (vector).
 - **If you copy your live `.env` into the clone, delete its `KNOWLEDGE_SYSTEM_HOME=` line** (or point
   it at the clone). The live value redirects every script in the clone back at the **live vault**.
-- Otherwise export only what a step needs: `ANTHROPIC_API_KEY` for step 6 (enrich), `EMBEDDING_*`
-  for step 5 (vector).
 
-Embedding backend (ADR-0053): the default GPU backend is **in-process**
-(`EMBEDDING_PROVIDER=flagembedding_bge_m3`) — there is no embedding server to run; it needs the
-out-of-lock torch overlay installed in the clone's venv (`docs/Environment Setup v0.1.md` §14.1).
-`local_http` is the CPU/HTTP fallback and is the only mode that needs a running embedding server.
+### 1.1 GPU embedding stack — install the torch overlay in the clone
+
+The default embedding backend (ADR-0053) is **in-process** (`EMBEDDING_PROVIDER=flagembedding_bge_m3`)
+— there is no embedding server to run. But the GPU stack is an **out-of-lock overlay**: the `uv sync`
+above deliberately does not install it, so the clone cannot embed until you install it into the
+clone's venv (canonical commands and rationale: `docs/Environment Setup v0.1.md` §14.1):
+
+```bash
+cd /tmp/ks-uat
+source .venv/bin/activate
+
+uv pip uninstall -y torchvision torchaudio   # must be absent (torchvision::nms import error)
+uv pip install torch --index-url https://download.pytorch.org/whl/cu128
+uv pip install -U FlagEmbedding sentence-transformers transformers accelerate
+```
+
+`torch` must come from the CUDA 12.8 wheel index — a plain PyPI resolve pulls a CPU build. The first
+embedding run downloads `BAAI/bge-m3` (~2 GB) into the Hugging Face cache (`~/.cache/huggingface`
+when `EMBEDDING_CACHE_DIR` is unset), which is shared with the live checkout — no per-clone
+re-download. `local_http` is the CPU/HTTP fallback and is the only mode that needs a running
+embedding server.
+
+### 1.2 Clone `.env` — what embeddings need
+
+Create `/tmp/ks-uat/.env` by hand. GPU embeddings need the `EMBEDDING_*` block below (same values as
+`.env.example`); add `ANTHROPIC_API_KEY` only if you will run the billable steps (6, and `POST /query`
+in 8). Keep comments on their own lines.
+
+```dotenv
+# Do NOT set KNOWLEDGE_SYSTEM_HOME here: left unset, the clone root is the vault root.
+# A carried-over live value redirects every script in the clone back at the LIVE vault.
+
+# LLM key — only for step 6 (enrich) and POST /query in step 8; omit for a key-free UAT.
+ANTHROPIC_API_KEY=
+
+# Embedding backend (ADR-0053): in-process FlagEmbedding BGE-M3 on CUDA.
+EMBEDDING_PROVIDER=flagembedding_bge_m3
+EMBEDDING_MODEL_ID=BAAI/bge-m3
+EMBEDDING_DEVICE=cuda
+EMBEDDING_USE_FP16=true
+EMBEDDING_BATCH_SIZE=16
+EMBEDDING_MAX_LENGTH=8192
+EMBEDDING_DIMENSION=1024
+EMBEDDING_DISTANCE_METRIC=cosine
+```
+
+With this provider and `EMBEDDING_DEVICE=cuda`, the served app (step 7) loads BGE-M3 once at startup
+and **fails fast** if CUDA or the model load fails; ingest/review/lint runs never import torch.
+
+Verify the overlay + config before the vector step:
+
+```bash
+uv run python scripts/check_embedding.py   # expect: dense_vecs shape: (3, 1024)
+```
 
 ## 2. Preflight
 
@@ -107,7 +156,7 @@ sed -n '1,120p' wiki/index.md
 
 ## 5. Optional vector index
 
-Only when your `EMBEDDING_*` environment is set (in-process default needs no server; see step 1).
+Only when your `EMBEDDING_*` environment is set (in-process default needs no server; see §1.1–1.2).
 
 ```bash
 env | grep -o '^EMBEDDING_[A-Z0-9_]*' | sort
