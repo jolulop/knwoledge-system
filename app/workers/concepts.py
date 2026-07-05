@@ -259,6 +259,7 @@ def extract_concepts(
 
     considered = nodes_written = mentions_written = 0
     skipped_fresh = skipped_not_extracted = skipped_empty = skipped_no_key = 0
+    concept_starved_sources: list[str] = []
     errors: list[dict[str, str]] = []
     texts: dict[str, dict[str, Any]] = {}
     touched: set[str] = set()
@@ -345,12 +346,16 @@ def extract_concepts(
                     skipped_fresh += 1
                     continue
 
-            affected.update(graph.supersede_mentions_for_source(gconn, sid, now=now))
-
+            # ADR-0055 rollout safety: supersede a source's prior mentions ONLY once this run can
+            # produce the replacement state — after a successful parse (below), or deterministically
+            # for an empty source. A no-key or failed-parse run must leave the existing topic layer
+            # untouched: supersede-then-skip would recompose affected nodes with zero mentions and
+            # tombstone them (the wipe hazard a prompt-version bump arms vault-wide).
             if not has_key:
                 skipped_no_key += 1
                 continue
             if not md.strip():
+                affected.update(graph.supersede_mentions_for_source(gconn, sid, now=now))
                 skipped_empty += 1
                 _write_artifact(apath, sid, fingerprint, [], model_ref, now)
                 continue
@@ -364,6 +369,10 @@ def extract_concepts(
             except ParseError as exc:
                 errors.append({"source_id": sid, "error": str(exc)})
                 continue
+
+            # Parse succeeded: retire the old mentions immediately before emitting replacements
+            # (supersede covers ALL active mentions for the source, so it must precede _emit).
+            affected.update(graph.supersede_mentions_for_source(gconn, sid, now=now))
 
             graph.upsert_node(
                 gconn, node_id=sid, node_type="source", slug=sid,
@@ -380,6 +389,10 @@ def extract_concepts(
 
             _write_artifact(apath, sid, fingerprint, source_nodes, model_ref, now)
             nodes_written += len(source_nodes)
+            # ADR-0055: immediate operator feedback for the F1 failure signature (zero concepts
+            # from a substantive source). Artifact/claim state only — never text-shape inference.
+            if art.concept_starved(source_nodes, art.stored_claim_count(enrichment_dir, sid)):
+                concept_starved_sources.append(sid)
 
         pages_written = pages_tombstoned = 0
         for nid in touched | affected:
@@ -404,6 +417,8 @@ def extract_concepts(
             "node_pages_tombstoned": pages_tombstoned, "skipped_fresh": skipped_fresh,
             "skipped_not_extracted": skipped_not_extracted, "skipped_empty": skipped_empty,
             "skipped_no_key": skipped_no_key, "manifests_skipped_invalid": len(skipped_invalid),
+            "concept_starved": len(concept_starved_sources),
+            "concept_starved_sources": sorted(concept_starved_sources),
             "errors": len(errors), "error_details": errors,
             "index_rebuilt": index_rebuilt, "extracted_at": now,
         }

@@ -1,4 +1,7 @@
-.env
+# All .env variants can hold secrets (operator copies like ".env (UAT)" included);
+# only the committed example survives the glob.
+.env*
+!.env.example
 __pycache__/
 *.pyc
 .venv/

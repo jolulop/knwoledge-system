@@ -310,3 +310,19 @@ def test_operator_docs_dont_claim_ci_gate_when_no_ci_runner():
     assert not offenders, (
         "operator docs claim an automated CI gate but no in-repo CI runner exists "
         "(reword to the local pytest gate; see Build Spec §16):\n" + "\n".join(offenders))
+
+
+_ENRICH_MAX_TOKENS_DEFAULT_RE = re.compile(r'cfg\("ENRICH_MAX_TOKENS", "(\d+)"\)')
+
+
+def test_env_example_and_config_agree_on_enrich_max_tokens():
+    # ADR-0055 raised the default from 1024, which truncated claim extraction on dense real PDFs
+    # (three billed retries, zero output). Guard both the value and the config<->doc parity so the
+    # example file can't silently drift from the code default again.
+    src = (ROOT / "app" / "backend" / "config.py").read_text(encoding="utf-8")
+    m = _ENRICH_MAX_TOKENS_DEFAULT_RE.search(src)
+    assert m, "config.py no longer reads ENRICH_MAX_TOKENS with a literal default"
+    assert int(m.group(1)) >= 4096, "ENRICH_MAX_TOKENS default regressed below the ADR-0055 floor"
+    env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    assert f"ENRICH_MAX_TOKENS={m.group(1)}" in env_example, (
+        ".env.example ENRICH_MAX_TOKENS drifted from the config.py default")

@@ -362,3 +362,144 @@ def test_concept_aggregates_mentions_across_sources(tmp_path):
     page = (tmp_path / "wiki" / "Concepts" / "shared-concept.md").read_text(encoding="utf-8")
     assert f"[[Sources/{a}]]" in page and f"[[Sources/{b}]]" in page  # one page, both sources
     assert "mentioned by 2 source(s)" in page
+
+
+# --- ADR-0055: tier-2 extraction contract + concept starvation --------------
+
+
+def test_concept_prompt_contract_pinned():
+    # The ADR-0055 contract markers must survive prompt edits, and any wording change must ride a
+    # version bump (the fingerprint + cache key both hash CONCEPT_PROMPT_VERSION).
+    from app.llm import prompts
+    from app.workers import enrichment_artifact as art
+
+    assert art.CONCEPT_PROMPT_VERSION == "enrich-concepts-prompt-v2"
+    text = prompts._CONCEPTS_SYSTEM
+    assert "UNTRUSTED" in text                                  # untrusted-data framing kept
+    assert "typically 3-10" in text                             # concept expectation band
+    assert "Never invent a concept to satisfy a count" in text  # no-invention posture
+    assert "those belong in `entities`" in text  # no named things in concepts
+    for marker in ("references", "bibliographies", "bylines", "author lists", "acknowledgments"):
+        assert marker in text                                   # entity-noise boundary
+    assert "own authors qualify only if" in text
+
+
+def test_concept_starved_predicate_matrix():
+    from app.workers import enrichment_artifact as art
+
+    ent = [{"node_type": "person"}] * 5
+    assert art.concept_starved(ent, 0)                                    # 5 entities, 0 claims
+    assert not art.concept_starved(ent[:4], 0)                            # below threshold
+    assert art.concept_starved([{"node_type": "entity"}], 1)              # one claim suffices
+    assert not art.concept_starved([], 0)                                 # degenerate doc
+    assert not art.concept_starved([{"node_type": "concept"}] + ent, 1)   # concepts present
+
+
+def test_starved_extraction_reported_in_job_summary(tmp_path):
+    _build(tmp_path)
+    _gen_wiki(tmp_path)
+    payload = {"concepts": [], "entities": [
+        {"name": f"Person {i}", "entity_type": "person", "aliases": []} for i in range(5)]}
+    summary = _extract(tmp_path, FakeAdapter(payload=payload))
+    sid = _sids(tmp_path)["doc.md"]
+    assert summary["concept_starved"] == 1
+    assert summary["concept_starved_sources"] == [sid]
+
+
+def test_starvation_via_stored_claims(tmp_path):
+    # Below the entity threshold, but a durable claims artifact proves substance -> starved.
+    _build(tmp_path)
+    _gen_wiki(tmp_path)
+    sid = _sids(tmp_path)["doc.md"]
+    ed = tmp_path / "normalized" / "enrichment"
+    ed.mkdir(parents=True, exist_ok=True)
+    (ed / f"{sid}.claims.json").write_text(
+        json.dumps({"source_id": sid, "claims": [{"claim_id": "clm_0000000000000001"}]}),
+        encoding="utf-8")
+    payload = {"concepts": [], "entities": [{"name": "Solo Org", "entity_type": "organization",
+                                             "aliases": []}]}
+    summary = _extract(tmp_path, FakeAdapter(payload=payload))
+    assert summary["concept_starved_sources"] == [sid]
+
+
+def test_sparse_and_healthy_extractions_not_starved(tmp_path):
+    # 4 entities + no claims (below threshold) and the default concept-bearing payload: no flag.
+    _build(tmp_path, extra={"doc2.md": "# Other\n\nA distinct second document body.\n"})
+    sids = _sids(tmp_path)
+    sparse = {"concepts": [], "entities": [
+        {"name": f"Entity {i}", "entity_type": "entity", "aliases": []} for i in range(4)]}
+    s1 = _extract(tmp_path, FakeAdapter(payload=sparse), source_ids=[sids["doc.md"]])
+    s2 = _extract(tmp_path, FakeAdapter(), source_ids=[sids["doc2.md"]])
+    assert s1["concept_starved"] == 0 and s2["concept_starved"] == 0
+
+
+# --- ADR-0055 rollout safety: no supersede without a replacement extraction --
+
+
+class WrongShapeAdapter(FakeAdapter):
+    def parse(self, messages, schema, model_id, *, max_tokens):
+        self.calls += 1
+        return {"wrong": "shape"}  # fails the schema -> ParseError after retries
+
+
+def _topic_layer_intact(tmp_path, sid):
+    from app.backend import graph as g
+    page = tmp_path / "wiki" / "Concepts" / "post-merger-integration.md"
+    assert parse_frontmatter(page.read_text(encoding="utf-8"))["status"] == "candidate"
+    gconn = g.connect(tmp_path / "db" / "graph.sqlite")
+    try:
+        nid = concepts.node_id("concept", "Post-Merger Integration")
+        assert any(e["dst_id"] == nid and e["edge_type"] == "mentions"
+                   for e in g.outgoing_active(gconn, sid))
+    finally:
+        gconn.close()
+    dep = [p for p in (tmp_path / "reviews" / "pending").glob("*.json")
+           if json.loads(p.read_text(encoding="utf-8"))["type"] == "deprecate_wiki_page"]
+    assert not dep
+
+
+def test_no_key_run_never_supersedes_existing_mentions(tmp_path):
+    # The v2 prompt bump makes every artifact stale at once; a key-less run over that state must
+    # not touch the graph (supersede-then-skip would tombstone the whole topic layer).
+    _build(tmp_path)
+    _gen_wiki(tmp_path)
+    _extract(tmp_path, FakeAdapter())
+    sid = _sids(tmp_path)["doc.md"]
+
+    summary = _extract(tmp_path, FakeAdapter(available=False), force=True)
+    assert summary["skipped_no_key"] == 1
+    assert summary["node_pages_tombstoned"] == 0
+    _topic_layer_intact(tmp_path, sid)
+
+
+def test_failed_parse_never_supersedes_existing_mentions(tmp_path):
+    # A parse failure (e.g. max_tokens truncation) must leave the prior topic layer intact; the
+    # artifact stays stale so the next run retries. The failing run gets its own empty response
+    # cache — the shared one would (correctly) replay the healthy first-run response.
+    _build(tmp_path)
+    _gen_wiki(tmp_path)
+    _extract(tmp_path, FakeAdapter())
+    sid = _sids(tmp_path)["doc.md"]
+
+    client = LLMClient({"anthropic": WrongShapeAdapter()},
+                       cache=ResponseCache(tmp_path / "db" / "empty_cache.sqlite"))
+    summary = concepts.extract_concepts(tmp_path, client=client, model_ref=MODEL_REF,
+                                        jobs_db=tmp_path / "db" / "jobs.sqlite", force=True)
+    assert summary["errors"] == 1 and summary["status"] == "partial"
+    assert summary["node_pages_tombstoned"] == 0
+    _topic_layer_intact(tmp_path, sid)
+
+
+def test_stored_claim_count_rejects_spoofed_artifact(tmp_path):
+    from app.workers import enrichment_artifact as art
+
+    ed = tmp_path / "enrichment"
+    ed.mkdir()
+    sid = "src_00000000000000aa"
+    (ed / f"{sid}.claims.json").write_text(json.dumps(
+        {"source_id": "src_00000000000000ff", "claims": [{"claim_id": "clm_1"}]}),
+        encoding="utf-8")
+    assert art.stored_claim_count(ed, sid) == 0  # internal id must match the filename
+    (ed / f"{sid}.claims.json").write_text(json.dumps(
+        {"source_id": sid, "claims": [{"claim_id": "clm_1"}]}), encoding="utf-8")
+    assert art.stored_claim_count(ed, sid) == 1

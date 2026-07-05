@@ -33,7 +33,7 @@ from typing import Any
 from app.backend import db, graph, search
 from app.backend.manifests import get_provenance, is_source_id, iso_now, valid_manifests
 from app.backend.paths import safe_child, safe_under
-from app.workers import citations, reviews, synthesis
+from app.workers import citations, enrichment_artifact, reviews, synthesis
 from app.workers.enrichment_artifact import artifact_fingerprint
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter
 
@@ -255,6 +255,45 @@ def _check_summary_rot(enrichment_dir: Path, markdown_dir: Path, wiki_dir: Path,
     return findings, degraded
 
 
+def _check_concept_starvation(enrichment_dir: Path) -> list[dict[str, Any]]:
+    """Substantive sources whose concepts artifact extracted zero concepts (ADR-0055). Report-only.
+
+    The F1 pattern: `concepts == 0 AND (entity_family >= threshold OR claims >= 1)` per source,
+    read from the durable `<sid>.concepts.json` / `<sid>.claims.json` artifacts via the shared
+    `enrichment_artifact.concept_starved` predicate. Artifact/claim state ONLY — never raw text
+    length or normalized text shape (that would reopen the "substantive document" classifier
+    problem). Graph-independent and key-free; severity medium (it suppresses the source's entire
+    topic layer); remediation `rerun_extract_concepts`. Unreadable/spoofed artifacts are skipped
+    (validators own artifact integrity); a missing claims artifact counts as zero claims.
+    """
+    findings: list[dict[str, Any]] = []
+    if not enrichment_dir.exists():
+        return findings
+    for apath in sorted(enrichment_dir.glob("*.concepts.json")):
+        sid = apath.name[:-len(".concepts.json")]
+        if not is_source_id(sid):  # positive-only allowlist, as in _check_summary_rot
+            continue
+        try:
+            artifact = json.loads(apath.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if artifact.get("source_id") != sid:  # internal id must match the filename (no spoofing)
+            continue
+        nodes = artifact.get("nodes")
+        if not isinstance(nodes, list):
+            continue
+        claim_count = enrichment_artifact.stored_claim_count(enrichment_dir, sid)
+        if enrichment_artifact.concept_starved(nodes, claim_count):
+            entity_family = sum(1 for n in nodes
+                                if n.get("node_type") in enrichment_artifact._ENTITY_FAMILY_TYPES)
+            findings.append({
+                "check": "concept_starvation", "severity": "medium", "subject": sid,
+                "detail": "substantive source extracted zero concepts (entities/claims present)",
+                "data": {"source_id": sid, "concept_count": 0, "entity_family_count": entity_family,
+                         "claim_count": claim_count, "remediation": "rerun_extract_concepts"}})
+    return findings
+
+
 def _check_stale_claims(gconn, enrichment_dir: Path,
                         markdown_dir: Path) -> tuple[list[dict[str, Any]], bool]:
     """Claim citations whose stored anchor no longer supports the stored quote (ADR-0037). Graph-gated.
@@ -446,6 +485,9 @@ def run_lint(
         rot_findings, coverage_degraded = _check_summary_rot(
             enrichment_dir, markdown_dir, wiki_dir, summary_model_ref)
         findings += rot_findings
+
+        # concept_starvation is artifact-driven and graph-independent — runs always (ADR-0055).
+        findings += _check_concept_starvation(enrichment_dir)
 
         gconn = _open_graph_ro(graph_db)
         graph_available = gconn is not None

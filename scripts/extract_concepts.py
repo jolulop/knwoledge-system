@@ -65,6 +65,9 @@ def main(argv: list[str]) -> int:
           f"{summary['node_pages_tombstoned']} tombstoned")
     print(f"Skipped (fresh): {summary['skipped_fresh']}")
     print(f"Skipped (no API key): {summary['skipped_no_key']}")
+    print(f"Concept-starved sources: {summary['concept_starved']}")  # ADR-0055 F1 signature
+    for sid in summary["concept_starved_sources"]:
+        print(f"  - {sid}: zero concepts extracted despite entities/claims present")
     print(f"Errors: {summary['errors']}")
     for err in summary["error_details"]:
         print(f"  - {err['source_id']}: {err['error']}")

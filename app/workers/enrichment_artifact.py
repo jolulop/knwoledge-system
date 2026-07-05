@@ -22,9 +22,11 @@ PROMPT_VERSION = "enrich-summary-tags-prompt-v1"
 # Phase 3.5b claim-extraction pass (separate artifact + versions, tier-2).
 CLAIM_SCHEMA_VERSION = "enrich-claims-v1"
 CLAIM_PROMPT_VERSION = "enrich-claims-prompt-v1"
-# Phase 3.5b concept/entity extraction pass.
+# Phase 3.5b concept/entity extraction pass. v2 = the ADR-0055 tier-2 extraction contract
+# (concept elicitation band + entity-noise boundary); the bump makes every v1 artifact stale,
+# so the next extract_concepts run re-extracts opt-in — no --force machinery.
 CONCEPT_SCHEMA_VERSION = "enrich-concepts-v1"
-CONCEPT_PROMPT_VERSION = "enrich-concepts-prompt-v1"
+CONCEPT_PROMPT_VERSION = "enrich-concepts-prompt-v2"
 # Phase 3.5c contradiction-detection pass (tier-3; per claim pair, response-cache replayed).
 CONTRADICTION_SCHEMA_VERSION = "enrich-contradiction-v1"
 CONTRADICTION_PROMPT_VERSION = "enrich-contradiction-prompt-v1"
@@ -75,6 +77,50 @@ def concepts_artifact_path(enrichment_dir: Path, source_id: str) -> Path:
 
 def concepts_fingerprint(normalized_markdown: str, model_ref: str) -> str:
     return _fingerprint(normalized_markdown, model_ref, CONCEPT_SCHEMA_VERSION, CONCEPT_PROMPT_VERSION)
+
+
+# --- concept starvation (ADR-0055) -----------------------------------------
+#
+# The F1 failure signature: a substantive document extracts zero concepts. The predicate reads
+# existing artifact/claim state ONLY — never raw text length or normalized text shape (that would
+# reopen the "substantive document" classifier problem). The threshold is a module constant, not
+# config: a quality heuristic; configurability would add noise before operational evidence exists.
+CONCEPT_STARVATION_ENTITY_THRESHOLD = 5
+_ENTITY_FAMILY_TYPES = ("entity", "person", "organization", "project")
+
+
+def concept_starved(nodes: list[dict[str, Any]], claim_count: int) -> bool:
+    """True when a concepts artifact's node list shows the F1 pattern for a source.
+
+    `concepts == 0 AND (entity_family >= threshold OR claims >= 1)` — one stored claim proves
+    semantic substance; many entities without concepts is the starvation signature. A degenerate
+    document (no entities, no claims) is not starved.
+    """
+    concepts = sum(1 for n in nodes if n.get("node_type") == "concept")
+    entity_family = sum(1 for n in nodes if n.get("node_type") in _ENTITY_FAMILY_TYPES)
+    return concepts == 0 and (entity_family >= CONCEPT_STARVATION_ENTITY_THRESHOLD
+                              or claim_count >= 1)
+
+
+def stored_claim_count(enrichment_dir: Path, source_id: str) -> int:
+    """Claims recorded in the durable `<sid>.claims.json`, freshness-agnostic; 0 if missing/unreadable.
+
+    Deliberately not `load_fresh_claims`: even a stale claims artifact proves the source carried
+    extractable semantic substance, which is all the starvation predicate needs (ADR-0055). The
+    artifact's internal `source_id` must match the filename (no spoofing) — same posture as the
+    lint checks that consume this count.
+    """
+    path = claims_artifact_path(enrichment_dir, source_id)
+    if not path.exists():
+        return 0
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return 0
+    if data.get("source_id") != source_id:
+        return 0
+    claims = data.get("claims")
+    return len(claims) if isinstance(claims, list) else 0
 
 
 def _load_fresh(path: Path, normalized_markdown: str, fingerprint_fn) -> dict[str, Any] | None:

@@ -642,3 +642,79 @@ def test_operations_doc_synthesis_remediation_uses_force():
     text = (Path(__file__).resolve().parents[1] / "docs" / "Operations.md").read_text(encoding="utf-8")
     row = next(ln for ln in text.splitlines() if "`synthesis_rot`" in ln and "rerun_synthesis" in ln)
     assert "--force" in row  # the actionable command must use --force (normal run only reports)
+
+
+# --- concept starvation (ADR-0055) ------------------------------------------
+
+
+def _concepts_artifact(tmp_path, sid, nodes, *, internal_sid=None):
+    ed = tmp_path / "normalized" / "enrichment"
+    ed.mkdir(parents=True, exist_ok=True)
+    (ed / f"{sid}.concepts.json").write_text(json.dumps({
+        "source_id": internal_sid or sid, "nodes": nodes}), encoding="utf-8")
+    return ed
+
+
+def _claims_artifact(tmp_path, sid, n):
+    ed = tmp_path / "normalized" / "enrichment"
+    ed.mkdir(parents=True, exist_ok=True)
+    (ed / f"{sid}.claims.json").write_text(json.dumps({
+        "source_id": sid, "claims": [{"claim_id": f"clm_{i:016x}"} for i in range(n)]}),
+        encoding="utf-8")
+
+
+def test_concept_starvation_flagged_with_remediation(tmp_path):
+    sid = "src_00000000000000aa"
+    _concepts_artifact(tmp_path, sid, [{"node_type": "person", "name": f"P{i}"} for i in range(5)])
+    res = _run(tmp_path)
+    found = [f for f in res["findings"] if f["check"] == "concept_starvation"]
+    assert len(found) == 1 and found[0]["subject"] == sid
+    assert found[0]["severity"] == "medium"
+    assert found[0]["data"] == {"source_id": sid, "concept_count": 0, "entity_family_count": 5,
+                                "claim_count": 0, "remediation": "rerun_extract_concepts"}
+    assert res["by_check"]["concept_starvation"] == 1
+    assert res["status"] != "failing"  # report-only: never flips failing (ADR-0037 posture)
+
+
+def test_concept_starvation_via_claims_artifact(tmp_path):
+    sid = "src_00000000000000ab"
+    _concepts_artifact(tmp_path, sid, [{"node_type": "entity", "name": "Solo"}])
+    _claims_artifact(tmp_path, sid, 1)
+    res = _run(tmp_path)
+    found = [f for f in res["findings"] if f["check"] == "concept_starvation"]
+    assert len(found) == 1 and found[0]["data"]["claim_count"] == 1
+
+
+def test_concept_starvation_boundaries_not_flagged(tmp_path):
+    # Below entity threshold + no claims; degenerate (nothing extracted); concepts present.
+    _concepts_artifact(tmp_path, "src_00000000000000ac",
+                       [{"node_type": "entity", "name": f"E{i}"} for i in range(4)])
+    _concepts_artifact(tmp_path, "src_00000000000000ad", [])
+    _concepts_artifact(tmp_path, "src_00000000000000ae",
+                       [{"node_type": "concept", "name": "Idea"}] +
+                       [{"node_type": "person", "name": f"P{i}"} for i in range(9)])
+    res = _run(tmp_path)
+    assert not any(f["check"] == "concept_starvation" for f in res["findings"])
+
+
+def test_concept_starvation_skips_spoofed_and_unreadable_artifacts(tmp_path):
+    # Internal source_id must match the filename; unreadable JSON is skipped (validators own it).
+    _concepts_artifact(tmp_path, "src_00000000000000af",
+                       [{"node_type": "person", "name": f"P{i}"} for i in range(5)],
+                       internal_sid="src_00000000000000ff")
+    ed = tmp_path / "normalized" / "enrichment"
+    (ed / "src_00000000000000b0.concepts.json").write_text("{not json", encoding="utf-8")
+    res = _run(tmp_path)
+    assert not any(f["check"] == "concept_starvation" for f in res["findings"])
+
+
+def test_concept_starvation_ignores_spoofed_claims_artifact(tmp_path):
+    # A claims artifact whose internal source_id mismatches its filename contributes zero claims,
+    # so a below-threshold source is not flagged through it.
+    sid = "src_00000000000000b1"
+    _concepts_artifact(tmp_path, sid, [{"node_type": "entity", "name": "Solo"}])
+    ed = tmp_path / "normalized" / "enrichment"
+    (ed / f"{sid}.claims.json").write_text(json.dumps({
+        "source_id": "src_00000000000000ff", "claims": [{"claim_id": "clm_1"}]}), encoding="utf-8")
+    res = _run(tmp_path)
+    assert not any(f["check"] == "concept_starvation" for f in res["findings"])

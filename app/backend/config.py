@@ -161,7 +161,9 @@ def get_settings(root: Path | None = None) -> Settings:
         enrich_model_standard=cfg("ENRICH_MODEL_STANDARD", "anthropic:claude-sonnet-4-6"),
         enrich_model_heavy=cfg("ENRICH_MODEL_HEAVY", "anthropic:claude-opus-4-8"),
         query_model=cfg("QUERY_MODEL", cfg("ENRICH_MODEL_STANDARD", "anthropic:claude-sonnet-4-6")),
-        enrich_max_tokens=int(cfg("ENRICH_MAX_TOKENS", "1024")),
+        # 4096 (ADR-0055): 1024 truncated claim extraction on dense real PDFs — three billed
+        # retries, zero output. The cap is a ceiling, not a spend (providers bill actual tokens).
+        enrich_max_tokens=int(cfg("ENRICH_MAX_TOKENS", "4096")),
         enrich_local_base_url=(cfg("ENRICH_LOCAL_BASE_URL", "") or None),
         anthropic_api_key=(cfg("ANTHROPIC_API_KEY", "") or None),
         openai_api_key=(cfg("OPENAI_API_KEY", "") or None),

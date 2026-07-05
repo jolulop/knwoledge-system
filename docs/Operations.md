@@ -26,7 +26,7 @@ private network / sidecar behind a TLS/auth proxy) and is **not** a substitute f
 
 | Pass | Endpoint | Script-equivalent | What it does |
 |---|---|---|---|
-| **Lint** | `POST /jobs/lint` | — | Structural validators + semantic checks (orphan/under-supported concept, uncited claim, **missing raw**) + quality heuristics (**summary rot**, **stale claim citations**) → health report + governance review items. |
+| **Lint** | `POST /jobs/lint` | — | Structural validators + semantic checks (orphan/under-supported concept, uncited claim, **missing raw**) + quality heuristics (**summary rot**, **stale claim citations**, **concept starvation**) → health report + governance review items. |
 | **Stale / retention** | `POST /jobs/stale-check` | — | Stale sources → `archive_source` candidates; ephemeral past window → `delete_raw_file` (record-only); **LLM-cache** over TTL/size → `purge_response_cache` (record-only). Reports **live cache stats** every run. |
 | **Reindex** | `POST /jobs/reindex` | `scripts/rebuild_index.py` + `scripts/reindex_keyword.py` | Rebuild `wiki/index.md` + refresh the keyword index. **Never the vector index.** |
 | **Backup** | — | `scripts/backup.py` | Snapshot manifests, db (incl. graph), wiki, reviews, policies. |
@@ -81,9 +81,9 @@ Each pass writes a job row to `db/jobs.sqlite` and appends `wiki/log.md`, so pro
 (state is on disk, never chat context). **Review the queue** (`/ui/reviews`) and **apply** on your own
 cadence — nothing is applied automatically.
 
-## Lint quality heuristics — remediation codes (ADR-0037)
+## Lint quality heuristics — remediation codes (ADR-0037, ADR-0055)
 
-`/jobs/lint` also reports two **report-only** quality findings (deterministic, key-free; they never file
+`/jobs/lint` also reports **report-only** quality findings (deterministic, key-free; they never file
 review items and never turn lint `failing` on their own — they surface as maintenance debt in `by_check`).
 Each finding carries a stable `data.remediation` code; act on it by re-running a producer:
 
@@ -92,6 +92,7 @@ Each finding carries a stable `data.remediation` code; act on it by re-running a
 | `summary_rot` | low | An enriched Source summary's artifact fingerprint no longer matches the current normalized markdown / configured summary model. | `rerun_enrich` → run enrichment for the source(s): `uv run python scripts/enrich.py` (needs the configured enrichment provider's API key — provider/model-dependent). |
 | `stale_claim_citation` | medium | A claim's stored citation quote no longer grounds at its anchor in the current markdown. | `rerun_extract_claims` → re-run extraction + claim maintenance: `uv run python scripts/extract_claims.py` (needs the configured provider's key; auto-retracts/regrounds stale evidence). |
 | `synthesis_rot` | low | An active synthesis's topic evidence (claims/citations/disagreements) drifted since approval — its artifact fingerprint no longer matches the current topic. | `rerun_synthesis` → **`uv run python scripts/generate_synthesis.py --force`** (needs the configured provider's key). `--force` is required: a normal run only *reports* the stale active synthesis (governance gate) and won't rewrite it. |
+| `concept_starvation` | medium | A substantive source extracted zero concepts — its concepts artifact has ≥5 entity-family nodes (or ≥1 stored claim) but no `concept` nodes, suppressing the source's topic layer (ADR-0055). Artifact/claim state only, never text-shape inference. | `rerun_extract_concepts` → re-run the tier-2 pass: `uv run python scripts/extract_concepts.py` (needs the configured provider's key; a prompt/model change makes the artifact stale so a plain run re-extracts). |
 
 Three coverage findings (`summary_unverifiable`, `claim_evidence_unverifiable`, `synthesis_unverifiable`,
 low severity) mark lint `degraded` when an enriched page / active claim / active synthesis expects a
