@@ -36,6 +36,17 @@ def _resolve_under(root: Path, value: str) -> Path:
     return p.resolve() if p.is_absolute() else (root / p)
 
 
+def _positive_int(value: str, name: str) -> int:
+    """Parse a knob that must be a positive integer; fail fast on 0/negative (ADR-0056).
+
+    A zero/negative coverage knob is never a tuning choice — e.g. ENRICH_CONCEPT_INPUT_MAX_CHARS=0
+    would send an empty concept body and then *replace the topic layer* with it."""
+    parsed = int(value)
+    if parsed <= 0:
+        raise ValueError(f"{name} must be a positive integer, got {parsed}")
+    return parsed
+
+
 def _resolve_root() -> Path:
     """Environment wins, then .env at the derived root, then the derived root."""
     env_root = os.environ.get("KNOWLEDGE_SYSTEM_HOME")
@@ -86,6 +97,10 @@ class Settings:
     # Phase 5 query answering (ADR-0034). The synthesis model_ref; defaults to the standard tier.
     query_model: str
     enrich_max_tokens: int
+    # ADR-0056 cost-bearing semantic knobs: they define tier-2 extraction COVERAGE and enter
+    # the strategy refs, so changing one restales that pass vault-wide (deliberate, billable).
+    enrich_claim_window_chars: int
+    enrich_concept_input_max_chars: int
     enrich_local_base_url: str | None
     anthropic_api_key: str | None
     openai_api_key: str | None
@@ -164,6 +179,12 @@ def get_settings(root: Path | None = None) -> Settings:
         # 4096 (ADR-0055): 1024 truncated claim extraction on dense real PDFs — three billed
         # retries, zero output. The cap is a ceiling, not a spend (providers bill actual tokens).
         enrich_max_tokens=int(cfg("ENRICH_MAX_TOKENS", "4096")),
+        # ADR-0056: 12000 preserves the pre-window per-call input scale; 300000 covers the
+        # observed 137KB worst case >2x over while bounding pathological inputs.
+        enrich_claim_window_chars=_positive_int(
+            cfg("ENRICH_CLAIM_WINDOW_CHARS", "12000"), "ENRICH_CLAIM_WINDOW_CHARS"),
+        enrich_concept_input_max_chars=_positive_int(
+            cfg("ENRICH_CONCEPT_INPUT_MAX_CHARS", "300000"), "ENRICH_CONCEPT_INPUT_MAX_CHARS"),
         enrich_local_base_url=(cfg("ENRICH_LOCAL_BASE_URL", "") or None),
         anthropic_api_key=(cfg("ANTHROPIC_API_KEY", "") or None),
         openai_api_key=(cfg("OPENAI_API_KEY", "") or None),

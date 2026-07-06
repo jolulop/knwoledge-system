@@ -20,13 +20,33 @@ from typing import Any
 SCHEMA_VERSION = "enrich-summary-tags-v1"
 PROMPT_VERSION = "enrich-summary-tags-prompt-v1"
 # Phase 3.5b claim-extraction pass (separate artifact + versions, tier-2).
+# v2 = the ADR-0056 segment-framed prompt (claims are extracted per claim window; each call
+# states "segment i of N" + local section context).
 CLAIM_SCHEMA_VERSION = "enrich-claims-v1"
-CLAIM_PROMPT_VERSION = "enrich-claims-prompt-v1"
+CLAIM_PROMPT_VERSION = "enrich-claims-prompt-v2"
 # Phase 3.5b concept/entity extraction pass. v2 = the ADR-0055 tier-2 extraction contract
-# (concept elicitation band + entity-noise boundary); the bump makes every v1 artifact stale,
-# so the next extract_concepts run re-extracts opt-in — no --force machinery.
+# (concept elicitation band + entity-noise boundary); v3 = the ADR-0056 entity soft band
+# (typically up to ~25 central entities — full-document input made unbounded entity output a
+# truncation + review-flood risk). Each bump makes every prior artifact stale, so the next
+# extract_concepts run re-extracts opt-in — no --force machinery.
 CONCEPT_SCHEMA_VERSION = "enrich-concepts-v1"
-CONCEPT_PROMPT_VERSION = "enrich-concepts-prompt-v2"
+CONCEPT_PROMPT_VERSION = "enrich-concepts-prompt-v3"
+
+# ADR-0056 extraction-strategy identity. The strategy ref is the explicit coverage component
+# of tier-2 identity — composed alongside (never folded into) schema/prompt versions in both
+# the artifact freshness fingerprint and the response-cache key. The knob VALUES are part of
+# the ref: changing `ENRICH_CLAIM_WINDOW_CHARS` / `ENRICH_CONCEPT_INPUT_MAX_CHARS` restales
+# that pass vault-wide (cost-bearing semantic knobs, ADR-0033 config-ref precedent).
+CLAIM_WINDOW_STRATEGY = "chunk-greedy-v1"
+CONCEPT_COVERAGE_STRATEGY = "full-doc-v1"
+
+
+def claims_strategy_ref(window_chars: int) -> str:
+    return f"{CLAIM_WINDOW_STRATEGY}:{window_chars}"
+
+
+def concepts_strategy_ref(input_max_chars: int) -> str:
+    return f"{CONCEPT_COVERAGE_STRATEGY}:{input_max_chars}"
 # Phase 3.5c contradiction-detection pass (tier-3; per claim pair, response-cache replayed).
 CONTRADICTION_SCHEMA_VERSION = "enrich-contradiction-v1"
 CONTRADICTION_PROMPT_VERSION = "enrich-contradiction-prompt-v1"
@@ -40,16 +60,25 @@ def synthesis_artifact_path(enrichment_dir: Path, node_id: str) -> Path:
 
 
 def _fingerprint(
-    normalized_markdown: str, model_ref: str, schema_version: str, prompt_version: str
+    normalized_markdown: str, model_ref: str, schema_version: str, prompt_version: str,
+    strategy_ref: str | None = None,
 ) -> str:
-    """Hash every input that should force re-enrichment (ADR-0027)."""
-    h = hashlib.sha256()
-    for part in (
+    """Hash every input that should force re-enrichment (ADR-0027).
+
+    `strategy_ref` (ADR-0056) is the composed extraction-strategy component — appended only
+    when present so passes without one (summary/contradiction/synthesis) keep their
+    pre-ADR-0056 fingerprints.
+    """
+    parts = [
         schema_version.encode("utf-8"),
         prompt_version.encode("utf-8"),
         model_ref.encode("utf-8"),
         normalized_markdown.encode("utf-8"),
-    ):
+    ]
+    if strategy_ref is not None:
+        parts.append(strategy_ref.encode("utf-8"))
+    h = hashlib.sha256()
+    for part in parts:
         h.update(part)
         h.update(b"\0")
     return h.hexdigest()[:16]
@@ -59,24 +88,33 @@ def artifact_path(enrichment_dir: Path, source_id: str) -> Path:
     return Path(enrichment_dir) / f"{source_id}.json"
 
 
-def artifact_fingerprint(normalized_markdown: str, model_ref: str) -> str:
-    return _fingerprint(normalized_markdown, model_ref, SCHEMA_VERSION, PROMPT_VERSION)
+def artifact_fingerprint(normalized_markdown: str, model_ref: str,
+                         strategy_ref: str | None = None) -> str:
+    # The summary pass has no strategy ref; the parameter exists so `_load_fresh` can pass a
+    # STRAY `strategy_ref` from a malformed/tampered artifact and get "stale" (fingerprint
+    # mismatch) instead of a TypeError crash (ADR-0056 review round 2).
+    return _fingerprint(normalized_markdown, model_ref, SCHEMA_VERSION, PROMPT_VERSION,
+                        strategy_ref)
 
 
 def claims_artifact_path(enrichment_dir: Path, source_id: str) -> Path:
     return Path(enrichment_dir) / f"{source_id}.claims.json"
 
 
-def claims_fingerprint(normalized_markdown: str, model_ref: str) -> str:
-    return _fingerprint(normalized_markdown, model_ref, CLAIM_SCHEMA_VERSION, CLAIM_PROMPT_VERSION)
+def claims_fingerprint(normalized_markdown: str, model_ref: str,
+                       strategy_ref: str | None = None) -> str:
+    return _fingerprint(normalized_markdown, model_ref, CLAIM_SCHEMA_VERSION,
+                        CLAIM_PROMPT_VERSION, strategy_ref)
 
 
 def concepts_artifact_path(enrichment_dir: Path, source_id: str) -> Path:
     return Path(enrichment_dir) / f"{source_id}.concepts.json"
 
 
-def concepts_fingerprint(normalized_markdown: str, model_ref: str) -> str:
-    return _fingerprint(normalized_markdown, model_ref, CONCEPT_SCHEMA_VERSION, CONCEPT_PROMPT_VERSION)
+def concepts_fingerprint(normalized_markdown: str, model_ref: str,
+                         strategy_ref: str | None = None) -> str:
+    return _fingerprint(normalized_markdown, model_ref, CONCEPT_SCHEMA_VERSION,
+                        CONCEPT_PROMPT_VERSION, strategy_ref)
 
 
 # --- concept starvation (ADR-0055) -----------------------------------------
@@ -130,8 +168,15 @@ def _load_fresh(path: Path, normalized_markdown: str, fingerprint_fn) -> dict[st
         artifact = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    if artifact.get("input_fingerprint") != fingerprint_fn(normalized_markdown, artifact.get("model_ref", "")):
-        return None  # stale: normalized text / prompt / model changed since enrichment
+    # Recompute with the artifact's OWN recorded model_ref/strategy_ref (ADR-0056): freshness
+    # here means "does this artifact still describe the current text under its recorded
+    # parameters" — the producer-side skip check is where a changed knob/model restales.
+    kwargs = {}
+    if artifact.get("strategy_ref") is not None:
+        kwargs["strategy_ref"] = artifact["strategy_ref"]
+    if artifact.get("input_fingerprint") != fingerprint_fn(
+            normalized_markdown, artifact.get("model_ref", ""), **kwargs):
+        return None  # stale: normalized text / prompt / schema changed since enrichment
     return artifact
 
 

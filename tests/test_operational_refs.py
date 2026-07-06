@@ -56,6 +56,26 @@ def test_env_example_documents_query_model():
     assert "QUERY_MODEL=" in (ROOT / ".env.example").read_text(encoding="utf-8")
 
 
+def test_env_example_documents_adr_0056_coverage_knobs():
+    text = (ROOT / ".env.example").read_text(encoding="utf-8")
+    assert "ENRICH_CLAIM_WINDOW_CHARS=" in text
+    assert "ENRICH_CONCEPT_INPUT_MAX_CHARS=" in text
+
+
+def test_adr_0056_rollout_chain_includes_keyword_reindex():
+    # ADR-0056 review round 1 (blocking): the producers refresh Source pages without
+    # guaranteeing keyword/nav index freshness — the documented rollout chain must run
+    # scripts/reindex_keyword.py before validate_all.py, or the operator lands on a
+    # validate_index_consistency failure (as the 2026-07-06 live repair demonstrated).
+    adr = (ROOT / "docs" / "adr" / "0056-tier2-document-complete-extraction-coverage.md").read_text(
+        encoding="utf-8")
+    reindex_at = adr.find("reindex_keyword.py")
+    validate_at = adr.find("validate_all.py")
+    assert reindex_at != -1, "ADR-0056 rollout chain must name reindex_keyword.py"
+    assert validate_at != -1
+    assert reindex_at < validate_at, "reindex_keyword.py must come before validate_all.py"
+
+
 # Runbook/operational docs may WARN against a bare uvicorn launch, but must never RECOMMEND one: the
 # blessed ``python -m app.backend`` entrypoint is the only launch routed through the assert_safe_bind
 # loopback guard (ADR-0009). A direct ``uvicorn app.backend.main:app --host ...`` overrides the bind

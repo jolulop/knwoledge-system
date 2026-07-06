@@ -94,14 +94,21 @@ class LLMClient:
         *,
         schema_version: str | None = None,
         prompt_version: str | None = None,
+        strategy_ref: str | None = None,
     ) -> dict[str, Any]:
-        """Return a schema-valid object, replaying from cache when possible, or raise."""
+        """Return a schema-valid object, replaying from cache when possible, or raise.
+
+        `strategy_ref` (ADR-0056) is the explicit extraction-strategy component of cache
+        identity — tier-2 callers pass their coverage strategy so a window-budget or
+        input-cap change forces fresh calls without pretending the prompt changed.
+        """
         provider, model_id = parse_model_ref(model_ref)
         adapter = self._adapter(provider)
 
         key = cache_key(
             messages, model_ref, schema,
             schema_version=schema_version, prompt_version=prompt_version,
+            strategy_ref=strategy_ref,
         )
         if self._cache is not None:
             cached = self._cache.get(key)

@@ -3,10 +3,12 @@
 
 LLM output is not byte-reproducible, so a rebuild or forced re-render replays the stored
 response rather than re-sampling — reproducible and free until an input changes. The cache
-key is `hash(messages + model_ref + schema + schema_version + prompt_version)`, so it carries
-the provider and model id (via `model_ref`), the schema and its version, the prompt template
-version, and the source content (embedded in `messages`). A swap of any of these is a clean
-miss-and-refresh, never a silent collision.
+key is `hash(messages + model_ref + schema + schema_version + prompt_version [+ strategy_ref])`,
+so it carries the provider and model id (via `model_ref`), the schema and its version, the
+prompt template version, the source content (embedded in `messages`), and — for tier-2
+callers (ADR-0056) — the extraction-strategy ref (appended only when present, so non-tier-2
+keys are unchanged). A swap of any of these is a clean miss-and-refresh, never a silent
+collision.
 
 The cache lives under `db/` and is covered by backup by default (`policies/retention.yaml`,
 `scripts/backup.py`). Dependency-free (stdlib sqlite3).
@@ -85,16 +87,29 @@ def cache_key(
     *,
     schema_version: Any = None,
     prompt_version: Any = None,
+    strategy_ref: Any = None,
 ) -> str:
-    """Stable key over everything that should force a fresh model call."""
-    h = hashlib.sha256()
-    for part in (
+    """Stable key over everything that should force a fresh model call.
+
+    `strategy_ref` is the explicit extraction-strategy identity component (ADR-0056) — a
+    coverage change (window budget, input cap) must force fresh calls even when prompt text
+    and schema are unchanged. Composed as its own component, never folded into
+    prompt/schema version strings; `None` (every non-tier-2 caller) hashes identically to the
+    pre-ADR-0056 key, so existing cache entries stay valid.
+    """
+    parts = [
         _canonical(messages),
         model_ref.encode("utf-8"),
         _canonical(schema),
         _version_bytes(schema_version),
         _version_bytes(prompt_version),
-    ):
+    ]
+    if strategy_ref is not None:
+        # Appended only when present so a None ref hashes byte-identically to the
+        # pre-ADR-0056 five-component key.
+        parts.append(_version_bytes(strategy_ref))
+    h = hashlib.sha256()
+    for part in parts:
         h.update(part)
         h.update(b"\0")
     return h.hexdigest()

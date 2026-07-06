@@ -167,7 +167,7 @@ def test_unlocatable_quote_is_dropped(tmp_path):
     summary = _extract(tmp_path, FakeAdapter(claims_payload=[
         {"claim": "Real claim.", "quote": Q1},
         {"claim": "Hallucinated.", "quote": "this text is nowhere in the source"}]))
-    assert summary["claims_written"] == 1 and summary["claims_dropped"] == 1
+    assert summary["claims_written"] == 1 and summary["claims_dropped_ungrounded"] == 1
 
 
 def test_no_api_key_skips_and_writes_nothing(tmp_path):
@@ -196,7 +196,16 @@ def test_claim_pages_are_idempotent_byte_stable(tmp_path):
 
 
 def _set_md(tmp_path, sid, text):
+    # Markdown and chunks are always written together by extraction (ADR-0012 anchor contract,
+    # validate_normalized-enforced), and the ADR-0056 window planner trusts that invariant —
+    # so this shortcut must maintain it: one whole-document chunk matching the new text.
     (tmp_path / "normalized" / "markdown" / f"{sid}.md").write_text(text, encoding="utf-8")
+    chunk = {"chunk_id": f"{sid}::0000", "source_id": sid, "ordinal": 0, "kind": "prose",
+             "heading_path": [], "section": None, "text": text, "char_start": 0,
+             "char_end": len(text), "page": None, "page_end": None,
+             "table_reference": None, "sheet_reference": None}
+    (tmp_path / "normalized" / "chunks" / f"{sid}.jsonl").write_text(
+        json.dumps(chunk, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
 def _edge_statuses(tmp_path):
@@ -237,22 +246,32 @@ def test_reextraction_tombstones_orphan_and_supersedes_edges(tmp_path):
     assert validate_frontmatter.main([str(tmp_path)]) == 0
 
 
-def test_reextraction_without_key_retracts_stale_claims(tmp_path):
+def test_reextraction_without_key_preserves_claim_layer(tmp_path):
+    # ADR-0056 decision 3 (reverses the earlier retract-first ordering): a run that cannot
+    # produce the replacement never supersedes existing evidence — stale-but-VISIBLE.
     _build(tmp_path)
     _gen_wiki(tmp_path)
     _extract(tmp_path, FakeAdapter(claims_payload=[{"claim": "Claim X.", "quote": Q1}]))
     cid = claims.claim_id("Claim X.")
     sid = _sids(tmp_path)["doc.md"]
 
-    # Text changes, but no API key on the re-run: the stale claim must not stay active.
     _set_md(tmp_path, sid, "# T\n\nUnrelated replacement text here now.\n")
-    _extract(tmp_path, FakeAdapter(available=False))
-    assert _edge_statuses(tmp_path)[cid] == "superseded"
+    summary = _extract(tmp_path, FakeAdapter(available=False))
+    assert summary["skipped_no_key"] == 1
+    # Missing key is in the "cannot produce a complete replacement" class (review round 2).
+    assert summary["replacement_not_applied"] == 1
+    assert summary["stale_claim_layer_preserved"] == 1
+    assert _edge_statuses(tmp_path)[cid] == "active"  # preserved, not silently thinned
     page = tmp_path / "wiki" / "Claims" / f"{cid}.md"
-    assert parse_frontmatter(page.read_text(encoding="utf-8"))["status"] == "deprecated_candidate"
+    assert parse_frontmatter(page.read_text(encoding="utf-8"))["status"] == "active"
+    # The changed Markdown makes the preserved anchor stale — validators fail LOUDLY until
+    # extract_claims succeeds (the honest degraded state the ADR prefers over silent absence).
+    assert validate_citations.main([str(tmp_path)]) != 0
 
 
-def test_reextraction_parse_failure_retracts_stale_claims(tmp_path):
+def test_reextraction_parse_failure_preserves_claim_layer(tmp_path):
+    # ADR-0056 staging: one bad window must not wipe a source's existing claim layer, and the
+    # summary distinguishes "nothing changed because staging failed" from "zero claims".
     _build(tmp_path)
     _gen_wiki(tmp_path)
     _extract(tmp_path, FakeAdapter(claims_payload=[{"claim": "Claim Y.", "quote": Q1}]))
@@ -266,7 +285,9 @@ def test_reextraction_parse_failure_retracts_stale_claims(tmp_path):
     _set_md(tmp_path, sid, "# T\n\nReplacement body that no longer supports Claim Y.\n")
     summary = _extract(tmp_path, BrokenAdapter())
     assert summary["errors"] == 1
-    assert _edge_statuses(tmp_path)[cid] == "superseded"  # retracted despite the failure
+    assert summary["replacement_not_applied"] == 1
+    assert summary["stale_claim_layer_preserved"] == 1
+    assert _edge_statuses(tmp_path)[cid] == "active"  # untouched: no replacement was staged
 
 
 def test_claim_text_authority_is_the_page(tmp_path):

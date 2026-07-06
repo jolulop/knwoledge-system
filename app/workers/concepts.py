@@ -231,10 +231,15 @@ def extract_concepts(
     enrichment_dir: Path | None = None,
     wiki_dir: Path | None = None,
     reviews_dir: Path | None = None,
+    input_max_chars: int = 300000,
     rebuild_index: bool = True,
     record_job: bool = True,
 ) -> dict[str, Any]:
-    """Extract candidate concepts/entities for pending (or selected) sources; return a summary."""
+    """Extract candidate concepts/entities for pending (or selected) sources; return a summary.
+
+    ADR-0056: one full-document call per source up to ``input_max_chars`` (the
+    `full-doc-v1` strategy ref component); an above-cap document is truncated and marked
+    ``coverage: truncated`` in its artifact and the job metadata."""
     root = Path(root).resolve()
     manifests_dir = Path(manifests_dir) if manifests_dir else root / "raw" / "manifests"
     jobs_db = Path(jobs_db) if jobs_db else root / "db" / "jobs.sqlite"
@@ -257,9 +262,11 @@ def extract_concepts(
     gconn = graph.connect(graph_db)
     has_key = client.provider_available(model_ref)
 
+    strategy_ref = art.concepts_strategy_ref(input_max_chars)
     considered = nodes_written = mentions_written = 0
     skipped_fresh = skipped_not_extracted = skipped_empty = skipped_no_key = 0
     concept_starved_sources: list[str] = []
+    coverage_truncated_sources: list[str] = []
     errors: list[dict[str, str]] = []
     texts: dict[str, dict[str, Any]] = {}
     touched: set[str] = set()
@@ -335,7 +342,7 @@ def extract_concepts(
 
             md_path = markdown_dir / f"{sid}.md"
             md = md_path.read_text(encoding="utf-8") if md_path.exists() else ""
-            fingerprint = art.concepts_fingerprint(md, model_ref)
+            fingerprint = art.concepts_fingerprint(md, model_ref, strategy_ref)
             apath = art.concepts_artifact_path(enrichment_dir, sid)
             if not force and apath.exists():
                 try:
@@ -357,14 +364,23 @@ def extract_concepts(
             if not md.strip():
                 affected.update(graph.supersede_mentions_for_source(gconn, sid, now=now))
                 skipped_empty += 1
-                _write_artifact(apath, sid, fingerprint, [], model_ref, now)
+                _write_artifact(apath, sid, fingerprint, [], model_ref, now, strategy_ref)
                 continue
 
+            # ADR-0056: one full-document call up to the input cap; above-cap documents are
+            # truncated and marked (coverage honesty — the head-bias returns only for
+            # pathological inputs, and visibly).
+            coverage = "truncated" if len(md) > input_max_chars else "full"
+            if coverage == "truncated":
+                coverage_truncated_sources.append(sid)
             title = title_from_filename(manifest.get("original_filename", sid))
             try:
                 result = client.parse(
-                    prompts.build_concept_messages(title, md), prompts.CONCEPTS_SCHEMA, model_ref,
-                    schema_version=art.CONCEPT_SCHEMA_VERSION, prompt_version=art.CONCEPT_PROMPT_VERSION,
+                    prompts.build_concept_messages(title, md, max_chars=input_max_chars),
+                    prompts.CONCEPTS_SCHEMA, model_ref,
+                    schema_version=art.CONCEPT_SCHEMA_VERSION,
+                    prompt_version=art.CONCEPT_PROMPT_VERSION,
+                    strategy_ref=strategy_ref,
                 )
             except ParseError as exc:
                 errors.append({"source_id": sid, "error": str(exc)})
@@ -387,7 +403,8 @@ def extract_concepts(
                     etype = "entity"
                 _emit(sid, md, etype, e.get("name", ""), e.get("aliases", []), source_nodes, seen)
 
-            _write_artifact(apath, sid, fingerprint, source_nodes, model_ref, now)
+            _write_artifact(apath, sid, fingerprint, source_nodes, model_ref, now,
+                            strategy_ref, coverage)
             nodes_written += len(source_nodes)
             # ADR-0055: immediate operator feedback for the F1 failure signature (zero concepts
             # from a substantive source). Artifact/claim state only — never text-shape inference.
@@ -419,6 +436,8 @@ def extract_concepts(
             "skipped_no_key": skipped_no_key, "manifests_skipped_invalid": len(skipped_invalid),
             "concept_starved": len(concept_starved_sources),
             "concept_starved_sources": sorted(concept_starved_sources),
+            "coverage_truncated": len(coverage_truncated_sources),
+            "coverage_truncated_sources": sorted(coverage_truncated_sources),
             "errors": len(errors), "error_details": errors,
             "index_rebuilt": index_rebuilt, "extracted_at": now,
         }
@@ -435,11 +454,16 @@ def extract_concepts(
             conn.close()
 
 
-def _write_artifact(apath, sid, fingerprint, source_nodes, model_ref, now):
+def _write_artifact(apath, sid, fingerprint, source_nodes, model_ref, now,
+                    strategy_ref=None, coverage="full"):
     apath.parent.mkdir(parents=True, exist_ok=True)
     apath.write_text(json.dumps({
         "source_id": sid, "schema_version": art.CONCEPT_SCHEMA_VERSION,
         "prompt_version": art.CONCEPT_PROMPT_VERSION, "model_ref": model_ref,
+        "strategy_ref": strategy_ref,
+        # ADR-0056 honesty marker: "truncated" when the document exceeded the input cap, so
+        # "document-complete" stays auditable (a future lint can consume this).
+        "coverage": coverage,
         "input_fingerprint": fingerprint, "generation_status": "enriched",
         "generated_at": now, "nodes": source_nodes,
     }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

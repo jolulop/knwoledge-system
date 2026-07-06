@@ -54,6 +54,8 @@ def main(argv: list[str]) -> int:
         manifests_dir=settings.manifests_dir,
         jobs_db=settings.jobs_db_path,
         markdown_dir=settings.markdown_dir,
+        chunks_dir=settings.chunks_dir,
+        window_chars=settings.enrich_claim_window_chars,
     )
 
     print("Claim extraction complete.")
@@ -63,7 +65,11 @@ def main(argv: list[str]) -> int:
     print(f"Claims written: {summary['claims_written']} "
           f"(pages: {summary['claim_pages_written']} active / "
           f"{summary['claim_pages_tombstoned']} tombstoned)")
-    print(f"Claims dropped (unlocatable quote): {summary['claims_dropped']}")
+    print(f"Claims dropped (ungroundable quote): {summary['claims_dropped_ungrounded']}")
+    print(f"Claim windows: {summary['claim_windows']} ({summary['claim_window_strategy']}; "
+          f"over-budget singletons: {summary['claim_window_over_budget']})")
+    print(f"Staging: replacement_not_applied={summary['replacement_not_applied']} "
+          f"stale_claim_layer_preserved={summary['stale_claim_layer_preserved']}")
     print(f"Skipped (fresh): {summary['skipped_fresh']}")
     print(f"Skipped (no API key): {summary['skipped_no_key']}")
     print(f"Errors: {summary['errors']}")

@@ -55,6 +55,7 @@ def main(argv: list[str]) -> int:
         manifests_dir=settings.manifests_dir,
         jobs_db=settings.jobs_db_path,
         markdown_dir=settings.markdown_dir,
+        input_max_chars=settings.enrich_concept_input_max_chars,
     )
 
     print("Concept/entity extraction complete.")
@@ -68,6 +69,9 @@ def main(argv: list[str]) -> int:
     print(f"Concept-starved sources: {summary['concept_starved']}")  # ADR-0055 F1 signature
     for sid in summary["concept_starved_sources"]:
         print(f"  - {sid}: zero concepts extracted despite entities/claims present")
+    print(f"Coverage-truncated sources: {summary['coverage_truncated']}")  # ADR-0056 cap marker
+    for sid in summary["coverage_truncated_sources"]:
+        print(f"  - {sid}: document exceeds ENRICH_CONCEPT_INPUT_MAX_CHARS, head-truncated")
     print(f"Errors: {summary['errors']}")
     for err in summary["error_details"]:
         print(f"  - {err['source_id']}: {err['error']}")

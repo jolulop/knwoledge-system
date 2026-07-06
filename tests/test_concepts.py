@@ -370,10 +370,11 @@ def test_concept_aggregates_mentions_across_sources(tmp_path):
 def test_concept_prompt_contract_pinned():
     # The ADR-0055 contract markers must survive prompt edits, and any wording change must ride a
     # version bump (the fingerprint + cache key both hash CONCEPT_PROMPT_VERSION).
+    # v3 = the ADR-0056 entity soft band.
     from app.llm import prompts
     from app.workers import enrichment_artifact as art
 
-    assert art.CONCEPT_PROMPT_VERSION == "enrich-concepts-prompt-v2"
+    assert art.CONCEPT_PROMPT_VERSION == "enrich-concepts-prompt-v3"
     text = prompts._CONCEPTS_SYSTEM
     assert "UNTRUSTED" in text                                  # untrusted-data framing kept
     assert "typically 3-10" in text                             # concept expectation band
@@ -382,6 +383,52 @@ def test_concept_prompt_contract_pinned():
     for marker in ("references", "bibliographies", "bylines", "author lists", "acknowledgments"):
         assert marker in text                                   # entity-noise boundary
     assert "own authors qualify only if" in text
+    # ADR-0056 entity soft band: a count expectation, salience-worded, never schema-enforced.
+    assert "typically up to ~25 central entities" in text
+    assert "substantively central, not merely mentioned" in text
+    assert "never pad" in text
+
+
+def test_above_cap_document_marked_coverage_truncated(tmp_path):
+    # ADR-0056: the honesty marker lives in the ARTIFACT and the job metadata, not stdout.
+    from app.workers import enrichment_artifact as art
+
+    _build(tmp_path)
+    _gen_wiki(tmp_path)
+    summary = _extract(tmp_path, FakeAdapter(), input_max_chars=50)
+    sid = _sids(tmp_path)["doc.md"]
+    assert summary["coverage_truncated"] == 1
+    assert summary["coverage_truncated_sources"] == [sid]
+    artifact = json.loads(
+        art.concepts_artifact_path(tmp_path / "normalized" / "enrichment", sid).read_text())
+    assert artifact["coverage"] == "truncated"
+    assert artifact["strategy_ref"] == "full-doc-v1:50"
+
+
+def test_within_cap_document_marked_coverage_full(tmp_path):
+    from app.workers import enrichment_artifact as art
+
+    _build(tmp_path)
+    _gen_wiki(tmp_path)
+    summary = _extract(tmp_path, FakeAdapter())
+    sid = _sids(tmp_path)["doc.md"]
+    assert summary["coverage_truncated"] == 0
+    artifact = json.loads(
+        art.concepts_artifact_path(tmp_path / "normalized" / "enrichment", sid).read_text())
+    assert artifact["coverage"] == "full"
+    assert artifact["strategy_ref"] == "full-doc-v1:300000"
+
+
+def test_input_cap_change_restales_the_pass(tmp_path):
+    # The knob is part of the strategy ref (cost-bearing semantic knob): changing it must
+    # re-extract even though markdown, prompt, and model are unchanged.
+    _build(tmp_path)
+    _gen_wiki(tmp_path)
+    _extract(tmp_path, FakeAdapter())
+    again = _extract(tmp_path, FakeAdapter())
+    assert again["skipped_fresh"] == 1
+    rescoped = _extract(tmp_path, FakeAdapter(), input_max_chars=200000)
+    assert rescoped["skipped_fresh"] == 0
 
 
 def test_concept_starved_predicate_matrix():

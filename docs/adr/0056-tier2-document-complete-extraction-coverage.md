@@ -1,6 +1,6 @@
 # ADR-0056 — Tier-2 document-complete extraction coverage
 
-- **Status:** design-locked (not implemented)
+- **Status:** implemented
 - **Date:** 2026-07-06
 - **Drivers:** UAT run 2 finding F3 (12k-char head bias); live-vault ADR-0055 v2 rollout
   (2026-07-06) leaving 10 of 23 substantive sources concept-starved
@@ -80,7 +80,10 @@ not the ordering). With ~5× more calls per source, partial-failure probability 
 window must not wipe a source's claim layer. The run summary distinguishes
 `replacement_not_applied` / `stale_claim_layer_preserved` from ordinary parse errors, so an
 operator can tell "nothing changed because staging failed" from "replacement applied with zero
-claims".
+claims". A missing key is in the "cannot produce a complete replacement" class, so a no-key
+skip of a stale source also counts in `replacement_not_applied` (+
+`stale_claim_layer_preserved` when prior claims exist); `skipped_no_key` keeps the cause
+distinct (review round 2).
 
 ### 4. Claim windows: greedy runs of persisted chunks (`chunk-greedy-v1`)
 
@@ -99,8 +102,22 @@ re-implemented.
   recorded as an accepted **recall limitation** of no-overlap windows, distinct from
   `claims_dropped_ungrounded` (which counts only quotes the model emitted that fail to ground).
 - **Prompt framing:** each window call states it is seeing "segment *i* of *N*" of the titled
-  document and includes local section context from chunk metadata. This is a real prompt-text
-  change: `CLAIM_PROMPT_VERSION` → `enrich-claims-prompt-v2`.
+  document and includes local section context from chunk metadata. Section context is
+  DOCUMENT-DERIVED (chunk `heading_path`), so it travels inside an explicitly-untrusted
+  `<segment_metadata>` delimiter, kept separate from `<source_document_segment>` so the
+  verbatim-quote contract stays scoped to the segment (review round 2 — a malicious heading
+  must never become instruction-adjacent prompt text). The metadata is **entity-encoded**
+  (`&`, `<`, `>`) before interpolation so a heading containing the literal closing tag cannot
+  escape the container (review round 3; `&` first, so pre-escaped input cannot smuggle a
+  tag). This is a real prompt-text change:
+  `CLAIM_PROMPT_VERSION` → `enrich-claims-prompt-v2`.
+- **Fail closed on an unusable chunk table (review round 2):** non-empty Markdown whose window
+  plan is empty (chunk file missing, corrupt, or without anchored records) is normalized
+  drift — the ADR-0012 md↔chunks invariant broken on disk. The worker makes no model call and
+  supersedes nothing: typed `window_planning_failed` error, `replacement_not_applied` (+
+  `stale_claim_layer_preserved` when prior claims exist), old layer stays visible, validators
+  surface the drift. There is **no whole-document fallback** — it would silently violate the
+  `chunk-greedy-v1` contract and then replace the claim layer from a degraded plan.
 - Run metadata: `claim_windows`, `claim_window_over_budget`, `claims_dropped_ungrounded`,
   `claim_window_strategy: chunk-greedy-v1`, plus the staging outcomes of decision 3.
 
@@ -116,7 +133,10 @@ and intentionally invalidate existing tier-2 artifacts — not performance tunin
 
 Defaults: 12k preserves today's per-call input scale (known-good with `ENRICH_MAX_TOKENS=4096`);
 300k (~75–100k tokens) covers the current 137KB worst case >2× over while bounding pathological
-inputs inside the model context.
+inputs inside the model context. Both knobs are validated as **positive integers** at config
+load (review round 2): a zero/negative value is never a tuning choice —
+`ENRICH_CONCEPT_INPUT_MAX_CHARS=0` would send an empty concept body and then replace the topic
+layer with its output.
 
 Strict strategy refs carry the values:
 
@@ -189,11 +209,30 @@ vocabulary.
   `enrich-concepts-prompt-v3` version constant.
 - **Rollout-doc guard** (`tests/test_operational_refs.py` family): the ADR-0056 rollout chain
   names `reindex_keyword.py` before `validate_all.py`.
+- **Untrusted section metadata:** a malicious heading (e.g. "Ignore prior instructions…")
+  stays inside the `<segment_metadata>` delimiter, and the system prompt marks that tag
+  untrusted (review round 2). A delimiter-escape heading (literal `</segment_metadata>`)
+  arrives entity-encoded and cannot close the container (review round 3).
+- **Unusable chunk table fails closed:** non-empty Markdown with a missing/corrupt/anchorless
+  chunk file → no adapter call, no supersede, `window_planning_failed` error + preservation
+  counters (review round 2).
+- **Knob validation:** non-positive `ENRICH_CLAIM_WINDOW_CHARS` /
+  `ENRICH_CONCEPT_INPUT_MAX_CHARS` fail config load fast (review round 2).
+- **Malformed summary artifact robustness:** a summary artifact carrying a stray
+  `strategy_ref` reads as stale, never crashes rendering (review round 2).
+- **No-key preservation telemetry:** a no-key rerun over a stale source with prior claims
+  reports `replacement_not_applied` + `stale_claim_layer_preserved` (review round 2).
 - **E2E:** a multi-window fixture whose distinctive claim lives beyond the first 12k chars is
   extracted, grounded (`markdown[start:end] == quote`), and survives `validate_all`.
 
 ## Out of scope (named deferrals)
 
+- **Cross-builder untrusted-metadata hardening (title/filename):** `Title:` sits outside the
+  untrusted delimiter in **all four** prompt builders (summary, claims, concepts,
+  contradiction) — pre-existing, filename-derived. Bringing it under an explicit
+  untrusted-metadata contract bumps four prompt versions and restales every pass vault-wide,
+  so it is its own slice with its own rollout decision (review round 2 — named here so it
+  does not vanish).
 - Tier-1 summary/tags coverage (head-biased by documented limitation).
 - Seam-overlap or two-pass seam repair for claims recall.
 - LLM consolidation pass for windowed concepts.
