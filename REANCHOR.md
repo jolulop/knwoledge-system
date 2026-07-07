@@ -19,7 +19,7 @@ critical rules and `CONTEXT.md` for the glossary.
 
 - **Branch:** `main` — local commits may sit unpushed on top of `origin/main`; run
   `git log --oneline origin/main..HEAD` for the live unpushed set (pushed tip at refresh time:
-  `469e6b9`, branch in sync).
+  `0d2d3a0`, branch in sync).
   The per-slice rhythm: grill (design-lock,
   docs-only) → implement (on "implement now") → test → external review (user pastes) → analyze+recommend+
   **wait** → fix → commit (user says so) → push.
@@ -67,22 +67,27 @@ critical rules and `CONTEXT.md` for the glossary.
     help. **Multi-chunk extension design-locked** (ADR-0038 §Multi-chunk, NOT yet implemented): chunk-level
     cases (`chunk:`/`near_miss:` phrase→citation-key, `chunk_disambiguation`), separate report blocks,
     chunk-granular per-channel diagnostic — the benchmark layer needed before any fusion tuning.
-- **Recent commits (all pushed, tip `469e6b9`):** `469e6b9` **ADR-0056 tier-2 document-complete
-  extraction coverage** (claims `chunk-greedy-v1` windows + stage-before-replace, concepts full-doc
-  call + entity soft band v3, strategy refs in composed fingerprint/cache identity, untrusted
-  entity-encoded `<segment_metadata>`, fail-closed window planning; 3 review rounds) · `c906e66` its
-  design-lock · `7ef8c38` **ADR-0055 tier-2 extraction contract** (concept elicitation band +
-  entity-noise boundary, `concept_starvation` guard, `ENRICH_MAX_TOKENS` 4096, replacement-only
-  supersede) · `5040da3` UAT Guide §1 torch-overlay/clone-.env docs · `b6d446f` cache_key int-version
-  coercion fix · `0994321` **ADR-0054 PDF de-hyphenation at extraction** · `5f109b8` keyword-index
-  zero-citable-row consistency fix · `99c3d15` Dockerfile blessed CMD + Build Spec §6 annotations ·
-  `8a641f4` UAT Guide disposable-vault rework · `006e44a` **ADR-0053 in-process FlagEmbedding BGE-M3
-  embedder** (default GPU backend; `local_http` = CPU/HTTP fallback; torch overlay out-of-lock).
-- **Tests/lint green:** `1203 passed, 2 skipped` (the opt-in `gpu`/`model` marks, ADR-0053), ruff clean,
-  **10** validators pass. Newest test files: `tests/test_claim_windows.py` (ADR-0056: window-planner
-  matrix, window-local grounding, staging, delimiter-escape, identity), `tests/test_dehyphenation.py`
-  (ADR-0054), `tests/test_flagembedding_provider.py` (ADR-0053) and the identity-surgery family
-  (`test_merge.py`/`test_rekey.py`/`test_split.py`);
+- **Recent commits (all pushed, tip `0d2d3a0`):** `0d2d3a0` **ADR-0058 per-source review flow**
+  (source-index lens + per-source screens w/ `H == {S}` retired predicate, batch decide over the
+  single-item primitives w/ server-side visible-row scope guard, approve-with-amendments applied by
+  the promote executor incl. frozen-id slug move + Source fan-out + new `description` field,
+  human-add producer path w/ anchorless human mention + slug-collision guard + rejected-slot block +
+  index rebuild; 1 review round) · `9d29c55` **ADR-0057 review-queue reconciliation** (symmetric
+  auto-withdrawal: shared decision fn + `_recompose_node` hook + `reason_code` provenance keying +
+  preflight-gated key-free catch-up sweep; page-frontmatter status authority w/ graph corroboration;
+  2 review rounds) · `afdfc0e` their design-lock (W1 grill, 3 CONTEXT entries) · `469e6b9` **ADR-0056
+  tier-2 document-complete extraction coverage** (claims `chunk-greedy-v1` windows +
+  stage-before-replace, concepts full-doc call + entity soft band v3, strategy refs in composed
+  identity, fail-closed window planning) · `c906e66` its design-lock · `7ef8c38` **ADR-0055 tier-2
+  extraction contract** · `5040da3` UAT Guide §1 docs · `b6d446f` cache_key int-version fix ·
+  `0994321` **ADR-0054 PDF de-hyphenation** · `006e44a` **ADR-0053 in-process FlagEmbedding BGE-M3**.
+- **Tests/lint green:** `1231 passed, 2 skipped` (the opt-in `gpu`/`model` marks, ADR-0053), ruff clean,
+  **10** validators pass. Newest test files: `tests/test_source_flow.py` (ADR-0058: attribution +
+  `H == {S}` matrix, batch decide incl. forged-rid scope guard, amendments e2e incl. frozen-id slug
+  move, human-add matrix incl. rejected-slot/slug-collision/anchorless-validators, XSS fixtures),
+  `tests/test_reconcile.py` (ADR-0057: decision/corroboration matrix, preflight refusals, legacy
+  shim, hook, sweep idempotence), `tests/test_claim_windows.py` (ADR-0056), `tests/test_dehyphenation.py`
+  (ADR-0054), `tests/test_flagembedding_provider.py` (ADR-0053);
   `tests/test_operational_refs.py` carries the `_APPLY_TYPES`↔docs parity, no-CI-claim, wrapper-agnostic
   bare-uvicorn (ADR-0009), UAT-Guide drift guards (script refs, **method-aware** curl-target↔route
   parity, EMBEDDING_-prefix strip contract, the operator-doc **no-env-value-print** security lint —
@@ -90,10 +95,13 @@ critical rules and `CONTEXT.md` for the glossary.
 - **LIVE VAULT (2026-07-07):** fully repaired + rolled out. All 23 sources re-extracted with
   de-hyphenation; **vector index built for the first time** (716 chunks, BGE-M3); ADR-0055+0056
   producers re-run billable: **1184 claims (was 422), 222 concepts (was 121), 356 entities,
-  2314 wiki pages, `concept_starved` 10 → 2**, coverage_truncated 0, all validators green.
-  **Pending review queue: ~1380 items** (many stale promotes for tombstoned nodes —
-  scope-guard-skipped at apply; W1 target). ADR-0038 baseline re-recorded: identical to the committed
-  reference (no drift from de-hyphenation).
+  `concept_starved` 10 → 2**, coverage_truncated 0, all validators green. **ADR-0057 sweep RUN
+  (backup first): 238 stale items withdrawn (220 tombstoned-node promotes + 18 resurrected-node
+  deprecations, all audited), queue 1380 → 1142** = 513 promotes + 220 concept/entity retirement
+  gates + 397 claim-tombstone gates (claims producer's territory, correctly untouched) + 12 subtype.
+  **Per-source UI live-verified read-only**: `/ui/reviews/sources` = 25 sources · 741 attributable
+  items, screens render candidate/retired sections + real multi-source badges. ADR-0038 baseline
+  re-recorded: identical to the committed reference (no drift from de-hyphenation).
 
 ## Viewing the vault (Obsidian)
 
@@ -105,7 +113,8 @@ critical rules and `CONTEXT.md` for the glossary.
 - `wiki/` is **regenerated by the pipeline** (derived data) — Obsidian is a viewer; manual edits
   are overwritten on the next run. `wiki/.obsidian/` (its config) is gitignored.
 - The **Human Review UI** (Phase 6) is served by the FastAPI app at `/ui/reviews` (loopback only);
-  start the app, then browse the review queue / detail / apply pages there.
+  start the app, then browse the review queue / detail / apply pages there. The **per-source flow**
+  (ADR-0058) lives at `/ui/reviews/sources` — the high-volume lens for candidate/retirement review.
 
 ## Phase status
 
@@ -126,28 +135,44 @@ critical rules and `CONTEXT.md` for the glossary.
 | ADR-0054 PDF de-hyphenation at extraction | **Complete + pushed** (`0994321`); vault repair executed 2026-07-06 |
 | ADR-0055 tier-2 extraction contract (concept band + entity-noise boundary + starvation guard) | **Complete + pushed** (`7ef8c38`); live rollout verified |
 | ADR-0056 tier-2 document-complete coverage (claim windows + staging; concepts full-doc + entity band v3; strategy refs) | **Complete + pushed** (`c906e66` + `469e6b9`); §6 rollout run 2026-07-07, starved 10 → 2 |
+| ADR-0057 review-queue reconciliation (symmetric auto-withdrawal + preflight-gated catch-up sweep; closes the ADR-0055 deferral) | **Complete + pushed** (`afdfc0e` + `9d29c55`); sweep run 2026-07-07, queue 1380 → 1142 |
+| ADR-0058 per-source review flow (source lens + batch decide + approve-with-amendments + human-add) | **Complete + pushed** (`afdfc0e` + `0d2d3a0`); live UI verified — **W1 family complete** |
 
 ## Next step
 
-**Last shipped (all pushed, tip `469e6b9`): ADR-0056 tier-2 document-complete extraction coverage**,
-closing UAT finding F3 (the 12k-char head bias — 10 of 23 substantive live sources concept-starved).
-Differentiated per pass: **claims** = `chunk-greedy-v1` windows (greedy runs of consecutive normalized
-chunks, full-span budget, never split a chunk, no overlap; quotes located **inside window text** then
-offset-translated; "segment i of N" prompt with section context inside an untrusted, entity-encoded
-`<segment_metadata>` delimiter) + **stage-before-replace** (all windows must parse before any
-supersede; failure preserves the old layer — stale-but-visible over silently-absent; supersedes the
-old retract-first block); **concepts/entities** = one full-document call up to
-`ENRICH_CONCEPT_INPUT_MAX_CHARS` (`coverage: truncated` marker above cap) + the v3 **entity soft
-band** (~25 central entities). Strategy refs `chunk-greedy-v1:{window}` / `full-doc-v1:{cap}` enter
-fingerprint AND cache key as a composed component (`LLMClient.parse(strategy_ref=…)`); both knobs are
-cost-bearing semantic knobs (change = vault-wide restale). Fail-closed window planning
-(`window_planning_failed`, no whole-doc fallback). 3 external review rounds (untrusted metadata,
-fail-closed, delimiter-escape entity-encoding).
+**Last shipped (all pushed, tip `0d2d3a0`): the W1 review-flow family** — grill → two ADRs →
+live rollout → verified UI, closing the semantic-layer bottleneck (nothing promoted because the
+1380-item queue was unreviewable).
 
-**§6 rollout RUN on the live vault (2026-07-07, billable):** claims 422 → **1184** (73 windows,
-0 staging failures, 163 ungroundable drops ~12%), concepts 121 → **222**, `concept_starved` 10 → **2**,
-all validators green. **9 of the starved-10 fixed**, incl. the Spanish doc (its zero-node mystery was
-coverage) and the 137KB quantum monitor (240 claims / 14 concepts).
+- **ADR-0057 review-queue reconciliation** (`9d29c55`): one shared decision function reconciles a
+  node's unresolved extraction-caused items with its state in BOTH directions (tombstone →
+  withdraw the pending promote; resurrection → withdraw the recompose-filed deprecation), called
+  by the `_recompose_node` hook going forward AND by the key-free catch-up sweep
+  `scripts/reconcile_reviews.py`. Deprecation ownership keys on stored provenance
+  (`proposal.reason_code: "no_active_mentions"`; exact legacy prose accepted by the sweep only) —
+  never node state (lint's under-supported deprecates would mass-misfire) — with the same-subject
+  ownership rule (`review_id = hash(type|subject)` collisions: first filer owns the reason).
+  Status-based reasons require graph == page agreement (page = authority, ADR-0030; edges are
+  graph-SoT, ADR-0029); the sweep is preflight-gated fail-closed (DB exists / schema matches /
+  ≥1 node / projection valid over reviewed nodes → else exit non-zero, nothing withdrawn).
+  **Sweep run on the live vault: 238 withdrawn, queue 1380 → 1142.** Closes the ADR-0055 deferral.
+- **ADR-0058 per-source review flow** (`0d2d3a0`): a high-volume review **lens** over
+  extraction-caused items (flat queue stays canonical). `/ui/reviews/sources` lists sources in
+  manifest `discovered_at` order; each screen shows the source's promote candidates (multi-source
+  candidates appear on every mentioning screen, first decision resolves globally), subtype items,
+  and a "Retired by re-extraction" section (deterministic only: recompose provenance + zero active
+  mentions + superseded history `H == {S}`). ONE batch form per source loops the existing
+  single-item primitives (untouched = pending; per-item skip-with-reason; server-side visible-row
+  scope guard — a forged rid can't launder a flat-queue decision). **Approve-with-amendments**
+  (promote-only: title/aliases/description; frozen id, promote executor owns the slug/page move +
+  Source-page fan-out; `draft_amendments` preserved on defer). **Human-add producer path**
+  (immediate candidate + anchorless `asserted_by: human` mention + pre-approved promote item +
+  `-human-added-` audit + index rebuild; slug-collision and rejected-slot blocks write nothing).
+  Live-verified read-only: 25 sources · 741 attributable items.
+
+**Operator loop now available:** start the app → `/ui/reviews/sources` → batch-decide source by
+source → `Apply…` (dry-run then apply) promotes approved candidates → synthesis/graph channels
+unlock as concepts turn active.
 
 **Open finding F5 (forensics done, cached raw responses read):** the two residual zero-concept
 sources expose a **taxonomy-misrouting failure mode** — the nursing-AI PDF's model response filed its
@@ -162,16 +187,18 @@ tail on short queries (`vector_prefers_irrelevant_keyword_silent` class — sema
 fusion). `/query` grounding filters it; cost = prompt tokens + slot displacement. Candidate slice:
 reference-chunk tagging/down-ranking (eval-gated per ADR-0038).
 
-**NEXT SLICE (user-agreed): W1 review-flow UX grill.** The pending queue (~1380 items) is now the
-semantic-layer bottleneck: nothing promotes → no active concepts → no synthesis/graph channel. The
-grill MUST pull in the ADR-0055-deferred **auto-withdrawal-on-retraction** governance micro-slice
-(bulk dispositions and stale-promote withdrawal are the same design space). Also queued by user:
-W2 Obsidian readability (id-titled pages → display-text links/aliases), W3 local-model-first pass +
-commercial escalation, HF weight-download/offline policy (own knob, **not** `EMBEDDING_ALLOW_CLOUD`),
-dead-surface cleanup (unused templates, empty `app/frontend/`, compose `qdrant`; align CLAUDE/AGENTS
-"use templates" wording), F5 v4-prompt micro-slice, F4 reference-chunk slice.
+**NEXT (user to pick, each starts with a `grill-phase`):** W2 Obsidian readability (id-titled pages →
+display-text links/aliases), W3 local-model-first pass + commercial escalation, F5 v4-prompt
+micro-slice, F4 reference-chunk slice, HF weight-download/offline policy (own knob, **not**
+`EMBEDDING_ALLOW_CLOUD`), dead-surface cleanup (unused templates, empty `app/frontend/`, compose
+`qdrant`; align CLAUDE/AGENTS "use templates" wording).
 
 **Deferred options (each starts with a `grill-phase`):**
+- **ADR-0058 named deferrals** — guarded sweep shortcut ("Approve N unchanged candidate nodes",
+  constraints pinned in the ADR), biggest-queue-first index sort, rename of ACTIVE nodes
+  (amendments work pre-promotion only), free-text quote-to-locate for human-added mentions,
+  extractor alias resolution (the amended-title alias-divergence hazard's root fix), JSON twins for
+  the source views.
 - **Cross-builder untrusted-metadata hardening** — `Title:` sits outside the untrusted delimiter in
   all four prompt builders (pre-existing, filename-derived); bumps four prompt versions = vault-wide
   restale, own rollout decision (named in ADR-0056 out-of-scope).
@@ -183,18 +210,21 @@ dead-surface cleanup (unused templates, empty `app/frontend/`, compose `qdrant`;
 - LLM-as-judge eval "analysis lane", scheduled eval runs, baseline-diff gating (all out of ADR-0042 v1);
   ADR-0054's named deferrals (glued-word/extractor-evaluation slice, key-free repair script,
   extractor-version lint); seam-overlap claims recall; tier-1 summary coverage; `coverage: truncated`
-  lint (markers ship, lint deferred — ADR-0056).
+  lint (markers ship, lint deferred — ADR-0056); ADR-0057's named deferrals (`reason_code` adoption
+  by the other deprecation producers, reconciliation of other review types, a reconciliation-drift
+  lint).
 
-**Closed since this doc last tracked them:** ADR-0054 (de-hyphenation + full vault repair), ADR-0055
-(tier-2 contract), ADR-0056 (document-complete coverage + rollout), the first-ever live vector index,
-and UAT run 2 (findings F1–F3 fixed; F4/F5 logged above). Round-by-round detail may additionally live
-in a Claude Code session's private per-project memory tracker (external session state, not a repo
-path); the on-disk authority is `git log` + the ADRs.
+**Closed since this doc last tracked them:** the whole W1 family (ADR-0057 reconciliation + live
+sweep, ADR-0058 per-source review flow + live UI), on top of ADR-0054/0055/0056 and UAT run 2
+(F1–F3 fixed; F4/F5 logged above). Round-by-round detail may additionally live in a Claude Code
+session's private per-project memory tracker (external session state, not a repo path); the on-disk
+authority is `git log` + the ADRs.
 
 **Operate it** (`docs/Operations.md`): `POST /jobs/lint|stale-check|reindex` (key-free, detect-and-propose);
-review at `/ui/reviews`; apply via `POST /reviews/apply`. **LLM producers** (need `ANTHROPIC_API_KEY`):
-`scripts/extract_claims.py` → `extract_concepts.py` → `promote.py` → `detect_contradictions.py` →
-`generate_synthesis.py`. Validate: `scripts/validate_all.py`.
+review at `/ui/reviews` (flat queue) or `/ui/reviews/sources` (per-source flow, ADR-0058); apply via
+`POST /reviews/apply`; reconcile stale items via `scripts/reconcile_reviews.py` (key-free, idempotent).
+**LLM producers** (need `ANTHROPIC_API_KEY`): `scripts/extract_claims.py` → `extract_concepts.py` →
+`promote.py` → `detect_contradictions.py` → `generate_synthesis.py`. Validate: `scripts/validate_all.py`.
 
 ## Standing rules (do not violate)
 
@@ -262,7 +292,22 @@ call + entity soft band (~25) + `coverage: truncated` marker; strategy refs
 `chunk-greedy-v1:{window}` / `full-doc-v1:{cap}` composed into fingerprint + cache identity via
 `LLMClient.parse(strategy_ref=…)`; cost-bearing semantic knobs `ENRICH_CLAIM_WINDOW_CHARS` /
 `ENRICH_CONCEPT_INPUT_MAX_CHARS`; untrusted entity-encoded `<segment_metadata>`; opt-in billable
-rollout, acceptance = starved-10 → 2 with F5 logged) —
+rollout, acceptance = starved-10 → 2 with F5 logged),
+0057 (**review-queue reconciliation** — symmetric auto-withdrawal of extraction-stale items via ONE
+shared decision function (`_recompose_node` hook + `scripts/reconcile_reviews.py` sweep);
+`proposal.reason_code: "no_active_mentions"` provenance keying (legacy prose = sweep-only shim);
+same-subject ownership rule; per-surface authority (status needs graph == page, resurrection reads
+edges alone); preflight-gated fail-closed sweep; unresolved = pending|deferred, terminal immutable;
+closes the ADR-0055 deferral),
+0058 (**per-source review flow** — lens over extraction-caused items, flat queue canonical;
+attribution: promotes via active mentions (multi-source shown everywhere, first decision global),
+subtype via `context.source_id`, retirements via recompose provenance + `H == {S}` over superseded
+mentions; source index in manifest `discovered_at` order, free jump; batch decide over the
+single-item primitives w/ server-side visible-row scope guard; approve-with-amendments
+(title/aliases/description, frozen id, executor-owned slug move + fan-out, `draft_amendments` on
+defer); human-add producer path (anchorless `asserted_by: human` mention, pre-approved promote,
+`-human-added-` audit, slug-collision + rejected-slot blocks, index rebuild; keyword waits for the
+normal reindex pass)) —
 full glossary entries in `CONTEXT.md` (round-by-round history may additionally be in a Claude Code
 session's private per-project memory tracker — external session state, not a repo path).
 
