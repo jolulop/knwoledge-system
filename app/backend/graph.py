@@ -370,6 +370,22 @@ def sources_for_node(conn: sqlite3.Connection, node_id: str) -> list[str]:
     ]
 
 
+def superseded_mention_sources(conn: sqlite3.Connection, node_id: str) -> list[str]:
+    """Distinct sources whose `mentions` of a node were superseded (retirement provenance).
+
+    The ADR-0058 retired-section attribution set `H`: a recompose-tombstoned node is shown
+    under source S only when this history is exactly `{S}` — multi-source or empty history
+    stays flat-queue-only.
+    """
+    return [
+        r["src_id"] for r in conn.execute(
+            "SELECT DISTINCT src_id FROM edges WHERE dst_id = ? AND edge_type = 'mentions' "
+            "AND status = 'superseded' ORDER BY src_id",
+            (node_id,),
+        )
+    ]
+
+
 def get_node(conn: sqlite3.Connection, node_id: str) -> dict[str, Any] | None:
     row = conn.execute(
         "SELECT node_id, node_type, slug, status FROM nodes WHERE node_id = ?", (node_id,)

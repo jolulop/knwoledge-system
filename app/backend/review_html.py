@@ -60,6 +60,7 @@ def _render_value(value: Any) -> str:
 def _nav() -> str:
     return ("<nav>"
             "<a href='/ui/reviews'>Queue</a>"
+            "<a href='/ui/reviews/sources'>Sources</a>"
             "<a href='/ui/reviews?status=approved'>Approved</a>"
             "<a href='/ui/reviews/apply'>Apply…</a>"
             "</nav>")
@@ -349,6 +350,204 @@ def render_apply_result(result: dict[str, Any]) -> str:
         body.append("<h2 class='err'>Failed validators</h2>")
         body.append(_render_value(result["failed_validators"]))
     return _page("Apply result", "".join(body))
+
+
+# --- per-source review flow (ADR-0058) --------------------------------------
+
+
+def _counts_cell(counts: dict[str, Any]) -> str:
+    return _h(" / ".join(f"{k}:{counts.get(k, 0)}"
+                         for k in ("remaining", "approved", "rejected", "deferred",
+                                   "added", "amended")))
+
+
+def render_sources_index(data: dict[str, Any]) -> str:
+    """The entry page: every reviewable source in manifest ingest order with counts; sources with
+    zero remaining items render greyed-out as done. 'Start review' jumps to the first source with
+    remaining items; every row stays clickable (a lens, not a locked wizard)."""
+    totals = data.get("totals") or {}
+    parts = [_nav(), "<h1>Review by source</h1>",
+             f"<p>{_h(totals.get('sources', 0))} sources · "
+             f"{_h(totals.get('remaining_overall', 0))} items remaining overall. "
+             "The <a href='/ui/reviews'>flat queue</a> remains canonical; this flow covers "
+             "extraction-caused items only.</p>"]
+    first = totals.get("first_remaining_source")
+    if first:
+        parts.append(f"<p><a href='/ui/reviews/sources/{_h(first)}'>"
+                     "<strong>Start review</strong></a> (first source with remaining items)</p>")
+    else:
+        parts.append("<p><em>No source-attributable items remaining.</em></p>")
+    rows = ["<tr><th>#</th><th>source</th><th>file</th><th>ingested</th>"
+            "<th>remaining / approved / rejected / deferred / added / amended</th></tr>"]
+    for i, s in enumerate(data.get("sources") or [], start=1):
+        sid = _h(s.get("source_id"))
+        remaining = (s.get("counts") or {}).get("remaining", 0)
+        style = "" if remaining else " style='color:#999'"
+        rows.append(
+            f"<tr{style}><td>{i}</td>"
+            f"<td><a href='/ui/reviews/sources/{sid}'>{sid}</a></td>"
+            f"<td>{_h(s.get('filename'))}</td><td>{_h(s.get('discovered_at'))}</td>"
+            f"<td>{_counts_cell(s.get('counts') or {})}{'' if remaining else ' — done'}</td></tr>")
+    parts.append("<table>" + "".join(rows) + "</table>")
+    if data.get("global_remaining_by_type"):
+        by_type = ", ".join(f"{_h(t)}: {_h(n)}"
+                            for t, n in data["global_remaining_by_type"].items())
+        parts.append(f"<p>Global review items remaining (flat queue): {by_type}</p>")
+    return _page("Review by source", "".join(parts))
+
+
+def _decision_radios(rid: str) -> str:
+    rid = _h(rid)
+    return ("".join(
+        f"<label><input type='radio' name='decision_{rid}' value='{v}'{checked}> {label}</label> "
+        for v, label, checked in (("", "—", " checked"), ("approve", "approve", ""),
+                                  ("reject", "reject", ""), ("defer", "defer", ""))))
+
+
+def _amend_inputs(row: dict[str, Any]) -> str:
+    """Inline amendment fields (ADR-0058: title/aliases/description only), prefilled from a
+    preserved draft when the reviewer deferred with typed amendments."""
+    rid = _h(row.get("review_id"))
+    draft = row.get("draft_amendments") or {}
+    title = _h(draft.get("title") or "")
+    aliases = _h(", ".join(draft.get("aliases") or []))
+    description = _h(draft.get("description") or "")
+    return (f"<input type='text' name='amend_title_{rid}' value='{title}' size='18' "
+            "placeholder='amended title'> "
+            f"<input type='text' name='amend_aliases_{rid}' value='{aliases}' size='18' "
+            "placeholder='aliases, comma-sep'> "
+            f"<input type='text' name='amend_description_{rid}' value='{description}' size='24' "
+            "placeholder='description'>")
+
+
+def _decided_cell(row: dict[str, Any]) -> str:
+    meta = {"decision": row.get("status"), "decided_by": row.get("decided_by"),
+            "decided_at": row.get("decided_at")}
+    if row.get("decision_note"):
+        meta["note"] = row["decision_note"]
+    if row.get("amendments"):
+        meta["amendments"] = row["amendments"]
+    return _render_value(meta)
+
+
+def render_source_screen(data: dict[str, Any]) -> str:
+    """One source's screen: candidates + subtype items + retired section in ONE batch form
+    (untouched rows stay pending), plus the human-add form. Decided rows render read-only."""
+    sid = _h(data.get("source_id"))
+    totals = data.get("totals") or {}
+    counts = data.get("counts") or {}
+    parts = [
+        _nav(),
+        f"<h1>Source {sid}</h1>",
+        f"<p>{_h(data.get('filename'))} — source {_h(data.get('position'))} of "
+        f"{_h(totals.get('sources'))} · {_h(totals.get('remaining_overall'))} items remaining "
+        f"overall · this source: {_counts_cell(counts)}</p>",
+        "<p><a href='/ui/reviews/sources'>Source index</a>"
+        + (f" · <a href='/ui/reviews/sources/{_h(data['next_source'])}'>Next source</a>"
+           if data.get("next_source") else "") + "</p>",
+        "<p>Decisions are recorded only; effects are applied later via "
+        "<a href='/ui/reviews/apply'>Apply</a>. Untouched rows stay pending. Amendments "
+        "(promote items only) are frozen on approve and preserved as a draft on defer.</p>",
+        f"<form method='post' action='/ui/reviews/sources/{sid}/decide'>",
+    ]
+
+    def _section(title_txt: str, rows: list[dict[str, Any]], *, amendable: bool,
+                 columns: str) -> None:
+        parts.append(f"<h2>{_h(title_txt)} ({len(rows)})</h2>")
+        if not rows:
+            parts.append("<p><em>None.</em></p>")
+            return
+        table = [f"<tr>{columns}<th>decision</th></tr>"]
+        for row in rows:
+            rid = _h(row.get("review_id"))
+            info = f"<td><a href='/ui/reviews/{rid}'>{rid}</a></td>"
+            if row["kind"] == "candidate":
+                badges = []
+                if row.get("other_source_count"):
+                    badges.append(f"also mentioned by {row['other_source_count']} other source(s)")
+                if row.get("recurrence_eligible"):
+                    badges.append("recurrence-eligible (would auto-promote)")
+                info += (f"<td>{_h(row.get('title'))}</td><td>{_h(row.get('node_type'))}</td>"
+                         f"<td>{_h(', '.join(row.get('aliases') or []))}</td>"
+                         f"<td>{_h(row.get('node_status'))}</td>"
+                         f"<td>{_h('; '.join(badges))}</td>")
+            elif row["kind"] == "subtype":
+                info += (f"<td>{_h(row.get('name'))}</td>"
+                         f"<td>{_h(row.get('from_type'))} → {_h(row.get('to_type'))}</td>")
+            else:  # retired
+                info += (f"<td>{_h(row.get('title'))}</td><td>{_h(row.get('page'))}</td>"
+                         f"<td>{_h(row.get('node_status'))}</td>")
+            if row.get("decidable"):
+                cell = _decision_radios(str(row.get("review_id")))
+                if amendable:
+                    cell += "<br>" + _amend_inputs(row)
+                table.append(f"<tr>{info}<td>{cell}</td></tr>")
+            else:
+                table.append(f"<tr style='color:#777'>{info}<td>{_decided_cell(row)}</td></tr>")
+        parts.append("<table>" + "".join(table) + "</table>")
+
+    _section("Candidates mentioned by this source", data.get("candidates") or [],
+             amendable=True,
+             columns="<th>review_id</th><th>title</th><th>type</th><th>aliases</th>"
+                     "<th>status</th><th>notes</th>")
+    _section("Subtype changes from this source", data.get("subtype_items") or [],
+             amendable=False,
+             columns="<th>review_id</th><th>name</th><th>retype</th>")
+    _section("Retired by re-extraction", data.get("retired") or [], amendable=False,
+             columns="<th>review_id</th><th>title</th><th>page</th><th>status</th>")
+    parts.append("<p><label>Note (applies to every decision this submit): "
+                 "<input type='text' name='note' size='40'></label></p>"
+                 "<button type='submit'>Record marked decisions</button></form>")
+
+    parts.append(
+        "<h2>Add a missed concept/entity</h2>"
+        "<p>Creates the candidate immediately (producer act) with an anchorless "
+        "<code>asserted_by: human</code> mention and a pre-approved promotion — apply still "
+        "promotes it. A previously rejected promotion blocks the add (reopen it explicitly).</p>"
+        f"<form method='post' action='/ui/reviews/sources/{sid}/add'>"
+        "<p><label>Title: <input type='text' name='title' size='30' required></label> "
+        "<label>Type: <select name='node_type'>"
+        + "".join(f"<option value='{t}'>{t}</option>"
+                  for t in ("concept", "person", "organization", "project", "entity"))
+        + "</select></label></p>"
+        "<p><label>Aliases (comma-sep): <input type='text' name='aliases' size='30'></label></p>"
+        "<p><label>Description: <input type='text' name='description' size='50'></label></p>"
+        "<button type='submit'>Add candidate</button></form>")
+
+    if data.get("global_remaining_by_type"):
+        by_type = ", ".join(f"{_h(t)}: {_h(n)}"
+                            for t, n in data["global_remaining_by_type"].items())
+        parts.append(f"<p>Global review items remaining (<a href='/ui/reviews'>flat queue</a>): "
+                     f"{by_type}</p>")
+    return _page(f"Source {data.get('source_id')}", "".join(parts))
+
+
+def render_source_decide_result(source_id: str, results: list[dict[str, Any]]) -> str:
+    """Per-item batch results (recorded vs skipped-with-reason; never a batch abort)."""
+    sid = _h(source_id)
+    recorded = sum(1 for r in results if r.get("recorded"))
+    parts = [
+        _nav(),
+        f"<h1>Batch decisions — source {sid}</h1>",
+        f"<p>{_h(recorded)} recorded, {_h(len(results) - recorded)} skipped/no-op.</p>",
+        f"<p><a href='/ui/reviews/sources/{sid}'>Back to source</a> · "
+        "<a href='/ui/reviews/sources'>Source index</a> · "
+        "<a href='/ui/reviews/apply'>Apply…</a></p>",
+    ]
+    if not results:
+        parts.append("<p><em>No decisions were marked.</em></p>")
+    else:
+        rows = ["<tr><th>review_id</th><th>action</th><th>recorded</th>"
+                "<th>status / skip reason</th></tr>"]
+        for r in results:
+            rid = _h(r.get("review_id"))
+            outcome = _h(r.get("skip_reason") or r.get("status") or "")
+            amended = " (amended)" if r.get("amended") else ""
+            rows.append(f"<tr><td><a href='/ui/reviews/{rid}'>{rid}</a></td>"
+                        f"<td>{_h(r.get('action'))}</td><td>{_h(r.get('recorded'))}</td>"
+                        f"<td>{outcome}{_h(amended)}</td></tr>")
+        parts.append("<table>" + "".join(rows) + "</table>")
+    return _page(f"Batch decisions — {source_id}", "".join(parts))
 
 
 # --- error -----------------------------------------------------------------

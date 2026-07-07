@@ -418,6 +418,11 @@ class ReviewDecisionRequest(BaseModel):
     # ADR-0044 supersede-via-UI: on an APPROVE of a resolve_contradiction, the winning claim_id (the
     # loser is superseded). Valid ONLY for that case — set on any other type / decision -> 400.
     winner: str | None = None
+    # ADR-0058 approve-with-amendments: on an APPROVE of a promote_candidate_node, the human's
+    # title/aliases/description corrections (applied by the promote executor at flip-to-active; the
+    # node id stays frozen). On a DEFER of the same type the payload is preserved as a mutable
+    # draft on the pending item. Any other type / decision / field -> 400.
+    amendments: dict[str, Any] | None = None
 
 
 class ReviewDecisionResponse(BaseModel):

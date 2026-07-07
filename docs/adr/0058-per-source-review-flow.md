@@ -1,6 +1,6 @@
 # ADR-0058 — Per-source review flow: sequential source lens, batch decide, approve-with-amendments, human-add
 
-- **Status:** design-locked
+- **Status:** implemented
 - **Date:** 2026-07-07
 - **Drivers:** W1 grill — the user's framing requirement: candidate review processed on a
   single-source basis, sources reviewed sequentially, per-source UI showing all candidate items for
@@ -59,7 +59,8 @@ apply, ADR-0018) are labeled as such. One-owner-source and excluded-if-multi-sou
 ### 3. Sequence UX: ordered index, free jump
 
 An entry page lists ALL reviewable sources — including zero-item ones, greyed out as done — in
-**manifest ingest order** (creation/import time, tie-break `source_id`), each with counts
+**manifest ingest order** (the manifest's `discovered_at`, set once at first scan and preserved
+across rescans — NOT `created_at`, which is the file's mtime; tie-break `source_id`), each with counts
 (remaining / approved / rejected / deferred / added / amended). "Start review" / "Next source"
 jump to the first source with remaining attributable items; any row is directly clickable; a
 deferred item never blocks the next source. Progress copy: "source k of N · M items remaining
@@ -72,7 +73,14 @@ Each source screen is **one HTML form**: per-item approve/reject/defer radios de
 decision", inline amendment fields, one submit. The POST loops the EXISTING single-item ledger
 primitives (`_record_decision` path) — **no new ledger primitive**; it is orchestration only.
 Already-decided rows **skip with a per-item reason** (never 409-abort the batch — the batch
-variant of the ADR-0041 scope-guard posture); results are reported per item. Partial passes are
+variant of the ADR-0041 scope-guard posture); results are reported per item.
+
+**Batch scope guard (review round):** the endpoint recomputes the source view SERVER-side and
+permits only review ids actually visible on that source's screen; anything else — a forged or
+cross-source id, or a global type — skips with `not_attributable_to_source` before any ledger
+call, so the per-source lens can never launder a flat-queue decision. Decided visible rows stay
+permitted: a stale-form race resolves honestly through `_record_decision` (idempotent no-op or a
+409 flip-skip), never a misleading attribution error. Partial passes are
 normal; a source is done when zero attributable items remain. **Apply is unchanged**: still the
 explicit, queue-wide, dry-run-previewed end step (ADR-0040); the flow records decisions only.
 
@@ -126,7 +134,19 @@ The POST performs **producer-side writes immediately** — the same class of mut
 - **Purpose-named audit entry** in addition to the approval audit:
   `audit_log/<review_id>-human-added-<hex>.json` (actor, source_id, node_id/type,
   title/aliases/description, created-vs-reused node, edge identity, promote-item resolution
-  reference) — precedent: the `-withdrawn-`/`-merged-` entries.
+  reference) — precedent: the `-withdrawn-`/`-merged-` entries. The filename keys on the
+  node's promote-slot review id even for a mention-only add on an active node (one
+  deterministic key per node, whether or not an item was filed this time;
+  `promote_resolution: null` marks the mention-only case) — review round, accepted.
+- **Slug-collision guard (review round):** a CREATE whose derived slug is already owned by a
+  page with a DIFFERENT typed id blocks (`slug_collision`) before any graph/wiki/review/audit
+  write — different titles can hash to different ids yet normalize to the same slug; the
+  promote executor's `amended_slug_collision` mirror.
+- **Index freshness (review round):** a successful add rebuilds `wiki/index.md` (the same
+  best-effort producer seam `extract_concepts`/`promote` use; surfaced as `index_rebuilt`).
+  The KEYWORD index deliberately stays stale until the normal reindex pass (`/jobs/reindex`,
+  the apply chain, `reindex_keyword.py`) — no producer refreshes it synchronously; documented
+  exception, matching every other producer.
 - **Anchorless mention, stated posture:** the human mention carries NO evidence anchor in v1. This
   is not a schema exception — evidence fields are nullable (`graph.py` edges schema),
   `validate_graph` rejects only half-specified ranges, the LLM path already writes anchorless
@@ -164,8 +184,12 @@ projector registry, sharing its primitives; nothing in the HTML layer becomes au
 - Human-add matrix: new candidate / existing candidate (mention + reuse) / already-active
   (mention only, no promote item) / subtype collision routes to `change_entity_subtype` /
   cross-type conflict deferred (no write) / terminal REJECTED promote slot blocks with the
-  prior-rejection message (no reuse, no reopen side effect, no parallel subject). Audit entry
-  contents pinned.
+  prior-rejection message (no reuse, no reopen side effect, no parallel subject) / slug
+  collision (same slug, different id) blocks with zero partial writes. Audit entry contents
+  pinned. A successful add rebuilds `wiki/index.md` (candidate listed; `index_rebuilt`).
+- Batch scope guard: a forged POST naming a valid-but-not-visible promote id skips
+  `not_attributable_to_source` with no ledger mutation; a global-type id (e.g.
+  `merge_entities`) likewise; a decided visible row re-sent is an idempotent no-op row.
 - Validators green over anchorless human mentions (`validate_graph`, projection, wiki).
 - Batch submit: partial decisions recorded, untouched items stay pending, already-decided rows
   skip-with-reason, no 409 abort; per-item results rendered.

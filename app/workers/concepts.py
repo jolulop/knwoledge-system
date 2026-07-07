@@ -111,7 +111,9 @@ def _read_node_meta(page_path: Path) -> dict[str, Any] | None:
             "confidence": fm.get("confidence", "low"),
             # ADR-0052: preserve a spin-off's split lineage across re-renders (page-authoritative).
             "split_from": fm.get("split_from"),
-            "split_review_id": fm.get("split_review_id")}
+            "split_review_id": fm.get("split_review_id"),
+            # ADR-0058: preserve the page-owned human description across re-renders.
+            "description": fm.get("description")}
 
 
 def _rebuild_index(root: Path) -> bool:
@@ -162,6 +164,7 @@ def _recompose_node(gconn, *, node_id, wiki_dir, reviews_dir, now, text_hint=Non
         "status": status, "duplicates": graph.active_duplicates(gconn, node_id),
         "split_from": (existing or {}).get("split_from"),               # ADR-0052: preserve spin-off lineage
         "split_review_id": (existing or {}).get("split_review_id"),
+        "description": (existing or {}).get("description"),            # ADR-0058: preserve human description
     }), encoding="utf-8")
     graph.upsert_node(gconn, node_id=node_id, node_type=node_type, slug=slug,
                       status=status, now=now)
@@ -213,6 +216,7 @@ def recompose_semantic_node_page(
         "duplicates": graph.active_duplicates(gconn, node_id),
         "split_from": meta.get("split_from"),                           # ADR-0052: preserve spin-off lineage
         "split_review_id": meta.get("split_review_id"),
+        "description": meta.get("description"),                        # ADR-0058: preserve human description
     }, review_status=review_status)
     # Write only when content differs (avoid churn; ADR-0041). confidence is page-owned, preserved.
     # Returns "written" only when the page actually changed, "unchanged" otherwise (the graph node-status

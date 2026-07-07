@@ -560,6 +560,9 @@ def render_concept_page(node: dict[str, Any], *, review_status: str | None = Non
         # nothing (byte-stable, no fingerprint churn) and any re-render must thread these through.
         *([f'split_from: "{node["split_from"]}"'] if node.get("split_from") else []),
         *([f'split_review_id: "{node["split_review_id"]}"'] if node.get("split_review_id") else []),
+        # ADR-0058: page-owned human description (approve-with-amendments) — optional and
+        # page-preserved like split lineage; every re-render must thread it through.
+        *([f'description: "{_fm_quote(node["description"])}"'] if node.get("description") else []),
         'input_fingerprint: ""',
         "---",
     ]
@@ -573,6 +576,7 @@ def render_concept_page(node: dict[str, Any], *, review_status: str | None = Non
         summary = f"{node_type.capitalize()} with no active mentions — {review_note}."
         mentioned = [f"_No active source mentions; {review_note}._"]
     alias_lines = [f"- {_delink(a)}" for a in aliases] if aliases else ["_None._"]
+    description = node.get("description")
     body = [
         "",
         f"# {_delink(title)}",
@@ -580,6 +584,7 @@ def render_concept_page(node: dict[str, Any], *, review_status: str | None = Non
         f"> [!summary] {label.capitalize()} {node_type}",
         f"> {summary}",
         "",
+        *(["## Description", "", _delink(str(description)), ""] if description else []),
         "## Aliases",
         "",
         *alias_lines,

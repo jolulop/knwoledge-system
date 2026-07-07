@@ -80,7 +80,12 @@ KS=/home/jolulop/code/knowledge-system
 Or run the passes directly as one-shot scripts under `systemd` timers — same endpoints, same job records.
 Each pass writes a job row to `db/jobs.sqlite` and appends `wiki/log.md`, so progress survives restarts
 (state is on disk, never chat context). **Review the queue** (`/ui/reviews`) and **apply** on your own
-cadence — nothing is applied automatically.
+cadence — nothing is applied automatically. For high-volume candidate review, the **per-source flow**
+(`/ui/reviews/sources`, ADR-0058) walks the sources in ingest order — each screen batch-decides that
+source's promotes/subtype changes/retirements, supports approve-with-amendments (title/aliases/
+description) and human-added candidates; the flat queue stays canonical for everything cross-source.
+A human-added candidate rebuilds `wiki/index.md` immediately; its **keyword** rows follow the next
+reindex pass (`/jobs/reindex` or the apply chain) like every other producer's output.
 
 ## Lint quality heuristics — remediation codes (ADR-0037, ADR-0055)
 

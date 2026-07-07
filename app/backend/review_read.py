@@ -1385,3 +1385,248 @@ def get_review(
         if conn is not None:
             conn.close()
     return {"item": item, "preview": preview}
+
+
+# --- per-source review flow (ADR-0058) ---------------------------------------
+
+# Concept/entity-family scope of the flow; everything else stays in the flat queue.
+_FLOW_FAMILY = frozenset({"concept", "entity", "person", "organization", "project"})
+# Recompose provenance gate for the "Retired by re-extraction" section (ADR-0057 decision 2:
+# the stable reason_code, plus the exact legacy prose constant for pre-ADR-0057 items).
+_FLOW_REASON_CODE = "no_active_mentions"
+_FLOW_LEGACY_REASON = "no active source mentions remain"
+_UNRESOLVED_STATUSES = ("pending", "deferred")
+
+
+def _family_page_meta(wiki_dir: Path | None) -> dict[str, dict[str, Any]]:
+    """One-shot page-authority scan: typed node id -> {title, status, aliases} (ADR-0030)."""
+    meta: dict[str, dict[str, Any]] = {}
+    if wiki_dir is None:
+        return meta
+    id_fields = {"Concepts": "concept_id", "Entities": "entity_id", "People": "person_id",
+                 "Organizations": "organization_id", "Projects": "project_id"}
+    for dir_name, id_field in id_fields.items():
+        page_dir = Path(wiki_dir) / dir_name
+        if not page_dir.is_dir():
+            continue
+        for path in sorted(page_dir.glob("*.md")):
+            try:
+                fm = parse_frontmatter(path.read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                continue
+            nid = fm.get(id_field)
+            if isinstance(nid, str) and nid:
+                aliases = fm.get("aliases")
+                meta[nid] = {"title": fm.get("title"), "status": fm.get("status"),
+                             "aliases": aliases if isinstance(aliases, list) else [],
+                             "description": fm.get("description")}
+    return meta
+
+
+def _flow_owns_deprecation(item: dict[str, Any]) -> bool:
+    if (item.get("context") or {}).get("node_type") not in _FLOW_FAMILY:
+        return False
+    proposal = item.get("proposal") or {}
+    return (proposal.get("reason_code") == _FLOW_REASON_CODE
+            or proposal.get("reason") == _FLOW_LEGACY_REASON)
+
+
+def _human_added_counts(reviews_dir: Path) -> Counter:
+    """source_id -> count of human-added audit entries (the per-source `added` counter)."""
+    counts: Counter = Counter()
+    audit = Path(reviews_dir) / "audit_log"
+    if not audit.is_dir():
+        return counts
+    for path in sorted(audit.glob("*-human-added-*.json")):
+        entry = _load_item(path)
+        sid = (entry or {}).get("source_id")
+        if isinstance(sid, str) and sid:
+            counts[sid] += 1
+    return counts
+
+
+def _item_row(item: dict[str, Any], kind: str) -> dict[str, Any]:
+    """The shared per-item row shape for the source screen (decidable vs read-only decided)."""
+    status = item.get("status")
+    return {
+        "kind": kind,
+        "review_id": item.get("review_id"),
+        "type": item.get("type"),
+        "status": status,
+        "decidable": status in _UNRESOLVED_STATUSES,
+        "decided_by": item.get("decided_by"),
+        "decided_at": item.get("decided_at"),
+        "decision_note": item.get("decision_note"),
+        "amendments": item.get("amendments"),
+        "draft_amendments": item.get("draft_amendments"),
+    }
+
+
+def _independent_pair(source_ids: list[str], prov: dict[str, dict[str, Any]]) -> bool:
+    provs = [prov.get(s, {}) for s in source_ids]
+    return any(manifests.independent_sources(provs[i], provs[j])
+               for i in range(len(provs)) for j in range(i + 1, len(provs)))
+
+
+def _source_flow(reviews_dir: Path, *, gconn: Any, wiki_dir: Path | None,
+                 manifests_dir: Path | None) -> dict[str, Any]:
+    """Assemble the whole ADR-0058 per-source model once (index + screen slice it).
+
+    Attribution: promotes via active `mentions` from the source; `change_entity_subtype` via
+    `context.source_id`; deprecations in the retired section only when deterministic
+    (recompose provenance + zero active mentions + superseded history `H == {S}`). Decided
+    items render read-only; the flat queue stays canonical for everything unattributed.
+    """
+    valid, _skipped = manifests.valid_manifests(manifests_dir) if manifests_dir else ([], [])
+    ordered = sorted(valid, key=lambda m: (str(m.get("discovered_at") or ""), m["source_id"]))
+    prov = {m["source_id"]: manifests.get_provenance(m) for m in valid}
+
+    all_items: list[dict[str, Any]] = []
+    for dir_name in ("pending", "approved", "rejected"):
+        items, _p, _s = _scan_dir(reviews_dir, dir_name)
+        all_items.extend(items)
+    promote_by_node: dict[str, dict[str, Any]] = {}
+    subtype_by_source: dict[str, list[dict[str, Any]]] = {}
+    flow_deprecations: list[dict[str, Any]] = []
+    unresolved_unattributed: list[dict[str, Any]] = []
+    for it in all_items:
+        rtype = it.get("type")
+        if rtype == "promote_candidate_node":
+            nid = (it.get("subject") or {}).get("node_id")
+            if isinstance(nid, str) and nid:
+                promote_by_node[nid] = it
+        elif rtype == "change_entity_subtype":
+            sid = (it.get("context") or {}).get("source_id")
+            if isinstance(sid, str) and sid:
+                subtype_by_source.setdefault(sid, []).append(it)
+        elif rtype == "deprecate_wiki_page" and _flow_owns_deprecation(it):
+            flow_deprecations.append(it)
+        if it.get("status") in _UNRESOLVED_STATUSES:
+            unresolved_unattributed.append(it)   # pruned below once attribution is known
+
+    pages = _family_page_meta(wiki_dir)
+    added_counts = _human_added_counts(reviews_dir)
+    attributed_rids: set[str] = set()
+    sources: list[dict[str, Any]] = []
+    node_info_cache: dict[str, dict[str, Any]] = {}
+
+    def _node_info(nid: str, node_type: str) -> dict[str, Any]:
+        if nid not in node_info_cache:
+            mention_sources = graph.sources_for_node(gconn, nid) if gconn is not None else []
+            page = pages.get(nid) or {}
+            node_info_cache[nid] = {
+                "node_id": nid, "node_type": node_type,
+                "title": page.get("title"), "node_status": page.get("status"),
+                "aliases": page.get("aliases") or [], "description": page.get("description"),
+                "mention_sources": mention_sources,
+                "recurrence_eligible": _independent_pair(mention_sources, prov),
+            }
+        return node_info_cache[nid]
+
+    for m in ordered:
+        sid = m["source_id"]
+        candidates: list[dict[str, Any]] = []
+        if gconn is not None:
+            for mention in graph.mentions_for_source(gconn, sid):
+                if mention["node_type"] not in _FLOW_FAMILY:
+                    continue
+                item = promote_by_node.get(mention["dst_id"])
+                if item is None:
+                    continue
+                info = _node_info(mention["dst_id"], mention["node_type"])
+                row = _item_row(item, "candidate") | info
+                row["other_source_count"] = max(len(info["mention_sources"]) - 1, 0)
+                candidates.append(row)
+        subtype_rows = [_item_row(it, "subtype")
+                        | {"node_id": (it.get("subject") or {}).get("node_id"),
+                           "to_type": (it.get("subject") or {}).get("to_type"),
+                           "from_type": (it.get("context") or {}).get("from_type"),
+                           "name": (it.get("context") or {}).get("name")}
+                        for it in subtype_by_source.get(sid, [])]
+        retired: list[dict[str, Any]] = []
+        if gconn is not None:
+            for it in flow_deprecations:
+                nid = (it.get("subject") or {}).get("node_id")
+                if not (isinstance(nid, str) and nid):
+                    continue
+                if graph.sources_for_node(gconn, nid):
+                    continue                                   # mentions live: not retired
+                if graph.superseded_mention_sources(gconn, nid) != [sid]:
+                    continue                                   # H != {S}: stays flat-queue-only
+                page = pages.get(nid) or {}
+                retired.append(_item_row(it, "retired")
+                               | {"node_id": nid, "title": page.get("title"),
+                                  "node_status": page.get("status"),
+                                  "page": (it.get("subject") or {}).get("page")})
+        rows = candidates + subtype_rows + retired
+        attributed_rids.update(str(r["review_id"]) for r in rows)
+        counts = Counter(r["status"] for r in rows)
+        amended = sum(1 for r in rows if r.get("amendments"))
+        sources.append({
+            "source_id": sid,
+            "filename": m.get("original_filename"),
+            "discovered_at": m.get("discovered_at"),
+            "candidates": candidates, "subtype_items": subtype_rows, "retired": retired,
+            "counts": {"remaining": counts.get("pending", 0),
+                       "approved": counts.get("approved", 0),
+                       "rejected": counts.get("rejected", 0),
+                       "deferred": counts.get("deferred", 0),
+                       "added": added_counts.get(sid, 0),
+                       "amended": amended},
+        })
+
+    # Distinct unresolved attributable items (a multi-source candidate counts once overall).
+    remaining_rids = {str(r["review_id"])
+                      for s in sources for r in (s["candidates"] + s["subtype_items"] + s["retired"])
+                      if r["status"] == "pending"}
+    global_by_type = Counter(str(it.get("type")) for it in unresolved_unattributed
+                             if str(it.get("review_id")) not in attributed_rids)
+    first_remaining = next((s["source_id"] for s in sources if s["counts"]["remaining"]), None)
+    return {
+        "graph_available": gconn is not None,
+        "sources": sources,
+        "totals": {"sources": len(sources), "remaining_overall": len(remaining_rids),
+                   "first_remaining_source": first_remaining},
+        "global_remaining_by_type": dict(sorted(global_by_type.items())),
+    }
+
+
+def source_review_index(reviews_dir: Path, *, graph_db: Path | None = None,
+                        wiki_dir: Path | None = None,
+                        manifests_dir: Path | None = None) -> dict[str, Any]:
+    """The source index (entry page): every reviewable source in manifest ingest order with counts."""
+    conn = _open_graph_readonly(graph_db)
+    try:
+        flow = _source_flow(reviews_dir, gconn=conn, wiki_dir=wiki_dir, manifests_dir=manifests_dir)
+    finally:
+        if conn is not None:
+            conn.close()
+    for s in flow["sources"]:                      # the index is counts-only
+        for key in ("candidates", "subtype_items", "retired"):
+            s.pop(key)
+    return flow
+
+
+def source_review_view(reviews_dir: Path, source_id: str, *, graph_db: Path | None = None,
+                       wiki_dir: Path | None = None,
+                       manifests_dir: Path | None = None) -> dict[str, Any] | None:
+    """One source's screen model (rows + position + progress), or None for an unknown source."""
+    conn = _open_graph_readonly(graph_db)
+    try:
+        flow = _source_flow(reviews_dir, gconn=conn, wiki_dir=wiki_dir, manifests_dir=manifests_dir)
+    finally:
+        if conn is not None:
+            conn.close()
+    ids = [s["source_id"] for s in flow["sources"]]
+    if source_id not in ids:
+        return None
+    pos = ids.index(source_id)
+    view = dict(flow["sources"][pos])
+    view["position"] = pos + 1
+    view["graph_available"] = flow["graph_available"]
+    view["totals"] = flow["totals"]
+    view["global_remaining_by_type"] = flow["global_remaining_by_type"]
+    view["next_source"] = next(
+        (s["source_id"] for s in flow["sources"]
+         if s["counts"]["remaining"] and s["source_id"] != source_id), None)
+    return view

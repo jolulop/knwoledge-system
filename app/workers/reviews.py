@@ -120,6 +120,7 @@ def resolve_review_item(
     decided_by: str = "auto",
     note: str = "",
     winner: str | None = None,
+    amendments: dict[str, Any] | None = None,
     now: str | None = None,
 ) -> bool:
     """Resolve a pending review item to approved/rejected and append an audit-log entry.
@@ -132,11 +133,19 @@ def resolve_review_item(
     onto the approved item (`item["winner"]`, which `apply_resolved_contradictions` consumes) and into
     the terminal audit entry — conditionally, so ordinary approvals/rejections are unchanged. The caller
     validates that `winner` is valid (approve of a resolve_contradiction, in the pair, claims active).
+
+    `amendments` (ADR-0058): the approve-with-amendments payload (`title`/`aliases`/`description`),
+    persisted immutably onto the approved item (the promote executor consumes it at flip-to-active) and
+    into the audit entry — same conditional shape as `winner`. The caller validates it (approve of a
+    promote_candidate_node only, allowed fields only). Any mutable `draft_amendments` on the pending
+    file is dropped here: frozen into `amendments` on approve, discarded on reject.
     """
     if decision not in ("approved", "rejected"):
         raise ValueError(f"decision must be approved|rejected, got {decision!r}")
     if winner is not None and decision != "approved":  # defensive: winner is an approve-only sub-outcome
         raise ValueError(f"winner is only valid for an approved decision, got {decision!r}")
+    if amendments is not None and decision != "approved":  # defensive: amendments ride approvals only
+        raise ValueError(f"amendments are only valid for an approved decision, got {decision!r}")
     reviews_dir = Path(reviews_dir)
     # Already resolved -> idempotent no-op (no duplicate audit).
     if (reviews_dir / "approved" / f"{review_id}.json").exists() or \
@@ -147,9 +156,12 @@ def resolve_review_item(
         return False
     now = now or iso_now()
     item = json.loads(src.read_text(encoding="utf-8"))
+    item.pop("draft_amendments", None)  # ADR-0058: drafts never survive a terminal decision
     item.update(status=decision, decided_by=decided_by, decided_at=now, decision_note=note)
     if winner is not None:
         item["winner"] = winner
+    if amendments is not None:
+        item["amendments"] = amendments
     dest_dir = reviews_dir / decision
     dest_dir.mkdir(parents=True, exist_ok=True)
     (dest_dir / f"{review_id}.json").write_text(
@@ -164,6 +176,8 @@ def resolve_review_item(
     }
     if winner is not None:
         audit_entry["winner"] = winner
+    if amendments is not None:
+        audit_entry["amendments"] = amendments
     (audit / f"{review_id}-{decision}.json").write_text(
         json.dumps(audit_entry, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return True
@@ -227,6 +241,7 @@ def defer_review_item(
     *,
     decided_by: str = "human",
     note: str = "",
+    draft_amendments: dict[str, Any] | None = None,
     now: str | None = None,
 ) -> bool:
     """Defer a still-pending item: keep it in `pending/` with `status: deferred` + an audit entry.
@@ -238,6 +253,13 @@ def defer_review_item(
     the item is already deferred, already resolved (approved/rejected), or not pending. Returns True
     iff it deferred this call. `resolve_review_item` only does approved|rejected, so defer is its own
     review-service primitive (Phase 6 slice 6-2).
+
+    `draft_amendments` (ADR-0058): typed-but-undecided amendments preserved on the pending file so the
+    reviewer returns to the same edited form. MUTABLE (unlike everything else on the ledger): a re-defer
+    with a new draft updates it in place even when already deferred (that update alone returns False —
+    no status transition, no duplicate audit). Excluded from identity by construction (`review_id`
+    hashes only type|subject), never read by executors; `resolve_review_item` drops it on any terminal
+    decision.
     """
     reviews_dir = Path(reviews_dir)
     # An already-resolved item is a terminal human record — not deferrable.
@@ -249,8 +271,13 @@ def defer_review_item(
         return False
     item = json.loads(src.read_text(encoding="utf-8"))
     if item.get("status") == "deferred":
+        if draft_amendments is not None and item.get("draft_amendments") != draft_amendments:
+            item["draft_amendments"] = draft_amendments
+            src.write_text(json.dumps(item, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         return False  # idempotent: already deferred, no duplicate audit
     now = now or iso_now()
+    if draft_amendments is not None:
+        item["draft_amendments"] = draft_amendments
     item.update(status="deferred", decided_by=decided_by, decided_at=now, decision_note=note)
     src.write_text(json.dumps(item, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     audit = reviews_dir / "audit_log"

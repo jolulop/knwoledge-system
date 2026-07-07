@@ -5,12 +5,13 @@ import hashlib
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Form, HTTPException, Query
+from fastapi import FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 logger = logging.getLogger(__name__)
@@ -61,8 +62,8 @@ from app.llm.adapters import AdapterError
 from app.llm.cache import ResponseCache
 from app.llm.client import ConfigError, ParseError, build_client
 from app.workers import (
-    claims, contradictions, deprecations, duplicates, eval_answers, extract, intake, lint, merges,
-    promote, query, rekeys, retention, reviews, splits, synthesis, wiki,
+    claims, contradictions, deprecations, duplicates, eval_answers, extract, human_add, intake,
+    lint, merges, promote, query, rekeys, retention, reviews, splits, synthesis, wiki,
 )
 from app.workers.wiki_render import parse_frontmatter, render_query_page
 
@@ -454,6 +455,56 @@ def _require_active_claims(item: dict[str, Any]) -> None:
                 detail=f"claim {cid} is no longer active or its page is missing — cannot supersede")
 
 
+_AMENDMENT_FIELDS = frozenset({"title", "aliases", "description"})
+_AMEND_MAX_TITLE, _AMEND_MAX_ALIAS, _AMEND_MAX_ALIASES, _AMEND_MAX_DESCRIPTION = 200, 120, 16, 2000
+
+
+def _validate_amendments(decision: str, rtype: str,
+                         amendments: dict[str, Any]) -> dict[str, Any] | None:
+    """Normalize + validate the ADR-0058 amendments payload; 400 on any shape violation.
+
+    Valid ONLY for a promote_candidate_node on approve (frozen into the ledger) or defer
+    (preserved as a mutable draft). Allowed fields exactly title/aliases/description; a blank
+    title is treated as not-provided (a title can be corrected, never erased); a blank
+    description explicitly clears the page field. Returns the normalized payload, or None when
+    nothing effective was provided.
+    """
+    if rtype != "promote_candidate_node":
+        raise HTTPException(
+            status_code=400,
+            detail=f"amendments are only valid for promote_candidate_node, not {rtype}")
+    if decision not in ("approved", "deferred"):
+        raise HTTPException(
+            status_code=400,
+            detail="amendments are only valid on approve (recorded) or defer (draft)")
+    unknown = sorted(set(amendments) - _AMENDMENT_FIELDS)
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"unknown amendment field(s): {unknown}")
+    out: dict[str, Any] = {}
+    title = amendments.get("title")
+    if title is not None:
+        if not isinstance(title, str):
+            raise HTTPException(status_code=400, detail="amendment title must be a string")
+        title = re.sub(r"\s+", " ", title).strip()[:_AMEND_MAX_TITLE]
+        if title:
+            out["title"] = title
+    aliases = amendments.get("aliases")
+    if aliases is not None:
+        if not isinstance(aliases, list) or any(not isinstance(a, str) for a in aliases):
+            raise HTTPException(
+                status_code=400, detail="amendment aliases must be a list of strings")
+        out["aliases"] = [a.strip()[:_AMEND_MAX_ALIAS]
+                          for a in aliases if a.strip()][:_AMEND_MAX_ALIASES]
+    description = amendments.get("description")
+    if description is not None:
+        if not isinstance(description, str):
+            raise HTTPException(status_code=400, detail="amendment description must be a string")
+        # Canonical single-line prose (review round): whitespace collapsed at the boundary; an
+        # explicitly-blank description clears the page field.
+        out["description"] = re.sub(r"\s+", " ", description).strip()[:_AMEND_MAX_DESCRIPTION]
+    return out or None
+
+
 def _record_decision(
     review_id: str, decision: str, body: ReviewDecisionRequest | None
 ) -> dict[str, Any]:
@@ -465,6 +516,7 @@ def _record_decision(
     """
     note = body.note if body else ""
     winner = (body.winner if body else None) or None
+    amendments = (body.amendments if body else None) or None
     item, error = review_read.find_review(settings.reviews_dir, review_id)
     if item is None:
         raise HTTPException(status_code=404, detail=f"review not found: {review_id}")
@@ -475,6 +527,10 @@ def _record_decision(
     # check (page-frontmatter authority, graph-free) is a 409 and runs only when actually resolving.
     if winner is not None:
         _validate_supersede_winner(decision, rtype, item, winner)
+    # ADR-0058: amendments are ONLY valid on an approve (frozen) or defer (draft) of a
+    # promote_candidate_node — shape violations are 400, never silently ignored.
+    if amendments is not None:
+        amendments = _validate_amendments(decision, rtype, amendments)
     if current in ("approved", "rejected"):
         if current != decision:
             raise HTTPException(
@@ -482,14 +538,15 @@ def _record_decision(
                 detail=f"review {review_id} already decided as {current}; decisions are immutable")
         recorded, final = False, current  # idempotent: same terminal decision re-sent (winner unchanged)
     elif decision == "deferred":
-        recorded = reviews.defer_review_item(settings.reviews_dir, review_id, note=note)
+        recorded = reviews.defer_review_item(settings.reviews_dir, review_id, note=note,
+                                             draft_amendments=amendments)
         final = "deferred"
     else:
         if winner is not None:
             _require_active_claims(item)  # 409 if either Claim page is missing / not active
         recorded = reviews.resolve_review_item(
             settings.reviews_dir, review_id, decision=decision, decided_by="human", note=note,
-            winner=winner)
+            winner=winner, amendments=amendments if decision == "approved" else None)
         final = decision
     return {
         "review_id": review_id,
@@ -1175,6 +1232,154 @@ def ui_apply() -> HTMLResponse:
     except HTTPException as exc:
         return _html_error(exc)
     return HTMLResponse(review_html.render_apply_result(result))
+
+
+# --- per-source review flow (ADR-0058) — declared before /ui/reviews/{review_id} so
+# "sources" is never read as a review id. A high-volume LENS over extraction-caused items;
+# the flat queue above stays canonical. Graph-REQUIRED (attribution = mentions edges).
+
+_SOURCE_RID_RE = re.compile(r"^rev_[0-9a-f]{16}$")
+
+
+def _source_flow_unavailable() -> HTMLResponse:
+    return HTMLResponse(review_html.render_error(
+        503, "graph unavailable — the per-source flow needs the graph; use the flat queue"),
+        status_code=503)
+
+
+@app.get("/ui/reviews/sources", response_class=HTMLResponse)
+def ui_review_sources() -> HTMLResponse:
+    """The source index: every reviewable source in manifest ingest order with counts."""
+    data = review_read.source_review_index(
+        settings.reviews_dir, graph_db=settings.graph_db_path,
+        wiki_dir=settings.wiki_dir, manifests_dir=settings.manifests_dir)
+    if not data["graph_available"]:
+        return _source_flow_unavailable()
+    return HTMLResponse(review_html.render_sources_index(data))
+
+
+@app.get("/ui/reviews/sources/{source_id}", response_class=HTMLResponse)
+def ui_review_source_screen(source_id: str) -> HTMLResponse:
+    """One source's screen: its candidates + subtype items + retired section, one batch form."""
+    if not manifests.is_source_id(source_id):
+        return HTMLResponse(
+            review_html.render_error(404, f"unknown source: {source_id}"), status_code=404)
+    data = review_read.source_review_view(
+        settings.reviews_dir, source_id, graph_db=settings.graph_db_path,
+        wiki_dir=settings.wiki_dir, manifests_dir=settings.manifests_dir)
+    if data is None:
+        return HTMLResponse(
+            review_html.render_error(404, f"unknown source: {source_id}"), status_code=404)
+    if not data["graph_available"]:
+        return _source_flow_unavailable()
+    return HTMLResponse(review_html.render_source_screen(data))
+
+
+@app.post("/ui/reviews/sources/{source_id}/decide", response_class=HTMLResponse)
+async def ui_review_source_decide(source_id: str, request: Request) -> HTMLResponse:
+    """Batch decide (ADR-0058): one submit loops the EXISTING single-item primitives — no new
+    ledger primitive. Untouched rows stay pending; an already-decided/invalid row skips with a
+    per-item reason (never a 409 abort of the batch); results render per item.
+
+    Scope guard (review round, B1): the source view is recomputed SERVER-side and only row ids
+    actually visible on this source's screen are decidable here — a forged form naming a
+    global/cross-source item skips with `not_attributable_to_source` before any ledger call
+    (the per-source lens can never launder a flat-queue decision). Decided visible rows stay
+    permitted so a stale-form race resolves honestly via `_record_decision` (idempotent no-op
+    or 409 skip), not a misleading attribution error."""
+    if not manifests.is_source_id(source_id):
+        return HTMLResponse(
+            review_html.render_error(404, f"unknown source: {source_id}"), status_code=404)
+    view = review_read.source_review_view(
+        settings.reviews_dir, source_id, graph_db=settings.graph_db_path,
+        wiki_dir=settings.wiki_dir, manifests_dir=settings.manifests_dir)
+    if view is None:
+        return HTMLResponse(
+            review_html.render_error(404, f"unknown source: {source_id}"), status_code=404)
+    if not view["graph_available"]:
+        return _source_flow_unavailable()
+    visible = {str(r["review_id"])
+               for r in (view["candidates"] + view["subtype_items"] + view["retired"])}
+    form = await request.form()
+    note = str(form.get("note") or "").strip() or f"per-source flow: {source_id}"
+    results: list[dict[str, Any]] = []
+    for key in sorted(k for k in form.keys() if str(k).startswith("decision_")):
+        rid = str(key)[len("decision_"):]
+        action = str(form.get(key) or "")
+        if not action:
+            continue  # untouched = stays pending (ADR-0058 decision: no default decision)
+        if not _SOURCE_RID_RE.fullmatch(rid):
+            results.append({"review_id": rid, "action": action, "recorded": False,
+                            "skip_reason": "invalid review id"})
+            continue
+        if rid not in visible:
+            results.append({"review_id": rid, "action": action, "recorded": False,
+                            "skip_reason": "not_attributable_to_source"})
+            continue
+        decision = _UI_DECISIONS.get(action)
+        if decision is None:
+            results.append({"review_id": rid, "action": action, "recorded": False,
+                            "skip_reason": f"unknown action: {action}"})
+            continue
+        amendments: dict[str, Any] = {}
+        title = str(form.get(f"amend_title_{rid}") or "").strip()
+        aliases = str(form.get(f"amend_aliases_{rid}") or "").strip()
+        description = str(form.get(f"amend_description_{rid}") or "").strip()
+        if title:
+            amendments["title"] = title
+        if aliases:
+            amendments["aliases"] = [a.strip() for a in aliases.split(",") if a.strip()]
+        if description:
+            amendments["description"] = description
+        # Amendments ride approvals (frozen) and defers (draft) only; a reject discards them.
+        send = amendments if (amendments and decision in ("approved", "deferred")) else None
+        try:
+            out = _record_decision(rid, decision,
+                                   ReviewDecisionRequest(note=note, amendments=send))
+            results.append({"review_id": rid, "action": action, "recorded": out["decision_recorded"],
+                            "status": out["status"], "amended": bool(send)})
+        except HTTPException as exc:
+            results.append({"review_id": rid, "action": action, "recorded": False,
+                            "skip_reason": f"{exc.status_code}: {exc.detail}"})
+    return HTMLResponse(review_html.render_source_decide_result(source_id, results))
+
+
+@app.post("/ui/reviews/sources/{source_id}/add", response_model=None)
+def ui_review_source_add(
+    source_id: str, title: str = Form(""), node_type: str = Form("concept"),
+    aliases: str = Form(""), description: str = Form(""),
+) -> HTMLResponse | RedirectResponse:
+    """Human-add (ADR-0058): a PRODUCER-side act — candidate node + anchorless human mention +
+    page + a promote item recorded approved in one operation (the add IS the approval; the
+    normal executor promotes at apply). Blocked outcomes write nothing."""
+    if not manifests.is_source_id(source_id):
+        return HTMLResponse(
+            review_html.render_error(404, f"unknown source: {source_id}"), status_code=404)
+    gconn = _open_graph_safe()
+    if gconn is None:
+        return _source_flow_unavailable()
+    try:
+        result = human_add.add_candidate(
+            gconn, root=settings.root, source_id=source_id, node_type=node_type.strip(),
+            title=title, aliases=[a.strip() for a in aliases.split(",") if a.strip()],
+            description=description, wiki_dir=settings.wiki_dir,
+            reviews_dir=settings.reviews_dir)
+    finally:
+        gconn.close()
+    if result["outcome"] == "blocked":
+        reason = result["reason"]
+        if reason == "promotion_previously_rejected":
+            message = (f"this candidate's promotion was rejected by "
+                       f"{result.get('decided_by')} at {result.get('decided_at')} "
+                       f"(review {result.get('review_id')}). A rejection is a human governance "
+                       "record — reopen it explicitly from the item detail (ADR-0045) if you've "
+                       "changed your mind; it is never silently reused.")
+            return HTMLResponse(review_html.render_error(409, message), status_code=409)
+        status = 400 if reason.startswith("invalid") else \
+            404 if reason == "unknown_source" else 409
+        return HTMLResponse(
+            review_html.render_error(status, f"add blocked: {reason}"), status_code=status)
+    return RedirectResponse(f"/ui/reviews/sources/{source_id}", status_code=303)
 
 
 @app.get("/ui/reviews/{review_id}", response_class=HTMLResponse)
