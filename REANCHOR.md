@@ -1,6 +1,6 @@
 # REANCHOR — session status
 
-_Last updated: 2026-07-04. **Reanchor command:** "read REANCHOR.md and reanchor". Read this
+_Last updated: 2026-07-07. **Reanchor command:** "read REANCHOR.md and reanchor". Read this
 first after an app restart, then `wiki/index.md` if working in the vault._
 
 > [!warning] This is a periodically-refreshed snapshot and can lag the live state. The authoritative
@@ -12,14 +12,14 @@ first after an app restart, then `wiki/index.md` if working in the vault._
 
 Local-first **LLM Wiki** knowledge-system. Immutable `raw/` → derived `normalized/` →
 generated `wiki/` (gitignored, regenerable) → `db/` SQLite (graph, jobs, llm_cache) →
-`reviews/`, `policies/`. ADR-driven (`docs/adr/0001–0054`). See `CLAUDE.md` for the
+`reviews/`, `policies/`. ADR-driven (`docs/adr/0001–0056`). See `CLAUDE.md` for the
 critical rules and `CONTEXT.md` for the glossary.
 
 ## Where we are
 
 - **Branch:** `main` — local commits may sit unpushed on top of `origin/main`; run
   `git log --oneline origin/main..HEAD` for the live unpushed set (pushed tip at refresh time:
-  `5f109b8`; the ADR-0054 slice below lands on top of it).
+  `469e6b9`, branch in sync).
   The per-slice rhythm: grill (design-lock,
   docs-only) → implement (on "implement now") → test → external review (user pastes) → analyze+recommend+
   **wait** → fix → commit (user says so) → push.
@@ -67,25 +67,33 @@ critical rules and `CONTEXT.md` for the glossary.
     help. **Multi-chunk extension design-locked** (ADR-0038 §Multi-chunk, NOT yet implemented): chunk-level
     cases (`chunk:`/`near_miss:` phrase→citation-key, `chunk_disambiguation`), separate report blocks,
     chunk-granular per-channel diagnostic — the benchmark layer needed before any fusion tuning.
-- **Recent commits (all pushed, tip `5f109b8`):** `5f109b8` keyword-index zero-citable-row consistency
-  fix (the first UAT-found product bug: a `partial`/`needs_ocr` 0-chunk source failed the validator AND
-  degraded the runtime search gate) · `99c3d15` Dockerfile blessed-entrypoint CMD + Build Spec §6
-  implementation annotations · `8a641f4` UAT Guide
-  disposable-vault rework + doc-drift/security guards · `006e44a` **ADR-0053 in-process
-  FlagEmbedding BGE-M3 embedder** (supersedes ADR-0033 decision 1: TEI/Candle fell back to CPU on the
-  RTX 5090; in-process torch+FlagEmbedding is the default GPU backend, `local_http` stays as CPU/HTTP
-  fallback; torch overlay deliberately out-of-lock) · `c15bdd9` docs executor/CI-gate drift reconcile +
-  operational-drift test guards · `cb586d2`/`42078a0` docs & governance sync · `4d352b4`/`16ddae8`
-  ADR-0052 `split_entity` · `4db3f58` graph-boundary slug path-containment hardening ·
-  `152704d`/`3ab1577` ADR-0051 subtype rekey · `ce80064`/`4721c46` ADR-0050 merge (identity surgery).
-- **Tests/lint green:** `1166 passed, 2 skipped` (the opt-in `gpu`/`model` marks, ADR-0053), ruff clean,
-  **10** validators pass. Newest test files: `tests/test_dehyphenation.py` (ADR-0054 contract matrix +
-  e2e anchor-contract run), `tests/test_flagembedding_provider.py` (ADR-0053, torch-free
-  unit layer) and the identity-surgery family (`test_merge.py`/`test_rekey.py`/`test_split.py`);
+- **Recent commits (all pushed, tip `469e6b9`):** `469e6b9` **ADR-0056 tier-2 document-complete
+  extraction coverage** (claims `chunk-greedy-v1` windows + stage-before-replace, concepts full-doc
+  call + entity soft band v3, strategy refs in composed fingerprint/cache identity, untrusted
+  entity-encoded `<segment_metadata>`, fail-closed window planning; 3 review rounds) · `c906e66` its
+  design-lock · `7ef8c38` **ADR-0055 tier-2 extraction contract** (concept elicitation band +
+  entity-noise boundary, `concept_starvation` guard, `ENRICH_MAX_TOKENS` 4096, replacement-only
+  supersede) · `5040da3` UAT Guide §1 torch-overlay/clone-.env docs · `b6d446f` cache_key int-version
+  coercion fix · `0994321` **ADR-0054 PDF de-hyphenation at extraction** · `5f109b8` keyword-index
+  zero-citable-row consistency fix · `99c3d15` Dockerfile blessed CMD + Build Spec §6 annotations ·
+  `8a641f4` UAT Guide disposable-vault rework · `006e44a` **ADR-0053 in-process FlagEmbedding BGE-M3
+  embedder** (default GPU backend; `local_http` = CPU/HTTP fallback; torch overlay out-of-lock).
+- **Tests/lint green:** `1203 passed, 2 skipped` (the opt-in `gpu`/`model` marks, ADR-0053), ruff clean,
+  **10** validators pass. Newest test files: `tests/test_claim_windows.py` (ADR-0056: window-planner
+  matrix, window-local grounding, staging, delimiter-escape, identity), `tests/test_dehyphenation.py`
+  (ADR-0054), `tests/test_flagembedding_provider.py` (ADR-0053) and the identity-surgery family
+  (`test_merge.py`/`test_rekey.py`/`test_split.py`);
   `tests/test_operational_refs.py` carries the `_APPLY_TYPES`↔docs parity, no-CI-claim, wrapper-agnostic
-  bare-uvicorn (ADR-0009), and UAT-Guide drift guards (script refs, **method-aware** curl-target↔route
-  parity, EMBEDDING_-prefix strip contract, and the operator-doc **no-env-value-print** security lint —
-  AGENTS.md/security.yaml).
+  bare-uvicorn (ADR-0009), UAT-Guide drift guards (script refs, **method-aware** curl-target↔route
+  parity, EMBEDDING_-prefix strip contract, the operator-doc **no-env-value-print** security lint —
+  AGENTS.md/security.yaml), and the ADR-0056 rollout-chain + coverage-knob guards.
+- **LIVE VAULT (2026-07-07):** fully repaired + rolled out. All 23 sources re-extracted with
+  de-hyphenation; **vector index built for the first time** (716 chunks, BGE-M3); ADR-0055+0056
+  producers re-run billable: **1184 claims (was 422), 222 concepts (was 121), 356 entities,
+  2314 wiki pages, `concept_starved` 10 → 2**, coverage_truncated 0, all validators green.
+  **Pending review queue: ~1380 items** (many stale promotes for tombstoned nodes —
+  scope-guard-skipped at apply; W1 target). ADR-0038 baseline re-recorded: identical to the committed
+  reference (no drift from de-hyphenation).
 
 ## Viewing the vault (Obsidian)
 
@@ -114,58 +122,74 @@ critical rules and `CONTEXT.md` for the glossary.
 | Visibility family — ADR-0043 `hide_content` (source) · 0044 supersede-via-UI · 0045 reopen/re-decide · 0046 `hide_semantic_page` · 0047 `unhide_content`/`unhide_semantic_page` · 0048 claim hide/unhide · 0049 synthesis hide/unhide (+`evidence_hidden`) | **Complete + pushed** (visibility lifecycle now symmetric across sources/semantic/claims/synthesis) |
 | Identity-surgery family — ADR-0050 `merge_entities`/`merge_concepts` · 0051 `change_entity_subtype` (subtype rekey) · 0052 `split_entity` | **Complete + pushed** (`ce80064`/`152704d`/`4d352b4`; the rekeying class deferred by ADR-0041 is now shipped) |
 | ADR-0053 in-process FlagEmbedding BGE-M3 embedder (default GPU backend; `local_http` = CPU/HTTP fallback; torch overlay out-of-lock) | **Complete + pushed** (`006e44a`) |
-| ADR-0038 multi-chunk extension | **Design-locked, NOT implemented** (a deferred option, not the active slice) |
+| ADR-0038 multi-chunk extension (8 chunk-level cases in the committed reference baseline) | **Complete + pushed** (implemented 2026-06-25; earlier "not implemented" note here was stale) |
+| ADR-0054 PDF de-hyphenation at extraction | **Complete + pushed** (`0994321`); vault repair executed 2026-07-06 |
+| ADR-0055 tier-2 extraction contract (concept band + entity-noise boundary + starvation guard) | **Complete + pushed** (`7ef8c38`); live rollout verified |
+| ADR-0056 tier-2 document-complete coverage (claim windows + staging; concepts full-doc + entity band v3; strategy refs) | **Complete + pushed** (`c906e66` + `469e6b9`); §6 rollout run 2026-07-07, starved 10 → 2 |
 
 ## Next step
 
-**Last shipped (all pushed, tip `5f109b8`):** the keyword-index **zero-citable-row consistency fix** —
-the first real product bug found by disposable-vault UAT (`src_3c3da984d6489006`, a scanned
-`needs_ocr` PDF with 0 chunks failed `validate_index_consistency` and degraded the runtime
-unsafe-to-search gate; `_evidence_freshness` now allows fingerprint-without-FTS-rows only when the
-live chunk file re-parses to zero citable rows; a tamper regression pins the corruption branch).
-Before it: `99c3d15` (Dockerfile blessed CMD + Build Spec §6 annotations) · `8a641f4` (UAT Guide
-disposable-vault rework + doc-drift/security guards, incl. the env-value-print security lint).
+**Last shipped (all pushed, tip `469e6b9`): ADR-0056 tier-2 document-complete extraction coverage**,
+closing UAT finding F3 (the 12k-char head bias — 10 of 23 substantive live sources concept-starved).
+Differentiated per pass: **claims** = `chunk-greedy-v1` windows (greedy runs of consecutive normalized
+chunks, full-span budget, never split a chunk, no overlap; quotes located **inside window text** then
+offset-translated; "segment i of N" prompt with section context inside an untrusted, entity-encoded
+`<segment_metadata>` delimiter) + **stage-before-replace** (all windows must parse before any
+supersede; failure preserves the old layer — stale-but-visible over silently-absent; supersedes the
+old retract-first block); **concepts/entities** = one full-document call up to
+`ENRICH_CONCEPT_INPUT_MAX_CHARS` (`coverage: truncated` marker above cap) + the v3 **entity soft
+band** (~25 central entities). Strategy refs `chunk-greedy-v1:{window}` / `full-doc-v1:{cap}` enter
+fingerprint AND cache key as a composed component (`LLMClient.parse(strategy_ref=…)`); both knobs are
+cost-bearing semantic knobs (change = vault-wide restale). Fail-closed window planning
+(`window_planning_failed`, no whole-doc fallback). 3 external review rounds (untrusted metadata,
+fail-closed, delimiter-escape entity-encoding).
 
-**Latest slice: ADR-0054 de-hyphenation — grilled, design-locked and IMPLEMENTED (this slice's
-commit; check `git log`/`git status` for its push state).** UAT root cause: pypdf preserves `con-\ntributions`; the paragraph
-reflow collapsed it to `con- tributions` → exact-phrase keyword miss. In-tree: `dehyphenate()` in
-`app/workers/extractors/__init__.py` (ADR-0054 contract: Unicode word-chars, both-lowercase → drop
-hyphen, otherwise keep it; U+00AD strip; paragraph-bounded; accepted `best-\nknown`→`bestknown` error
-pinned), applied in the PDF extractor before reflow; `EXTRACT_CODE_VERSION = 1` recorded in every
-extraction log (observability only); multi-line PDF test fixture; `tests/test_dehyphenation.py`
-(contract matrix incl. both soft-hyphen branches + error-path log marker + e2e incl. the
-`markdown[start:end]==chunk.text` anchor check). **Verified against
-the originating UAT document** — the exact sentence now extracts verbatim. Docs in the same slice:
-ADR-0054, CONTEXT.md Extraction Log entry, UAT Guide step-8 notes (query-needs-key/503 detail,
-ranked-top-20, grep-normalized-before-phrase-search). Operator repair after commit is **opt-in**
-(ADR-0054 §3): `extract_sources.py --force` → `generate_wiki.py` → `reindex_keyword.py` →
-`rebuild_index.py` → `validate_all.py`; vector/enrich/claims follow-ups stay separate and
-cost-bearing; the ADR-0038 baseline needs re-recording after the eval corpus re-extracts.
+**§6 rollout RUN on the live vault (2026-07-07, billable):** claims 422 → **1184** (73 windows,
+0 staging failures, 163 ungroundable drops ~12%), concepts 121 → **222**, `concept_starved` 10 → **2**,
+all validators green. **9 of the starved-10 fixed**, incl. the Spanish doc (its zero-node mystery was
+coverage) and the 137KB quantum monitor (240 claims / 14 concepts).
 
-**Post-UAT queue (user decisions 2026-07-04):** HF weight-download/offline policy (own knob, **not**
-`EMBEDDING_ALLOW_CLOUD` — likely an ADR-0053 addendum); dead-surface cleanup slice (5 unused
-`templates/*.md`, empty `app/frontend/`, compose `qdrant`; `indexes/graph/` stays documented-reserved;
-must align the CLAUDE.md/AGENTS.md "use templates" wording + add a template-consumption guard);
-plus ADR-0054's named deferrals (glued-word/extractor-evaluation slice, key-free repair script,
-extractor-version lint). The two big families the recent work pursued are both **complete**: the
-**visibility family** (hide/unhide across sources, semantic pages, claims, synthesis — ADR-0043–0049) and the
-**identity-surgery family** (merge / subtype-rekey / split — ADR-0050–0052). Pick the next slice from the
-deferred list below with a fresh `grill-phase`.
+**Open finding F5 (forensics done, cached raw responses read):** the two residual zero-concept
+sources expose a **taxonomy-misrouting failure mode** — the nursing-AI PDF's model response filed its
+concepts as generic `entity` items ('AI adoption in nursing', 'workflow redesign'…) which the v3
+entity boundary now rightly suppresses (themes lost entirely); the `iberian_decipherment_plan.docx`
+is proven concept-rich (v2-head gave 10 excellent concepts) but v3-full-doc returns zero (prompt vs
+input-size confounded; 1-call discriminator available: v3 prompt on its 12k head). Future v4
+micro-slice direction: anti-misrouting cross-check in `_CONCEPTS_SYSTEM`.
+
+**Open finding F4 (UAT run 2, logged):** bibliography/reference chunks pollute the vector-channel
+tail on short queries (`vector_prefers_irrelevant_keyword_silent` class — semantic ambiguity, not
+fusion). `/query` grounding filters it; cost = prompt tokens + slot displacement. Candidate slice:
+reference-chunk tagging/down-ranking (eval-gated per ADR-0038).
+
+**NEXT SLICE (user-agreed): W1 review-flow UX grill.** The pending queue (~1380 items) is now the
+semantic-layer bottleneck: nothing promotes → no active concepts → no synthesis/graph channel. The
+grill MUST pull in the ADR-0055-deferred **auto-withdrawal-on-retraction** governance micro-slice
+(bulk dispositions and stale-promote withdrawal are the same design space). Also queued by user:
+W2 Obsidian readability (id-titled pages → display-text links/aliases), W3 local-model-first pass +
+commercial escalation, HF weight-download/offline policy (own knob, **not** `EMBEDDING_ALLOW_CLOUD`),
+dead-surface cleanup (unused templates, empty `app/frontend/`, compose `qdrant`; align CLAUDE/AGENTS
+"use templates" wording), F5 v4-prompt micro-slice, F4 reference-chunk slice.
 
 **Deferred options (each starts with a `grill-phase`):**
+- **Cross-builder untrusted-metadata hardening** — `Title:` sits outside the untrusted delimiter in
+  all four prompt builders (pre-existing, filename-derived); bumps four prompt versions = vault-wide
+  restale, own rollout decision (named in ADR-0056 out-of-scope).
 - **Identity-surgery follow-ups** — cross-type merge, live un-merge / un-split, N-way split (>2), a
   subtype-differing spin-off, moving non-`mentions` edges to a spin-off, a `rename_node` executor (ADR-0017
   rename is design-locked-but-unimplemented and currently bounds split/merge), a `split_from` graph
   edge / lineage query.
-- **ADR-0038 multi-chunk retrieval-eval extension** — design-locked, never implemented. Author `##`-section
-  multi-chunk docs + `chunk_disambiguation` cases + the phrase→citation-key resolver in
-  `scripts/eval_retrieval.py`. Re-opens weighted RRF only if a chunk failure shows channel *disagreement*.
 - **Phase 8 auth/CSRF/API-worker** — deferred until a concrete non-loopback exposure requirement exists.
-- LLM-as-judge eval "analysis lane", scheduled eval runs, baseline-diff gating (all out of ADR-0042 v1).
+- LLM-as-judge eval "analysis lane", scheduled eval runs, baseline-diff gating (all out of ADR-0042 v1);
+  ADR-0054's named deferrals (glued-word/extractor-evaluation slice, key-free repair script,
+  extractor-version lint); seam-overlap claims recall; tier-1 summary coverage; `coverage: truncated`
+  lint (markers ship, lint deferred — ADR-0056).
 
-**Closed since this doc last tracked them:** the whole ADR-0043–0052 arc (visibility + identity-surgery
-families). Round-by-round detail may additionally live in a Claude Code session's private per-project
-memory tracker (external session state, not a repo path); the on-disk authority is `git log` + the ADRs.
+**Closed since this doc last tracked them:** ADR-0054 (de-hyphenation + full vault repair), ADR-0055
+(tier-2 contract), ADR-0056 (document-complete coverage + rollout), the first-ever live vector index,
+and UAT run 2 (findings F1–F3 fixed; F4/F5 logged above). Round-by-round detail may additionally live
+in a Claude Code session's private per-project memory tracker (external session state, not a repo
+path); the on-disk authority is `git log` + the ADRs.
 
 **Operate it** (`docs/Operations.md`): `POST /jobs/lint|stale-check|reindex` (key-free, detect-and-propose);
 review at `/ui/reviews`; apply via `POST /reviews/apply`. **LLM producers** (need `ANTHROPIC_API_KEY`):
@@ -227,7 +251,18 @@ dim-1024, `flagembedding_bge_m3:<model_id>:<fp16|fp32>` staleness ref, lifespan 
 when selected, torch overlay out-of-lock, `scripts/check_embedding.py` smoke CLI),
 0054 (**PDF de-hyphenation at extraction** — two-branch line-break hyphen repair + U+00AD strip in the
 PDF path before reflow, forced there by the ADR-0012 anchor contract; opt-in re-extract rollout, no
-automation; `extract_code_version` extraction-log marker, observability only) —
+automation; `extract_code_version` extraction-log marker, observability only),
+0055 (**tier-2 extraction contract** — concept elicitation band 3–10 + entity-noise boundary
+(provenance ≠ content, own authors excluded) in `_CONCEPTS_SYSTEM`; `concept_starvation` guard —
+job-summary + report-only lint, remediation `rerun_extract_concepts`; replacement-only supersede —
+a run that cannot produce the replacement never retires existing mentions; `ENRICH_MAX_TOKENS` 4096),
+0056 (**tier-2 document-complete extraction coverage** — claims `chunk-greedy-v1` windows +
+stage-before-replace + window-local quote grounding + fail-closed planning; concepts full-document
+call + entity soft band (~25) + `coverage: truncated` marker; strategy refs
+`chunk-greedy-v1:{window}` / `full-doc-v1:{cap}` composed into fingerprint + cache identity via
+`LLMClient.parse(strategy_ref=…)`; cost-bearing semantic knobs `ENRICH_CLAIM_WINDOW_CHARS` /
+`ENRICH_CONCEPT_INPUT_MAX_CHARS`; untrusted entity-encoded `<segment_metadata>`; opt-in billable
+rollout, acceptance = starved-10 → 2 with F5 logged) —
 full glossary entries in `CONTEXT.md` (round-by-round history may additionally be in a Claude Code
 session's private per-project memory tracker — external session state, not a repo path).
 
