@@ -1,6 +1,6 @@
 # ADR-0057 — Review-queue reconciliation: symmetric auto-withdrawal of extraction-stale items
 
-- **Status:** design-locked
+- **Status:** implemented
 - **Date:** 2026-07-07
 - **Drivers:** W1 grill (pending queue ~1380 items after the ADR-0056 rollout — the semantic-layer
   bottleneck), the ADR-0055 named deferral ("auto-withdrawal of pending promotes for
@@ -55,8 +55,19 @@ already reconcile their contradiction items; synthesis withdraws its own stale p
 Contradiction-loser deprecates are filed pre-approved and are unreachable by construction.
 
 **Unresolved = `pending` OR `deferred`** (both live in `pending/`; matches the merge/rekey
-withdrawal boundary). Approved/rejected items are immutable audit and are **never touched**.
-Every withdrawal is audited with one of four stable reasons:
+withdrawal boundary). Approved/rejected items are immutable audit and are **never touched** —
+and a file found in `pending/` whose own `status` field is terminal is broken ledger state:
+skipped and counted, never withdrawn (review round, B3).
+
+**Authority is per-surface (review round, B2):** node *status* authority is page frontmatter
+(ADR-0030), the graph a derived mirror — so every **status-based** reason requires graph and
+page to AGREE; *edges* are graph-SoT (ADR-0029), so the active-mentions resurrection premise
+reads the graph alone. The `_recompose_node` hook writes page and mirror in the same pass and
+passes the status it just wrote (agreement by construction); the sweep reads both surfaces.
+`node_missing_or_rekeyed` requires page-side corroboration — the page absent, or its
+frontmatter an identity tombstone (`merged`/`rekeyed`) — **graph-missing alone never
+withdraws**. Any surface disagreement withdraws nothing (and fails the sweep preflight,
+decision 4). Every withdrawal is audited with one of four stable reasons:
 
 - `node_tombstoned_no_active_mentions` — promote withdrawn, node is a retraction tombstone.
 - `node_resurrected_active_mentions` — deprecate withdrawn, mentions returned.
@@ -91,14 +102,29 @@ deprecations remain human/flat-queue decisions and are never rewritten or withdr
 sweep.** Consequence accepted: if lint filed first and the node later tombstones, the pending item
 keeps the lint reason and reconciliation leaves it — the conservative outcome (a human decides).
 
-### 4. Catch-up sweep: key-free deterministic script, one-time rollout
+### 4. Catch-up sweep: key-free deterministic script, preflight-gated, one-time rollout
 
 `scripts/reconcile_reviews.py` (CLAUDE.md rule 10: small deterministic script) runs the shared
-reconciliation function over the whole `pending/` set against current graph/wiki state. Key-free
-(no LLM), idempotent (a second run withdraws nothing new), output is **counts only** per the
-output-discipline rule (withdrawn by reason code, skipped-not-owned, untouched), every withdrawal
-individually audited. Rollout: run **once on the live vault before ADR-0058 is implemented**, so
-the per-source flow is built and tested against the real post-cleanup queue.
+reconciliation function over the whole `pending/` set against current graph + page state.
+Key-free (no LLM), idempotent (a second run withdraws nothing new), output is **counts only**
+per the output-discipline rule (withdrawn by reason code, not-owned, left-unresolved,
+terminal-in-pending, parse vs schema errors — the read-model's diagnostic split), every
+withdrawal individually audited. Malformed pending files (unparseable JSON, non-dict, missing
+`review_id`/`node_id`) are counted and skipped — the sweep never raises mid-pass.
+
+**Preflight contract (review round, B1/B2) — a single fail-closed gate before any mutation;
+any failure exits non-zero and withdraws NOTHING:**
+
+1. the graph database exists;
+2. its schema version matches `graph.SCHEMA_VERSION`;
+3. the graph has at least one node (an empty/wrong-root database must never read the queue as
+   all-nodes-missing);
+4. the graph↔wiki lifecycle projection is valid for every reviewed concept/entity-family node
+   (page frontmatter scanned as the authority): a mirror without a page, a page without a
+   mirror, or a status disagreement refuses the sweep and is reported per node.
+
+Rollout: run **once on the live vault before ADR-0058 is implemented**, so the per-source flow
+is built and tested against the real post-cleanup queue.
 
 ### 5. Boundary: this is machine retraction of machine proposals, not governance
 
@@ -112,14 +138,25 @@ a re-filed id is a fresh pending item over a live premise).
 
 - Withdrawal matrix: `pending` and `deferred` items withdrawn; `approved`/`rejected` untouched;
   each of the four reason codes exercised; audit entry written per withdrawal.
+- Corroboration (review round): every status-based withdrawal requires graph == page; each
+  disagreement shape (mirror-without-page, page-without-mirror, status mismatch) withdraws
+  nothing; graph-missing with a live page never withdraws; tombstone withdrawal additionally
+  requires zero active mentions.
 - Provenance gate: recompose-provenance deprecate withdrawn on resurrection; lint-filed
   under-supported deprecate for an active node **not** withdrawn; same-subject foreign-reason item
   untouched when the node tombstones (decision 3).
 - Legacy shim: item carrying the exact legacy constant withdrawn by the sweep; near-miss prose not
   matched; `reason_code` present on newly recompose-filed deprecates.
+- Preflight fail-closed: empty graph refused; schema-version mismatch refused; each projection
+  drift shape refuses the whole sweep with nothing withdrawn; CLI exits non-zero on missing DB
+  and on any refusal.
+- Ledger hygiene: a terminal-status file in `pending/` is skipped, never withdrawn; malformed
+  files (unparseable, non-dict) are counted parse/schema and the sweep continues past them.
 - Idempotence: second sweep run over the same state withdraws zero.
 - Hook: `_recompose_node` tombstone path withdraws the pending promote in the same pass;
   resurrection path withdraws the recompose-provenance deprecate.
+- Parity: the sweep's local page-dir→id-field map pinned against `concepts.ID_FIELD` /
+  `wiki_render.NODE_DIR` (kept local to avoid an import cycle).
 
 ## Deferred (named)
 

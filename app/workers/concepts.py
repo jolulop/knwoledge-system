@@ -31,7 +31,7 @@ from app.backend import db, graph
 from app.backend.manifests import get_status, iso_now, valid_manifests
 from app.llm import prompts
 from app.llm.client import LLMClient, ParseError
-from app.workers import citations, reviews
+from app.workers import citations, reconcile, reviews
 from app.workers import enrichment_artifact as art
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter, render_concept_page, title_from_filename
 
@@ -128,7 +128,9 @@ def _recompose_node(gconn, *, node_id, wiki_dir, reviews_dir, now, text_hint=Non
     title is preserved across re-extractions, and aliases are an additive union of what's on
     the page and what this run found — so a later source cannot overwrite or drop aliases
     gathered from another (B1/Q4). With no active mentions the page is tombstoned
-    (deprecated_candidate) and a `deprecate_wiki_page` review item is filed (B4).
+    (deprecated_candidate) and a `deprecate_wiki_page` review item is filed (B4). Either
+    status flip also reconciles the node's unresolved review items (ADR-0057): tombstoning
+    withdraws a pending promote, resurrection withdraws the recompose-filed deprecation.
     """
     node = graph.get_node(gconn, node_id)
     if node is None:
@@ -163,15 +165,21 @@ def _recompose_node(gconn, *, node_id, wiki_dir, reviews_dir, now, text_hint=Non
     }), encoding="utf-8")
     graph.upsert_node(gconn, node_id=node_id, node_type=node_type, slug=slug,
                       status=status, now=now)
+    page_rel = f"{NODE_DIR[node_type]}/{slug}.md"
     if not sources:
         reviews.create_review_item(
             reviews_dir, review_type="deprecate_wiki_page",
-            subject={"node_id": node_id, "page": f"{NODE_DIR[node_type]}/{slug}.md"},
+            subject={"node_id": node_id, "page": page_rel},
             proposal={"to_status": "deprecated_candidate",
-                      "reason": "no active source mentions remain"},
+                      "reason": reconcile.LEGACY_NO_ACTIVE_MENTIONS_REASON,
+                      "reason_code": reconcile.REASON_CODE_NO_ACTIVE_MENTIONS},
             context={"node_type": node_type}, now=now)
-        return "tombstoned"
-    return "written"
+    # ADR-0057: the status flip may invalidate an unresolved item's premise in either direction
+    # (tombstone -> stale pending promote; resurrection -> stale recompose-filed deprecation).
+    reconcile.reconcile_node_items(
+        reviews_dir, node_id=node_id, page=page_rel,
+        node_status=status, active_source_count=len(sources), now=now)
+    return "tombstoned" if not sources else "written"
 
 
 def recompose_semantic_node_page(

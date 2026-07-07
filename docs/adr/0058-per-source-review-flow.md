@@ -138,6 +138,11 @@ The POST performs **producer-side writes immediately** — the same class of mut
   approve/reuse its existing promote item; already `active` → add the mention only, no promote
   item; entity-family subtype collision → route to `change_entity_subtype`; concept↔entity
   cross-type conflicts stay deferred — never guessed.
+- **Terminal rejected slot (review round):** if the candidate's `promote_candidate_node` item is
+  already **rejected**, the add is **blocked with a message** naming the prior rejection (who,
+  when) and pointing at the explicit ADR-0045 reopen path. A rejected promotion is a human
+  governance record: it is never silently reused, reopened as a side effect, or bypassed via a
+  parallel review subject (which would break `(type, subject)` idempotence).
 
 ### 7. Surfaces
 
@@ -158,7 +163,9 @@ projector registry, sharing its primitives; nothing in the HTML layer becomes au
 
 - Human-add matrix: new candidate / existing candidate (mention + reuse) / already-active
   (mention only, no promote item) / subtype collision routes to `change_entity_subtype` /
-  cross-type conflict deferred (no write). Audit entry contents pinned.
+  cross-type conflict deferred (no write) / terminal REJECTED promote slot blocks with the
+  prior-rejection message (no reuse, no reopen side effect, no parallel subject). Audit entry
+  contents pinned.
 - Validators green over anchorless human mentions (`validate_graph`, projection, wiki).
 - Batch submit: partial decisions recorded, untouched items stay pending, already-decided rows
   skip-with-reason, no 409 abort; per-item results rendered.
