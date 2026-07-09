@@ -1,5 +1,10 @@
 # Semantic node identity: deterministic id generation, rename, and merge
 
+> **Partially superseded by ADR-0059** (2026-07-08): the concept/entity-family typed prefixes
+> (`cpt_/ent_/per_/org_/prj_`) are replaced by the single type-neutral `itm_` id — classification
+> (`item_type`) is governed metadata, never part of identity. Everything else (creation-time
+> normalized-name hash, frozen across renames; `src_`/`clm_`/`syn_`/`qry_` schemes) stands.
+
 Every semantic node type gets a typed, stable identifier, generalizing the content-keyed
 model (ADR-0015) and the concept/entity scheme (ADR-0017) across concepts, entities,
 claims, and syntheses. Source pages keep `source_id = src_<sha256[:16]>` (content hash).

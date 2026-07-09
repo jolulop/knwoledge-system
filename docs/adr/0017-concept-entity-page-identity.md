@@ -1,5 +1,10 @@
 # Concept/Entity pages: readable slug filename + stable id + aliases
 
+> **Superseded for the semantic-node family by ADR-0059** (2026-07-08, knowledge-item taxonomy +
+> type-neutral `itm_` identity; clean-repository restart — no migration). The slug/stable-id/aliases
+> *mechanics* carry over to Item pages; the Concept/Entity split and typed prefixes do not.
+> Historical for the pre-restart vault.
+
 Concept and Entity pages are identified differently from Source pages. A source is
 content-keyed (`source_id` = `src_<sha256[:16]>`, ADR-0015) because it has canonical
 bytes to hash. A concept or entity has no content to hash — its identity is a name and

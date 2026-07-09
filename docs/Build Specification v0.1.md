@@ -314,6 +314,19 @@ only** — no producer upserts them as graph nodes; `wiki/Queries/` and `wiki/Ta
 without graph presence by design (`app/backend/eligibility.py`: source/query/tag pages are
 navigation aids, not answer-eligible semantic nodes).
 
+Second annotation (2026-07-08, revised 2026-07-09, **ADR-0059**, design-locked): the
+`entity`/`concept`/`project`/`person`/`organization` rows are superseded by the single structural
+node type **`item`** (type-neutral `itm_` id) classified by a mutable, governed **`item_type`**
+drawn from the 15-value knowledge-item taxonomy (domain, sub_domain, problem_risk, use_case,
+method_technique, architecture_pattern, technology_capability, model, ai_model_family,
+product_tool_platform, data_ontology_asset, standard_protocol_interface, infrastructure_hardware,
+governance_regulation, provider_institution) plus the QA-only `unclassified_review_required`
+sentinel. The `source`/`claim`/`tag`/`query`/`synthesis` *rows* stand, but this table is no longer
+authoritative without the ADR-0059 overlay: the graph `NODE_TYPES` set becomes
+`{source, item, claim, tag, query, synthesis}`, the §6.2 `derived_from` endpoint contract's source
+set becomes `{claim, synthesis, item}`, and `SCHEMA_VERSION` bumps to 2. Adopted with a
+clean-repository restart; see ADR-0059 for the full contract.
+
 ### 6.2 Relationship Types
 
 | Edge Type | Meaning |

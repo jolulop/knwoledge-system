@@ -1,5 +1,11 @@
 # ADR-0051 — Entity subtype rekey: `change_entity_subtype` as a single-node rekeying executor
 
+> **Retired for the item era by ADR-0059** (2026-07-08): under the type-neutral `itm_` identity a
+> type change is a non-rekeying metadata flip (`change_item_type`) — no id substitution, no
+> tombstone, no re-point. The entity family this ADR rekeys within no longer exists post-restart.
+> The subject-shape rule (`{node_id, to_type}` — one rejected retype never locks out a different
+> future retype) carries over to `change_item_type`. Historical for the pre-restart vault.
+
 **Status:** Accepted. **Design-locked 2026-06-30** (grill-phase, committed `3ab1577`); **v1 implemented
 2026-07-01** (`app/workers/rekeys.py::apply_rekeys`; `rekeyed` status in graph/validate_wiki/retention.yaml;
 the `render_concept_page` rekeyed-tombstone branch; `review_read` `_effect_rekey`/`preview_change_entity_subtype`
