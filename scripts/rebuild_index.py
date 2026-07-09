@@ -24,13 +24,13 @@ WIKI_DIRS = [
 # QA sentinel bucket last — LOCAL constants because this script is dependency-free by
 # design (a parity test pins them against app/backend/taxonomy.py).
 ITEM_GROUP_ORDER = [
-    "domain", "model", "sub_domain", "architecture_pattern", "ai_model_family",
+    "domain", "model", "ai_topic_area", "architecture_pattern", "model_family_architecture",
     "method_technique", "technology_capability", "use_case", "problem_risk",
     "product_tool_platform", "standard_protocol_interface", "data_ontology_asset",
     "governance_regulation", "infrastructure_hardware", "provider_institution",
     "unclassified_review_required",
 ]
-_ITEM_DISPLAY = {"ai_model_family": "AI Model Family",
+_ITEM_DISPLAY = {"ai_topic_area": "AI Topic Area",
                  "unclassified_review_required": "Unclassified (review required)"}
 
 

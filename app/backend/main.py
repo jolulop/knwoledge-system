@@ -4,6 +4,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import mimetypes
 import os
 import re
 import subprocess
@@ -12,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Form, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
 logger = logging.getLogger(__name__)
 
@@ -1268,8 +1269,14 @@ def ui_review_sources() -> HTMLResponse:
 
 
 @app.get("/ui/reviews/sources/{source_id}", response_class=HTMLResponse)
-def ui_review_source_screen(source_id: str) -> HTMLResponse:
-    """One source's screen: its candidates + type changes + retired section, one batch form."""
+def ui_review_source_screen(source_id: str, preselect: str | None = None) -> HTMLResponse:
+    """One source's screen: its candidates + type changes + retired section, one batch form.
+
+    `?preselect=approve` (the only honored value; anything else is ignored) re-renders the
+    SAME form with approve pre-checked on every PENDING row — the explicit two-click bulk
+    approve (UAT round): one click of intent, one click of commit. Deferred rows were parked
+    deliberately and stay unchecked; recording still runs the per-item primitives + scope
+    guard unchanged."""
     if not manifests.is_source_id(source_id):
         return HTMLResponse(
             review_html.render_error(404, f"unknown source: {source_id}"), status_code=404)
@@ -1281,7 +1288,60 @@ def ui_review_source_screen(source_id: str) -> HTMLResponse:
             review_html.render_error(404, f"unknown source: {source_id}"), status_code=404)
     if not data["graph_available"]:
         return _source_flow_unavailable()
+    data["preselect"] = "approve" if preselect == "approve" else None
     return HTMLResponse(review_html.render_source_screen(data))
+
+
+# MIME types a browser can render inline WITHOUT executing active content. HTML, SVG, and
+# XML are deliberately excluded: raw sources are UNTRUSTED (CLAUDE.md rule 2), and inline
+# same-origin HTML/SVG would let a hostile document script against the unauthenticated
+# loopback API (review round: blocking). Everything off-list downloads as an attachment.
+_RAW_INLINE_TYPES = frozenset({
+    "application/pdf", "text/plain",
+    "image/png", "image/jpeg", "image/gif", "image/webp",
+})
+
+
+@app.get("/raw/{source_id}")
+def get_raw_original(source_id: str) -> FileResponse:
+    """Serve a source's ORIGINAL raw bytes for operator review (UAT round).
+
+    Read-only view seam for the review flow ("view original"). Trust posture:
+    - The source resolves through `valid_manifests` — the SAME quarantine the rest of the
+      system uses (canonical id, filename↔id match, duplicate rejection); a quarantined
+      manifest is a plain 404.
+    - The path comes ONLY from the manifest's `relative_raw_path`, containment-checked under
+      `raw/` (`safe_under`, ADR-0009) — a tampered/escaping path is a 404, never a traversal.
+    - Only passive media renders inline (`_RAW_INLINE_TYPES`; markdown re-served as
+      text/plain); anything else — HTML/SVG/XML/unknown — is `attachment`. Every response is
+      `nosniff`, and inline responses carry `Content-Security-Policy: sandbox` (opaque
+      origin, no scripts) as defense in depth.
+    - Deliberately STATUS-AGNOSTIC (review round): hide/archive govern default retrieval +
+      navigation, and this is a loopback-only governance surface — a human deciding about a
+      hidden/archived source must be able to inspect it. A physically absent file is a 404.
+    """
+    valid, _quarantined = manifests.valid_manifests(settings.manifests_dir)
+    manifest = next((m for m in valid if m.get("source_id") == source_id), None)
+    if manifest is None:
+        raise HTTPException(status_code=404, detail=f"unknown source: {source_id}")
+    rel = manifest.get("relative_raw_path")
+    if not isinstance(rel, str) or not rel:
+        raise HTTPException(status_code=404, detail="source has no catalogued raw path")
+    resolved = safe_under(settings.root, settings.root / "raw", rel)
+    if resolved is None or not resolved.is_file():
+        raise HTTPException(status_code=404, detail="raw file not found")
+    filename = manifest.get("original_filename") or resolved.name
+    media_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    if media_type == "text/markdown":
+        media_type = "text/plain"       # browsers don't render markdown; show it as text
+    headers = {"X-Content-Type-Options": "nosniff"}
+    if media_type in _RAW_INLINE_TYPES:
+        headers["Content-Security-Policy"] = "sandbox"
+        disposition = "inline"
+    else:
+        disposition = "attachment"
+    return FileResponse(resolved, media_type=media_type, filename=filename,
+                        content_disposition_type=disposition, headers=headers)
 
 
 @app.post("/ui/reviews/sources/{source_id}/decide", response_class=HTMLResponse)

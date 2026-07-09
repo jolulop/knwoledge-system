@@ -12,14 +12,14 @@ from __future__ import annotations
 # The 15 production types (lowercase snake_case; TitleCase is a display convention).
 ITEM_TYPES = frozenset({
     "domain",
-    "sub_domain",
+    "ai_topic_area",
     "problem_risk",
     "use_case",
     "method_technique",
     "architecture_pattern",
     "technology_capability",
     "model",
-    "ai_model_family",
+    "model_family_architecture",
     "product_tool_platform",
     "data_ontology_asset",
     "standard_protocol_interface",
@@ -41,9 +41,9 @@ ITEM_TYPES_ALL = ITEM_TYPES | {UNCLASSIFIED}
 PRIORITY_ORDER: tuple[str, ...] = (
     "domain",
     "model",
-    "sub_domain",
+    "ai_topic_area",
     "architecture_pattern",
-    "ai_model_family",
+    "model_family_architecture",
     "method_technique",
     "technology_capability",
     "use_case",
@@ -60,13 +60,13 @@ PRIORITY_ORDER: tuple[str, ...] = (
 # guard. The sentinel counts toward NEITHER group.
 THEMATIC_TYPES = frozenset({
     "domain",
-    "sub_domain",
+    "ai_topic_area",
     "problem_risk",
     "use_case",
     "method_technique",
     "architecture_pattern",
     "technology_capability",
-    "ai_model_family",
+    "model_family_architecture",
     "governance_regulation",
 })
 NAMED_TYPES = ITEM_TYPES - THEMATIC_TYPES
@@ -74,7 +74,7 @@ NAMED_TYPES = ITEM_TYPES - THEMATIC_TYPES
 
 # Human-facing labels (TitleCase display convention). The sentinel's label deliberately
 # reads as a QA bucket, never as a taxonomy category (ADR-0059 decision 5).
-_DISPLAY_OVERRIDES = {"ai_model_family": "AI Model Family"}
+_DISPLAY_OVERRIDES = {"ai_topic_area": "AI Topic Area"}
 UNCLASSIFIED_DISPLAY = "Unclassified (review required)"
 
 

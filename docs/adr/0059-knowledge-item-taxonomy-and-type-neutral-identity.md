@@ -1,9 +1,13 @@
 # ADR-0059 — Knowledge-item taxonomy (15 types) and type-neutral semantic identity
 
-- **Status:** design-locked (grill-phase 2026-07-08); NOT implemented
+- **Status:** implemented (2026-07-09, commit `fa9c593`; the clean-repository wipe ran the
+  same day — UAT-round UI + label revisions ride the working tree)
 - **Date:** 2026-07-08; **revised 2026-07-09** (review round 1 + user taxonomy v2: `evaluation_benchmark_metric`
   and `research_publication` removed, `ai_model_family` and `sub_domain` added — still 15 production
-  types; complete 15-step priority order supplied by the user)
+  types; complete 15-step priority order supplied by the user). **Label revision (UAT round,
+  2026-07-09): `sub_domain` → `ai_topic_area`, `ai_model_family` → `model_family_architecture` —
+  labels only, semantics/grouping/priority position unchanged; rides `enrich-items-v2` /
+  `enrich-items-prompt-v2` (zero restale cost on the empty post-wipe vault).**
 - **Precedence:** where any older ADR, CONTEXT.md entry, or Build Spec wording conflicts with this
   ADR, **this ADR is dominant** for the post-restart vault; layered supersession notes elsewhere are
   historical context, not co-equal authority.
@@ -55,14 +59,14 @@ TitleCase is a display/docs convention.
 | `item_type` | Meaning (one line) | Examples |
 |---|---|---|
 | `domain` | Broad knowledge area, industry, or subject field | AI, finance, legal AI, healthcare AI, robotics, quantum computing |
-| `sub_domain` | Field, specialty, or set of techniques/tools within a broader domain | Semantics, Agents, Models, Coding, Tools, AI Research, Hardware and Infrastructure, Data, Regulation and Ethics, Economics, World Models |
+| `ai_topic_area` | Field, specialty, or set of techniques/tools within a broader domain | Semantics, Agents, Models, Coding, Tools, AI Research, Hardware and Infrastructure, Data, Regulation and Ethics, Economics, World Models |
 | `problem_risk` | Pain point, limitation, failure mode, threat, bottleneck, unresolved challenge | hallucination, agent failure, token cost escalation, data quality, MCP security weakness |
 | `use_case` | Concrete application of technology to a business/research/operational problem | agentic RAG for enterprise search, AI code review, regulatory reporting automation, virtual try-on |
 | `method_technique` | Method, algorithmic approach, design/prompting/training/analytical technique | RAG fusion, chunking, LoRA, RLHF, GraphRAG, self-reflection, test-time scaling |
 | `architecture_pattern` | System structure, stack design, integration pattern, conceptual architecture | semantic layer, ontology stack, agent harness, hub-and-spoke MDM, agent memory architecture |
 | `technology_capability` | Generic technical capability or technology class (not a specific product) | embeddings, OCR, vector database, knowledge graph, VLM, speech-to-text, computer use |
 | `model` | **Named/branded** AI model, model family, or foundation model | GPT, Claude, Gemini, Qwen, DeepSeek, Phi, bge-m3, AlphaFold, ModernBERT |
-| `ai_model_family` | **Generic** model family, type, approach, or algorithm class | Transformers, LFMs, dLLMs, VLMs, Distills, LLMs, SLMs, Reasoning, Agentic, SSMs, HRM/TRM, LSTM, Diffusion, RFMs, MoE, RLM |
+| `model_family_architecture` | **Generic** model family, type, approach, or algorithm class | Transformers, LFMs, dLLMs, VLMs, Distills, LLMs, SLMs, Reasoning, Agentic, SSMs, HRM/TRM, LSTM, Diffusion, RFMs, MoE, RLM |
 | `product_tool_platform` | Named commercial/open-source tool, library, product, SaaS, platform, repo | Ollama, LangGraph, LlamaIndex, Docling, Pinecone, Claude Code, Codex, AutoGen, Vertex AI, Bedrock |
 | `data_ontology_asset` | Dataset, ontology, schema, corpus, knowledge graph, taxonomy, semantic model | FIBO, UMLS, BIRD schema, enterprise ontology, data catalog, semantic contract |
 | `standard_protocol_interface` | Protocol, standard, API style, interface language, interoperability mechanism | MCP, A2A, SPARQL, GraphQL, Cypher, PDDL, OSCAL, OpenAPI |
@@ -73,9 +77,10 @@ TitleCase is a display/docs convention.
 Plus one **sentinel** (decision 5): `unclassified_review_required` — QA-only, never a production
 category.
 
-**Model vs `ai_model_family` boundary:** `model` is for *named/branded* things (Claude, Qwen);
-`ai_model_family` is for *generic classes/approaches* (transformers, MoE, diffusion). The priority
-order (decision 4) puts `model` first, so a branded family never falls through to the generic class.
+**Model vs `model_family_architecture` boundary:** `model` is for *named/branded* things (Claude,
+Qwen); `model_family_architecture` is for *generic classes/approaches* (transformers, MoE,
+diffusion). The priority order (decision 4) puts `model` first, so a branded family never falls
+through to the generic class.
 
 **Taxonomy v2 revision notes (2026-07-09):** `evaluation_benchmark_metric` and
 `research_publication` were **removed** by the user. Benchmarks/metrics now classify by role via
@@ -86,11 +91,12 @@ user's `sub_domain` examples but is a publication, not a field — **dropped fro
 (flagged for user veto; keeping it would teach the model to route publications into `sub_domain`).
 
 **Grouping (drives band guidance + the starvation guard, decision 6):**
-- *Thematic* (9): `domain`, `sub_domain`, `problem_risk`, `use_case`, `method_technique`,
-  `architecture_pattern`, `technology_capability`, `ai_model_family`, `governance_regulation`.
+- *Thematic* (9): `domain`, `ai_topic_area`, `problem_risk`, `use_case`, `method_technique`,
+  `architecture_pattern`, `technology_capability`, `model_family_architecture`,
+  `governance_regulation`.
 - *Named* (6): `model`, `product_tool_platform`, `data_ontology_asset`,
   `standard_protocol_interface`, `infrastructure_hardware`, `provider_institution`.
-- `ai_model_family` → thematic is a **flagged default** (it is a generic class like
+- `model_family_architecture` → thematic is a **flagged default** (it is a generic class like
   `technology_capability`, not a named singular thing), not a grilled choice.
 
 **Dropped types:** `person` (decision 8), `organization` (→ `provider_institution`), `project`
@@ -163,10 +169,11 @@ Replaces the ADR-0055/0056 two-array contract. Tier-2 items output:
   identity plumbing carry over unchanged.
 - The **15-step priority order** (user-supplied, taxonomy v2 — every production type appears
   exactly once) lives in the system prompt as the tie-break when several types could apply:
-  1. `domain` → 2. `model` → 3. `sub_domain` → 4. `architecture_pattern` → 5. `ai_model_family` →
-  6. `method_technique` → 7. `technology_capability` → 8. `use_case` → 9. `problem_risk` →
-  10. `product_tool_platform` → 11. `standard_protocol_interface` → 12. `data_ontology_asset` →
-  13. `governance_regulation` → 14. `infrastructure_hardware` → 15. `provider_institution`.
+  1. `domain` → 2. `model` → 3. `ai_topic_area` → 4. `architecture_pattern` →
+  5. `model_family_architecture` → 6. `method_technique` → 7. `technology_capability` →
+  8. `use_case` → 9. `problem_risk` → 10. `product_tool_platform` →
+  11. `standard_protocol_interface` → 12. `data_ontology_asset` → 13. `governance_regulation` →
+  14. `infrastructure_hardware` → 15. `provider_institution`.
 - **Substrate carve-out (accepted, review round 2):** the user's example table files vLLM, CUDA,
   and Kubernetes under `infrastructure_hardware`, but the order above reaches
   `product_tool_platform` (10) before `infrastructure_hardware` (14), so those examples would

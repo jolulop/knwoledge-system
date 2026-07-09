@@ -387,7 +387,8 @@ def render_sources_index(data: dict[str, Any]) -> str:
         rows.append(
             f"<tr{style}><td>{i}</td>"
             f"<td><a href='/ui/reviews/sources/{sid}'>{sid}</a></td>"
-            f"<td>{_h(s.get('filename'))}</td><td>{_h(s.get('discovered_at'))}</td>"
+            f"<td><a href='/raw/{sid}'>{_h(s.get('filename'))}</a></td>"
+            f"<td>{_h(s.get('discovered_at'))}</td>"
             f"<td>{_counts_cell(s.get('counts') or {})}{'' if remaining else ' — done'}</td></tr>")
     parts.append("<table>" + "".join(rows) + "</table>")
     if data.get("global_remaining_by_type"):
@@ -397,12 +398,19 @@ def render_sources_index(data: dict[str, Any]) -> str:
     return _page("Review by source", "".join(parts))
 
 
-def _decision_radios(rid: str) -> str:
+def _decision_radios(rid: str, *, preselect: str | None = None) -> str:
+    """Per-row decision radios. The explicit no-decision option is load-bearing in this
+    JS-free UI: a radio group cannot be DEselected once clicked, so it is the only way to
+    take back a misclick before submit (and unlike defer it records NOTHING — the row just
+    stays pending). `preselect="approve"` (the explicit ?preselect=approve link) checks
+    approve instead; the human still reviews and submits."""
     rid = _h(rid)
+    default = "approve" if preselect == "approve" else ""
     return ("".join(
-        f"<label><input type='radio' name='decision_{rid}' value='{v}'{checked}> {label}</label> "
-        for v, label, checked in (("", "—", " checked"), ("approve", "approve", ""),
-                                  ("reject", "reject", ""), ("defer", "defer", ""))))
+        f"<label><input type='radio' name='decision_{rid}' value='{v}'"
+        f"{' checked' if v == default else ''}> {label}</label> "
+        for v, label in (("", "— leave pending"), ("approve", "approve"),
+                         ("reject", "reject"), ("defer", "defer"))))
 
 
 def _amend_inputs(row: dict[str, Any]) -> str:
@@ -418,7 +426,7 @@ def _amend_inputs(row: dict[str, Any]) -> str:
     drafted_type = draft.get("item_type") or ""
     options = ["<option value=''>keep type</option>"] + [
         f"<option value='{t}'{' selected' if t == drafted_type else ''}>{t}</option>"
-        for t in taxonomy.PRIORITY_ORDER]
+        for t in sorted(taxonomy.ITEM_TYPES)]
     return (f"<input type='text' name='amend_title_{rid}' value='{title}' size='18' "
             "placeholder='amended title'> "
             f"<input type='text' name='amend_aliases_{rid}' value='{aliases}' size='18' "
@@ -444,10 +452,12 @@ def render_source_screen(data: dict[str, Any]) -> str:
     sid = _h(data.get("source_id"))
     totals = data.get("totals") or {}
     counts = data.get("counts") or {}
+    preselect = data.get("preselect")
     parts = [
         _nav(),
         f"<h1>Source {sid}</h1>",
-        f"<p>{_h(data.get('filename'))} — source {_h(data.get('position'))} of "
+        f"<p>{_h(data.get('filename'))} — <a href='/raw/{sid}'>view original</a> — source "
+        f"{_h(data.get('position'))} of "
         f"{_h(totals.get('sources'))} · {_h(totals.get('remaining_overall'))} items remaining "
         f"overall · this source: {_counts_cell(counts)}</p>",
         "<p><a href='/ui/reviews/sources'>Source index</a>"
@@ -456,6 +466,14 @@ def render_source_screen(data: dict[str, Any]) -> str:
         "<p>Decisions are recorded only; effects are applied later via "
         "<a href='/ui/reviews/apply'>Apply</a>. Untouched rows stay pending. Amendments "
         "(promote items only) are frozen on approve and preserved as a draft on defer.</p>",
+        # Explicit pre-select (UAT round): a deliberate two-click bulk approve — one click of
+        # intent (this link re-renders with approve checked on every PENDING row; deferred
+        # rows were parked on purpose and stay unchecked), one click of commit (submit).
+        (f"<p><strong>Approve pre-selected on all pending rows</strong> — review, adjust, "
+         f"then submit. <a href='/ui/reviews/sources/{sid}'>Clear pre-selection</a></p>"
+         if preselect == "approve" else
+         f"<p><a href='/ui/reviews/sources/{sid}?preselect=approve'>"
+         "Pre-select approve for all pending rows</a></p>"),
         f"<form method='post' action='/ui/reviews/sources/{sid}/decide'>",
     ]
 
@@ -486,7 +504,9 @@ def render_source_screen(data: dict[str, Any]) -> str:
                 info += (f"<td>{_h(row.get('title'))}</td><td>{_h(row.get('page'))}</td>"
                          f"<td>{_h(row.get('node_status'))}</td>")
             if row.get("decidable"):
-                cell = _decision_radios(str(row.get("review_id")))
+                cell = _decision_radios(
+                    str(row.get("review_id")),
+                    preselect=preselect if row.get("status") == "pending" else None)
                 if amendable:
                     cell += "<br>" + _amend_inputs(row)
                 table.append(f"<tr>{info}<td>{cell}</td></tr>")
@@ -516,7 +536,7 @@ def render_source_screen(data: dict[str, Any]) -> str:
         "<p><label>Title: <input type='text' name='title' size='30' required></label> "
         "<label>Type: <select name='item_type'>"
         + "".join(f"<option value='{t}'>{t}</option>"
-                  for t in taxonomy.PRIORITY_ORDER)
+                  for t in sorted(taxonomy.ITEM_TYPES))
         + "</select></label></p>"
         "<p><label>Aliases (comma-sep): <input type='text' name='aliases' size='30'></label></p>"
         "<p><label>Description: <input type='text' name='description' size='50'></label></p>"

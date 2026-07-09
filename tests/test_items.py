@@ -443,8 +443,11 @@ def test_items_prompt_contract_pinned():
     from app.llm import prompts
     from app.workers import enrichment_artifact as art
 
-    assert art.ITEMS_PROMPT_VERSION == "enrich-items-prompt-v1"
-    assert art.ITEMS_SCHEMA_VERSION == "enrich-items-v1"
+    # v2 = the 2026-07-09 UAT label revision (sub_domain -> ai_topic_area,
+    # ai_model_family -> model_family_architecture); labels changed both the enum (schema)
+    # and the priority-order wording (prompt), so BOTH versions bumped.
+    assert art.ITEMS_PROMPT_VERSION == "enrich-items-prompt-v2"
+    assert art.ITEMS_SCHEMA_VERSION == "enrich-items-v2"
     text = prompts._ITEMS_SYSTEM
     assert "UNTRUSTED" in text                                   # untrusted-data framing kept
     # 15-step priority order: every production type appears, numbered 1..15.
@@ -643,3 +646,15 @@ def test_stored_claim_count_rejects_spoofed_artifact(tmp_path):
     (ed / f"{sid}.claims.json").write_text(json.dumps(
         {"source_id": sid, "claims": [{"claim_id": "clm_1"}]}), encoding="utf-8")
     assert art.stored_claim_count(ed, sid) == 1
+
+
+def test_old_taxonomy_labels_absent_from_runtime():
+    # 2026-07-09 UAT label revision: the pre-revision enum values must be gone from every
+    # runtime-accepted vocabulary (historical docs/comments may still mention them).
+    from app.llm import prompts
+    for old in ("sub_domain", "ai_model_family"):
+        assert old not in taxonomy.ITEM_TYPES_ALL
+        assert not taxonomy.is_item_type(old)
+        enum = prompts.ITEMS_SCHEMA["properties"]["items"]["items"]["properties"]["item_type"]["enum"]
+        assert old not in enum
+        assert old not in prompts._ITEMS_SYSTEM

@@ -22,7 +22,7 @@ import validate_wikilinks  # noqa: E402
 
 from fastapi.testclient import TestClient
 
-from app.backend import graph, manifests, review_read
+from app.backend import graph, manifests, review_read, taxonomy
 from app.backend import main as main_module
 from app.backend.config import get_settings
 from app.llm.cache import ResponseCache
@@ -562,3 +562,124 @@ def test_source_screen_escapes_untrusted_text(client, tmp_path):
     resp = client.post(f"/ui/reviews/sources/{a}/decide",
                        data={f"decision_{hostile}": "approve"})
     assert resp.status_code == 200 and hostile not in resp.text
+
+
+# --- UAT round: preselect link, alphabetical selects, view-original ------------
+
+
+def test_preselect_approve_checks_pending_rows_only(client, tmp_path):
+    _build(tmp_path, {"a.md": "alpha body"})
+    _extract(tmp_path, RoutingAdapter({"alpha": {"items": [_item("Fresh"), _item("Parked")]}}))
+    a = _sids(tmp_path)["a.md"]
+    parked = _promote_rid("Parked")
+    reviews.defer_review_item(tmp_path / "reviews", parked, note="later")
+    fresh = _promote_rid("Fresh")
+
+    plain = client.get(f"/ui/reviews/sources/{a}").text
+    assert f"name='decision_{fresh}' value='' checked" in plain      # default = leave pending
+    assert "— leave pending" in plain
+    assert "value='approve' checked" not in plain
+    assert f"/ui/reviews/sources/{a}?preselect=approve" in plain     # the explicit link
+
+    pre = client.get(f"/ui/reviews/sources/{a}?preselect=approve").text
+    assert f"name='decision_{fresh}' value='approve' checked" in pre     # pending row pre-checked
+    assert f"name='decision_{parked}' value='' checked" in pre           # deferred stays parked
+    assert "Clear pre-selection" in pre
+
+    # Any other value is ignored (only "approve" is honored).
+    bogus = client.get(f"/ui/reviews/sources/{a}?preselect=reject").text
+    assert "value='approve' checked" not in bogus
+    assert "value='reject' checked" not in bogus
+
+
+def test_type_selects_are_alphabetical(client, tmp_path):
+    import re as _re
+    _build(tmp_path, {"a.md": "alpha body"})
+    _extract(tmp_path, RoutingAdapter({"alpha": {"items": [_item("Solo")]}}))
+    a = _sids(tmp_path)["a.md"]
+    page = client.get(f"/ui/reviews/sources/{a}").text
+    selects = dict(_re.findall(r"<select name='([^']+)'>(.*?)</select>", page, _re.S))
+    # Human-add select: exactly the 15 production values, alphabetical.
+    add_options = _re.findall(r"<option value='([^']*)'", selects["item_type"])
+    assert add_options == sorted(taxonomy.ITEM_TYPES)
+    # Amendment select: the blank keep-type option, then the same alphabetical 15.
+    amend_name = next(k for k in selects if k.startswith("amend_item_type_"))
+    amend_options = _re.findall(r"<option value='([^']*)'", selects[amend_name])
+    assert amend_options == [""] + sorted(taxonomy.ITEM_TYPES)
+
+
+def test_view_original_raw_endpoint(client, tmp_path):
+    _build(tmp_path, {"a.md": "alpha body"})
+    _extract(tmp_path, RoutingAdapter({"alpha": {"items": [_item("Solo")]}}))
+    a = _sids(tmp_path)["a.md"]
+    # Linked from both flow surfaces.
+    assert f"/raw/{a}" in client.get(f"/ui/reviews/sources/{a}").text
+    assert f"/raw/{a}" in client.get("/ui/reviews/sources").text
+    # Serves the original bytes inline with a guessed MIME type.
+    resp = client.get(f"/raw/{a}")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/")
+    assert "alpha body" in resp.text
+    assert "inline" in resp.headers.get("content-disposition", "")
+    # Unknown / non-canonical ids are plain 404s.
+    assert client.get("/raw/src_0000000000000000").status_code == 404
+    assert client.get("/raw/not_a_source_id").status_code == 404
+    # A tampered manifest path can never traverse out of raw/ (safe_under containment).
+    (tmp_path / "secret.txt").write_text("outside raw", encoding="utf-8")
+    mpath = tmp_path / "raw" / "manifests" / f"{a}.json"
+    m = json.loads(mpath.read_text(encoding="utf-8"))
+    m["relative_raw_path"] = "../secret.txt"
+    mpath.write_text(json.dumps(m), encoding="utf-8")
+    assert client.get(f"/raw/{a}").status_code == 404
+
+
+
+def test_raw_endpoint_never_renders_active_content_inline(client, tmp_path):
+    _build(tmp_path, {"a.md": "alpha body",
+                      "page.html": "<script>document.write('x')</script>",
+                      "pic.svg": "<svg xmlns='http://www.w3.org/2000/svg' onload='alert(1)'/>"})
+    _extract(tmp_path, RoutingAdapter({"alpha": {"items": [_item("Solo")]}}))
+    sids = _sids(tmp_path)
+    # Untrusted active-content types NEVER render inline same-origin: attachment + nosniff.
+    for fname in ("page.html", "pic.svg"):
+        resp = client.get(f"/raw/{sids[fname]}")
+        assert resp.status_code == 200
+        assert resp.headers["content-disposition"].startswith("attachment")
+        assert resp.headers["x-content-type-options"] == "nosniff"
+    # Passive text renders inline — but sandboxed (opaque origin, no scripts) + nosniff.
+    resp = client.get(f"/raw/{sids['a.md']}")
+    assert resp.headers["content-disposition"].startswith("inline")
+    assert resp.headers["content-type"].startswith("text/plain")
+    assert resp.headers["content-security-policy"] == "sandbox"
+    assert resp.headers["x-content-type-options"] == "nosniff"
+    # A tampered original_filename cannot smuggle an inline-HTML render for the .md bytes.
+    a = sids["a.md"]
+    mpath = tmp_path / "raw" / "manifests" / f"{a}.json"
+    m = json.loads(mpath.read_text(encoding="utf-8"))
+    m["original_filename"] = "evil.html"
+    mpath.write_text(json.dumps(m), encoding="utf-8")
+    resp = client.get(f"/raw/{a}")
+    assert resp.headers["content-disposition"].startswith("attachment")
+
+
+def test_raw_endpoint_uses_the_manifest_quarantine(client, tmp_path):
+    _build(tmp_path, {"a.md": "alpha body"})
+    a = _sids(tmp_path)["a.md"]
+    # An internal source_id mismatch quarantines the manifest (valid_manifests) -> plain 404.
+    mpath = tmp_path / "raw" / "manifests" / f"{a}.json"
+    m = json.loads(mpath.read_text(encoding="utf-8"))
+    m["source_id"] = "src_00000000000000ff"
+    mpath.write_text(json.dumps(m), encoding="utf-8")
+    assert client.get(f"/raw/{a}").status_code == 404
+    assert client.get("/raw/src_00000000000000ff").status_code == 404
+
+
+def test_raw_endpoint_is_lifecycle_status_agnostic(client, tmp_path):
+    # Operator-review access is explicitly allowed (review round): hide/archive govern
+    # default retrieval + navigation, not this loopback governance surface.
+    _build(tmp_path, {"a.md": "alpha body"})
+    a = _sids(tmp_path)["a.md"]
+    manifests.set_status(tmp_path / "raw" / "manifests", a, "hidden")
+    assert client.get(f"/raw/{a}").status_code == 200
+    manifests.set_status(tmp_path / "raw" / "manifests", a, "archive_candidate")
+    assert client.get(f"/raw/{a}").status_code == 200

@@ -84,7 +84,10 @@ cadence — nothing is applied automatically. For high-volume candidate review, 
 (`/ui/reviews/sources`, ADR-0058) walks the sources in ingest order — each screen batch-decides that
 source's promotes/type changes/retirements, supports approve-with-amendments (title/aliases/
 description/item_type — item_type is required to clear an unclassified-sentinel candidate) and
-human-added candidates; the flat queue stays canonical for everything cross-source.
+human-added candidates; the flat queue stays canonical for everything cross-source. Each screen
+links the source's original file (`/raw/<source_id>` — passive media like PDF/text/images renders inline, sandboxed + nosniff; HTML/SVG/unknown types download as attachments, since raw sources are untrusted; lifecycle status never blocks this operator view) and offers
+an explicit `?preselect=approve` link that pre-checks approve on the pending rows (deferred rows
+stay parked) — you still review and submit; untouched rows always stay pending.
 A human-added candidate rebuilds `wiki/index.md` immediately; its **keyword** rows follow the next
 reindex pass (`/jobs/reindex` or the apply chain) like every other producer's output.
 
