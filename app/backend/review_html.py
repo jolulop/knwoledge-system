@@ -402,7 +402,7 @@ def _decision_radios(rid: str, *, preselect: str | None = None) -> str:
     """Per-row decision radios. The explicit no-decision option is load-bearing in this
     JS-free UI: a radio group cannot be DEselected once clicked, so it is the only way to
     take back a misclick before submit (and unlike defer it records NOTHING — the row just
-    stays pending). `preselect="approve"` (the explicit ?preselect=approve link) checks
+    stays pending). `preselect="approve"` (the explicit ?preselect=approve button) checks
     approve instead; the human still reviews and submits."""
     rid = _h(rid)
     default = "approve" if preselect == "approve" else ""
@@ -467,13 +467,14 @@ def render_source_screen(data: dict[str, Any]) -> str:
         "<a href='/ui/reviews/apply'>Apply</a>. Untouched rows stay pending. Amendments "
         "(promote items only) are frozen on approve and preserved as a draft on defer.</p>",
         # Explicit pre-select (UAT round): a deliberate two-click bulk approve — one click of
-        # intent (this link re-renders with approve checked on every PENDING row; deferred
+        # intent (this button re-renders with approve checked on every PENDING row; deferred
         # rows were parked on purpose and stay unchecked), one click of commit (submit).
         (f"<p><strong>Approve pre-selected on all pending rows</strong> — review, adjust, "
          f"then submit. <a href='/ui/reviews/sources/{sid}'>Clear pre-selection</a></p>"
          if preselect == "approve" else
-         f"<p><a href='/ui/reviews/sources/{sid}?preselect=approve'>"
-         "Pre-select approve for all pending rows</a></p>"),
+         f"<form method='get' action='/ui/reviews/sources/{sid}'>"
+         "<input type='hidden' name='preselect' value='approve'>"
+         "<button type='submit'>Pre-select approve for all pending rows</button></form>"),
         f"<form method='post' action='/ui/reviews/sources/{sid}/decide'>",
     ]
 

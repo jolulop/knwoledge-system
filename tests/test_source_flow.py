@@ -579,7 +579,10 @@ def test_preselect_approve_checks_pending_rows_only(client, tmp_path):
     assert f"name='decision_{fresh}' value='' checked" in plain      # default = leave pending
     assert "— leave pending" in plain
     assert "value='approve' checked" not in plain
-    assert f"/ui/reviews/sources/{a}?preselect=approve" in plain     # the explicit link
+    # The explicit pre-select control is a GET-form button targeting the same URL.
+    assert f"<form method='get' action='/ui/reviews/sources/{a}'>" in plain
+    assert "<input type='hidden' name='preselect' value='approve'>" in plain
+    assert "<button type='submit'>Pre-select approve for all pending rows</button>" in plain
 
     pre = client.get(f"/ui/reviews/sources/{a}?preselect=approve").text
     assert f"name='decision_{fresh}' value='approve' checked" in pre     # pending row pre-checked
