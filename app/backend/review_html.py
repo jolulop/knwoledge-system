@@ -15,6 +15,7 @@ from __future__ import annotations
 import html
 from typing import Any
 
+from app.backend import taxonomy
 from app.backend.review_read import reopen_block_reason
 
 _STYLE = (
@@ -342,7 +343,7 @@ def render_apply_result(result: dict[str, Any]) -> str:
         "synthesis_hidden": s.get("synthesis_hidden"),
         "synthesis_unhidden": s.get("synthesis_unhidden"),
         "synthesis_evidence": s.get("synthesis_evidence"),
-        "merged": s.get("merged"), "rekeyed": s.get("rekeyed"), "split": s.get("split"),
+        "merged": s.get("merged"), "retyped": s.get("retyped"), "split": s.get("split"),
         "pages_changed": s.get("pages_changed"), "index_rebuilt": s.get("index_rebuilt"),
         "unapplied": s.get("unapplied"),
     }))
@@ -405,19 +406,26 @@ def _decision_radios(rid: str) -> str:
 
 
 def _amend_inputs(row: dict[str, Any]) -> str:
-    """Inline amendment fields (ADR-0058: title/aliases/description only), prefilled from a
-    preserved draft when the reviewer deferred with typed amendments."""
+    """Inline amendment fields (ADR-0058 title/aliases/description + ADR-0059 item_type),
+    prefilled from a preserved draft when the reviewer deferred with typed amendments. The
+    item_type select is REQUIRED to clear an unclassified sentinel (approval blocks without
+    it); for a classified candidate it is an optional reclassification-at-promotion."""
     rid = _h(row.get("review_id"))
     draft = row.get("draft_amendments") or {}
     title = _h(draft.get("title") or "")
     aliases = _h(", ".join(draft.get("aliases") or []))
     description = _h(draft.get("description") or "")
+    drafted_type = draft.get("item_type") or ""
+    options = ["<option value=''>keep type</option>"] + [
+        f"<option value='{t}'{' selected' if t == drafted_type else ''}>{t}</option>"
+        for t in taxonomy.PRIORITY_ORDER]
     return (f"<input type='text' name='amend_title_{rid}' value='{title}' size='18' "
             "placeholder='amended title'> "
             f"<input type='text' name='amend_aliases_{rid}' value='{aliases}' size='18' "
             "placeholder='aliases, comma-sep'> "
             f"<input type='text' name='amend_description_{rid}' value='{description}' size='24' "
-            "placeholder='description'>")
+            "placeholder='description'> "
+            f"<select name='amend_item_type_{rid}'>" + "".join(options) + "</select>")
 
 
 def _decided_cell(row: dict[str, Any]) -> str:
@@ -431,7 +439,7 @@ def _decided_cell(row: dict[str, Any]) -> str:
 
 
 def render_source_screen(data: dict[str, Any]) -> str:
-    """One source's screen: candidates + subtype items + retired section in ONE batch form
+    """One source's screen: candidates + type changes + retired section in ONE batch form
     (untouched rows stay pending), plus the human-add form. Decided rows render read-only."""
     sid = _h(data.get("source_id"))
     totals = data.get("totals") or {}
@@ -467,13 +475,13 @@ def render_source_screen(data: dict[str, Any]) -> str:
                     badges.append(f"also mentioned by {row['other_source_count']} other source(s)")
                 if row.get("recurrence_eligible"):
                     badges.append("recurrence-eligible (would auto-promote)")
-                info += (f"<td>{_h(row.get('title'))}</td><td>{_h(row.get('node_type'))}</td>"
+                info += (f"<td>{_h(row.get('title'))}</td><td>{_h(row.get('item_type'))}</td>"
                          f"<td>{_h(', '.join(row.get('aliases') or []))}</td>"
                          f"<td>{_h(row.get('node_status'))}</td>"
                          f"<td>{_h('; '.join(badges))}</td>")
-            elif row["kind"] == "subtype":
+            elif row["kind"] == "retype":
                 info += (f"<td>{_h(row.get('name'))}</td>"
-                         f"<td>{_h(row.get('from_type'))} → {_h(row.get('to_type'))}</td>")
+                         f"<td>{_h(row.get('from_item_type'))} → {_h(row.get('to_item_type'))}</td>")
             else:  # retired
                 info += (f"<td>{_h(row.get('title'))}</td><td>{_h(row.get('page'))}</td>"
                          f"<td>{_h(row.get('node_status'))}</td>")
@@ -490,7 +498,7 @@ def render_source_screen(data: dict[str, Any]) -> str:
              amendable=True,
              columns="<th>review_id</th><th>title</th><th>type</th><th>aliases</th>"
                      "<th>status</th><th>notes</th>")
-    _section("Subtype changes from this source", data.get("subtype_items") or [],
+    _section("Type changes from this source", data.get("retype_items") or [],
              amendable=False,
              columns="<th>review_id</th><th>name</th><th>retype</th>")
     _section("Retired by re-extraction", data.get("retired") or [], amendable=False,
@@ -500,15 +508,15 @@ def render_source_screen(data: dict[str, Any]) -> str:
                  "<button type='submit'>Record marked decisions</button></form>")
 
     parts.append(
-        "<h2>Add a missed concept/entity</h2>"
+        "<h2>Add a missed knowledge item</h2>"
         "<p>Creates the candidate immediately (producer act) with an anchorless "
         "<code>asserted_by: human</code> mention and a pre-approved promotion — apply still "
         "promotes it. A previously rejected promotion blocks the add (reopen it explicitly).</p>"
         f"<form method='post' action='/ui/reviews/sources/{sid}/add'>"
         "<p><label>Title: <input type='text' name='title' size='30' required></label> "
-        "<label>Type: <select name='node_type'>"
+        "<label>Type: <select name='item_type'>"
         + "".join(f"<option value='{t}'>{t}</option>"
-                  for t in ("concept", "person", "organization", "project", "entity"))
+                  for t in taxonomy.PRIORITY_ORDER)
         + "</select></label></p>"
         "<p><label>Aliases (comma-sep): <input type='text' name='aliases' size='30'></label></p>"
         "<p><label>Description: <input type='text' name='description' size='50'></label></p>"

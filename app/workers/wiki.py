@@ -44,7 +44,7 @@ _TITLE_RE = re.compile(r'(?m)^title:\s*"(.*)"\s*$')
 
 
 def _node_title(wiki_dir: Path, node_type: str, slug: str) -> str | None:
-    """Resolve a concept/entity node's display title from its page (worker-side IO)."""
+    """Resolve an item node's display title from its page (worker-side IO)."""
     page = wiki_dir / wiki_render.NODE_DIR[node_type] / f"{slug}.md"
     if not page.exists():
         return None
@@ -161,8 +161,7 @@ def generate_wiki(
                 # (slice 4) from the graph; resolve labels worker-side, pass plain data to
                 # the pure renderer.
                 claims = None
-                buckets: dict[str, list] = {k: [] for k in
-                                            ("concept", "entity", "person", "organization", "project")}
+                items = None
                 if gconn is not None:
                     claims = [
                         {"claim_id": cid, "title": _claim_label(claims_dir, cid)}
@@ -172,20 +171,19 @@ def generate_wiki(
                         # edge stays active in the graph for raw inspection.
                         if (graph.get_node(gconn, cid) or {}).get("status") != "hidden"
                     ]
-                    for m in graph.mentions_for_source(gconn, source_id):
-                        nt, slug = m["node_type"], m["slug"]
-                        item = {"target": f"{wiki_render.NODE_DIR[nt]}/{slug}",
-                                "title": _node_title(wiki_dir, nt, slug)}
-                        buckets.get(nt, buckets["entity"]).append(item)
+                    # ADR-0059: project the source's mentioned knowledge items; the renderer
+                    # groups them by item_type (sentinel under the QA bucket, never a taxonomy group).
+                    items = [
+                        {"target": f"Items/{m['slug']}",
+                         "title": _node_title(wiki_dir, "item", m["slug"]),
+                         "item_type": m.get("item_type")}
+                        for m in graph.mentions_for_source(gconn, source_id)
+                        if m["node_type"] == "item"
+                    ]
                 candidate = wiki_render.render_source_page(
                     template, manifest, normalized_markdown,
                     summary_max=summary_max, summary_min=summary_min,
-                    enrichment=enrichment, claims=claims,
-                    concepts=buckets["concept"] if gconn else None,
-                    entities=buckets["entity"] if gconn else None,
-                    people=buckets["person"] if gconn else None,
-                    organizations=buckets["organization"] if gconn else None,
-                    projects=buckets["project"] if gconn else None,
+                    enrichment=enrichment, claims=claims, items=items,
                 )
             except Exception as exc:  # one page's failure must not abort the run
                 errors.append({"source_id": source_id, "error": f"{type(exc).__name__}: {exc}"})

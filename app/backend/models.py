@@ -153,6 +153,8 @@ class JobsResponse(BaseModel):
 class GraphNodeMeta(BaseModel):
     node_id: str
     node_type: str
+    # ADR-0059: the governed classification of `item` nodes (None for every other type).
+    item_type: str | None = None
     slug: str | None = None
     status: str | None = None
     answer_eligible: bool

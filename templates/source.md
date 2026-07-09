@@ -18,11 +18,7 @@ created: "{{created_at}}"
 ingested: "{{ingested_at}}"
 input_fingerprint: "{{input_fingerprint}}"
 tags: {{tags}}
-concepts: {{concepts_fm}}
-entities: {{entities_fm}}
-people: {{people_fm}}
-organizations: {{organizations_fm}}
-projects: {{projects_fm}}
+items: {{items_fm}}
 ---
 
 # {{title}}
@@ -48,25 +44,9 @@ _Pending semantic enrichment._
 
 {{claims_block}}
 
-## Concepts Mentioned
+## Items Mentioned
 
-{{concepts_block}}
-
-## Entities Mentioned
-
-{{entities_block}}
-
-## People Mentioned
-
-{{people_block}}
-
-## Organizations Mentioned
-
-{{organizations_block}}
-
-## Projects Mentioned
-
-{{projects_block}}
+{{items_block}}
 
 ## Notes
 

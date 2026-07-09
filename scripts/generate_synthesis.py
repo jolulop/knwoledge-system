@@ -5,9 +5,9 @@ Usage:
     uv run python scripts/generate_synthesis.py            # synthesize eligible topics
     uv run python scripts/generate_synthesis.py --force    # re-synthesize all eligible topics
 
-Preconditions: run scripts/extract_claims.py and scripts/extract_concepts.py first — a topic is
-eligible only with ≥2 active claims from ≥2 independent sources mentioning an active concept/
-entity, all read from db/graph.sqlite.
+Preconditions: run scripts/extract_claims.py and scripts/extract_items.py first — a topic is
+eligible only with ≥2 active claims from ≥2 independent sources mentioning an active knowledge
+item, all read from db/graph.sqlite.
 
 Uses the tier-3 (heavy) model_ref and provider credentials from config/.env. With no API key,
 generation is skipped (recorded as a 'skipped' job) — but human review decisions are still

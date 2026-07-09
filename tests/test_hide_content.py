@@ -383,17 +383,18 @@ def test_search_graph_channel_excludes_hidden_node(tmp_path):
     gdb.parent.mkdir(parents=True, exist_ok=True)
     graph.init_db(gdb)
     conn = graph.connect(gdb)
-    cpt = "cpt_cccccccccccccccc"
-    graph.upsert_node(conn, node_id=cpt, node_type="concept", slug="topic", status="active")
+    itm = "itm_cccccccccccccccc"
+    graph.upsert_node(conn, node_id=itm, node_type="item", item_type="method_technique",
+                      slug="topic", status="active")
     graph.upsert_node(conn, node_id=SID, node_type="source", slug=SID, status="hidden")
-    graph.upsert_assertion(conn, src_id=cpt, dst_id=SID, edge_type="mentions",
+    graph.upsert_assertion(conn, src_id=itm, dst_id=SID, edge_type="mentions",
                            asserted_by="deterministic", status="active")
     conn.commit()
-    default = graph_read.search_subgraph(conn, [cpt], depth=1,
+    default = graph_read.search_subgraph(conn, [itm], depth=1,
                                          node_statuses=search.RETENTION_DEFAULT_STATUSES,
                                          node_cap=50, edge_cap=50)
     assert SID not in {n["node_id"] for n in default["nodes"]}        # graph channel excludes hidden
-    incl = graph_read.search_subgraph(conn, [cpt], depth=1, node_statuses=("active", "hidden"),
+    incl = graph_read.search_subgraph(conn, [itm], depth=1, node_statuses=("active", "hidden"),
                                       node_cap=50, edge_cap=50)
     assert SID in {n["node_id"] for n in incl["nodes"]}              # explicit include surfaces it
     assert graph.get_node(conn, SID)["status"] == "hidden"          # raw inspection still sees it

@@ -141,8 +141,8 @@ def _claim(**over):
     return base
 
 
-def _concept(**over):
-    base = {"node_type": "concept", "node_id": "cpt_x", "id_field": "concept_id",
+def _item(**over):
+    base = {"node_id": "itm_x", "item_type": "method_technique",
             "title": "Thing", "aliases": [], "confidence": "low", "source_ids": [], "status": "active"}
     base.update(over)
     return base
@@ -153,8 +153,8 @@ def test_review_status_none_preserves_derived_claim():
     assert wiki_render.render_claim_page(_claim()) == wiki_render.render_claim_page(_claim(), review_status=None)
 
 
-def test_review_status_none_preserves_derived_concept():
-    assert wiki_render.render_concept_page(_concept()) == wiki_render.render_concept_page(_concept(), review_status=None)
+def test_review_status_none_preserves_derived_item():
+    assert wiki_render.render_item_page(_item()) == wiki_render.render_item_page(_item(), review_status=None)
 
 
 def test_explicit_review_status_marks_no_evidence_claim_tombstone_approved():
@@ -165,8 +165,8 @@ def test_explicit_review_status_marks_no_evidence_claim_tombstone_approved():
 
 
 def test_explicit_review_status_marks_no_mention_concept_approved():
-    page = wiki_render.render_concept_page(_concept(source_ids=[], status="deprecated_candidate"),
-                                           review_status="approved")
+    page = wiki_render.render_item_page(_item(source_ids=[], status="deprecated_candidate"),
+                                        review_status="approved")
     fm = wiki_render.parse_frontmatter(page)
     assert fm["status"] == "deprecated_candidate" and fm["review_status"] == "approved"
 
@@ -175,7 +175,7 @@ def test_unknown_review_status_override_raises():
     with pytest.raises(ValueError):
         wiki_render.render_claim_page(_claim(), review_status="bogus")
     with pytest.raises(ValueError):
-        wiki_render.render_concept_page(_concept(), review_status="bogus")
+        wiki_render.render_item_page(_item(), review_status="bogus")
 
 
 def _syn_node(**over):
@@ -208,3 +208,44 @@ def test_query_emits_constant_in_set_review_status():
     fm = wiki_render.parse_frontmatter(
         wiki_render.render_query_page({"query_id": "qry_x", "question": "What?"}))
     assert fm["review_status"] == "none"
+
+
+# --- ADR-0059 review round B2: sentinel is a QA bucket, never a taxonomy group ---
+
+
+def test_source_items_block_sentinel_renders_only_as_qa_bucket_last():
+    items = [
+        {"target": "Items/zeta", "title": "Zeta", "item_type": "unclassified_review_required"},
+        {"target": "Items/alpha", "title": "Alpha", "item_type": "model"},
+    ]
+    block = wiki_render._items_block(items)
+    assert "### Model" in block
+    assert "### Unclassified (review required)" in block
+    # QA bucket LAST, and the sentinel never appears as a taxonomy-style heading.
+    assert block.index("### Model") < block.index("### Unclassified (review required)")
+    assert "### unclassified_review_required" not in block
+    assert "### Unclassified Review Required" not in block
+
+
+def test_index_sentinel_renders_only_as_qa_bucket_last(tmp_path):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "rebuild_index_qa", Path(__file__).resolve().parents[1] / "scripts" / "rebuild_index.py")
+    rebuild_index = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rebuild_index)
+    wiki = tmp_path / "wiki"
+    (wiki / "Items").mkdir(parents=True)
+    (wiki / "Items" / "alpha.md").write_text(
+        '---\ntype: item\nitem_id: "itm_a"\nitem_type: model\ntitle: "Alpha"\n'
+        "status: candidate\n---\n\n> [!summary] s\n> Alpha.\n", encoding="utf-8")
+    (wiki / "Items" / "zeta.md").write_text(
+        '---\ntype: item\nitem_id: "itm_z"\nitem_type: unclassified_review_required\n'
+        'title: "Zeta"\nstatus: candidate\n---\n\n> [!summary] s\n> Zeta.\n', encoding="utf-8")
+    text = rebuild_index.render_index(rebuild_index.collect_pages(wiki))
+    # Full listing preserved: BOTH pages are indexed; the sentinel only under its QA bucket, last.
+    assert "[[Items/alpha]]" in text and "[[Items/zeta]]" in text
+    assert "### Model (1)" in text
+    assert "### Unclassified (review required) (1)" in text
+    assert text.index("### Model (1)") < text.index("### Unclassified (review required) (1)")
+    assert "### unclassified_review_required" not in text
+    assert "### Unclassified Review Required" not in text

@@ -24,6 +24,8 @@ OPERATIONAL_FILES = [
     ROOT / ".claude" / "skills" / "vault-maintenance" / "SKILL.md",
     ROOT / "README.md",
     ROOT / "docs" / "UAT Guide.md",
+    ROOT / "docs" / "Workflow.md",
+    ROOT / "docs" / "Operations.md",
 ]
 
 SCRIPT_REF_RE = re.compile(r"scripts/([A-Za-z0-9_./-]+\.py)")
@@ -57,9 +59,22 @@ def test_env_example_documents_query_model():
 
 
 def test_env_example_documents_adr_0056_coverage_knobs():
+    # ADR-0059 renamed the items-pass knob (ENRICH_CONCEPT_INPUT_MAX_CHARS -> ENRICH_ITEMS_...).
     text = (ROOT / ".env.example").read_text(encoding="utf-8")
     assert "ENRICH_CLAIM_WINDOW_CHARS=" in text
-    assert "ENRICH_CONCEPT_INPUT_MAX_CHARS=" in text
+    assert "ENRICH_ITEMS_INPUT_MAX_CHARS=" in text
+    assert "ENRICH_CONCEPT_INPUT_MAX_CHARS=" not in text   # old name must not read as current
+
+
+def test_operator_docs_reference_the_renamed_items_pass():
+    # ADR-0059 review round: docs/Workflow.md shipped still telling operators to run the
+    # deleted extract_concepts.py. The operator-facing runbooks must name the renamed
+    # producer (the existing scripts-exist guard now also covers these surfaces).
+    for doc in ("Workflow.md", "Operations.md"):
+        text = (ROOT / "docs" / doc).read_text(encoding="utf-8")
+        assert "extract_concepts.py" not in text, f"docs/{doc} references the deleted script"
+    assert "extract_items.py" in (ROOT / "docs" / "Workflow.md").read_text(encoding="utf-8")
+    assert "extract_items.py" in (ROOT / "docs" / "Operations.md").read_text(encoding="utf-8")
 
 
 def test_adr_0056_rollout_chain_includes_keyword_reindex():

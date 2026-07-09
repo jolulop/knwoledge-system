@@ -101,7 +101,7 @@ def _write_page(root, rel, fm, summary):
 
 SRC_OK = "src_aaaaaaaaaaaaaaaa"
 SRC_ARCH = "src_bbbbbbbbbbbbbbbb"
-CPT = "cpt_synergyxxxxxxxx"
+ITM = "itm_synergyxxxxxxxx"
 
 
 @pytest.fixture
@@ -115,22 +115,25 @@ def vault(tmp_path):
     _write_page(tmp_path, f"wiki/Sources/{SRC_ARCH}.md",
                 {"type": "source", "source_id": SRC_ARCH, "title": "Archived deck", "status": "archived",
                  "language": "en", "aliases": [], "tags": []}, "old synergy notes")
-    # Navigation + graph seed: an active concept page matching "synergy".
-    _write_page(tmp_path, f"wiki/Concepts/{CPT}.md",
-                {"type": "concept", "concept_id": CPT, "title": "Synergy capture", "status": "active",
+    # Navigation + graph seed: an active item page matching "synergy".
+    _write_page(tmp_path, f"wiki/Items/{ITM}.md",
+                {"type": "item", "item_id": ITM, "item_type": "method_technique",
+                 "title": "Synergy capture", "status": "active",
                  "review_status": "none", "aliases": ["synergies"], "tags": []},
                 "How synergy is captured after a merger.")
     keyword_index.reindex(tmp_path, force=True)
     kconn = keyword_index.connect(tmp_path / keyword_index.DB_RELPATH)
 
-    # Graph: source mentions the concept (active edge).
+    # Graph: source mentions the item (active edge).
     gdb = tmp_path / "db" / "graph.sqlite"
     graph.init_db(gdb)
     gconn = graph.connect(gdb)
     graph.reindex_nodes(gconn, source_ids=[SRC_OK, SRC_ARCH],
-                        page_nodes=[{"node_id": CPT, "node_type": "concept", "slug": "synergy", "status": "active"}],
+                        page_nodes=[{"node_id": ITM, "node_type": "item",
+                                     "item_type": "method_technique", "slug": "synergy",
+                                     "status": "active"}],
                         now="t0")
-    graph.upsert_assertion(gconn, src_id=SRC_OK, dst_id=CPT, edge_type="mentions",
+    graph.upsert_assertion(gconn, src_id=SRC_OK, dst_id=ITM, edge_type="mentions",
                            asserted_by="llm", status="active")
     return kconn, gconn
 
@@ -163,19 +166,19 @@ def test_evidence_hit_carries_citation_and_path(vault):
 def test_navigation_mode_returns_status_aware_pages(vault):
     res = _run(vault, "synergy", mode="navigation")
     paths = {h["path"]: h for h in res["navigation"]}
-    concept = paths[f"wiki/Concepts/{CPT}.md"]
-    assert concept["answer_eligible"] is True
-    assert concept["page_type"] == "concept"
+    item = paths[f"wiki/Items/{ITM}.md"]
+    assert item["answer_eligible"] is True
+    assert item["page_type"] == "item"
 
 
 def test_graph_mode_is_flat_subgraph_seeded_from_navigation(vault):
     res = _run(vault, "synergy", mode="graph")
     assert res["retrieval_path"] == ["graph"]
     g = res["graph"]
-    assert CPT in g["seeds"]  # the concept page seeds the graph
+    assert ITM in g["seeds"]  # the item page seeds the graph
     ids = {n["node_id"] for n in g["nodes"]}
-    assert {CPT, SRC_OK} <= ids  # BFS reached the mentioning source
-    assert any(e["edge_type"] == "mentions" and e["src_id"] == SRC_OK and e["dst_id"] == CPT
+    assert {ITM, SRC_OK} <= ids  # BFS reached the mentioning source
+    assert any(e["edge_type"] == "mentions" and e["src_id"] == SRC_OK and e["dst_id"] == ITM
                for e in g["edges"])
     # Flat edges are canonical-only — no other_node_id (ADR-0032 addendum 1).
     assert all("other_node_id" not in e for e in g["edges"])
@@ -460,8 +463,8 @@ def test_golden_discovery_finds_topic_not_question_words(vault):
     res = _run(vault, "what do I know about synergy", mode="auto")
     assert res["shape"] == "discovery"
     assert res["retrieval_path"] == ["navigation", "graph"]
-    assert any(h["node_id"] == CPT for h in res["navigation"])  # topic 'synergy' matched the concept
-    assert CPT in res["graph"]["seeds"]
+    assert any(h["node_id"] == ITM for h in res["navigation"])  # topic 'synergy' matched the item
+    assert ITM in res["graph"]["seeds"]
 
 
 def test_golden_mention_routes_keyword_and_graph(vault):
@@ -475,7 +478,7 @@ def test_golden_relationship_routes_to_graph(vault):
     res = _run(vault, "how are synergy and mergers related", mode="auto")
     assert res["shape"] == "relationship"
     assert res["retrieval_path"] == ["graph"]
-    assert CPT in res["graph"]["seeds"]
+    assert ITM in res["graph"]["seeds"]
 
 
 # --- graph-native disagreement, retention, and depth (own builders) ---
@@ -492,9 +495,10 @@ def _graph(tmp_path, page_nodes, edges, source_ids=()):
     return conn
 
 
-def _concept_index(tmp_path, concept_id, title, summary):
-    _write_page(tmp_path, f"wiki/Concepts/{concept_id}.md",
-                {"type": "concept", "concept_id": concept_id, "title": title, "status": "active",
+def _item_index(tmp_path, item_id, title, summary):
+    _write_page(tmp_path, f"wiki/Items/{item_id}.md",
+                {"type": "item", "item_id": item_id, "item_type": "method_technique",
+                 "title": title, "status": "active",
                  "review_status": "none", "aliases": [], "tags": []}, summary)
     keyword_index.reindex(tmp_path, force=True)
     return keyword_index.connect(tmp_path / keyword_index.DB_RELPATH)
@@ -518,14 +522,15 @@ def test_disagreement_is_graph_native_without_topic(tmp_path):
 
 
 def test_graph_retention_excludes_archived_and_deleted_adjacents(tmp_path):
-    seed = "cpt_anchorxxxxxxxxx"
-    arch, dele, depr = "cpt_archivedxxxxxx", "cpt_deletedxxxxxxx", "cpt_deprecatedxxx"
-    kconn = _concept_index(tmp_path, seed, "Anchor", "anchor topic")
+    seed = "itm_anchorxxxxxxxxx"
+    arch, dele, depr = "itm_archivedxxxxxx", "itm_deletedxxxxxxx", "itm_deprecatedxxx"
+    kconn = _item_index(tmp_path, seed, "Anchor", "anchor topic")
+    T = {"item_type": "method_technique"}
     gconn = _graph(tmp_path, [
-        {"node_id": seed, "node_type": "concept", "slug": "a", "status": "active"},
-        {"node_id": arch, "node_type": "concept", "slug": "b", "status": "archived"},
-        {"node_id": dele, "node_type": "concept", "slug": "c", "status": "deleted"},
-        {"node_id": depr, "node_type": "concept", "slug": "d", "status": "deprecated_candidate"},
+        {"node_id": seed, "node_type": "item", "slug": "a", "status": "active", **T},
+        {"node_id": arch, "node_type": "item", "slug": "b", "status": "archived", **T},
+        {"node_id": dele, "node_type": "item", "slug": "c", "status": "deleted", **T},
+        {"node_id": depr, "node_type": "item", "slug": "d", "status": "deprecated_candidate", **T},
     ], [(seed, arch, "related_to"), (seed, dele, "related_to"), (seed, depr, "related_to")])
     res = search.run_search(q="anchor", mode="graph", keyword_conn=kconn, graph_conn=gconn,
                             policy=RetrievalPolicy())
@@ -539,12 +544,13 @@ def test_graph_retention_excludes_archived_and_deleted_adjacents(tmp_path):
 
 
 def test_search_depth_budget_controls_traversal(tmp_path):
-    a, b, d = "cpt_aaaaaaaaaaaaaaa", "cpt_bbbbbbbbbbbbbbb", "cpt_ddddddddddddddd"
-    kconn = _concept_index(tmp_path, a, "Alpha", "alpha topic")
+    a, b, d = "itm_aaaaaaaaaaaaaaa", "itm_bbbbbbbbbbbbbbb", "itm_ddddddddddddddd"
+    kconn = _item_index(tmp_path, a, "Alpha", "alpha topic")
+    T = {"item_type": "method_technique"}
     gconn = _graph(tmp_path, [
-        {"node_id": a, "node_type": "concept", "slug": "a", "status": "active"},
-        {"node_id": b, "node_type": "concept", "slug": "b", "status": "active"},
-        {"node_id": d, "node_type": "concept", "slug": "d", "status": "active"},
+        {"node_id": a, "node_type": "item", "slug": "a", "status": "active", **T},
+        {"node_id": b, "node_type": "item", "slug": "b", "status": "active", **T},
+        {"node_id": d, "node_type": "item", "slug": "d", "status": "active", **T},
     ], [(a, b, "related_to"), (b, d, "related_to")])
 
     def run(depth):

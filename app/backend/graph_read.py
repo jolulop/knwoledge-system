@@ -105,9 +105,12 @@ def parse_node_types(raw: str | None) -> frozenset[str] | None:
 def _node_meta(row: dict[str, Any] | sqlite3.Row) -> dict[str, Any]:
     node_type = row["node_type"]
     status = row["status"]
+    keys = row.keys() if hasattr(row, "keys") else row
     return {
         "node_id": row["node_id"],
         "node_type": node_type,
+        # ADR-0059: surface the governed classification on item metadata.
+        "item_type": row["item_type"] if "item_type" in keys else None,
         "slug": row["slug"],
         "status": status,
         "answer_eligible": is_answer_eligible(node_type, status),
@@ -117,7 +120,7 @@ def _node_meta(row: dict[str, Any] | sqlite3.Row) -> dict[str, Any]:
 def _unknown_meta(node_id: str) -> dict[str, Any]:
     # Defensive: edges require indexed endpoints (graph.upsert_assertion), so this should not
     # happen, but a hand-written graph row must not crash the projection.
-    return {"node_id": node_id, "node_type": "unknown", "slug": None,
+    return {"node_id": node_id, "node_type": "unknown", "item_type": None, "slug": None,
             "status": None, "answer_eligible": False}
 
 
@@ -170,7 +173,7 @@ def _node_meta_map(conn: sqlite3.Connection, node_ids: set[str]) -> dict[str, di
     ids = sorted(node_ids)
     placeholders = ",".join("?" for _ in ids)
     rows = conn.execute(
-        f"SELECT node_id, node_type, slug, status FROM nodes WHERE node_id IN ({placeholders})",
+        f"SELECT node_id, node_type, item_type, slug, status FROM nodes WHERE node_id IN ({placeholders})",
         ids,
     ).fetchall()
     return {r["node_id"]: _node_meta(r) for r in rows}

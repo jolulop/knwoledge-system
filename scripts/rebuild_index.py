@@ -13,16 +13,29 @@ from typing import Any
 
 WIKI_DIRS = [
     "Sources",
-    "Concepts",
+    "Items",
     "Claims",
-    "Entities",
-    "People",
-    "Organizations",
-    "Projects",
     "Tags",
     "Synthesis",
     "Queries",
 ]
+
+# ADR-0059: the Items section groups by item_type in the classifier priority order, the
+# QA sentinel bucket last — LOCAL constants because this script is dependency-free by
+# design (a parity test pins them against app/backend/taxonomy.py).
+ITEM_GROUP_ORDER = [
+    "domain", "model", "sub_domain", "architecture_pattern", "ai_model_family",
+    "method_technique", "technology_capability", "use_case", "problem_risk",
+    "product_tool_platform", "standard_protocol_interface", "data_ontology_asset",
+    "governance_regulation", "infrastructure_hardware", "provider_institution",
+    "unclassified_review_required",
+]
+_ITEM_DISPLAY = {"ai_model_family": "AI Model Family",
+                 "unclassified_review_required": "Unclassified (review required)"}
+
+
+def item_display(item_type: str) -> str:
+    return _ITEM_DISPLAY.get(item_type, item_type.replace("_", " ").title())
 
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 
@@ -99,6 +112,7 @@ def collect_pages(wiki_root: Path) -> dict[str, list[dict[str, Any]]]:
                     "link": wiki_link(path, wiki_root),
                     "title": page_title(path, fm, text),
                     "type": fm.get("type", section.lower().rstrip("s")),
+                    "item_type": fm.get("item_type", ""),
                     "status": fm.get("status", "unknown"),
                     "confidence": fm.get("confidence", ""),
                     "summary": extract_summary(text),
@@ -123,6 +137,14 @@ def render_index(sections: dict[str, list[dict[str, Any]]]) -> str:
         lines.append(f"- {section}: {len(pages)}")
     lines.append("")
 
+    def _page_lines(page: dict[str, Any]) -> list[str]:
+        meta = page["status"]
+        if page["confidence"]:
+            meta = f"{meta}, {page['confidence']} confidence"
+        if page["updated"]:
+            meta = f"{meta}, updated {page['updated']}"
+        return [f"- {page['link']} · {meta}", f"  {page['summary']}"]
+
     for section, pages in sections.items():
         lines.append(f"## {section} ({len(pages)})")
         lines.append("")
@@ -130,14 +152,27 @@ def render_index(sections: dict[str, list[dict[str, Any]]]) -> str:
             lines.append("_No pages yet._")
             lines.append("")
             continue
+        if section == "Items":
+            # ADR-0059: group by item_type (priority order; the sentinel's QA bucket renders
+            # last and never as a taxonomy group). Unknown/missing types sort into the QA
+            # bucket rather than being dropped — the index is the full page listing.
+            groups: dict[str, list[dict[str, Any]]] = {}
+            for page in pages:
+                itype = page.get("item_type") or ""
+                key = itype if itype in ITEM_GROUP_ORDER[:-1] else ITEM_GROUP_ORDER[-1]
+                groups.setdefault(key, []).append(page)
+            for itype in ITEM_GROUP_ORDER:
+                members = groups.get(itype)
+                if not members:
+                    continue
+                lines.append(f"### {item_display(itype)} ({len(members)})")
+                lines.append("")
+                for page in members:
+                    lines.extend(_page_lines(page))
+                lines.append("")
+            continue
         for page in pages:
-            meta = page["status"]
-            if page["confidence"]:
-                meta = f"{meta}, {page['confidence']} confidence"
-            if page["updated"]:
-                meta = f"{meta}, updated {page['updated']}"
-            lines.append(f"- {page['link']} · {meta}")
-            lines.append(f"  {page['summary']}")
+            lines.extend(_page_lines(page))
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 

@@ -158,7 +158,8 @@ Replaces the ADR-0055/0056 two-array contract. Tier-2 items output:
   confidence/evidence fields in v1 — items are interpretive topic labels, not grounded assertions;
   provenance stays in graph mentions + Source links.
 - **One full-document call** — ADR-0056's `full-doc-v1` strategy, input cap
-  (`ENRICH_CONCEPT_INPUT_MAX_CHARS`), `coverage: truncated` marker, and strategy-ref/cache
+  (`ENRICH_ITEMS_INPUT_MAX_CHARS`, renamed from `ENRICH_CONCEPT_INPUT_MAX_CHARS`),
+  `coverage: truncated` marker, and strategy-ref/cache
   identity plumbing carry over unchanged.
 - The **15-step priority order** (user-supplied, taxonomy v2 — every production type appears
   exactly once) lives in the system prompt as the tie-break when several types could apply:
@@ -205,8 +206,15 @@ The sentinel is allowed in extraction output, and:
   `item_type` amendment is blocked (`missing_required_item_type`); with a real 15-value
   `item_type` it applies the metadata flip + promotes. Approve-with-amendments (ADR-0058) gains
   `item_type` as an amendable field for exactly this path.
-- Never a public navigation group: it may appear in review queues, job summaries, and lint
-  counts, never as a production taxonomy group in `index.md`/Source-page groupings.
+- Never a production taxonomy group (amended, implementation review round: the **QA-bucket
+  semantics** are the locked contract). On `index.md` and Source-page groupings the sentinel's
+  items render ONLY under the explicitly QA-labeled bucket **"Unclassified (review required)"**,
+  ordered LAST — never under a taxonomy-type heading. This preserves the full-listing convention
+  of `index.md` and the validator-enforced bidirectional Source-page mention projection (no
+  sentinel special-case hole in `validate_projection`). The sentinel counts toward NEITHER the
+  thematic nor the named group (decision 6) and is never answer-eligible while candidate
+  (candidates never are; `active` + sentinel is validator-forbidden). Review queues, job
+  summaries, and lint counts remain its primary surfaces.
 - Volume is observable: job-summary counter + a report-only lint check (ADR-0037 family).
 - The **human-add** path (ADR-0058) requires a real 15-value type — the sentinel is model-only.
 
@@ -294,8 +302,9 @@ claims → promote → reindex_keyword → reindex_vector → rebuild_index → 
   toward neither).
 - Graph: `SCHEMA_VERSION` 2; `item_type` column round-trip; `NODE_TYPES`/`EDGE_ENDPOINTS` gates;
   validator invariants (no active sentinel; item pages ↔ nodes-table projection).
-- Wiki: flat `Items/` render, `index.md` **and Source-page** grouping by `item_type` (sentinel
-  never a group on either surface), template swap; XSS fixtures carry over.
+- Wiki: flat `Items/` render, `index.md` **and Source-page** grouping by `item_type` (the
+  sentinel renders only under the QA bucket "Unclassified (review required)", last — never a
+  taxonomy-type heading on either surface), template swap; XSS fixtures carry over.
 - Merge/split over items (`merge_items`, `split_item`): same-family by construction; survivor
   keeps its `item_type`.
 - Operational-refs drift guards updated (`_APPLY_TYPES`↔docs parity, rollout chain naming).
@@ -308,6 +317,10 @@ claims → promote → reindex_keyword → reindex_vector → rebuild_index → 
 - **Taxonomy evolution governance** — adding/renaming a type = ADR + prompt-version bump +
   enum/validator/test updates; explicitly not a config knob.
 - **Sentinel-volume lint threshold tuning** (ship as counter first).
+- **Cross-builder untrusted-metadata hardening** (carried from ADR-0056's out-of-scope list and
+  explicitly covering the NEW items builder): `Title:` sits outside the untrusted
+  `<source_document>` delimiter in every prompt builder — fixing it bumps every prompt version
+  (vault-wide restale), its own slice.
 - ADR-0058's named deferrals carry over (guarded sweep shortcut, rename-of-active, JSON twins).
 - W2 Obsidian readability (display-text links/aliases) rides the new `Items/` pages when picked.
 

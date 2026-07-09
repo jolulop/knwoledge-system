@@ -172,7 +172,7 @@ Needs the configured provider key, normally `ANTHROPIC_API_KEY`.
 ```bash
 uv run python scripts/enrich.py
 uv run python scripts/extract_claims.py
-uv run python scripts/extract_concepts.py
+uv run python scripts/extract_items.py
 uv run python scripts/promote.py
 uv run python scripts/detect_contradictions.py
 uv run python scripts/generate_synthesis.py
@@ -184,8 +184,7 @@ uv run python scripts/validate_all.py
 Acceptance checks:
 
 ```bash
-find wiki/Claims wiki/Concepts wiki/Entities wiki/People wiki/Organizations wiki/Projects \
-  wiki/Tags wiki/Synthesis -type f 2>/dev/null | sort | tail -40
+find wiki/Claims wiki/Items wiki/Tags wiki/Synthesis -type f 2>/dev/null | sort | tail -40
 find reviews/pending -type f | sort | tail -40
 ```
 

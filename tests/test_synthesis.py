@@ -20,7 +20,7 @@ import validate_wikilinks  # noqa: E402
 from app.backend import graph, manifests  # noqa: E402
 from app.llm.cache import ResponseCache  # noqa: E402
 from app.llm.client import LLMClient  # noqa: E402
-from app.workers import claims, concepts, extract, intake, promote, reviews, synthesis, wiki  # noqa: E402
+from app.workers import claims, extract, intake, items, promote, reviews, synthesis, wiki  # noqa: E402
 
 TEMPLATES = ROOT / "templates"
 TIER2 = "anthropic:claude-sonnet-4-6"
@@ -30,7 +30,7 @@ DOC_A = "# Report A\n\nThe Q3 revenue rose ten percent on strong demand.\n"
 DOC_B = "# Report B\n\nThe Q3 revenue rose again, helped by new customers.\n"
 QUOTE_A = "The Q3 revenue rose ten percent on strong demand."
 QUOTE_B = "The Q3 revenue rose again, helped by new customers."
-CONCEPT = "Q3 revenue"
+ITEM = "Q3 revenue"
 
 
 class ClaimAdapter:
@@ -50,7 +50,7 @@ class ClaimAdapter:
         return {"claims": out}
 
 
-class ConceptAdapter:
+class ItemAdapter:
     name = "anthropic"
     supports_batch = False
 
@@ -58,7 +58,7 @@ class ConceptAdapter:
         return True
 
     def parse(self, messages, schema, model_id, *, max_tokens):
-        return {"concepts": [{"name": CONCEPT, "aliases": []}], "entities": []}
+        return {"items": [{"name": ITEM, "item_type": "method_technique", "aliases": []}]}
 
 
 class SynthAdapter:
@@ -98,7 +98,7 @@ def _sid(tmp_path, name):
 
 
 def _build(tmp_path, *, second=True):
-    """Two independent sources sharing a concept; claims + concepts extracted; concept promoted
+    """Two independent sources sharing a knowledge item; claims + items extracted; item promoted
     active (so it is an eligible synthesis topic)."""
     jobs = tmp_path / "db" / "jobs.sqlite"
     _ingest(tmp_path, "a.md", DOC_A)
@@ -112,9 +112,9 @@ def _build(tmp_path, *, second=True):
         manifests.set_provenance(tmp_path / "raw" / "manifests", _sid(tmp_path, "b.md"), author="Bob")
     claims.extract_claims(tmp_path, client=_client(tmp_path, ClaimAdapter()), model_ref=TIER2,
                           jobs_db=jobs, rebuild_index=False)
-    concepts.extract_concepts(tmp_path, client=_client(tmp_path, ConceptAdapter()), model_ref=TIER2,
-                              jobs_db=jobs, rebuild_index=False)
-    promote.promote_candidates(tmp_path, jobs_db=jobs, rebuild_index=False)  # concept -> active
+    items.extract_items(tmp_path, client=_client(tmp_path, ItemAdapter()), model_ref=TIER2,
+                        jobs_db=jobs, rebuild_index=False)
+    promote.promote_candidates(tmp_path, jobs_db=jobs, rebuild_index=False)  # item -> active
     wiki.generate_wiki(tmp_path, jobs_db=jobs, templates_dir=TEMPLATES, rebuild_index=False)
     return jobs
 
@@ -136,7 +136,7 @@ def _syn_page(tmp_path):
 # --- eligibility -----------------------------------------------------------
 
 
-def test_single_source_concept_is_not_eligible(tmp_path):
+def test_single_source_item_is_not_eligible(tmp_path):
     jobs = _build(tmp_path, second=False)
     summary = _gen(tmp_path, SynthAdapter(), jobs)
     assert summary["eligible_topics"] == 0 and summary["syntheses_written"] == 0
@@ -379,7 +379,7 @@ def test_synthesis_pages_are_keyed_by_node_id_not_slug(tmp_path):
     claims.extract_claims(tmp_path, client=_client(tmp_path, ClaimAdapter()), model_ref=TIER2,
                           jobs_db=jobs, rebuild_index=False)
 
-    class TwoConcepts:
+    class TwoItems:
         name = "anthropic"
         supports_batch = False
 
@@ -387,12 +387,12 @@ def test_synthesis_pages_are_keyed_by_node_id_not_slug(tmp_path):
             return True
 
         def parse(self, messages, schema, model_id, *, max_tokens):
-            # Both sources mention both concepts -> each is evidenced by 2 independent claims.
-            return {"concepts": [{"name": "Q3 revenue", "aliases": []},
-                                 {"name": "customer demand", "aliases": []}], "entities": []}
+            # Both sources mention both items -> each is evidenced by 2 independent claims.
+            return {"items": [{"name": "Q3 revenue", "item_type": "method_technique", "aliases": []},
+                              {"name": "customer demand", "item_type": "problem_risk", "aliases": []}]}
 
-    concepts.extract_concepts(tmp_path, client=_client(tmp_path, TwoConcepts()), model_ref=TIER2,
-                              jobs_db=jobs, rebuild_index=False)
+    items.extract_items(tmp_path, client=_client(tmp_path, TwoItems()), model_ref=TIER2,
+                        jobs_db=jobs, rebuild_index=False)
     promote.promote_candidates(tmp_path, jobs_db=jobs, rebuild_index=False)
     wiki.generate_wiki(tmp_path, jobs_db=jobs, templates_dir=TEMPLATES, rebuild_index=False)
     _gen(tmp_path, SynthAdapter(), jobs)

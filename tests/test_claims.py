@@ -238,7 +238,7 @@ def test_reextraction_tombstones_orphan_and_supersedes_edges(tmp_path):
     statuses = _edge_statuses(tmp_path)
     assert statuses[old_id] == "superseded" and statuses[new_id] == "active"
 
-    # Tombstoning a Claim page files a deprecate_wiki_page review item (B1, like concepts).
+    # Tombstoning a Claim page files a deprecate_wiki_page review item (B1, like items).
     pending = tmp_path / "reviews" / "pending"
     items = [json.loads(p.read_text(encoding="utf-8")) for p in pending.glob("*.json")]
     assert any(r["type"] == "deprecate_wiki_page" and r["subject"]["node_id"] == old_id for r in items)

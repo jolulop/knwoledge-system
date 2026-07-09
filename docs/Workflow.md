@@ -15,7 +15,7 @@ away: raw files are immutable, and everything generated is traceable back to a s
 Two ground rules shape everything:
 - **Imported documents are untrusted data, never instructions.**
 - **The LLM proposes; a human disposes.** Semantic/destructive changes — deprecations, contradictions,
-  merges, and concept/entity promotions that *don't* clear the deterministic bar — are *proposed* and
+  merges, and knowledge-item promotions that *don't* clear the deterministic bar — are *proposed* and
   wait in a review queue until you approve them. (A candidate auto-promotes only when it meets the
   objective ≥2-independent-sources rule; everything else routes to review.)
 
@@ -26,7 +26,7 @@ Two ground rules shape everything:
 ```
 raw/          immutable original files + manifests (raw/manifests/<source_id>.json)
 normalized/   extracted text: markdown/, chunks/, tables/, extraction_logs/
-wiki/         generated Markdown pages — Sources/ Claims/ Concepts/ Entities/ … + index.md   (gitignored, regenerable)
+wiki/         generated Markdown pages — Sources/ Claims/ Items/ Synthesis/ … + index.md   (gitignored, regenerable)
 db/           SQLite — graph.sqlite (the knowledge graph), jobs.sqlite, llm_cache.sqlite
 indexes/      keyword/ (BM25) + vector/ (LanceDB) search indexes
 reviews/      the human-review ledger — pending/ approved/ rejected/ audit_log/
@@ -40,8 +40,8 @@ policies/     retention, citation, review, retrieval rules
   projection of it. Page backlinks stay in sync because they're rendered from the graph.
 
 Node types (each its own wiki folder + id prefix): **source** (`src_`), **claim** (`clm_`),
-**concept** (`cpt_`), **entity/person/organization/project** (`ent_/per_/org_/prj_`),
-**synthesis** (`syn_`), **query** (`qry_`).
+**knowledge item** (`itm_` — ONE flat `Items/` folder; the classification lives in the mutable,
+governed `item_type` frontmatter field, ADR-0059), **synthesis** (`syn_`), **query** (`qry_`).
 
 ---
 
@@ -64,7 +64,7 @@ After this you can already browse **Source pages** in Obsidian. No review items 
 | Step | Script | Tier | Produces |
 |---|---|---|---|
 | Claims | `extract_claims.py` | Sonnet | atomic **Claim** pages, each with a verbatim source quote (citation-grounded) |
-| Concepts/Entities | `extract_concepts.py` | Sonnet | **candidate** Concept/Entity/… nodes + `mentions` edges |
+| Knowledge items | `extract_items.py` | Sonnet | **candidate** Item nodes (15-type taxonomy, ADR-0059) + `mentions` edges |
 | Promote | `promote.py` | — (deterministic) | auto-promotes a candidate to **active** on **≥2 independent sources**, else files a `promote_candidate_node` **review item** |
 | Contradictions | `detect_contradictions.py` | Opus | `resolve_contradiction` review items for conflicting claim pairs |
 | Synthesis | `generate_synthesis.py` | Opus | candidate cross-source **Synthesis** pages → `propose_synthesis` review items |
@@ -96,8 +96,8 @@ This is the Phase-6 surface — **decide and apply are deliberately decoupled**:
 
 Some review types are still **record-only** (e.g. raw-deletion types): you can decide them, but Apply
 reports them under `unapplied` rather than actioning them. (The identity-surgery types now have
-executors and ARE applied: `merge_entities`/`merge_concepts` (ADR-0050), `change_entity_subtype`
-(ADR-0051), and `split_entity` (ADR-0052).)
+executors and ARE applied: `merge_items` (ADR-0050/0059) and `split_item` (ADR-0052/0059) — plus
+the non-rekeying `change_item_type` classification flip (ADR-0059).)
 
 ### Using the UI
 Start the app via the blessed entrypoint (it binds through the `assert_safe_bind` loopback guard —
@@ -151,7 +151,7 @@ uv run python scripts/reindex_keyword.py && uv run python scripts/rebuild_index.
 
 # enrich (LLM, billable) — fills semantics + files review items
 uv run python scripts/extract_claims.py
-uv run python scripts/extract_concepts.py
+uv run python scripts/extract_items.py
 uv run python scripts/promote.py
 uv run python scripts/detect_contradictions.py
 uv run python scripts/generate_synthesis.py
@@ -176,6 +176,6 @@ independent, then re-run those two passes.
 
 ## 7. Mental model in one line
 
-**Immutable `raw/` → extracted `normalized/` → LLM proposes claims/concepts/contradictions → human
+**Immutable `raw/` → extracted `normalized/` → LLM proposes claims/items/contradictions → human
 reviews & approves → deterministic apply updates the graph + `wiki/` → ask questions with citations.**
 Every generated fact traces back to a source span; every semantic change passes through a human.

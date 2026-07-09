@@ -14,7 +14,7 @@ every withdrawal writes its own `reviews/audit_log/` entry.
 
 Fails closed BEFORE any mutation (exit non-zero, nothing withdrawn) when: the graph database
 is absent; its schema version mismatches; it has no nodes; or the graph↔wiki lifecycle
-projection is already invalid for any reviewed concept/entity-family node (page frontmatter
+projection is already invalid for any reviewed knowledge-item node (page frontmatter
 is the status authority, the graph a mirror — a drifted or wrong-root graph must never drain
 the queue).
 """

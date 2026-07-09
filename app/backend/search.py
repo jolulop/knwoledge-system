@@ -57,7 +57,7 @@ RETENTION_DEFAULT_STATUSES = ("active", "deprecated_candidate")
 # Wiki page types whose node_id participates in the graph (so a navigation hit can seed the graph
 # group). Source/query/tag pages are not graph seeds.
 GRAPH_SEED_TYPES = frozenset(
-    {"concept", "entity", "person", "organization", "project", "claim", "synthesis"}
+    {"item", "claim", "synthesis"}
 )
 
 _TERM_RE = re.compile(r"\w+", re.UNICODE)
@@ -112,7 +112,7 @@ def build_fts_match(terms: list[str], *, op: str = "AND") -> str | None:
 
     ``op="AND"`` (implicit-AND, all terms) is used for **evidence** — exact-lookup precision.
     ``op="OR"`` is used for **navigation/graph seeding** — a relationship query ("how are X and Y
-    related") must find the *entity* pages for X or Y separately so the graph can connect them; an
+    related") must find the *item* pages for X or Y separately so the graph can connect them; an
     AND would demand one page containing both. Each term is a quoted phrase (embedded quotes
     doubled), neutralizing FTS5 operators in user input.
     """
@@ -520,7 +520,7 @@ def run_search(
     terms = extract_terms(q, max_chars=policy.cap("max_query_chars"),
                           max_terms=policy.cap("max_query_terms"))
     evidence_match = build_fts_match(terms, op="AND")   # exact-lookup precision
-    nav_match = build_fts_match(terms, op="OR")          # entity recall for seeding
+    nav_match = build_fts_match(terms, op="OR")          # item recall for seeding
 
     navigation: list[dict[str, Any]] = []
     graph_result = _empty_graph(min(depth, graph_read.MAX_DEPTH))

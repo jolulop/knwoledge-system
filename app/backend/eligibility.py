@@ -12,7 +12,7 @@ node (candidate/deprecated/archived/…) is never answer_eligible regardless of 
 from __future__ import annotations
 
 ANSWER_ELIGIBLE_TYPES = frozenset(
-    {"concept", "entity", "person", "organization", "project", "synthesis", "claim"}
+    {"item", "synthesis", "claim"}
 )
 
 

@@ -231,7 +231,7 @@ def test_strategy_ref_enters_fingerprint_and_cache_key_independently():
     assert (art.claims_fingerprint(md, ref, art.claims_strategy_ref(12000))
             != art.claims_fingerprint(md, ref, art.claims_strategy_ref(6000)))
     assert art.claims_strategy_ref(12000) == "chunk-greedy-v1:12000"
-    assert art.concepts_strategy_ref(300000) == "full-doc-v1:300000"
+    assert art.items_strategy_ref(300000) == "full-doc-v1:300000"
 
     msgs = [{"role": "user", "content": "x"}]
     schema = {"type": "object"}
@@ -321,7 +321,7 @@ def test_non_positive_coverage_knobs_fail_fast(tmp_path, monkeypatch):
     from app.backend.config import get_settings
 
     (tmp_path / "raw").mkdir(parents=True, exist_ok=True)
-    for name in ("ENRICH_CLAIM_WINDOW_CHARS", "ENRICH_CONCEPT_INPUT_MAX_CHARS"):
+    for name in ("ENRICH_CLAIM_WINDOW_CHARS", "ENRICH_ITEMS_INPUT_MAX_CHARS"):
         for bad in ("0", "-5"):
             monkeypatch.setenv(name, bad)
             try:

@@ -22,28 +22,47 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.backend import graph
+from app.backend import graph, taxonomy
 
 # Hard-fail only for node-id grammars that are explicitly documented: `src_<sha256[:16]>` (ADR-0007),
-# `clm_<sha256[:16]>` (claims), `syn_<sha256[:16]>` (synthesis). These flow into filesystem paths, so a
-# non-canonical id is tampering — the validator twin of the runtime `safe_child` guards (ADR-0009/0037).
-# concept/entity/person/organization/project canonicality is **deferred** (their id grammar is not yet
-# explicitly fixed here); the runtime `safe_child` guard already protects their paths. tag/query carry no
-# such id. The defense-in-depth validator stays within documented id rules.
-_NODE_ID_PREFIX = {"source": "src", "claim": "clm", "synthesis": "syn"}
+# `itm_<sha256[:16]>` (knowledge items, ADR-0059), `clm_<sha256[:16]>` (claims), `syn_<sha256[:16]>`
+# (synthesis). These flow into filesystem paths, so a non-canonical id is tampering — the validator
+# twin of the runtime `safe_child` guards (ADR-0009/0037). tag/query carry no such id.
+_NODE_ID_PREFIX = {"source": "src", "item": "itm", "claim": "clm", "synthesis": "syn"}
 
 
 def _check(db_path: Path) -> list[str]:
     errors: list[str] = []
     conn = graph.connect(db_path)
     try:
-        node_rows = list(conn.execute("SELECT node_id, node_type, status, slug FROM nodes"))
+        # Schema gate (ADR-0059): a pre-v2 database (no `item_type` column) is stale by design
+        # after the clean-repository restart — refuse cleanly, never crash mid-query.
+        found = graph.schema_version(conn)
+        if found != graph.SCHEMA_VERSION or not graph._nodes_table_has_item_type(conn):
+            # The structural check is independent of the stamp (review round: B1) — a
+            # version that LIES about a pre-v2 table still refuses cleanly, never crashes.
+            return [f"graph schema version mismatch: found v{found}, expected "
+                    f"v{graph.SCHEMA_VERSION} (pre-ADR-0059 database; the clean-repository "
+                    f"restart rebuilds it)"]
+        node_rows = list(conn.execute("SELECT node_id, node_type, item_type, status, slug FROM nodes"))
         node_types = {r["node_id"]: r["node_type"] for r in node_rows}
         node_status = {r["node_id"]: r["status"] for r in node_rows}
         node_slugs = {r["node_id"]: r["slug"] for r in node_rows}
+        node_item_types = {r["node_id"]: r["item_type"] for r in node_rows}
         for node_id, node_type in node_types.items():
             if node_type not in graph.NODE_TYPES:
                 errors.append(f"node {node_id}: invalid node_type {node_type!r}")
+            # ADR-0059: an item's classification is governed vocabulary; the sentinel is
+            # candidate-only (never a live active classification). Non-items carry none.
+            item_type = node_item_types.get(node_id)
+            if node_type == "item":
+                if not taxonomy.is_item_type(item_type):
+                    errors.append(f"node {node_id}: item without a valid item_type ({item_type!r})")
+                elif item_type == taxonomy.UNCLASSIFIED and node_status.get(node_id) == "active":
+                    errors.append(f"node {node_id}: active item with the QA sentinel item_type "
+                                  f"(ADR-0059: approval requires a real item_type amendment)")
+            elif item_type is not None:
+                errors.append(f"node {node_id}: item_type on non-item node_type {node_type!r}")
             prefix = _NODE_ID_PREFIX.get(node_type)
             if prefix and not re.fullmatch(rf"{prefix}_[0-9a-f]{{16}}", node_id):
                 # Sanitize: never echo a path-like/oversized id verbatim.
@@ -80,18 +99,15 @@ def _check(db_path: Path) -> list[str]:
             if not dst_in:
                 errors.append(f"edge {ref}: dst_id {e['dst_id']!r} is not an indexed node")
 
-            # ADR-0050/0051 identity-surgery invariant: no ACTIVE edge may have a `merged` (absorbed) or
-            # `rekeyed` (old-subtype) tombstone endpoint — a merge/rekey re-points every active edge off the
-            # tombstoned id, so a live reference to a tombstone means the rewrite was incomplete.
+            # ADR-0050 identity-surgery invariant: no ACTIVE edge may have a `merged` (absorbed)
+            # tombstone endpoint — a merge re-points every active edge off the tombstoned id, so a
+            # live reference to a tombstone means the rewrite was incomplete. (ADR-0051's `rekeyed`
+            # tombstone is retired by ADR-0059 — retype never kills an id.)
             if e["status"] == "active":
                 for endpoint in (e["src_id"], e["dst_id"]):
-                    es = node_status.get(endpoint)
-                    if es == "merged":
+                    if node_status.get(endpoint) == "merged":
                         errors.append(f"edge {ref}: active edge has a merged endpoint {endpoint} "
                                       f"(ADR-0050: merge must re-point all active edges off the absorbed id)")
-                    elif es == "rekeyed":
-                        errors.append(f"edge {ref}: active edge has a rekeyed endpoint {endpoint} "
-                                      f"(ADR-0051: subtype rekey must re-point all active edges off the old id)")
 
             # Endpoint-type contract (ADR-0030), checked only when both nodes resolve.
             if src_in and dst_in and edge_type in graph.EDGE_TYPES:

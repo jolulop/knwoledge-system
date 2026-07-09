@@ -17,12 +17,14 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from app.backend import taxonomy
 from app.backend.manifests import iso_now
 
-# Build Spec §6.1 node types.
+# Build Spec §6.1 node types under the ADR-0059 overlay: the old concept/entity/person/
+# organization/project family collapsed into the single structural type `item` (type-neutral
+# `itm_` id); classification lives in `nodes.item_type` (taxonomy.py), mutable and governed.
 NODE_TYPES = frozenset(
-    {"source", "entity", "concept", "claim", "project", "person",
-     "organization", "tag", "query", "synthesis"}
+    {"source", "item", "claim", "tag", "query", "synthesis"}
 )
 # Build Spec §6.2 minus needs_review (ADR-0030: review is a status, not an edge type).
 EDGE_TYPES = frozenset(
@@ -38,15 +40,16 @@ NODE_STATUSES = frozenset(
      "archive_candidate", "archived", "delete_candidate", "deleted",
      "hidden",            # ADR-0043: governance visibility-suppression status (active -> hidden)
      "evidence_hidden",   # ADR-0049: synthesis auto-suppressed because a supporting claim is hidden
-     "merged",            # ADR-0050: absorbed identity tombstone (merged_into a same-type survivor)
-     "rekeyed"}           # ADR-0051: subtype-rekey tombstone (rekeyed_to a different-type same-family node)
+     "merged"}            # ADR-0050: absorbed identity tombstone (merged_into a same-type survivor)
+    # ADR-0051's `rekeyed` tombstone is retired by ADR-0059: a type change is a metadata flip
+    # on the type-neutral id, never an identity rekey, so the status can no longer arise.
 )
 # Endpoint-type contract per edge type (ADR-0030). `None` = unconstrained on that side;
 # SAME_TYPE_EDGES require src and dst to share a node_type. Enforced by validate_graph (not
 # at write time, to leave producer ordering free); extendable only by ADR.
 EDGE_ENDPOINTS: dict[str, tuple[frozenset[str] | None, frozenset[str] | None]] = {
     "mentions": (None, None),
-    "derived_from": (frozenset({"claim", "synthesis", "concept", "entity"}),
+    "derived_from": (frozenset({"claim", "synthesis", "item"}),
                      frozenset({"source", "claim", "synthesis"})),
     "supports": (frozenset({"claim", "synthesis"}), frozenset({"claim", "synthesis"})),
     "contradicts": (frozenset({"claim", "synthesis"}), frozenset({"claim", "synthesis"})),
@@ -55,12 +58,16 @@ EDGE_ENDPOINTS: dict[str, tuple[frozenset[str] | None, frozenset[str] | None]] =
 SAME_TYPE_EDGES = frozenset({"supersedes", "duplicates"})
 
 # Bump when the graph schema changes; recorded via PRAGMA user_version for migration.
-SCHEMA_VERSION = 1
+# v2 (ADR-0059): `nodes.item_type` — the governed classification of `item` nodes (NULL for
+# every other node_type). No in-place migration path: v2 ships with the clean-repository
+# restart, so a v1 database is simply stale (the ADR-0057 sweep preflight refuses it).
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS nodes (
     node_id    TEXT PRIMARY KEY,
     node_type  TEXT NOT NULL,
+    item_type  TEXT,
     slug       TEXT,
     status     TEXT,
     indexed_at TEXT
@@ -103,9 +110,34 @@ def connect(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+class GraphSchemaError(RuntimeError):
+    """An existing graph database has a pre-ADR-0059 schema; the clean restart rebuilds it."""
+
+
+def _nodes_table_has_item_type(conn: sqlite3.Connection) -> bool:
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(nodes)")}
+    return "item_type" in cols
+
+
 def init_db(db_path: Path) -> None:
+    """Create (or verify) the graph schema. HARD-FAILS on a pre-v2 database (ADR-0059).
+
+    There is deliberately NO migration path: the schema bump ships with the clean-repository
+    restart, so an existing v1 database is stale by design. `CREATE TABLE IF NOT EXISTS`
+    would silently keep the old `nodes` shape while the version stamp claimed v2 — the
+    structural check refuses BEFORE any write, so producers can never "upgrade" a v1 vault
+    into a lying half-state (review round: B1)."""
     conn = connect(db_path)
     try:
+        found = schema_version(conn)
+        has_nodes = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'nodes'"
+        ).fetchone() is not None
+        if (has_nodes and not _nodes_table_has_item_type(conn)) or \
+                found not in (0, SCHEMA_VERSION):
+            raise GraphSchemaError(
+                f"graph database at {db_path} is pre-ADR-0059 (schema v{found}); the "
+                f"clean-repository restart rebuilds it — refusing to modify")
         conn.executescript(_SCHEMA)
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         conn.commit()
@@ -125,7 +157,7 @@ def is_safe_slug(slug: Any) -> bool:
     """True iff `slug` is a single safe filename component — a non-empty string with no path separators
     (`/`, `\\`) and not `.`/`..` (ADR-0009 path-containment, at the graph boundary). Downstream renderers
     build `wiki_dir / NODE_DIR[type] / f"{slug}.md"` from `nodes.slug`, so an unsafe slug could escape the
-    wiki dir; a legitimate `concepts._slug()` value (`[a-z0-9-]+`) always passes. Shared by `upsert_node`
+    wiki dir; a legitimate `items._slug()` value (`[a-z0-9-]+`) always passes. Shared by `upsert_node`
     (the single normal write into `nodes`) and `validate_graph` (the tampered-DB / raw-SQL backstop) so both
     enforce the exact same rule. An unsafe slug is structural corruption, never governance business logic."""
     return (isinstance(slug, str) and bool(slug) and slug not in (".", "..")
@@ -139,9 +171,15 @@ def upsert_node(
     node_type: str,
     slug: str | None = None,
     status: str | None = None,
+    item_type: str | None = None,
     now: str | None = None,
 ) -> None:
-    """Index one node (producers call this before asserting edges, ADR-0030)."""
+    """Index one node (producers call this before asserting edges, ADR-0030).
+
+    ADR-0059: an `item` node carries a validated `item_type` (taxonomy.py). When the caller
+    omits it, the existing row's value is preserved (a status-only mirror update must not
+    null the classification); a brand-new item row without one is a producer bug and fails.
+    Non-item nodes must not carry one."""
     if node_type not in NODE_TYPES:
         raise ValueError(f"unknown node_type {node_type!r}; allowed: {sorted(NODE_TYPES)}")
     if status is not None and status not in NODE_STATUSES:
@@ -151,10 +189,19 @@ def upsert_node(
         # renderer builds an escaping path. Don't echo the (possibly path-like) value into the message.
         raise ValueError("unsafe node slug; must be a single safe filename component (no path separators, "
                          "not '.'/'..')")
+    if node_type == "item":
+        if item_type is None:
+            row = conn.execute(
+                "SELECT item_type FROM nodes WHERE node_id = ?", (node_id,)).fetchone()
+            item_type = row["item_type"] if row else None
+        if not taxonomy.is_item_type(item_type):
+            raise ValueError(f"item node requires a valid item_type; got {item_type!r}")
+    elif item_type is not None:
+        raise ValueError(f"item_type is only valid on item nodes, not {node_type!r}")
     conn.execute(
-        "INSERT OR REPLACE INTO nodes (node_id, node_type, slug, status, indexed_at) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (node_id, node_type, slug, status, now or iso_now()),
+        "INSERT OR REPLACE INTO nodes (node_id, node_type, item_type, slug, status, indexed_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (node_id, node_type, item_type, slug, status, now or iso_now()),
     )
     conn.commit()
 
@@ -329,7 +376,7 @@ def supersede_mentions_for_source(
     conn: sqlite3.Connection, source_id: str, *, now: str | None = None
 ) -> list[str]:
     """Supersede a source's active `mentions` before it is re-extracted; return the affected
-    node ids (concepts/entities) to recompose. The mirror of `supersede_source_edges`, but
+    node ids (knowledge items) to recompose. The mirror of `supersede_source_edges`, but
     `mentions` runs source→node (the source is the `src_id`)."""
     now = now or iso_now()
     affected = [
@@ -349,9 +396,9 @@ def supersede_mentions_for_source(
 
 
 def mentions_for_source(conn: sqlite3.Connection, source_id: str) -> list[dict[str, Any]]:
-    """Active nodes a source mentions, with their type and slug (Source-page projection)."""
+    """Active nodes a source mentions, with their type/item_type and slug (Source-page projection)."""
     return _rows(conn.execute(
-        "SELECT DISTINCT e.dst_id, n.node_type, n.slug FROM edges e "
+        "SELECT DISTINCT e.dst_id, n.node_type, n.item_type, n.slug FROM edges e "
         "JOIN nodes n ON n.node_id = e.dst_id "
         "WHERE e.src_id = ? AND e.edge_type = 'mentions' AND e.status = 'active' "
         "ORDER BY n.node_type, n.slug, e.dst_id",
@@ -388,21 +435,10 @@ def superseded_mention_sources(conn: sqlite3.Connection, node_id: str) -> list[s
 
 def get_node(conn: sqlite3.Connection, node_id: str) -> dict[str, Any] | None:
     row = conn.execute(
-        "SELECT node_id, node_type, slug, status FROM nodes WHERE node_id = ?", (node_id,)
+        "SELECT node_id, node_type, item_type, slug, status FROM nodes WHERE node_id = ?",
+        (node_id,)
     ).fetchone()
     return dict(row) if row else None
-
-
-def find_node_by_candidate_ids(
-    conn: sqlite3.Connection, candidate_ids: list[str]
-) -> dict[str, Any] | None:
-    """Return the first existing node among candidate ids (used to detect a same-name node
-    under a different type prefix — an entity subtype conflict, ADR-0021/0030)."""
-    for node_id in candidate_ids:
-        node = get_node(conn, node_id)
-        if node is not None:
-            return node
-    return None
 
 
 def _rows(cursor: sqlite3.Cursor) -> list[dict[str, Any]]:
@@ -496,13 +532,13 @@ def sources_for_claim(conn: sqlite3.Connection, claim_id: str) -> list[str]:
     ]
 
 
-def concept_ids_for_source(conn: sqlite3.Connection, source_id: str) -> set[str]:
-    """Active concept/entity-family nodes a source mentions (its blocking neighborhood)."""
+def item_ids_for_source(conn: sqlite3.Connection, source_id: str) -> set[str]:
+    """Active knowledge items a source mentions (its blocking neighborhood, ADR-0059)."""
     return {
         r["dst_id"] for r in conn.execute(
             "SELECT DISTINCT e.dst_id FROM edges e JOIN nodes n ON n.node_id = e.dst_id "
             "WHERE e.src_id = ? AND e.edge_type = 'mentions' AND e.status = 'active' "
-            "AND n.node_type IN ('concept', 'entity', 'person', 'organization', 'project')",
+            "AND n.node_type = 'item'",
             (source_id,),
         )
     }
@@ -629,8 +665,8 @@ def reindex_nodes(
     """Rebuild the derived `nodes` index from manifests (sources) + page frontmatter.
 
     Deterministic and edge-safe: it replaces only the `nodes` table and never touches
-    `edges`. `page_nodes` are dicts of {node_id, node_type, slug, status} taken from the
-    pages' frontmatter; `source_ids` come from the manifests (ADR-0008).
+    `edges`. `page_nodes` are dicts of {node_id, node_type, item_type?, slug, status} taken
+    from the pages' frontmatter; `source_ids` come from the manifests (ADR-0008).
     """
     now = now or iso_now()
     conn.execute("DELETE FROM nodes")
@@ -640,8 +676,8 @@ def reindex_nodes(
         if status not in NODE_STATUSES:
             raise ValueError(f"unknown source node status {status!r}; allowed: {sorted(NODE_STATUSES)}")
         conn.execute(
-            "INSERT OR REPLACE INTO nodes (node_id, node_type, slug, status, indexed_at) "
-            "VALUES (?, 'source', ?, ?, ?)",
+            "INSERT OR REPLACE INTO nodes (node_id, node_type, item_type, slug, status, indexed_at) "
+            "VALUES (?, 'source', NULL, ?, ?, ?)",
             (sid, sid, status, now),
         )
     for node in page_nodes:
@@ -651,10 +687,16 @@ def reindex_nodes(
         status = node.get("status")
         if status is not None and status not in NODE_STATUSES:
             raise ValueError(f"unknown node status {status!r}; allowed: {sorted(NODE_STATUSES)}")
+        item_type = node.get("item_type")
+        if node_type == "item":
+            if not taxonomy.is_item_type(item_type):
+                raise ValueError(f"item node requires a valid item_type; got {item_type!r}")
+        elif item_type is not None:
+            raise ValueError(f"item_type is only valid on item nodes, not {node_type!r}")
         conn.execute(
-            "INSERT OR REPLACE INTO nodes (node_id, node_type, slug, status, indexed_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (node["node_id"], node_type, node.get("slug"), node.get("status"), now),
+            "INSERT OR REPLACE INTO nodes (node_id, node_type, item_type, slug, status, indexed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (node["node_id"], node_type, item_type, node.get("slug"), node.get("status"), now),
         )
     conn.commit()
     return conn.execute("SELECT COUNT(*) AS n FROM nodes").fetchone()["n"]

@@ -13,7 +13,7 @@ separate ranking (ADR-0032 decision 2):
 - **navigation** — one row per *typed* wiki page (``wiki/**/*.md`` with a recognized ``type``
   frontmatter). Title, aliases, tags and the ``> [!summary]`` callout are tokenized; status and
   identity fields are ``UNINDEXED``. ``answer_eligible`` is true only for an ``active`` page whose
-  type is node prose that may back an answer (concept/entity/person/organization/project/
+  type is node prose that may back an answer (item/
   synthesis/claim) — never for a source/query/tag page, and never for a non-``active`` page
   (ADR-0032 retrieval-eligibility invariant). Status is stored, never filtered here; retention
   filtering is a query-time (`/search`) concern.

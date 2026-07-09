@@ -19,20 +19,23 @@ def _pending(reviews_dir):
 
 _INTENDED_REVIEW_TYPES = frozenset({
     "delete_raw_file", "archive_source", "deprecate_wiki_page", "resolve_contradiction",
-    "merge_entities", "split_entity", "merge_concepts", "mark_semantic_duplicate", "hide_content",
+    "merge_items", "split_item", "mark_semantic_duplicate", "hide_content",
     "hide_semantic_page", "unhide_content", "unhide_semantic_page", "hide_claim", "unhide_claim",
     "hide_synthesis", "unhide_synthesis",
-    "promote_candidate_node", "change_entity_subtype", "propose_synthesis",
+    "promote_candidate_node", "change_item_type", "propose_synthesis",
     "missing_raw_source", "purge_response_cache",
 })
 
 
 def test_review_vocabulary_is_the_intended_set():
-    # Pinned so a stray/removed type can't drift back in. `promote_single_source_claim_to_concept` was
-    # removed as dead vocabulary (no producer/executor); promote_candidate_node is the canonical
-    # early/manual promotion type.
+    # Pinned so a stray/removed type can't drift back in. ADR-0059 collapsed the typed-identity
+    # vocabulary: merge_entities + merge_concepts -> merge_items, split_entity -> split_item,
+    # change_entity_subtype -> change_item_type. `promote_single_source_claim_to_concept` stays
+    # removed as dead vocabulary; promote_candidate_node is the canonical early/manual promotion type.
     assert reviews.REVIEW_TYPES == _INTENDED_REVIEW_TYPES
     assert "promote_single_source_claim_to_concept" not in reviews.REVIEW_TYPES
+    for gone in ("merge_entities", "merge_concepts", "split_entity", "change_entity_subtype"):
+        assert gone not in reviews.REVIEW_TYPES, gone
 
 
 def test_review_policy_matches_vocabulary():

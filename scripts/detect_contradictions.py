@@ -4,9 +4,9 @@
 Usage:
     uv run python scripts/detect_contradictions.py        # detect over the current graph
 
-Preconditions: run scripts/extract_claims.py and scripts/extract_concepts.py first — detection
+Preconditions: run scripts/extract_claims.py and scripts/extract_items.py first — detection
 blocks candidate claim pairs on the graph's `derived_from` (claim→source) and `mentions`
-(source→concept) edges, so claims and concepts/entities must already be in db/graph.sqlite.
+(source→item) edges, so claims and knowledge items must already be in db/graph.sqlite.
 
 Uses the tier-3 (heavy) model_ref and provider credentials from config/.env. With no API key,
 detection is skipped (recorded as a 'skipped' job) — but human review decisions are still

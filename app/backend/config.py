@@ -39,8 +39,8 @@ def _resolve_under(root: Path, value: str) -> Path:
 def _positive_int(value: str, name: str) -> int:
     """Parse a knob that must be a positive integer; fail fast on 0/negative (ADR-0056).
 
-    A zero/negative coverage knob is never a tuning choice — e.g. ENRICH_CONCEPT_INPUT_MAX_CHARS=0
-    would send an empty concept body and then *replace the topic layer* with it."""
+    A zero/negative coverage knob is never a tuning choice — e.g. ENRICH_ITEMS_INPUT_MAX_CHARS=0
+    would send an empty items body and then *replace the topic layer* with it."""
     parsed = int(value)
     if parsed <= 0:
         raise ValueError(f"{name} must be a positive integer, got {parsed}")
@@ -100,7 +100,7 @@ class Settings:
     # ADR-0056 cost-bearing semantic knobs: they define tier-2 extraction COVERAGE and enter
     # the strategy refs, so changing one restales that pass vault-wide (deliberate, billable).
     enrich_claim_window_chars: int
-    enrich_concept_input_max_chars: int
+    enrich_items_input_max_chars: int
     enrich_local_base_url: str | None
     anthropic_api_key: str | None
     openai_api_key: str | None
@@ -183,8 +183,8 @@ def get_settings(root: Path | None = None) -> Settings:
         # observed 137KB worst case >2x over while bounding pathological inputs.
         enrich_claim_window_chars=_positive_int(
             cfg("ENRICH_CLAIM_WINDOW_CHARS", "12000"), "ENRICH_CLAIM_WINDOW_CHARS"),
-        enrich_concept_input_max_chars=_positive_int(
-            cfg("ENRICH_CONCEPT_INPUT_MAX_CHARS", "300000"), "ENRICH_CONCEPT_INPUT_MAX_CHARS"),
+        enrich_items_input_max_chars=_positive_int(
+            cfg("ENRICH_ITEMS_INPUT_MAX_CHARS", "300000"), "ENRICH_ITEMS_INPUT_MAX_CHARS"),
         enrich_local_base_url=(cfg("ENRICH_LOCAL_BASE_URL", "") or None),
         anthropic_api_key=(cfg("ANTHROPIC_API_KEY", "") or None),
         openai_api_key=(cfg("OPENAI_API_KEY", "") or None),

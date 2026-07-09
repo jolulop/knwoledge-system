@@ -7,7 +7,7 @@ pending `promote_candidate_node`; a later run that resurrects the node (active m
 return) strands the recompose-filed `deprecate_wiki_page`. This module is the ONE
 interpretation of that reconciliation (ADR-0057 decision 1): `reconciliation_decision` maps
 an unresolved item + current node state to an audited withdrawal reason (or None), and both
-call sites — the `concepts._recompose_node` hook and the catch-up `sweep` — go through it.
+call sites — the `items._recompose_node` hook and the catch-up `sweep` — go through it.
 
 Authority is per-surface (review round): node **status** authority is page frontmatter
 (ADR-0030) with the graph a derived mirror, so every status-based reason requires the two
@@ -22,7 +22,7 @@ tombstone) — graph-missing alone never withdraws.
 Ownership is keyed on STORED provenance, never node state (decision 2): only a deprecation
 carrying `proposal.reason_code == "no_active_mentions"` (or, for the sweep alone, the exact
 legacy prose constant) belongs to reconciliation. Node state alone would mass-misfire: lint
-files same-type `deprecate_wiki_page` items for under-supported ACTIVE concepts, whose nodes
+files same-type `deprecate_wiki_page` items for under-supported ACTIVE items, whose nodes
 always have active mentions. Same-subject collisions (`review_id = hash(type|subject)`) mean
 the first filer owns the stored reason — a foreign-reason item is never rewritten or
 withdrawn (decision 3).
@@ -43,13 +43,13 @@ from app.workers.wiki_render import parse_frontmatter
 
 # Stable machine-readable provenance recompose-filed deprecations carry going forward.
 REASON_CODE_NO_ACTIVE_MENTIONS = "no_active_mentions"
-# The exact prose constant `concepts._recompose_node` wrote BEFORE reason_code existed —
+# The exact prose constant the recompose hook wrote BEFORE reason_code existed —
 # unique to that producer (lint/claims/synthesis/contradiction variants all differ). Accepted
 # only where the caller opts in (the one-time catch-up sweep); never generalized.
 LEGACY_NO_ACTIVE_MENTIONS_REASON = "no active source mentions remain"
 
-# Concept/entity-family scope; claim/synthesis deprecations are owned by their producers.
-_FAMILY_TYPES = frozenset({"concept", "entity", "person", "organization", "project"})
+# Knowledge-item scope (ADR-0059); claim/synthesis deprecations are owned by their producers.
+_FAMILY_TYPES = frozenset({"item"})
 
 # Audited withdrawal reasons (ADR-0057 decision 1).
 REASON_TOMBSTONED = "node_tombstoned_no_active_mentions"
@@ -58,16 +58,17 @@ REASON_ALREADY_ACTIVE = "node_already_active"
 REASON_MISSING_OR_REKEYED = "node_missing_or_rekeyed"
 
 # Identity-surgery tombstones: the node id no longer exists as itself. Surgery withdraws its
-# own subjects at apply (ADR-0050/0051); this reason covers residue found later.
-_GONE_STATUSES = frozenset({"merged", "rekeyed"})
+# own subjects at apply (ADR-0050); this reason covers residue found later. (`rekeyed` is
+# retired by ADR-0059 — retype no longer kills an id — the reason NAME is kept for audit
+# continuity.)
+_GONE_STATUSES = frozenset({"merged"})
 
 _UNRESOLVED = frozenset({"pending", "deferred"})
 
-# Family page dir -> typed frontmatter id field, for the sweep's page-authority scan. Kept
-# local to avoid an import cycle with `concepts` (which imports this module); a parity test
-# pins it against concepts.ID_FIELD / wiki_render.NODE_DIR.
-_DIR_ID_FIELD = {"Concepts": "concept_id", "Entities": "entity_id", "People": "person_id",
-                 "Organizations": "organization_id", "Projects": "project_id"}
+# Family page dir -> frontmatter id field, for the sweep's page-authority scan. Kept
+# local to avoid an import cycle with `items` (which imports this module); a parity test
+# pins it against wiki_render.NODE_DIR.
+_DIR_ID_FIELD = {"Items": "item_id"}
 
 
 def owns_deprecation(item: dict[str, Any], *, allow_legacy_reason: bool = False) -> bool:

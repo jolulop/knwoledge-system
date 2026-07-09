@@ -20,7 +20,7 @@ from typing import Any
 
 from app.backend import graph
 from app.backend.manifests import iso_now
-from app.workers import concepts
+from app.workers import items
 from app.workers.wiki_render import NODE_DIR
 
 # Conservative id safety (ADR-0041): reject unsafe/path-like/empty ids before any graph lookup. NOT a
@@ -107,14 +107,14 @@ def apply_marked_duplicates(gconn, reviews_dir: Path, *, wiki_dir: Path,
             continue
         # Same type, but a type with no `## Duplicates` page projection (source/query/synthesis/...):
         # refuse BEFORE any edge write so an unprojectable edge can never land (ADR-0041).
-        if na["node_type"] not in concepts.ID_FIELD:
+        if na["node_type"] != "item":
             skipped.append({"review_id": rid, "reason": "unsupported_node_type"})
             continue
         # Both pages must exist before we write the edge (atomic: never an edge with no projection).
         nt = na["node_type"]
         page_a = wiki_dir / NODE_DIR[nt] / f"{na['slug']}.md"
         page_b = wiki_dir / NODE_DIR[nt] / f"{nb['slug']}.md"
-        meta_a, meta_b = concepts._read_node_meta(page_a), concepts._read_node_meta(page_b)
+        meta_a, meta_b = items._read_node_meta(page_a), items._read_node_meta(page_b)
         if meta_a is None or meta_b is None:
             skipped.append({"review_id": rid, "reason": "page_missing"})
             continue
@@ -133,7 +133,7 @@ def apply_marked_duplicates(gconn, reviews_dir: Path, *, wiki_dir: Path,
         # recompose writes only when content differs and returns "written" only then, so changed_pages
         # stays honest (an already-correct page returns "unchanged" and is not counted).
         for nid, n, meta in ((a, na, meta_a), (b, nb, meta_b)):
-            if concepts.recompose_semantic_node_page(
+            if items.recompose_semantic_node_page(
                     gconn, node_id=nid, wiki_dir=wiki_dir,
                     status=meta["status"], review_status=meta["review_status"], now=now) == "written":
                 changed_pages.append(f"{NODE_DIR[nt]}/{n['slug']}.md")

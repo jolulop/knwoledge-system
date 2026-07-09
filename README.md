@@ -3,8 +3,8 @@
 Local-first, agent-maintained information management system based on the LLM Wiki pattern.
 
 **Status: Phases 1–7 complete** (the Build Spec's planned scope). The pipeline runs end-to-end —
-immutable `raw/` intake → extract/normalize → generated wiki → LLM semantic layer (concepts/entities/
-claims/synthesis, grounded) → keyword+vector+graph retrieval → cited `POST /query` → human review UI →
+immutable `raw/` intake → extract/normalize → generated wiki → LLM semantic layer (knowledge items/
+claims/synthesis, grounded; ADR-0059 taxonomy) → keyword+vector+graph retrieval → cited `POST /query` → human review UI →
 autonomous detect-and-propose maintenance (lint / retention / reindex, no daemon). The API is
 **loopback-only with no auth** (ADR-0009). New-session orientation: read `REANCHOR.md`, then
 `docs/Operations.md` to run it, `CLAUDE.md` for the rules, `CONTEXT.md` for the glossary.
@@ -56,7 +56,7 @@ python3 scripts/reindex_vector.py . --force
 python3 scripts/validate_vector_index.py .
 ```
 
-The scaffold ships with one sample source, concept, claim, and synthesis page so the indexer and validators have something to inspect.
+The scaffold ships with one sample source, item, claim, and synthesis page so the indexer and validators have something to inspect.
 
 ## Suggested next implementation sequence
 
@@ -74,4 +74,4 @@ The scaffold ships with one sample source, concept, claim, and synthesis page so
 - Wiki pages are derived, reviewable, and regenerable.
 - Every major wiki page must include a `> [!summary]` callout.
 - Claims require citations or must be marked unsourced.
-- Deletion, contradiction resolution, entity merging, and deprecation require human approval.
+- Deletion, contradiction resolution, item merging, and deprecation require human approval.

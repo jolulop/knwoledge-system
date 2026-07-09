@@ -47,7 +47,7 @@ When a grilling session completes, stop and summarize:
 ```text
 raw/          immutable original sources and manifests
 normalized/   extracted Markdown, chunks, tables, OCR/captions, logs
-wiki/         generated source/concept/entity/claim/synthesis/query pages
+wiki/         generated source/item/claim/synthesis/query pages (ADR-0059 taxonomy)
 reviews/      pending and resolved human review decisions
 indexes/      keyword, vector, and graph indexes
 db/           SQLite metadata and job state
@@ -91,7 +91,7 @@ Review items are required for:
 - Archiving
 - Deprecation
 - Contradiction resolution
-- Entity/concept merge or split
+- Item merge or split
 - Duplicate resolution
 - Low-confidence relationship changes
 
@@ -103,8 +103,8 @@ Check for:
 - Missing frontmatter
 - Missing summary callouts
 - Missing citations
-- Orphan concepts
-- Concepts with fewer than two sources
+- Orphan items
+- Items with fewer than two sources
 - Summary rot
 - Stale claims
 - Duplicate sources

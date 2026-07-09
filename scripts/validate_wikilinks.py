@@ -7,11 +7,11 @@ import sys
 from pathlib import Path
 
 LINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
-WIKI_SUBDIRS = ["Sources", "Concepts", "Claims", "Entities", "People", "Organizations", "Projects", "Tags", "Synthesis", "Queries"]
+WIKI_SUBDIRS = ["Sources", "Items", "Claims", "Tags", "Synthesis", "Queries"]
 
 
 def normalize_target(raw: str) -> str:
-    # Drop alias and heading, e.g. [[Concepts/foo#Bar|alias]] -> Concepts/foo
+    # Drop alias and heading, e.g. [[Items/foo#Bar|alias]] -> Items/foo
     target = raw.split("|", 1)[0].split("#", 1)[0].strip()
     return target
 

@@ -13,21 +13,21 @@ from app.backend import graph, graph_read
 
 SRC_A = "src_aaaaaaaaaaaaaaaa"
 SRC_B = "src_bbbbbbbbbbbbbbbb"
-CPT_X = "cpt_xxxxxxxxxxxxxxxx"  # active
-CPT_Y = "cpt_yyyyyyyyyyyyyyyy"  # candidate
+ITM_X = "itm_xxxxxxxxxxxxxxxx"  # active item
+ITM_Y = "itm_yyyyyyyyyyyyyyyy"  # candidate item
 CLM_1 = "clm_1111111111111111"  # active
 CLM_2 = "clm_2222222222222222"  # active
 
 
 @pytest.fixture
 def conn(tmp_path):
-    """A small graph: two sources, two concepts (one candidate), two claims.
+    """A small graph: two sources, two items (one candidate), two claims.
 
-        src_a --mentions--> cpt_x <--mentions-- src_b
-        src_a --mentions--> cpt_y           cpt_x --related_to--> cpt_y
+        src_a --mentions--> itm_x <--mentions-- src_b
+        src_a --mentions--> itm_y           itm_x --related_to--> itm_y
         clm_1 --derived_from--> src_a       clm_2 --derived_from--> src_b
         clm_1 --contradicts--> clm_2 (symmetric, stored sorted)
-        (plus one PROPOSED mention src_a->cpt_x, hidden by default)
+        (plus one PROPOSED mention src_a->itm_x, hidden by default)
     """
     db_path = tmp_path / "db" / "graph.sqlite"
     graph.init_db(db_path)
@@ -36,23 +36,25 @@ def conn(tmp_path):
         c,
         source_ids=[SRC_A, SRC_B],
         page_nodes=[
-            {"node_id": CPT_X, "node_type": "concept", "slug": "x", "status": "active"},
-            {"node_id": CPT_Y, "node_type": "concept", "slug": "y", "status": "candidate"},
+            {"node_id": ITM_X, "node_type": "item", "item_type": "method_technique",
+             "slug": "x", "status": "active"},
+            {"node_id": ITM_Y, "node_type": "item", "item_type": "provider_institution",
+             "slug": "y", "status": "candidate"},
             {"node_id": CLM_1, "node_type": "claim", "slug": None, "status": "active"},
             {"node_id": CLM_2, "node_type": "claim", "slug": None, "status": "active"},
         ],
         now="t0",
     )
     A = dict(asserted_by="llm", status="active")
-    graph.upsert_assertion(c, src_id=SRC_A, dst_id=CPT_X, edge_type="mentions", **A)
-    graph.upsert_assertion(c, src_id=SRC_B, dst_id=CPT_X, edge_type="mentions", **A)
-    graph.upsert_assertion(c, src_id=SRC_A, dst_id=CPT_Y, edge_type="mentions", **A)
+    graph.upsert_assertion(c, src_id=SRC_A, dst_id=ITM_X, edge_type="mentions", **A)
+    graph.upsert_assertion(c, src_id=SRC_B, dst_id=ITM_X, edge_type="mentions", **A)
+    graph.upsert_assertion(c, src_id=SRC_A, dst_id=ITM_Y, edge_type="mentions", **A)
     graph.upsert_assertion(c, src_id=CLM_1, dst_id=SRC_A, edge_type="derived_from", **A)
     graph.upsert_assertion(c, src_id=CLM_2, dst_id=SRC_B, edge_type="derived_from", **A)
     graph.upsert_assertion(c, src_id=CLM_1, dst_id=CLM_2, edge_type="contradicts", **A)  # sorted
-    graph.upsert_assertion(c, src_id=CPT_X, dst_id=CPT_Y, edge_type="related_to", **A)  # sorted
+    graph.upsert_assertion(c, src_id=ITM_X, dst_id=ITM_Y, edge_type="related_to", **A)  # sorted
     # A proposed mention from a different asserter: hidden unless include_status asks for it.
-    graph.upsert_assertion(c, src_id=SRC_A, dst_id=CPT_X, edge_type="mentions",
+    graph.upsert_assertion(c, src_id=SRC_A, dst_id=ITM_X, edge_type="mentions",
                            asserted_by="human", status="proposed")
     return c
 
@@ -61,27 +63,32 @@ def conn(tmp_path):
 
 
 def test_node_view_groups_incoming_outgoing(conn):
-    view = graph_read.node_view(conn, CPT_X)
-    assert view["node"]["answer_eligible"] is True  # active concept
-    # cpt_x is dst of two active mentions, src of one related_to.
+    view = graph_read.node_view(conn, ITM_X)
+    assert view["node"]["answer_eligible"] is True  # active item
+    # Node meta carries the governed classification (ADR-0059).
+    assert view["node"]["item_type"] == "method_technique"
+    # itm_x is dst of two active mentions, src of one related_to.
     assert view["counts"] == {"outgoing": 1, "incoming": 2}
     assert set(view["incoming"]["mentions"][i]["other_node_id"] for i in range(2)) == {SRC_A, SRC_B}
     related = view["outgoing"]["related_to"][0]
-    assert related["other_node_id"] == CPT_Y
+    assert related["other_node_id"] == ITM_Y
     assert related["symmetric"] is True
-    assert related["other"]["answer_eligible"] is False  # candidate concept
+    assert related["other"]["answer_eligible"] is False  # candidate item
+    assert related["other"]["item_type"] == "provider_institution"
+    # Non-item adjacents carry item_type None (never a phantom classification).
+    assert view["incoming"]["mentions"][0]["other"]["item_type"] is None
 
 
 def test_node_view_evidence_is_advisory(conn):
-    view = graph_read.node_view(conn, CPT_X)
+    view = graph_read.node_view(conn, ITM_X)
     assertion = view["incoming"]["mentions"][0]
     assert assertion["evidence"]["advisory"] is True
 
 
 def test_node_view_hides_proposed_by_default(conn):
-    default = graph_read.node_view(conn, CPT_X)
+    default = graph_read.node_view(conn, ITM_X)
     assert default["counts"]["incoming"] == 2  # proposed mention hidden
-    widened = graph_read.node_view(conn, CPT_X, include_status=("active", "proposed"))
+    widened = graph_read.node_view(conn, ITM_X, include_status=("active", "proposed"))
     assert widened["counts"]["incoming"] == 3  # proposed now surfaced
 
 
@@ -99,30 +106,30 @@ def test_node_view_symmetric_edge_direction_preserved(conn):
 
 
 def test_node_view_missing_node(conn):
-    assert graph_read.node_view(conn, "cpt_does_not_exist") is None
+    assert graph_read.node_view(conn, "itm_does_not_exist") is None
 
 
 # --------------------------------------------------------------------------- neighborhood
 
 
 def test_neighborhood_depth1_induced_subgraph(conn):
-    nb = graph_read.neighborhood(conn, CPT_X, depth=1)
+    nb = graph_read.neighborhood(conn, ITM_X, depth=1)
     ids = {n["node_id"]: n for n in nb["nodes"]}
-    assert set(ids) == {CPT_X, CPT_Y, SRC_A, SRC_B}
-    assert ids[CPT_X]["distance"] == 0
+    assert set(ids) == {ITM_X, ITM_Y, SRC_A, SRC_B}
+    assert ids[ITM_X]["distance"] == 0
     assert ids[SRC_A]["distance"] == 1
     # Candidate node reachable via an active edge appears, flagged not answer_eligible.
-    assert ids[CPT_Y]["answer_eligible"] is False
-    # Induced edges include src_a->cpt_y even though it is "between" two distance-1 nodes.
+    assert ids[ITM_Y]["answer_eligible"] is False
+    # Induced edges include src_a->itm_y even though it is "between" two distance-1 nodes.
     edge_pairs = {(e["src_id"], e["dst_id"], e["edge_type"]) for e in nb["edges"]}
-    assert (SRC_A, CPT_Y, "mentions") in edge_pairs
-    assert (CPT_X, CPT_Y, "related_to") in edge_pairs
+    assert (SRC_A, ITM_Y, "mentions") in edge_pairs
+    assert (ITM_X, ITM_Y, "related_to") in edge_pairs
     assert nb["truncated"] is False
 
 
 def test_neighborhood_depth0_is_root_only(conn):
-    nb = graph_read.neighborhood(conn, CPT_X, depth=0)
-    assert [n["node_id"] for n in nb["nodes"]] == [CPT_X]
+    nb = graph_read.neighborhood(conn, ITM_X, depth=0)
+    assert [n["node_id"] for n in nb["nodes"]] == [ITM_X]
     assert nb["edges"] == []
 
 
@@ -136,24 +143,24 @@ def test_neighborhood_depth2_reaches_two_hops(conn):
     dist = {n["node_id"]: n["distance"] for n in nb["nodes"]}
     assert dist[CLM_1] == 0
     assert dist[CLM_2] == 1 and dist[SRC_A] == 1
-    assert dist[SRC_B] == 2 and dist[CPT_X] == 2 and dist[CPT_Y] == 2
+    assert dist[SRC_B] == 2 and dist[ITM_X] == 2 and dist[ITM_Y] == 2
 
 
 def test_neighborhood_node_types_filter(conn):
-    nb = graph_read.neighborhood(conn, CPT_X, depth=1, node_types=frozenset({"source"}))
-    assert {n["node_id"] for n in nb["nodes"]} == {CPT_X, SRC_A, SRC_B}  # cpt_y filtered out
-    # No edge touches the filtered-out cpt_y.
-    assert all(CPT_Y not in (e["src_id"], e["dst_id"]) for e in nb["edges"])
+    nb = graph_read.neighborhood(conn, ITM_X, depth=1, node_types=frozenset({"source"}))
+    assert {n["node_id"] for n in nb["nodes"]} == {ITM_X, SRC_A, SRC_B}  # itm_y filtered out
+    # No edge touches the filtered-out itm_y.
+    assert all(ITM_Y not in (e["src_id"], e["dst_id"]) for e in nb["edges"])
 
 
 def test_neighborhood_edge_types_filter(conn):
-    nb = graph_read.neighborhood(conn, CPT_X, depth=1, edge_types=("mentions",))
-    assert {n["node_id"] for n in nb["nodes"]} == {CPT_X, SRC_A, SRC_B}
+    nb = graph_read.neighborhood(conn, ITM_X, depth=1, edge_types=("mentions",))
+    assert {n["node_id"] for n in nb["nodes"]} == {ITM_X, SRC_A, SRC_B}
     assert all(e["edge_type"] == "mentions" for e in nb["edges"])
 
 
 def test_neighborhood_node_cap_truncates(conn):
-    nb = graph_read.neighborhood(conn, CPT_X, depth=1, node_cap=2)
+    nb = graph_read.neighborhood(conn, ITM_X, depth=1, node_cap=2)
     assert len(nb["nodes"]) == 2  # root + first sorted candidate
     assert nb["truncated"] is True
     assert nb["cap"]["nodes"] == 2
@@ -180,7 +187,7 @@ def test_neighborhood_edges_are_canonical_only(conn):
 
 
 def test_neighborhood_node_types_filter_blocks_deeper_discovery(conn):
-    # cpt_x/cpt_y/src_b are reachable from clm_1 only *through* src_a (a source). Excluding
+    # itm_x/itm_y/src_b are reachable from clm_1 only *through* src_a (a source). Excluding
     # sources at traversal time therefore stops discovery at the claims (traversal-time semantics).
     nb = graph_read.neighborhood(conn, CLM_1, depth=2, node_types=frozenset({"claim"}))
     assert {n["node_id"] for n in nb["nodes"]} == {CLM_1, CLM_2}
@@ -203,13 +210,14 @@ def test_graph_surfaces_retired_nodes_via_active_edges(tmp_path):
     # Edge-status-only traversal (ADR-0032 addendum 2): a deleted node reachable by an active edge
     # still appears, carrying its real status and answer_eligible: false. Pins the default.
     src = "src_cccccccccccccccc"
-    deleted = "cpt_deadbeefdeadbeef"
+    deleted = "itm_deadbeefdeadbeef"
     db_path = tmp_path / "db" / "graph.sqlite"
     graph.init_db(db_path)
     c = graph.connect(db_path)
     graph.reindex_nodes(
         c, source_ids=[src],
-        page_nodes=[{"node_id": deleted, "node_type": "concept", "slug": "d", "status": "deleted"}],
+        page_nodes=[{"node_id": deleted, "node_type": "item", "item_type": "method_technique",
+                     "slug": "d", "status": "deleted"}],
         now="t0",
     )
     graph.upsert_assertion(c, src_id=src, dst_id=deleted, edge_type="mentions",
@@ -242,7 +250,7 @@ def test_parse_edge_statuses_default_and_validation():
 
 def test_parse_edge_and_node_types_validation():
     assert graph_read.parse_edge_types(None) is None
-    assert graph_read.parse_node_types("source,concept") == frozenset({"source", "concept"})
+    assert graph_read.parse_node_types("source,item") == frozenset({"source", "item"})
     with pytest.raises(ValueError):
         graph_read.parse_edge_types("frobnicates")
     with pytest.raises(ValueError):

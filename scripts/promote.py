@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CLI: promote candidate concepts/entities to active by source recurrence (Phase 3.5b).
+"""CLI: promote candidate knowledge items to active by source recurrence (ADR-0018/0059).
 
 Usage:
     uv run python scripts/promote.py

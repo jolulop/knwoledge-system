@@ -15,6 +15,8 @@ import hashlib
 import re
 from typing import Any
 
+from app.backend import taxonomy
+
 _TOKEN = re.compile(r"\{\{(\w+)\}\}")
 _FRONTMATTER = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 _WS = re.compile(r"\s+")
@@ -41,9 +43,10 @@ def _resolve_review_status(override: str | None, derived: str) -> str:
     return override
 
 # Node type -> wiki subdirectory (page routing / link targets), Build Spec §6.1.
+# ADR-0059: all knowledge items live in ONE flat directory regardless of item_type — the
+# path never encodes classification, so a retype is a metadata flip, never a page move.
 NODE_DIR = {
-    "source": "Sources", "concept": "Concepts", "entity": "Entities", "person": "People",
-    "organization": "Organizations", "project": "Projects", "claim": "Claims",
+    "source": "Sources", "item": "Items", "claim": "Claims",
     "synthesis": "Synthesis", "query": "Queries", "tag": "Tags",
 }
 
@@ -185,6 +188,30 @@ def _mention_slugs(items: list[dict[str, Any]] | None) -> list[str]:
     return [it["target"].rsplit("/", 1)[-1] for it in (items or [])]
 
 
+def _items_block(items: list[dict[str, Any]] | None) -> str:
+    """Source-page Items section: mention links grouped by `item_type` (ADR-0059).
+
+    Groups render in the taxonomy GROUP_ORDER with display-name sub-headers; the sentinel's
+    group renders last under its QA label ("Unclassified (review required)") — never as a
+    taxonomy category. Empty/None -> the deterministic placeholder (byte-stable with the
+    Phase-3 backbone). Items whose type is unknown (drifted page) sort into the QA bucket
+    rather than being dropped — the projection must stay exact.
+    """
+    if not items:
+        return _PENDING
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for it in items:
+        itype = it.get("item_type")
+        key = itype if itype in taxonomy.ITEM_TYPES else taxonomy.UNCLASSIFIED
+        groups.setdefault(key, []).append(it)
+    blocks = []
+    for itype in taxonomy.GROUP_ORDER:
+        members = groups.get(itype)
+        if members:
+            blocks.append(f"### {taxonomy.display_name(itype)}\n\n{_link_list(members)}")
+    return "\n\n".join(blocks)
+
+
 def _claims_block(claims: list[dict[str, Any]] | None) -> str:
     """Source page Claims section from claim data ({claim_id, title|None})."""
     items = None if claims is None else [
@@ -198,11 +225,7 @@ def build_source_values(
     summary_max: int, summary_min: int,
     enrichment: dict[str, Any] | None = None,
     claims: list[dict[str, Any]] | None = None,
-    concepts: list[dict[str, Any]] | None = None,
-    entities: list[dict[str, Any]] | None = None,
-    people: list[dict[str, Any]] | None = None,
-    organizations: list[dict[str, Any]] | None = None,
-    projects: list[dict[str, Any]] | None = None,
+    items: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     sid = manifest["source_id"]
     title = title_from_filename(manifest.get("original_filename", sid))
@@ -253,20 +276,12 @@ def build_source_values(
         "summary_text": summary_text,
         "tags": tags,
         "claims_block": _claims_block(claims),
-        "concepts_block": _link_list(concepts),
-        "entities_block": _link_list(entities),
-        "people_block": _link_list(people),
-        "organizations_block": _link_list(organizations),
-        "projects_block": _link_list(projects),
-        # Frontmatter arrays mirror the projected body links as an **advisory** slug
+        "items_block": _items_block(items),
+        # The frontmatter array mirrors the projected body links as an **advisory** slug
         # projection — NOT relationship authority. The id-keyed graph is the source of truth
         # for mentions (ADR-0029/0030); on rename/re-slug these re-project from the graph.
         # validate_projection enforces frontmatter == body so they never drift.
-        "concepts_fm": _render_tag_list(_mention_slugs(concepts)),
-        "entities_fm": _render_tag_list(_mention_slugs(entities)),
-        "people_fm": _render_tag_list(_mention_slugs(people)),
-        "organizations_fm": _render_tag_list(_mention_slugs(organizations)),
-        "projects_fm": _render_tag_list(_mention_slugs(projects)),
+        "items_fm": _render_tag_list(_mention_slugs(items)),
         "notes": "",
     }
 
@@ -451,22 +466,24 @@ def render_claim_page(claim: dict[str, Any], *, review_status: str | None = None
     return draft.replace('input_fingerprint: ""', f'input_fingerprint: "{fingerprint}"', 1)
 
 
-def render_concept_page(node: dict[str, Any], *, review_status: str | None = None) -> str:
-    """Render a deterministic candidate concept/entity stub page (slice 4, ADR-0017/0018).
+def render_item_page(node: dict[str, Any], *, review_status: str | None = None) -> str:
+    """Render a deterministic knowledge-item stub page (ADR-0059; mechanics from ADR-0017/0018).
 
-    No LLM-authored prose: frontmatter (id, type, title, aliases, status, confidence) plus a
-    deterministic summary and a Mentioned-by section projected from the node's active
+    No LLM-authored prose: frontmatter (item_id, item_type, title, aliases, status, confidence)
+    plus a deterministic summary and a Mentioned-by section projected from the node's active
     `mentions` sources (passed in — no IO). `status` is supplied by the caller (it is
-    page-authoritative, ADR-0030): `candidate` until promoted to `active` by recurrence
-    (slice 5), or `deprecated_candidate` when no active mention remains (a tombstone, kept
-    page-backed and never hard-deleted).
+    page-authoritative, ADR-0030): `candidate` until promoted to `active` by recurrence,
+    or `deprecated_candidate` when no active mention remains (a tombstone, kept
+    page-backed and never hard-deleted). `item_type` is governed classification metadata
+    (taxonomy.py) — page-authoritative, mirrored to the graph nodes index, changed only by
+    the `change_item_type` executor (a metadata flip, never an identity change).
 
     `review_status` is normally *derived* from `status`/active-mentions; an explicit, validated override
     is the deterministic render-path input the Phase-6 deprecation executor uses to mark an approved
     deprecation (ADR-0035 A5) — the derivation would otherwise yield `pending` for a no-mention node.
     """
-    node_type = node["node_type"]
     title = _WS.sub(" ", str(node["title"])).strip()
+    item_type = node["item_type"]
     aliases = node.get("aliases") or []
     confidence = node.get("confidence", "low")
     source_ids = node.get("source_ids") or []
@@ -476,12 +493,13 @@ def render_concept_page(node: dict[str, Any], *, review_status: str | None = Non
         # ADR-0050 merge tombstone: the absorbed id is kept at its old path (old links resolve here) with
         # the FULL frontmatter schema preserved + `merged_into`; only the body collapses to a redirect note.
         merged_into = node.get("merged_into", "")
-        link = node.get("merged_into_link")            # "<Dir>/<survivor-slug>" of the active survivor
+        link = node.get("merged_into_link")            # "Items/<survivor-slug>" of the active survivor
         target = f"[[{link}]]" if link else merged_into
         fm_lines = [
             "---",
-            f"type: {node_type}",
-            f'{node["id_field"]}: "{node["node_id"]}"',
+            "type: item",
+            f'item_id: "{node["node_id"]}"',
+            f"item_type: {item_type}",
             f'title: "{_fm_quote(title)}"',
             "status: merged",
             "review_status: approved",
@@ -498,46 +516,10 @@ def render_concept_page(node: dict[str, Any], *, review_status: str | None = Non
             "",
             f"# {_delink(title)}",
             "",
-            f"> [!summary] Merged {node_type}",
-            f"> This {node_type} was merged into {target} — no longer a live identity.",
+            "> [!summary] Merged item",
+            f"> This item was merged into {target} — no longer a live identity.",
             "",
             f"Merged into {target}.",
-            "",
-        ]
-        draft = "\n".join(fm_lines + body) + "\n"
-        fingerprint = _fingerprint(_FP_LINE.sub("", draft))
-        return draft.replace('input_fingerprint: ""', f'input_fingerprint: "{fingerprint}"', 1)
-    if status == "rekeyed":
-        # ADR-0051 subtype-rekey tombstone: the old-subtype id is kept at its old path (old links resolve
-        # here) with the FULL frontmatter schema preserved + `rekeyed_to`; only the body collapses to a
-        # redirect note that KEEPS the required `> [!summary]` callout (like the merged tombstone).
-        rekeyed_to = node.get("rekeyed_to", "")
-        link = node.get("rekeyed_to_link")             # "<Dir>/<new-slug>" of the active new-subtype node
-        target = f"[[{link}]]" if link else rekeyed_to
-        fm_lines = [
-            "---",
-            f"type: {node_type}",
-            f'{node["id_field"]}: "{node["node_id"]}"',
-            f'title: "{_fm_quote(title)}"',
-            "status: rekeyed",
-            "review_status: approved",
-            "generation_status: deterministic",
-            f"confidence: {confidence}",
-            f"aliases: {_render_tag_list(aliases)}",
-            f'rekeyed_to: "{rekeyed_to}"',
-            f'rekeyed_at: "{node.get("rekeyed_at", "")}"',
-            f'rekey_review_id: "{node.get("rekey_review_id", "")}"',
-            'input_fingerprint: ""',
-            "---",
-        ]
-        body = [
-            "",
-            f"# {_delink(title)}",
-            "",
-            f"> [!summary] Retyped {node_type}",
-            f"> This {node_type} was retyped into {target} — no longer a live identity at this id.",
-            "",
-            f"Retyped into {target}.",
             "",
         ]
         draft = "\n".join(fm_lines + body) + "\n"
@@ -548,8 +530,9 @@ def render_concept_page(node: dict[str, Any], *, review_status: str | None = Non
 
     fm_lines = [
         "---",
-        f"type: {node_type}",
-        f'{node["id_field"]}: "{node["node_id"]}"',
+        "type: item",
+        f'item_id: "{node["node_id"]}"',
+        f"item_type: {item_type}",
         f'title: "{_fm_quote(title)}"',
         f"status: {status}",
         f"review_status: {rs}",
@@ -567,13 +550,14 @@ def render_concept_page(node: dict[str, Any], *, review_status: str | None = Non
         "---",
     ]
     label = status.replace("_", " ")
+    type_label = str(item_type).replace("_", " ")
     if active_mentions:
-        summary = f"{label.capitalize()} {node_type} mentioned by {len(source_ids)} source(s)."
+        summary = f"{label.capitalize()} item ({type_label}) mentioned by {len(source_ids)} source(s)."
         mentioned = [f"- [[Sources/{s}]]" for s in source_ids]
     else:
         # Callout prose tracks the resolved review_status (ADR-0035 A5); default `pending` byte-stable.
         review_note = "approved for deprecation" if rs == "approved" else "pending review"
-        summary = f"{node_type.capitalize()} with no active mentions — {review_note}."
+        summary = f"Item ({type_label}) with no active mentions — {review_note}."
         mentioned = [f"_No active source mentions; {review_note}._"]
     alias_lines = [f"- {_delink(a)}" for a in aliases] if aliases else ["_None._"]
     description = node.get("description")
@@ -581,7 +565,7 @@ def render_concept_page(node: dict[str, Any], *, review_status: str | None = Non
         "",
         f"# {_delink(title)}",
         "",
-        f"> [!summary] {label.capitalize()} {node_type}",
+        f"> [!summary] {label.capitalize()} item — {type_label}",
         f"> {summary}",
         "",
         *(["## Description", "", _delink(str(description)), ""] if description else []),
@@ -700,11 +684,7 @@ def render_source_page(
     summary_max: int, summary_min: int,
     enrichment: dict[str, Any] | None = None,
     claims: list[dict[str, Any]] | None = None,
-    concepts: list[dict[str, Any]] | None = None,
-    entities: list[dict[str, Any]] | None = None,
-    people: list[dict[str, Any]] | None = None,
-    organizations: list[dict[str, Any]] | None = None,
-    projects: list[dict[str, Any]] | None = None,
+    items: list[dict[str, Any]] | None = None,
 ) -> str:
     """Render a Source page, stamping its input_fingerprint.
 
@@ -717,8 +697,7 @@ def render_source_page(
     """
     values = build_source_values(
         manifest, normalized_markdown, summary_max=summary_max, summary_min=summary_min,
-        enrichment=enrichment, claims=claims, concepts=concepts, entities=entities,
-        people=people, organizations=organizations, projects=projects,
+        enrichment=enrichment, claims=claims, items=items,
     )
     draft = render_template(template, {**values, "input_fingerprint": ""})
     fingerprint = _fingerprint(_FP_LINE.sub("", draft))

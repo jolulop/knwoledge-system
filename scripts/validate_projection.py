@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """Validate that rendered wiki backlinks and the graph's active edges match (Phase 3.5b).
 
-The Source/Claim/concept-entity pages are a deterministic projection of the graph's `active`
-edges (ADR-0029/0030). This checks the projection is a *bidirectional* match — neither a
+The Source/Claim/Item pages are a deterministic projection of the graph's `active`
+edges (ADR-0029/0030/0059). This checks the projection is a *bidirectional* match — neither a
 silent missing link nor an invented one:
 
-- Source page: every active `derived_from` claim and `mentions` node is linked, and every
-  `[[Claims/…]]` / `[[Concepts|Entities|People|Organizations|Projects/…]]` link has a
-  corresponding active edge.
+- Source page: every active `derived_from` claim and `mentions` item is linked, and every
+  `[[Claims/…]]` / `[[Items/…]]` link has a corresponding active edge.
 - Claim page: its `[[Sources/…]]` links match its active `derived_from` edges.
-- Concept/entity/person/org/project page: its `[[Sources/…]]` (Mentioned-by) links match
-  its active incoming `mentions` edges.
+- Item page: its `[[Sources/…]]` (Mentioned-by) links match its active incoming `mentions`
+  edges, and its frontmatter `item_type` matches the graph nodes mirror (ADR-0059).
 
 No graph database yet -> nothing to validate (a pass).
 """
@@ -28,16 +27,12 @@ from app.backend import graph
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter
 
 _LINK = re.compile(r"\[\[([^\]]+)\]\]")
-_DIR_TYPE = {NODE_DIR[t]: t for t in ("concept", "entity", "person", "organization", "project")}
-_ENTITY_FAMILY = frozenset({"entity", "person", "organization", "project"})  # ADR-0051 subtype-rekey family
+_DIR_TYPE = {NODE_DIR["item"]: "item"}
 # Source frontmatter array <-> body section <-> link-target directory (advisory projection
-# mirror; the id-keyed graph remains the relationship authority — ADR-0030).
+# mirror; the id-keyed graph remains the relationship authority — ADR-0030). One flat Items
+# section (ADR-0059); the renderer's item_type sub-headers live INSIDE the section.
 _FM_SECTIONS = [
-    ("concepts", "Concepts Mentioned", "Concepts"),
-    ("entities", "Entities Mentioned", "Entities"),
-    ("people", "People Mentioned", "People"),
-    ("organizations", "Organizations Mentioned", "Organizations"),
-    ("projects", "Projects Mentioned", "Projects"),
+    ("items", "Items Mentioned", "Items"),
 ]
 
 
@@ -96,6 +91,14 @@ def _check(root: Path, db_path: Path) -> list[str]:
     errors: list[str] = []
     conn = graph.connect(db_path)
     try:
+        # Schema gate (ADR-0059): a pre-v2 database is stale by design after the clean restart.
+        found = graph.schema_version(conn)
+        if found != graph.SCHEMA_VERSION or not graph._nodes_table_has_item_type(conn):
+            # The structural check is independent of the stamp (review round: B1) — a
+            # version that LIES about a pre-v2 table still refuses cleanly, never crashes.
+            return [f"graph schema version mismatch: found v{found}, expected "
+                    f"v{graph.SCHEMA_VERSION} (pre-ADR-0059 database; the clean-repository "
+                    f"restart rebuilds it)"]
         slug_to_node = {
             (r["node_type"], r["slug"]): r["node_id"]
             for r in conn.execute("SELECT node_id, node_type, slug FROM nodes")
@@ -104,6 +107,8 @@ def _check(root: Path, db_path: Path) -> list[str]:
                        for r in conn.execute("SELECT node_id, status FROM nodes")}
         node_type_of = {r["node_id"]: r["node_type"]
                         for r in conn.execute("SELECT node_id, node_type FROM nodes")}
+        node_item_type = {r["node_id"]: r["item_type"]
+                          for r in conn.execute("SELECT node_id, item_type FROM nodes")}
 
         # --- Source pages: claims + mentions both directions ---
         sources_dir = root / "wiki" / "Sources"
@@ -187,7 +192,7 @@ def _check(root: Path, db_path: Path) -> list[str]:
                 errors.append(f"{syn_id}: derived_from frontmatter {sorted(fm_list)} != active "
                               f"derived_from edges {sorted(active)}")
 
-        # --- Concept/entity/... pages: Mentioned-by links match active mentions ---
+        # --- Item pages: Mentioned-by links match active mentions ---
         for node_type, subdir in ((t, NODE_DIR[t]) for t in _DIR_TYPE.values()):
             folder = root / "wiki" / subdir
             for page in sorted(folder.glob("*.md")) if folder.exists() else []:
@@ -215,33 +220,11 @@ def _check(root: Path, db_path: Path) -> list[str]:
                         errors.append(f"{node_id}: merged_into survivor {surv} is a different node_type "
                                       f"({node_type_of.get(surv)} != {node_type})")
                     continue
-                # ADR-0051: a `rekeyed` tombstone must point rekeyed_to an ACTIVE-or-CANDIDATE (the mint
-                # preserves the old status), DIFFERENT-type, SAME-(entity-)family node sharing the SAME
-                # name-hash (prefix-only delta); no Mentioned-by projection to check. The same-hash check
-                # proves it is a lawful subtype relabel.
-                if fm.get("status") == "rekeyed":
-                    tgt = fm.get("rekeyed_to")
-                    if not tgt:
-                        errors.append(f"{node_id}: rekeyed page is missing rekeyed_to")
-                    elif tgt == node_id:
-                        errors.append(f"{node_id}: rekeyed page points rekeyed_to at itself")
-                    elif tgt not in node_status:
-                        errors.append(f"{node_id}: rekeyed_to {tgt} is not an indexed node")
-                    elif node_status.get(tgt) not in ("active", "candidate"):
-                        # ADR-0051 D: the new-subtype node PRESERVES the old node's status, so the target is
-                        # active OR candidate (a candidate rekey is a supported first-class use case).
-                        errors.append(f"{node_id}: rekeyed_to {tgt} is not active/candidate "
-                                      f"(status {node_status.get(tgt)!r})")
-                    elif node_type_of.get(tgt) == node_type:
-                        errors.append(f"{node_id}: rekeyed_to {tgt} must be a DIFFERENT node_type "
-                                      f"(both {node_type})")
-                    elif node_type not in _ENTITY_FAMILY or node_type_of.get(tgt) not in _ENTITY_FAMILY:
-                        errors.append(f"{node_id}: rekeyed_to {tgt} must stay within the entity family "
-                                      f"({node_type} -> {node_type_of.get(tgt)})")
-                    elif node_id.split("_", 1)[-1] != tgt.split("_", 1)[-1]:
-                        errors.append(f"{node_id}: rekeyed_to {tgt} must share the same name-hash "
-                                      f"(prefix-only delta)")
-                    continue
+                # ADR-0059: the governed classification must round-trip page <-> graph mirror.
+                page_item_type = fm.get("item_type")
+                if page_item_type != node_item_type.get(node_id):
+                    errors.append(f"{node_id}: page item_type {page_item_type!r} != graph "
+                                  f"item_type {node_item_type.get(node_id)!r}")
                 linked = _sources_links(_targets(text))
                 active = set(graph.sources_for_node(conn, node_id))
                 for sid in active - linked:

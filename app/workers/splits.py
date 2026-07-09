@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Phase 6 identity-surgery executor: split_entity (ADR-0052) — the INVERSE of merge.
+"""Phase 6 identity-surgery executor: split_item (ADR-0052, restated over ADR-0059's item family) — the INVERSE of merge.
 
-One entity-family node's evidence is divided into a surviving **primary** A (keeps id + name) and a
+One knowledge item's evidence is divided into a surviving **primary** A (keeps id + name) and a
 freshly-minted **spin-off** B. The human partitions A's `mentions` (`spinoff_sources`) + aliases; the listed
 mentions **MOVE** `source→A` ⇒ `source→B`, B is minted `candidate`, A keeps the rest. **FORWARD-ONLY**, not a
 merge: nothing is retired, no tombstone, no new lifecycle status, no pending-review withdrawal. Two-pass: a
 dry plan (all guards + block gates, never partial) then apply. Graph-REQUIRED, key-free, deterministic.
-Reuses ADR-0050/0051 machinery (`graph.repoint_edge`/`find_assertion`, `merges._approved_unapplied_block`,
-`rekeys._is_canonical_node_id`, the virgin-target gates).
+Reuses ADR-0050 machinery (`graph.repoint_edge`/`find_assertion`, `merges._approved_unapplied_block`,
+`retypes._is_canonical_item_id`, the virgin-target gates). The spin-off inherits the
+primary's `item_type` (an item_type-differing spin-off stays deferred, ADR-0052 boundary).
 
 Beyond the three virgin-target gates on B it adds two identity-safety gates (ADR-0052 review round 1):
 `spinoff_promote_slot_taken` (a terminal promote record for computed B would fabricate/strand its promotion —
@@ -39,12 +40,11 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from app.backend import graph
+from app.backend import graph, taxonomy
 from app.backend.manifests import is_source_id, iso_now
-from app.workers import concepts, merges, rekeys, reviews
-from app.workers.wiki_render import NODE_DIR, render_concept_page
+from app.workers import items, merges, retypes, reviews
+from app.workers.wiki_render import NODE_DIR, render_item_page
 
-_ENTITY_FAMILY = frozenset({"entity", "person", "organization", "project"})
 _SPLITTABLE_STATUSES = frozenset({"active", "candidate"})
 
 
@@ -56,7 +56,7 @@ def _approved_splits(reviews_dir: Path) -> list[dict[str, Any]]:
             item = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if isinstance(item, dict) and item.get("type") == "split_entity" and item.get("status") == "approved":
+        if isinstance(item, dict) and item.get("type") == "split_item" and item.get("status") == "approved":
             out.append(item)
     return out
 
@@ -129,7 +129,7 @@ def _write_audit(reviews_dir: Path, rid: str, record: dict[str, Any], now: str) 
 
 
 def apply_splits(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = None) -> dict[str, Any]:
-    """Apply approved `split_entity` decisions (ADR-0052). Returns
+    """Apply approved `split_item` decisions (ADR-0052/0059). Returns
     `{applied, skipped:[{review_id, reason}], changed_pages, graph_changed, affected_sources}`. Graph-
     REQUIRED; the caller owns the final commit + the Source-page re-render of `affected_sources`. Repair-safe:
     a half-applied split is completed idempotently, a fully-applied one is a true no-op."""
@@ -154,7 +154,7 @@ def apply_splits(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = 
         if not isinstance(spinoff_name, str) or not spinoff_name.strip():
             _skip("invalid_proposal")
             continue
-        if not rekeys._is_canonical_node_id(a):
+        if not retypes._is_canonical_item_id(a):
             _skip("noncanonical_node_id")
             continue
         n_a = graph.get_node(gconn, a)
@@ -162,13 +162,13 @@ def apply_splits(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = 
             _skip("node_missing")
             continue
         a_type = n_a["node_type"]
-        if a_type not in _ENTITY_FAMILY:
+        if a_type != "item":
             _skip("out_of_scope")
             continue
         if n_a["status"] not in _SPLITTABLE_STATUSES:    # A's status gates both fresh + repair (split
             _skip("node_not_splittable")                 # preserves A's status, so a repair sees it too)
             continue
-        b = concepts.node_id(a_type, spinoff_name)
+        b = items.node_id(spinoff_name)
         if b != b_declared:
             _skip("spinoff_id_mismatch")
             continue
@@ -194,18 +194,24 @@ def apply_splits(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = 
         srcs_set = set(srcs)
 
         # A's page (needed to render on both the fresh and repair paths)
-        b_slug = concepts._slug(spinoff_name)
+        b_slug = items._slug(spinoff_name)
         b_page_rel = f"{NODE_DIR[a_type]}/{b_slug}.md"
         a_page = f"{NODE_DIR[a_type]}/{n_a['slug']}.md"
-        meta_a = concepts._read_node_meta(wiki_dir / a_page)
+        meta_a = items._read_node_meta(wiki_dir / a_page)
         if meta_a is None:
             _skip("page_missing")
+            continue
+        # ADR-0059: the spin-off inherits the primary's governed classification. A node whose
+        # page AND mirror both lack a valid type is drifted state — typed skip, never a raise.
+        a_item_type = meta_a.get("item_type") or n_a.get("item_type")
+        if not taxonomy.is_item_type(a_item_type):
+            _skip("item_type_missing")
             continue
 
         # --- B-slot state branch: fresh apply | no-op-or-repair | typed block ---
         n_b = graph.get_node(gconn, b)
         b_page_abs = wiki_dir / b_page_rel
-        b_meta = concepts._read_node_meta(b_page_abs) if b_page_abs.exists() else None
+        b_meta = items._read_node_meta(b_page_abs) if b_page_abs.exists() else None
         our_lineage = bool(b_meta and b_meta.get("split_from") == a
                            and b_meta.get("split_review_id") == rid)
 
@@ -241,8 +247,8 @@ def apply_splits(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = 
             if srcs_set == a_sources:                     # all moved -> a rename, not a split; A keeps >=1
                 _skip("full_partition_is_rename")
                 continue
-            a_aliases_norm = {concepts._normalize_name(x) for x in meta_a["aliases"]}
-            if not all(concepts._normalize_name(x) in a_aliases_norm for x in aliases_move):
+            a_aliases_norm = {items._normalize_name(x) for x in meta_a["aliases"]}
+            if not all(items._normalize_name(x) in a_aliases_norm for x in aliases_move):
                 _skip("alias_not_on_primary")
                 continue
             if _target_assertion_collision(gconn, _moved_mention_edges(gconn, a, srcs_set), b):
@@ -257,34 +263,37 @@ def apply_splits(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = 
 
         # --- APPLY / REPAIR (re-point before render; idempotent; never partial from here) ---
         moved = _moved_mention_edges(gconn, a, srcs_set)   # all on-A edges (fresh) / the remainder (repair)
-        graph.upsert_node(gconn, node_id=b, node_type=a_type, slug=b_slug, status="candidate", now=now)
+        graph.upsert_node(gconn, node_id=b, node_type=a_type, slug=b_slug, status="candidate",
+                          item_type=a_item_type, now=now)
         for e in moved:
             graph.repoint_edge(gconn, e["edge_id"], new_dst=b, now=now)   # source→A ⇒ source→B
-        # render the spin-off B (candidate; its moved mentions; split lineage)
+        # render the spin-off B (candidate; its moved mentions; split lineage; inherited item_type)
         b_page_abs.parent.mkdir(parents=True, exist_ok=True)
-        b_page_abs.write_text(render_concept_page({
-            "node_type": a_type, "node_id": b, "id_field": concepts.ID_FIELD[a_type],
+        b_page_abs.write_text(render_item_page({
+            "node_id": b, "item_type": a_item_type,
             "title": spinoff_name, "aliases": aliases_move, "confidence": meta_a.get("confidence", "low"),
             "source_ids": graph.sources_for_node(gconn, b), "status": "candidate",
             "duplicates": graph.active_duplicates(gconn, b), "split_from": a, "split_review_id": rid,
         }), encoding="utf-8")
         # re-render primary A: aliases minus spinoff_aliases AND the auto-moved spin-off name; status unchanged
-        drop = {concepts._normalize_name(x) for x in aliases_move} | {concepts._normalize_name(spinoff_name)}
-        a_aliases_final = [x for x in meta_a["aliases"] if concepts._normalize_name(x) not in drop]
-        (wiki_dir / a_page).write_text(render_concept_page({
-            "node_type": a_type, "node_id": a, "id_field": concepts.ID_FIELD[a_type],
+        drop = {items._normalize_name(x) for x in aliases_move} | {items._normalize_name(spinoff_name)}
+        a_aliases_final = [x for x in meta_a["aliases"] if items._normalize_name(x) not in drop]
+        (wiki_dir / a_page).write_text(render_item_page({
+            "node_id": a, "item_type": a_item_type,
             "title": meta_a["title"], "aliases": a_aliases_final, "confidence": meta_a.get("confidence", "low"),
             "source_ids": graph.sources_for_node(gconn, a), "status": n_a["status"],
             "duplicates": graph.active_duplicates(gconn, a),
             "split_from": meta_a.get("split_from"), "split_review_id": meta_a.get("split_review_id"),
+            "description": meta_a.get("description"),
         }), encoding="utf-8")
-        graph.upsert_node(gconn, node_id=a, node_type=a_type, slug=n_a["slug"], status=n_a["status"], now=now)
+        graph.upsert_node(gconn, node_id=a, node_type=a_type, slug=n_a["slug"], status=n_a["status"],
+                          item_type=a_item_type, now=now)
         # file B's promote_candidate_node so the new candidate enters the promotion ledger (the promote pass
         # won't file a pending item for a not-yet-independent candidate). Idempotent: reuses a pending slot,
         # and is a no-op when a terminal (approved/rejected) slot already accounts for B.
         reviews.create_review_item(
             reviews_dir, review_type="promote_candidate_node", subject={"node_id": b},
-            proposal={"to_status": "active", "node_type": a_type},
+            proposal={"to_status": "active", "item_type": a_item_type},
             context={"created_by": "split", "split_from": a}, now=now)
         item_pages = [b_page_rel, a_page]
         changed_pages.extend(item_pages)

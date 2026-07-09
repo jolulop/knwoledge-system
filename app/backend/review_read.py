@@ -33,7 +33,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from app.backend import graph, manifests
+from app.backend import graph, manifests, taxonomy
 from app.workers.reviews import PRIORITIES, REVIEW_STATUSES, review_id
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter
 
@@ -100,24 +100,23 @@ EXECUTOR_BY_TYPE = {
     # ADR-0049: synthesis visibility (the synthesis.py / _render_page seam, artifact-sourced).
     "hide_synthesis": "apply_hidden_syntheses",
     "unhide_synthesis": "apply_unhidden_syntheses",
-    # ADR-0050: identity surgery — entity/concept merge (rekeying), forward-only.
-    "merge_entities": "apply_merges",
-    "merge_concepts": "apply_merges",
-    # ADR-0051: identity surgery — single-node entity subtype rekey (id-prefix change), forward-only.
-    "change_entity_subtype": "apply_rekeys",
-    # ADR-0052: identity surgery — entity split (id-spawning; inverse of merge), forward-only.
-    "split_entity": "apply_splits",
+    # ADR-0050/0059: identity surgery — knowledge-item merge (rekeying), forward-only.
+    "merge_items": "apply_merges",
+    # ADR-0059: governed classification flip (NON-rekeying — id, page path, edges untouched).
+    "change_item_type": "apply_retypes",
+    # ADR-0052/0059: identity surgery — item split (id-spawning; inverse of merge), forward-only.
+    "split_item": "apply_splits",
 }
 
 # Wiki subdirs the scoped deprecation executor may touch in v1 (ADR-0035 A5). A deprecate item whose
 # page lives elsewhere is *not* executor-backed here: Synthesis/ is owned by the synthesis apply
 # orchestrator; Sources/Queries and any raw-touching deprecation stay record-only.
 DEPRECATION_SCOPE_DIRS = frozenset(
-    {"Claims", "Concepts", "Entities", "People", "Organizations", "Projects"})
-# ADR-0046 v1: semantic-page hide covers the concept/entity family only (the single
+    {"Claims", "Items"})
+# ADR-0046 v1: semantic-page hide covers knowledge items only (the single
 # recompose_semantic_node_page seam) — Claims (recompose_claim) + Synthesis are deferred fast-follows.
 HIDE_SEMANTIC_SCOPE_DIRS = frozenset(
-    {"Concepts", "Entities", "People", "Organizations", "Projects"})
+    {"Items"})
 
 # Executor-backed types whose *rejection* still carries a deterministic reject-effect to apply (node
 # -> deprecated_candidate / edge -> rejected). For promote/deprecate a rejection owes no world change.
@@ -703,7 +702,7 @@ def preview_archive_source(item: dict[str, Any], *, gconn: Any, wiki_dir: Path |
 
 # Node families with a `## Duplicates` page projection (ADR-0041) + a conservative id-safety check
 # (unsafe/path-like/empty), matching the executor's guards (app/workers/duplicates.py).
-_DUP_NODE_TYPES = frozenset({"concept", "entity", "person", "organization", "project"})
+_DUP_NODE_TYPES = frozenset({"item"})
 _SAFE_NODE_ID = re.compile(r"[A-Za-z0-9_]+")
 
 
@@ -1152,74 +1151,62 @@ def _preview_merge(item: dict[str, Any], *, gconn: Any, wiki_dir: Path | None,
     return out
 
 
-def preview_merge_entities(item: dict[str, Any], *, gconn: Any, wiki_dir: Path | None) -> dict[str, Any]:
-    return _preview_merge(item, gconn=gconn, wiki_dir=wiki_dir, rtype="merge_entities")
+def preview_merge_items(item: dict[str, Any], *, gconn: Any, wiki_dir: Path | None) -> dict[str, Any]:
+    return _preview_merge(item, gconn=gconn, wiki_dir=wiki_dir, rtype="merge_items")
 
 
-def preview_merge_concepts(item: dict[str, Any], *, gconn: Any, wiki_dir: Path | None) -> dict[str, Any]:
-    return _preview_merge(item, gconn=gconn, wiki_dir=wiki_dir, rtype="merge_concepts")
-
-
-def _effect_rekey(item: dict[str, Any], gconn: Any, wiki_dir: Path | None) -> tuple[str, list[str]]:
-    # ADR-0051: subtype rekey is FORWARD-ONLY. EFFECTED only when CLEANLY applied — the old node is
-    # `rekeyed`, its page is a tombstone pointing rekeyed_to the EXPECTED (prefix-substituted) new id, that
-    # target node EXISTS and is live (active/candidate — the mint preserves the old status), AND no active
-    # edge still touches the old id. Any partial live state — graph XOR page rekeyed, a wrong/missing target,
-    # or stray active edges — is UNKNOWN `partial_rekey_state` (reopen-safe: not reopenable until the read
-    # model is repaired), so reopen/approved-unapplied gating can't be fooled by a half-applied rekey. Only a
-    # fully-clean PENDING_APPLY (nothing rekeyed) is reopenable; an applied rekey is never reopenable.
-    from app.workers import concepts                      # lazy: reuse the canonical prefix map, no cycle
+def _effect_retype(item: dict[str, Any], gconn: Any, wiki_dir: Path | None) -> tuple[str, list[str]]:
+    # ADR-0059: a retype is a NON-rekeying metadata flip — no tombstone, no target mint, no
+    # edge re-point. EFFECTED iff BOTH authorities carry the target classification (page
+    # frontmatter `item_type` — the authority — AND the graph nodes mirror). A one-surface
+    # partial (page XOR graph) is UNKNOWN `partial_retype_state` (reopen-safe: not reopenable
+    # until the read model is repaired); anything else is PENDING_APPLY (fully reopenable —
+    # a not-yet-applied flip has no live effect to orphan).
     status = item.get("status")
     if status not in ("approved", "rejected"):
         return PENDING_APPLY, []
     if status == "rejected":
-        return NO_EFFECT_REQUIRED, []                    # a rejected rekey owes no world change
+        return NO_EFFECT_REQUIRED, []                    # a rejected retype owes no world change
     subj = item.get("subject") or {}
-    old, to_type = subj.get("node_id"), subj.get("to_type")
-    if not old or "_" not in old or to_type not in concepts._TYPE_PREFIX:
+    nid, to_type = subj.get("node_id"), subj.get("to_item_type")
+    if not nid or not taxonomy.is_production_item_type(to_type):
         return INVALID_SUBJECT, ["malformed_subject"]
     if gconn is None:
         return UNKNOWN, ["graph_unavailable"]
-    new = f"{concepts._TYPE_PREFIX[to_type]}_{old.split('_', 1)[1]}"   # expected target (frozen-hash swap)
-    n_old = graph.get_node(gconn, old)
-    if n_old is None:
+    node = graph.get_node(gconn, nid)
+    if node is None:
         return UNKNOWN, ["node_missing"]
-    graph_rekeyed = n_old["status"] == "rekeyed"
-    old_page = f"{NODE_DIR[n_old['node_type']]}/{n_old['slug']}.md" if n_old["node_type"] in NODE_DIR else None
-    fm = _page_frontmatter(wiki_dir, old_page)
-    page_rekeyed = bool(fm and fm.get("status") == "rekeyed" and fm.get("rekeyed_to") == new)
-    n_new = graph.get_node(gconn, new)
-    target_live = bool(n_new and n_new["status"] in ("active", "candidate"))
-    no_active_edges = not (graph.outgoing_active(gconn, old) or graph.incoming_active(gconn, old))
-    if graph_rekeyed and page_rekeyed and target_live and no_active_edges:
+    if node["node_type"] != "item":
+        return INVALID_SUBJECT, ["malformed_subject"]
+    page = f"{NODE_DIR['item']}/{node['slug']}.md"
+    fm = _page_frontmatter(wiki_dir, page)
+    if fm is None:
+        return UNKNOWN, ["page_missing"]
+    graph_done = node.get("item_type") == to_type
+    page_done = fm.get("item_type") == to_type
+    if graph_done and page_done:
         return EFFECTED, []
-    if graph_rekeyed or page_rekeyed:
-        return UNKNOWN, ["partial_rekey_state"]
-    # A half-applied mint (crash between the target mint and the old-id tombstone, since `upsert_node`
-    # commits immediately): the old id is untouched but the target node/page already exists. NOT
-    # PENDING_APPLY — reopening would strand the orphan target, and a re-apply would then block on
-    # `target_subtype_id_exists`. Report the partial state so reopen refuses (409); operator reconciles.
-    new_page = f"{NODE_DIR[to_type]}/{n_old['slug']}.md" if to_type in NODE_DIR else None
-    if n_new is not None or _page_frontmatter(wiki_dir, new_page) is not None:
-        return UNKNOWN, ["partial_rekey_state"]
+    if graph_done or page_done:
+        return UNKNOWN, ["partial_retype_state"]
     return PENDING_APPLY, []
 
 
-def preview_change_entity_subtype(item: dict[str, Any], *, gconn: Any,
-                                  wiki_dir: Path | None) -> dict[str, Any]:
+def preview_change_item_type(item: dict[str, Any], *, gconn: Any,
+                             wiki_dir: Path | None) -> dict[str, Any]:
     subj = item.get("subject") or {}
-    old, to_type = subj.get("node_id"), subj.get("to_type")
+    nid, to_type = subj.get("node_id"), subj.get("to_item_type")
     out = _scaffold(item)
-    out["node_ids"] = [x for x in (old,) if x]
-    out["proposed_status"] = "rekeyed"
-    out["proposed_action"] = f"retype {old} -> subtype {to_type} (old id -> rekeyed tombstone)"
-    out["summary"] = f"Retype {old} to subtype {to_type}."
-    out["details"] = {"node_id": old, "to_type": to_type}
-    n = graph.get_node(gconn, old) if (gconn and old) else None
+    out["node_ids"] = [x for x in (nid,) if x]
+    out["proposed_status"] = None                        # a retype never changes lifecycle status
+    out["proposed_action"] = f"reclassify {nid} -> item_type {to_type} (metadata flip; id/page unchanged)"
+    out["summary"] = f"Reclassify {nid} as {to_type}."
+    out["details"] = {"node_id": nid, "to_item_type": to_type,
+                      "from_item_type": (item.get("context") or {}).get("from_item_type")}
+    n = graph.get_node(gconn, nid) if (gconn and nid) else None
     out["affected_paths"] = ([f"{NODE_DIR[n['node_type']]}/{n['slug']}.md"]
                              if n and n["node_type"] in NODE_DIR else [])
-    effect_status, warnings = _effect_rekey(item, gconn, wiki_dir)
-    out["apply"] = _apply_supported(EXECUTOR_BY_TYPE["change_entity_subtype"], effect_status, warnings)
+    effect_status, warnings = _effect_retype(item, gconn, wiki_dir)
+    out["apply"] = _apply_supported(EXECUTOR_BY_TYPE["change_item_type"], effect_status, warnings)
     return out
 
 
@@ -1275,7 +1262,7 @@ def _effect_split(item: dict[str, Any], gconn: Any, wiki_dir: Path | None) -> tu
     return UNKNOWN, ["partial_split_state"]               # any half-applied state — not reopenable
 
 
-def preview_split_entity(item: dict[str, Any], *, gconn: Any, wiki_dir: Path | None) -> dict[str, Any]:
+def preview_split_item(item: dict[str, Any], *, gconn: Any, wiki_dir: Path | None) -> dict[str, Any]:
     subj = item.get("subject") or {}
     proposal = item.get("proposal") or {}
     a, b = subj.get("node_id"), subj.get("spinoff_node_id")
@@ -1294,7 +1281,7 @@ def preview_split_entity(item: dict[str, Any], *, gconn: Any, wiki_dir: Path | N
             paths.append(f"{NODE_DIR[n['node_type']]}/{n['slug']}.md")
     out["affected_paths"] = paths
     effect_status, warnings = _effect_split(item, gconn, wiki_dir)
-    out["apply"] = _apply_supported(EXECUTOR_BY_TYPE["split_entity"], effect_status, warnings)
+    out["apply"] = _apply_supported(EXECUTOR_BY_TYPE["split_item"], effect_status, warnings)
     return out
 
 
@@ -1313,10 +1300,9 @@ _PROJECTORS = {
     "unhide_claim": preview_unhide_claim,
     "hide_synthesis": preview_hide_synthesis,
     "unhide_synthesis": preview_unhide_synthesis,
-    "merge_entities": preview_merge_entities,
-    "merge_concepts": preview_merge_concepts,
-    "change_entity_subtype": preview_change_entity_subtype,
-    "split_entity": preview_split_entity,
+    "merge_items": preview_merge_items,
+    "change_item_type": preview_change_item_type,
+    "split_item": preview_split_item,
 }
 
 
@@ -1390,7 +1376,7 @@ def get_review(
 # --- per-source review flow (ADR-0058) ---------------------------------------
 
 # Concept/entity-family scope of the flow; everything else stays in the flat queue.
-_FLOW_FAMILY = frozenset({"concept", "entity", "person", "organization", "project"})
+_FLOW_FAMILY = frozenset({"item"})
 # Recompose provenance gate for the "Retired by re-extraction" section (ADR-0057 decision 2:
 # the stable reason_code, plus the exact legacy prose constant for pre-ADR-0057 items).
 _FLOW_REASON_CODE = "no_active_mentions"
@@ -1403,8 +1389,7 @@ def _family_page_meta(wiki_dir: Path | None) -> dict[str, dict[str, Any]]:
     meta: dict[str, dict[str, Any]] = {}
     if wiki_dir is None:
         return meta
-    id_fields = {"Concepts": "concept_id", "Entities": "entity_id", "People": "person_id",
-                 "Organizations": "organization_id", "Projects": "project_id"}
+    id_fields = {"Items": "item_id"}
     for dir_name, id_field in id_fields.items():
         page_dir = Path(wiki_dir) / dir_name
         if not page_dir.is_dir():
@@ -1419,6 +1404,7 @@ def _family_page_meta(wiki_dir: Path | None) -> dict[str, dict[str, Any]]:
                 aliases = fm.get("aliases")
                 meta[nid] = {"title": fm.get("title"), "status": fm.get("status"),
                              "aliases": aliases if isinstance(aliases, list) else [],
+                             "item_type": fm.get("item_type"),
                              "description": fm.get("description")}
     return meta
 
@@ -1472,7 +1458,7 @@ def _source_flow(reviews_dir: Path, *, gconn: Any, wiki_dir: Path | None,
                  manifests_dir: Path | None) -> dict[str, Any]:
     """Assemble the whole ADR-0058 per-source model once (index + screen slice it).
 
-    Attribution: promotes via active `mentions` from the source; `change_entity_subtype` via
+    Attribution: promotes via active `mentions` from the source; `change_item_type` via
     `context.source_id`; deprecations in the retired section only when deterministic
     (recompose provenance + zero active mentions + superseded history `H == {S}`). Decided
     items render read-only; the flat queue stays canonical for everything unattributed.
@@ -1486,7 +1472,7 @@ def _source_flow(reviews_dir: Path, *, gconn: Any, wiki_dir: Path | None,
         items, _p, _s = _scan_dir(reviews_dir, dir_name)
         all_items.extend(items)
     promote_by_node: dict[str, dict[str, Any]] = {}
-    subtype_by_source: dict[str, list[dict[str, Any]]] = {}
+    retype_by_source: dict[str, list[dict[str, Any]]] = {}
     flow_deprecations: list[dict[str, Any]] = []
     unresolved_unattributed: list[dict[str, Any]] = []
     for it in all_items:
@@ -1495,10 +1481,10 @@ def _source_flow(reviews_dir: Path, *, gconn: Any, wiki_dir: Path | None,
             nid = (it.get("subject") or {}).get("node_id")
             if isinstance(nid, str) and nid:
                 promote_by_node[nid] = it
-        elif rtype == "change_entity_subtype":
+        elif rtype == "change_item_type":
             sid = (it.get("context") or {}).get("source_id")
             if isinstance(sid, str) and sid:
-                subtype_by_source.setdefault(sid, []).append(it)
+                retype_by_source.setdefault(sid, []).append(it)
         elif rtype == "deprecate_wiki_page" and _flow_owns_deprecation(it):
             flow_deprecations.append(it)
         if it.get("status") in _UNRESOLVED_STATUSES:
@@ -1517,6 +1503,7 @@ def _source_flow(reviews_dir: Path, *, gconn: Any, wiki_dir: Path | None,
             node_info_cache[nid] = {
                 "node_id": nid, "node_type": node_type,
                 "title": page.get("title"), "node_status": page.get("status"),
+                "item_type": page.get("item_type"),
                 "aliases": page.get("aliases") or [], "description": page.get("description"),
                 "mention_sources": mention_sources,
                 "recurrence_eligible": _independent_pair(mention_sources, prov),
@@ -1537,12 +1524,12 @@ def _source_flow(reviews_dir: Path, *, gconn: Any, wiki_dir: Path | None,
                 row = _item_row(item, "candidate") | info
                 row["other_source_count"] = max(len(info["mention_sources"]) - 1, 0)
                 candidates.append(row)
-        subtype_rows = [_item_row(it, "subtype")
+        retype_rows = [_item_row(it, "retype")
                         | {"node_id": (it.get("subject") or {}).get("node_id"),
-                           "to_type": (it.get("subject") or {}).get("to_type"),
-                           "from_type": (it.get("context") or {}).get("from_type"),
+                           "to_item_type": (it.get("subject") or {}).get("to_item_type"),
+                           "from_item_type": (it.get("context") or {}).get("from_item_type"),
                            "name": (it.get("context") or {}).get("name")}
-                        for it in subtype_by_source.get(sid, [])]
+                        for it in retype_by_source.get(sid, [])]
         retired: list[dict[str, Any]] = []
         if gconn is not None:
             for it in flow_deprecations:
@@ -1558,7 +1545,7 @@ def _source_flow(reviews_dir: Path, *, gconn: Any, wiki_dir: Path | None,
                                | {"node_id": nid, "title": page.get("title"),
                                   "node_status": page.get("status"),
                                   "page": (it.get("subject") or {}).get("page")})
-        rows = candidates + subtype_rows + retired
+        rows = candidates + retype_rows + retired
         attributed_rids.update(str(r["review_id"]) for r in rows)
         counts = Counter(r["status"] for r in rows)
         amended = sum(1 for r in rows if r.get("amendments"))
@@ -1566,7 +1553,7 @@ def _source_flow(reviews_dir: Path, *, gconn: Any, wiki_dir: Path | None,
             "source_id": sid,
             "filename": m.get("original_filename"),
             "discovered_at": m.get("discovered_at"),
-            "candidates": candidates, "subtype_items": subtype_rows, "retired": retired,
+            "candidates": candidates, "retype_items": retype_rows, "retired": retired,
             "counts": {"remaining": counts.get("pending", 0),
                        "approved": counts.get("approved", 0),
                        "rejected": counts.get("rejected", 0),
@@ -1577,7 +1564,7 @@ def _source_flow(reviews_dir: Path, *, gconn: Any, wiki_dir: Path | None,
 
     # Distinct unresolved attributable items (a multi-source candidate counts once overall).
     remaining_rids = {str(r["review_id"])
-                      for s in sources for r in (s["candidates"] + s["subtype_items"] + s["retired"])
+                      for s in sources for r in (s["candidates"] + s["retype_items"] + s["retired"])
                       if r["status"] == "pending"}
     global_by_type = Counter(str(it.get("type")) for it in unresolved_unattributed
                              if str(it.get("review_id")) not in attributed_rids)
@@ -1602,7 +1589,7 @@ def source_review_index(reviews_dir: Path, *, graph_db: Path | None = None,
         if conn is not None:
             conn.close()
     for s in flow["sources"]:                      # the index is counts-only
-        for key in ("candidates", "subtype_items", "retired"):
+        for key in ("candidates", "retype_items", "retired"):
             s.pop(key)
     return flow
 

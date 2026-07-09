@@ -1,7 +1,7 @@
 """Phase 7 slice 7-1: the /jobs/lint maintenance pass (ADR-0036).
 
 Key-free tests over app.workers.lint.run_lint + POST /jobs/lint — detect-and-propose health:
-missing-raw → high-severity finding + missing_raw_source review item; under-supported active concept →
+missing-raw → high-severity finding + missing_raw_source review item; under-supported active item →
 deprecate_wiki_page proposal; idempotent reruns; job recorded; log.md appended; lint-health-as-outcome
 (failing is a 200 report, not an error); no path leak.
 """
@@ -92,46 +92,49 @@ def test_file_review_items_false_reports_without_filing(tmp_path):
     assert _pending(tmp_path) == []
 
 
-# --- under-supported concepts ----------------------------------------------
+# --- under-supported items ---------------------------------------------------
 
 
-def test_under_supported_active_concept_proposes_deprecation(tmp_path):
+def test_under_supported_active_item_proposes_deprecation(tmp_path):
     gdb, conn = _graph(tmp_path)
-    # active concept with one mentioning source -> under-supported (<2)
+    # active item with one mentioning source -> under-supported (<2)
     graph.upsert_node(conn, node_id="src_0000000000000101", node_type="source", slug="src_0000000000000101", status="active")
-    graph.upsert_node(conn, node_id="cpt_x", node_type="concept", slug="thing", status="active")
-    graph.upsert_assertion(conn, src_id="src_0000000000000101", dst_id="cpt_x", edge_type="mentions",
+    graph.upsert_node(conn, node_id="itm_x", node_type="item", slug="thing", status="active",
+                      item_type="method_technique")
+    graph.upsert_assertion(conn, src_id="src_0000000000000101", dst_id="itm_x", edge_type="mentions",
                            asserted_by="llm", status="active")
     conn.close()
     res = _run(tmp_path, graph_db=gdb)
-    us = [f for f in res["findings"] if f["check"] == "under_supported_concept"]
-    assert us and us[0]["subject"] == "cpt_x" and us[0]["severity"] == "medium"
+    us = [f for f in res["findings"] if f["check"] == "under_supported_item"]
+    assert us and us[0]["subject"] == "itm_x" and us[0]["severity"] == "medium"
     items = _pending(tmp_path, "deprecate_wiki_page")
     assert len(items) == 1
     subj = json.loads(items[0].read_text())["subject"]
-    assert subj == {"node_id": "cpt_x", "page": "Concepts/thing.md"}
+    assert subj == {"node_id": "itm_x", "page": "Items/thing.md"}
 
 
-def test_orphan_concept_zero_sources_is_high(tmp_path):
+def test_orphan_item_zero_sources_is_high(tmp_path):
     gdb, conn = _graph(tmp_path)
-    graph.upsert_node(conn, node_id="cpt_orphan", node_type="concept", slug="orphan", status="active")
+    graph.upsert_node(conn, node_id="itm_orphan", node_type="item", slug="orphan", status="active",
+                      item_type="provider_institution")
     conn.close()
     res = _run(tmp_path, graph_db=gdb)
-    us = [f for f in res["findings"] if f["check"] == "under_supported_concept"]
+    us = [f for f in res["findings"] if f["check"] == "under_supported_item"]
     assert us[0]["severity"] == "high" and res["status"] == "failing"
 
 
-def test_well_supported_concept_is_not_flagged(tmp_path):
+def test_well_supported_item_is_not_flagged(tmp_path):
     gdb, conn = _graph(tmp_path)
     for s in ("src_0000000000000101", "src_0000000000000102"):
         graph.upsert_node(conn, node_id=s, node_type="source", slug=s, status="active")
-    graph.upsert_node(conn, node_id="cpt_x", node_type="concept", slug="thing", status="active")
+    graph.upsert_node(conn, node_id="itm_x", node_type="item", slug="thing", status="active",
+                      item_type="method_technique")
     for s in ("src_0000000000000101", "src_0000000000000102"):
-        graph.upsert_assertion(conn, src_id=s, dst_id="cpt_x", edge_type="mentions",
+        graph.upsert_assertion(conn, src_id=s, dst_id="itm_x", edge_type="mentions",
                                asserted_by="llm", status="active")
     conn.close()
     res = _run(tmp_path, graph_db=gdb)
-    assert not any(f["check"] == "under_supported_concept" for f in res["findings"])
+    assert not any(f["check"] == "under_supported_item" for f in res["findings"])
 
 
 def test_archived_sources_do_not_count_as_live_support(tmp_path):
@@ -139,14 +142,15 @@ def test_archived_sources_do_not_count_as_live_support(tmp_path):
     graph.upsert_node(conn, node_id="src_0000000000000101", node_type="source", slug="src_0000000000000101", status="active")
     graph.upsert_node(conn, node_id="src_00000000000000a4", node_type="source", slug="src_00000000000000a4",
                       status="archive_candidate")
-    graph.upsert_node(conn, node_id="cpt_x", node_type="concept", slug="thing", status="active")
+    graph.upsert_node(conn, node_id="itm_x", node_type="item", slug="thing", status="active",
+                      item_type="method_technique")
     for s in ("src_0000000000000101", "src_00000000000000a4"):
-        graph.upsert_assertion(conn, src_id=s, dst_id="cpt_x", edge_type="mentions",
+        graph.upsert_assertion(conn, src_id=s, dst_id="itm_x", edge_type="mentions",
                                asserted_by="llm", status="active")
     conn.close()
     res = _run(tmp_path, graph_db=gdb)
-    us = [f for f in res["findings"] if f["check"] == "under_supported_concept"]
-    assert us and us[0]["subject"] == "cpt_x"
+    us = [f for f in res["findings"] if f["check"] == "under_supported_item"]
+    assert us and us[0]["subject"] == "itm_x"
     assert "1 mentioning source" in us[0]["detail"]
 
 
@@ -434,15 +438,15 @@ def test_active_claim_evidence_without_artifact_is_unverifiable_degraded(tmp_pat
 
 # --- ADR-0037 round 2: positive enumeration, path safety, exact-citation coverage ---
 
-def test_synthesis_and_concepts_artifacts_are_not_summaries(tmp_path):
+def test_synthesis_and_items_artifacts_are_not_summaries(tmp_path):
     gdb, conn = _graph(tmp_path)
     conn.close()
     edir = tmp_path / "normalized" / "enrichment"
     edir.mkdir(parents=True)
     # both have generation_status: enriched but non-canonical stems -> must be ignored
-    (edir / "cpt_thing.synthesis.json").write_text(json.dumps(
+    (edir / "itm_thing.synthesis.json").write_text(json.dumps(
         {"generation_status": "enriched", "input_fingerprint": "x", "summary": "s"}), encoding="utf-8")
-    (edir / f"{QSID}.concepts.json").write_text(json.dumps(
+    (edir / f"{QSID}.items.json").write_text(json.dumps(
         {"source_id": QSID, "generation_status": "enriched", "input_fingerprint": "x"}), encoding="utf-8")
     res = _run(tmp_path, graph_db=gdb, summary_model_ref=QMODEL)
     assert not any(f["check"] in ("summary_rot", "summary_unverifiable") for f in res["findings"])
@@ -526,7 +530,7 @@ def test_jobs_lint_serializes_finding_data(client, tmp_path):
 from app.workers import synthesis as _synth  # noqa: E402
 
 SYN_TOPIC = {
-    "node_id": "cpt_0000000000000001", "node_type": "concept", "slug": "thing", "title": "Thing",
+    "node_id": "itm_0000000000000001", "node_type": "item", "slug": "thing", "title": "Thing",
     "claims": [
         {"claim_id": "clm_a", "claim_text": "A", "citations": [
             {"source_id": QSID, "char_start": 0, "char_end": 5}]},
@@ -644,13 +648,15 @@ def test_operations_doc_synthesis_remediation_uses_force():
     assert "--force" in row  # the actionable command must use --force (normal run only reports)
 
 
-# --- concept starvation (ADR-0055) ------------------------------------------
+# --- topic starvation (ADR-0059, redefining ADR-0055's concept starvation) ---
+
+from app.backend import taxonomy  # noqa: E402
 
 
-def _concepts_artifact(tmp_path, sid, nodes, *, internal_sid=None):
+def _items_artifact(tmp_path, sid, nodes, *, internal_sid=None):
     ed = tmp_path / "normalized" / "enrichment"
     ed.mkdir(parents=True, exist_ok=True)
-    (ed / f"{sid}.concepts.json").write_text(json.dumps({
+    (ed / f"{sid}.items.json").write_text(json.dumps({
         "source_id": internal_sid or sid, "nodes": nodes}), encoding="utf-8")
     return ed
 
@@ -663,58 +669,62 @@ def _claims_artifact(tmp_path, sid, n):
         encoding="utf-8")
 
 
-def test_concept_starvation_flagged_with_remediation(tmp_path):
+def _named(n):
+    return [{"item_type": "provider_institution", "name": f"Org{i}"} for i in range(n)]
+
+
+def test_topic_starvation_flagged_with_remediation(tmp_path):
     sid = "src_00000000000000aa"
-    _concepts_artifact(tmp_path, sid, [{"node_type": "person", "name": f"P{i}"} for i in range(5)])
+    _items_artifact(tmp_path, sid, _named(5))  # 5 named, zero thematic
     res = _run(tmp_path)
-    found = [f for f in res["findings"] if f["check"] == "concept_starvation"]
+    found = [f for f in res["findings"] if f["check"] == "topic_starvation"]
     assert len(found) == 1 and found[0]["subject"] == sid
     assert found[0]["severity"] == "medium"
-    assert found[0]["data"] == {"source_id": sid, "concept_count": 0, "entity_family_count": 5,
-                                "claim_count": 0, "remediation": "rerun_extract_concepts"}
-    assert res["by_check"]["concept_starvation"] == 1
+    assert found[0]["data"] == {"source_id": sid, "thematic_item_count": 0, "named_item_count": 5,
+                                "claim_count": 0, "remediation": "rerun_extract_items"}
+    assert res["by_check"]["topic_starvation"] == 1
     assert res["status"] != "failing"  # report-only: never flips failing (ADR-0037 posture)
 
 
-def test_concept_starvation_via_claims_artifact(tmp_path):
+def test_topic_starvation_via_claims_artifact(tmp_path):
     sid = "src_00000000000000ab"
-    _concepts_artifact(tmp_path, sid, [{"node_type": "entity", "name": "Solo"}])
+    _items_artifact(tmp_path, sid, [{"item_type": "model", "name": "Solo"}])
     _claims_artifact(tmp_path, sid, 1)
     res = _run(tmp_path)
-    found = [f for f in res["findings"] if f["check"] == "concept_starvation"]
+    found = [f for f in res["findings"] if f["check"] == "topic_starvation"]
     assert len(found) == 1 and found[0]["data"]["claim_count"] == 1
 
 
-def test_concept_starvation_boundaries_not_flagged(tmp_path):
-    # Below entity threshold + no claims; degenerate (nothing extracted); concepts present.
-    _concepts_artifact(tmp_path, "src_00000000000000ac",
-                       [{"node_type": "entity", "name": f"E{i}"} for i in range(4)])
-    _concepts_artifact(tmp_path, "src_00000000000000ad", [])
-    _concepts_artifact(tmp_path, "src_00000000000000ae",
-                       [{"node_type": "concept", "name": "Idea"}] +
-                       [{"node_type": "person", "name": f"P{i}"} for i in range(9)])
+def test_topic_starvation_boundaries_not_flagged(tmp_path):
+    # Below named threshold + no claims; degenerate (nothing extracted); thematic layer present.
+    _items_artifact(tmp_path, "src_00000000000000ac", _named(4))
+    _items_artifact(tmp_path, "src_00000000000000ad", [])
+    _items_artifact(tmp_path, "src_00000000000000ae",
+                    [{"item_type": "method_technique", "name": "Idea"}] + _named(9))
+    # The sentinel counts toward NEITHER group: 4 named + 1 unclassified stays below threshold.
+    _items_artifact(tmp_path, "src_00000000000000b2",
+                    _named(4) + [{"item_type": taxonomy.UNCLASSIFIED, "name": "Mystery"}])
     res = _run(tmp_path)
-    assert not any(f["check"] == "concept_starvation" for f in res["findings"])
+    assert not any(f["check"] == "topic_starvation" for f in res["findings"])
 
 
-def test_concept_starvation_skips_spoofed_and_unreadable_artifacts(tmp_path):
+def test_topic_starvation_skips_spoofed_and_unreadable_artifacts(tmp_path):
     # Internal source_id must match the filename; unreadable JSON is skipped (validators own it).
-    _concepts_artifact(tmp_path, "src_00000000000000af",
-                       [{"node_type": "person", "name": f"P{i}"} for i in range(5)],
-                       internal_sid="src_00000000000000ff")
+    _items_artifact(tmp_path, "src_00000000000000af", _named(5),
+                    internal_sid="src_00000000000000ff")
     ed = tmp_path / "normalized" / "enrichment"
-    (ed / "src_00000000000000b0.concepts.json").write_text("{not json", encoding="utf-8")
+    (ed / "src_00000000000000b0.items.json").write_text("{not json", encoding="utf-8")
     res = _run(tmp_path)
-    assert not any(f["check"] == "concept_starvation" for f in res["findings"])
+    assert not any(f["check"] == "topic_starvation" for f in res["findings"])
 
 
-def test_concept_starvation_ignores_spoofed_claims_artifact(tmp_path):
+def test_topic_starvation_ignores_spoofed_claims_artifact(tmp_path):
     # A claims artifact whose internal source_id mismatches its filename contributes zero claims,
     # so a below-threshold source is not flagged through it.
     sid = "src_00000000000000b1"
-    _concepts_artifact(tmp_path, sid, [{"node_type": "entity", "name": "Solo"}])
+    _items_artifact(tmp_path, sid, [{"item_type": "model", "name": "Solo"}])
     ed = tmp_path / "normalized" / "enrichment"
     (ed / f"{sid}.claims.json").write_text(json.dumps({
         "source_id": "src_00000000000000ff", "claims": [{"claim_id": "clm_1"}]}), encoding="utf-8")
     res = _run(tmp_path)
-    assert not any(f["check"] == "concept_starvation" for f in res["findings"])
+    assert not any(f["check"] == "topic_starvation" for f in res["findings"])

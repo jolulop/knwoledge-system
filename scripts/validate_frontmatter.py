@@ -14,8 +14,8 @@ if str(ROOT) not in sys.path:
 from app.workers.wiki_render import REVIEW_STATUSES as PAGE_REVIEW_STATUSES  # noqa: E402
 
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
-WIKI_SUBDIRS = ["Sources", "Concepts", "Claims", "Entities", "People", "Organizations", "Projects", "Tags", "Synthesis", "Queries"]
-VALID_TYPES = {"source", "concept", "claim", "entity", "person", "organization", "project", "tag", "synthesis", "query"}
+WIKI_SUBDIRS = ["Sources", "Items", "Claims", "Tags", "Synthesis", "Queries"]
+VALID_TYPES = {"source", "item", "claim", "tag", "synthesis", "query"}
 # Field contracts per page type (ADR-0016/0020/0021/0022). Source pages use
 # relative_raw_path (never absolute raw_path) and the shared lifecycle fields.
 REQUIRED_BY_TYPE = {
@@ -26,12 +26,8 @@ REQUIRED_BY_TYPE = {
     ],
     # `review_status` is required on every page type that renders it (ADR-0022) — NOT Source, which
     # intentionally does not carry it (its review state lives in the ledger, owned by no renderer).
-    "concept": ["type", "concept_id", "title", "status", "confidence", "review_status"],
+    "item": ["type", "item_id", "item_type", "title", "status", "confidence", "review_status"],
     "claim": ["type", "claim_id", "status", "confidence", "review_status"],
-    "entity": ["type", "entity_id", "title", "status", "confidence", "review_status"],
-    "person": ["type", "person_id", "title", "status", "confidence", "review_status"],
-    "organization": ["type", "organization_id", "title", "status", "confidence", "review_status"],
-    "project": ["type", "project_id", "title", "status", "confidence", "review_status"],
     "synthesis": ["type", "synthesis_id", "title", "status", "review_status"],
     # No wall-clock fields: a saved Query page is a deterministic derived artifact (ADR-0023/0034),
     # like claim/synthesis pages — byte-stable, so no `created`/`last_compiled_at`.

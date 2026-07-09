@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Phase 6 identity-surgery executor: merge_entities / merge_concepts (ADR-0050).
+"""Phase 6 identity-surgery executor: merge_items (ADR-0050, restated over ADR-0059's item family).
 
-Collapses two EXACT same-type semantic nodes — absorbed **B** into survivor **A**: re-points A's live
+Collapses two knowledge items — absorbed **B** into survivor **A**: re-points A's live
 (active) edges with normalization, tombstones B (`status: merged`, `merged_into: A`), unions B's
 title+aliases into A, withdraws unresolved (pending/deferred) B-subjects, and writes a reconstructable
 audit entry. **FORWARD-ONLY** (auditable, not live-reversible). Two-pass: a dry plan that detects the
@@ -22,16 +22,15 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from app.backend import graph
+from app.backend import graph, taxonomy
 from app.backend.manifests import iso_now
-from app.workers import concepts, reviews
-from app.workers.wiki_render import NODE_DIR, render_concept_page
+from app.workers import items, reviews
+from app.workers.wiki_render import NODE_DIR, render_item_page
 
-# Review type -> the node-type family it merges (v1: exact same node_type within the family).
-_FAMILY = {
-    "merge_entities": frozenset({"entity", "person", "organization", "project"}),
-    "merge_concepts": frozenset({"concept"}),
-}
+# ADR-0059: one item family, one merge type. Same-structural-type by construction (both
+# nodes are `item`); the survivor KEEPS ITS OWN item_type regardless of the absorbed one —
+# the old cross-type-merge deferral dissolves with the typed-prefix identity model.
+_MERGE_TYPES = frozenset({"merge_items"})
 _SAFE_ID = re.compile(r"[A-Za-z0-9_]+")
 # Symmetric edges stored canonically (src_id < dst_id), per validate_graph. `supersedes` is DIRECTED.
 _CANONICAL_EDGES = frozenset({"contradicts", "duplicates"})
@@ -51,7 +50,7 @@ def _approved_merges(reviews_dir: Path) -> list[dict[str, Any]]:
             item = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if isinstance(item, dict) and item.get("type") in _FAMILY and item.get("status") == "approved":
+        if isinstance(item, dict) and item.get("type") in _MERGE_TYPES and item.get("status") == "approved":
             out.append(item)
     return out
 
@@ -89,7 +88,7 @@ def _alias_union(a_title: str, a_aliases: list[str], b_title: str, b_aliases: li
         if key and key not in seen:
             seen.add(key)
             out.append(x.strip())
-    return out[:concepts._MAX_ALIASES]
+    return out[:items._MAX_ALIASES]
 
 
 def _active_edges_touching(gconn, node_id: str) -> list[dict[str, Any]]:
@@ -154,20 +153,25 @@ def _approved_unapplied_block(gconn, reviews_dir: Path, wiki_dir: Path, b: str, 
 def _render_survivor(gconn, *, a: str, na: dict[str, Any], nt: str, aliases: list[str], title: str,
                      wiki_dir: Path, now: str) -> str | None:
     """Re-render survivor A with the unioned aliases (page-authoritative). Returns the page path if it
-    changed, else None."""
+    changed, else None. The survivor keeps its OWN item_type (ADR-0059) and page-owned fields."""
     page = wiki_dir / NODE_DIR[nt] / f"{na['slug']}.md"
-    meta = concepts._read_node_meta(page)
-    rendered = render_concept_page({
-        "node_type": nt, "node_id": a, "id_field": concepts.ID_FIELD[nt], "title": title,
+    meta = items._read_node_meta(page)
+    item_type = (meta or {}).get("item_type") or na.get("item_type")
+    rendered = render_item_page({
+        "node_id": a, "item_type": item_type, "title": title,
         "aliases": aliases, "confidence": (meta or {}).get("confidence", "low"),
         "source_ids": graph.sources_for_node(gconn, a), "status": "active",
         "duplicates": graph.active_duplicates(gconn, a),
+        "split_from": (meta or {}).get("split_from"),
+        "split_review_id": (meta or {}).get("split_review_id"),
+        "description": (meta or {}).get("description"),
     })
     changed = (not page.exists()) or page.read_text(encoding="utf-8") != rendered
     if changed:
         page.parent.mkdir(parents=True, exist_ok=True)
         page.write_text(rendered, encoding="utf-8")
-    graph.upsert_node(gconn, node_id=a, node_type=nt, slug=na["slug"], status="active", now=now)
+    graph.upsert_node(gconn, node_id=a, node_type=nt, slug=na["slug"], status="active",
+                      item_type=item_type, now=now)
     return f"{NODE_DIR[nt]}/{na['slug']}.md" if changed else None
 
 
@@ -176,15 +180,17 @@ def _render_tombstone(gconn, *, b: str, nb: dict[str, Any], nt: str, a: str, a_s
     """Render B as a `merged` tombstone (full schema + merged_into/merged_at/merge_review_id) and mirror
     the graph node status."""
     page = wiki_dir / NODE_DIR[nt] / f"{nb['slug']}.md"
-    meta = concepts._read_node_meta(page)
+    meta = items._read_node_meta(page)
+    item_type = (meta or {}).get("item_type") or nb.get("item_type")
     page.parent.mkdir(parents=True, exist_ok=True)
-    page.write_text(render_concept_page({
-        "node_type": nt, "node_id": b, "id_field": concepts.ID_FIELD[nt], "title": b_title,
+    page.write_text(render_item_page({
+        "node_id": b, "item_type": item_type, "title": b_title,
         "aliases": b_aliases, "confidence": (meta or {}).get("confidence", "low"), "status": "merged",
         "merged_into": a, "merged_into_link": f"{NODE_DIR[nt]}/{a_slug}",
         "merged_at": now, "merge_review_id": rid,
     }), encoding="utf-8")
-    graph.upsert_node(gconn, node_id=b, node_type=nt, slug=nb["slug"], status="merged", now=now)
+    graph.upsert_node(gconn, node_id=b, node_type=nt, slug=nb["slug"], status="merged",
+                      item_type=item_type, now=now)
     return f"{NODE_DIR[nt]}/{nb['slug']}.md"
 
 
@@ -198,7 +204,7 @@ def _write_audit(reviews_dir: Path, rid: str, record: dict[str, Any], now: str) 
 
 
 def apply_merges(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = None) -> dict[str, Any]:
-    """Apply approved `merge_entities`/`merge_concepts` decisions (ADR-0050). Returns
+    """Apply approved `merge_items` decisions (ADR-0050/0059). Returns
     `{applied, skipped:[{review_id, reason}], changed_pages, graph_changed, affected_sources}`. Graph-
     REQUIRED; the caller owns the final commit + the Source-page re-render of `affected_sources`."""
     now = now or iso_now()
@@ -209,7 +215,6 @@ def apply_merges(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = 
 
     for item in _approved_merges(reviews_dir):
         rid = str(item.get("review_id", ""))
-        rtype = str(item.get("type"))
         subj = item.get("subject") or {}
         proposal = item.get("proposal") or {}
         a, b = subj.get("survivor_node_id"), subj.get("absorbed_node_id")
@@ -235,7 +240,7 @@ def apply_merges(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = 
         if nb["node_type"] != nt:
             _skip("type_mismatch")
             continue
-        if nt not in _FAMILY[rtype] or nt not in concepts.ID_FIELD:
+        if nt != "item":
             _skip("out_of_scope")
             continue
         b_page = f"{NODE_DIR[nt]}/{nb['slug']}.md"
@@ -247,10 +252,16 @@ def apply_merges(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = 
         if nb["status"] != "active":
             _skip("absorbed_not_active")
             continue
-        meta_a = concepts._read_node_meta(wiki_dir / f"{NODE_DIR[nt]}/{na['slug']}.md")
-        meta_b = concepts._read_node_meta(wiki_dir / b_page)
+        meta_a = items._read_node_meta(wiki_dir / f"{NODE_DIR[nt]}/{na['slug']}.md")
+        meta_b = items._read_node_meta(wiki_dir / b_page)
         if meta_a is None or meta_b is None:
             _skip("page_missing")
+            continue
+        # ADR-0059: both pages must carry a valid governed classification (drifted state is a
+        # typed skip, never a mid-apply raise from the graph write gate).
+        if not taxonomy.is_item_type(meta_a.get("item_type") or na.get("item_type")) or \
+           not taxonomy.is_item_type(meta_b.get("item_type") or nb.get("item_type")):
+            _skip("item_type_missing")
             continue
 
         # --- plan the edge re-points (dry) + detect block gates (no writes) ---
@@ -326,9 +337,9 @@ def apply_merges(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = 
             item_pages.append(surv)
         for pid in sorted(partners):
             pn = graph.get_node(gconn, pid)
-            if pn and pn["node_type"] in concepts.ID_FIELD and concepts.recompose_semantic_node_page(
+            if pn and pn["node_type"] == "item" and items.recompose_semantic_node_page(
                     gconn, node_id=pid, wiki_dir=wiki_dir, status=pn["status"],
-                    review_status=(concepts._read_node_meta(
+                    review_status=(items._read_node_meta(
                         wiki_dir / NODE_DIR[pn["node_type"]] / f"{pn['slug']}.md") or {}).get(
                             "review_status", "none"), now=now) == "written":
                 item_pages.append(f"{NODE_DIR[pn['node_type']]}/{pn['slug']}.md")

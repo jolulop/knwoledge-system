@@ -1,6 +1,6 @@
 """ADR-0049 synthesis visibility: hide_synthesis / unhide_synthesis.
 
-Synthesis differs from claims/concepts: it has a promotion lifecycle (candidate -> active via
+Synthesis differs from claims/items: it has a promotion lifecycle (candidate -> active via
 propose_synthesis), an active synthesis carries `review_status: approved` (not `none`), and the
 synthesis-specific crux is PRESERVATION — a `hidden` synthesis must survive the three generate_syntheses
 clobber sites (retraction loop / apply_resolved_syntheses / normal-regen gate), keyed on the AUTHORITATIVE
@@ -31,7 +31,7 @@ from app.backend.config import get_settings
 from app.workers import claims, deprecations, synthesis
 from app.workers.wiki_render import parse_frontmatter
 
-TOPIC = "con_aaaaaaaaaaaaaaaa"
+TOPIC = "itm_aaaaaaaaaaaaaaaa"
 SYN = synthesis.synthesis_id(TOPIC)
 SID = "src_0123456789abcdef"
 CX = "clm_aaaaaaaaaaaaaaaa"
@@ -69,7 +69,8 @@ def _active_synthesis(tmp_path, conn, *, claim_ids=(CX,), status="active"):
     syn_dir = tmp_path / "wiki" / "Synthesis"
     for cid in claim_ids:
         _build_claim(tmp_path, conn, cid, text="The sky is blue today.")
-    graph.upsert_node(conn, node_id=TOPIC, node_type="concept", slug=TOPIC, status="active")
+    graph.upsert_node(conn, node_id=TOPIC, node_type="item", slug=TOPIC, status="active",
+                      item_type="method_technique")
     graph.upsert_node(conn, node_id=SYN, node_type="synthesis", slug=SYN, status=status)
     for cid in claim_ids:
         graph.upsert_assertion(conn, src_id=SYN, dst_id=cid, edge_type="derived_from",
@@ -199,7 +200,7 @@ def test_tampered_topic_node_is_typed_skip_not_misrendered(tmp_path):
     # artifact must NOT re-render this synthesis with mismatched prose — synthesis_id(topic_node) != nid.
     conn = _graph(tmp_path)
     _active_synthesis(tmp_path, conn)
-    other_topic = "con_bbbbbbbbbbbbbbbb"
+    other_topic = "itm_bbbbbbbbbbbbbbbb"
     (tmp_path / "normalized" / "enrichment" / f"{other_topic}.synthesis.json").write_text(json.dumps({
         "node_id": synthesis.synthesis_id(other_topic), "topic_node_id": other_topic,
         "title": "EVIL", "summary": "evil summary", "synthesis": "evil prose", "confidence": 0.1}),
@@ -265,7 +266,7 @@ def test_partial_page_hidden_survives_regen_gate(tmp_path, monkeypatch):
     p.write_text(p.read_text().replace("status: active", "status: hidden", 1), encoding="utf-8")
     conn.commit()
     conn.close()
-    fake_topic = {"node_id": TOPIC, "node_type": "concept", "slug": TOPIC, "title": "Solar trends",
+    fake_topic = {"node_id": TOPIC, "node_type": "item", "slug": TOPIC, "title": "Solar trends",
                   "claims": [{"claim_id": CX, "claim_text": "x",
                               "citations": [{"source_id": SID, "char_start": 0, "char_end": 1}],
                               "sources": [SID]}],
@@ -371,7 +372,7 @@ def test_preservation_regen_gate_skips_hidden(tmp_path, monkeypatch):
     conn.commit()
     conn.close()
     # Surface the hidden synthesis's topic as eligible so the regen loop reaches it; the guard must skip.
-    fake_topic = {"node_id": TOPIC, "node_type": "concept", "slug": TOPIC, "title": "Solar trends",
+    fake_topic = {"node_id": TOPIC, "node_type": "item", "slug": TOPIC, "title": "Solar trends",
                   "claims": [{"claim_id": CX, "claim_text": "x",
                               "citations": [{"source_id": SID, "char_start": 0, "char_end": 1}],
                               "sources": [SID]}],

@@ -22,9 +22,9 @@ def _write(wiki: Path, subdir: str, name: str, fm: dict) -> None:
     (folder / name).write_text(body, encoding="utf-8")
 
 
-def _concept_fm(**over):
-    fm = {"type": "concept", "concept_id": "cpt_x", "title": "Thing", "status": "active",
-          "confidence": "low", "review_status": "none"}
+def _item_fm(**over):
+    fm = {"type": "item", "item_id": "itm_x", "item_type": "method_technique", "title": "Thing",
+          "status": "active", "confidence": "low", "review_status": "none"}
     fm.update(over)
     return fm
 
@@ -38,21 +38,29 @@ def _source_fm(**over):
     return fm
 
 
-def test_valid_concept_with_review_status_passes(tmp_path):
-    _write(tmp_path / "wiki", "Concepts", "c.md", _concept_fm())
+def test_valid_item_with_review_status_passes(tmp_path):
+    _write(tmp_path / "wiki", "Items", "c.md", _item_fm())
     assert vf.main([str(tmp_path)]) == 0
 
 
-def test_concept_out_of_set_review_status_fails(tmp_path):
+def test_item_out_of_set_review_status_fails(tmp_path):
     # `deferred` is a review-ledger state, never a page value (ADR-0022).
-    _write(tmp_path / "wiki", "Concepts", "c.md", _concept_fm(review_status="deferred"))
+    _write(tmp_path / "wiki", "Items", "c.md", _item_fm(review_status="deferred"))
     assert vf.main([str(tmp_path)]) == 1
 
 
 def test_rendering_type_missing_review_status_fails(tmp_path):
-    fm = _concept_fm()
+    fm = _item_fm()
     del fm["review_status"]
-    _write(tmp_path / "wiki", "Concepts", "c.md", fm)
+    _write(tmp_path / "wiki", "Items", "c.md", fm)
+    assert vf.main([str(tmp_path)]) == 1
+
+
+def test_item_missing_item_type_fails(tmp_path):
+    # ADR-0059: the governed classification is a REQUIRED item-page field.
+    fm = _item_fm()
+    del fm["item_type"]
+    _write(tmp_path / "wiki", "Items", "c.md", fm)
     assert vf.main([str(tmp_path)]) == 1
 
 
@@ -71,16 +79,8 @@ def test_source_with_review_status_fails(tmp_path):
 # Every page type that renders review_status (NOT source/tag), with its other required fields + subdir.
 _RENDERING_PAGES = {
     "claim": ("Claims", {"type": "claim", "claim_id": "clm_x", "status": "active", "confidence": "low"}),
-    "concept": ("Concepts", {"type": "concept", "concept_id": "cpt_x", "title": "T",
-                             "status": "active", "confidence": "low"}),
-    "entity": ("Entities", {"type": "entity", "entity_id": "ent_x", "title": "T",
-                            "status": "active", "confidence": "low"}),
-    "person": ("People", {"type": "person", "person_id": "per_x", "title": "T",
-                          "status": "active", "confidence": "low"}),
-    "organization": ("Organizations", {"type": "organization", "organization_id": "org_x", "title": "T",
-                                        "status": "active", "confidence": "low"}),
-    "project": ("Projects", {"type": "project", "project_id": "prj_x", "title": "T",
-                             "status": "active", "confidence": "low"}),
+    "item": ("Items", {"type": "item", "item_id": "itm_x", "item_type": "method_technique",
+                       "title": "T", "status": "active", "confidence": "low"}),
     "synthesis": ("Synthesis", {"type": "synthesis", "synthesis_id": "syn_x", "title": "T",
                                 "status": "candidate"}),
     "query": ("Queries", {"type": "query", "query_id": "qry_x", "title": "T",
@@ -100,5 +100,5 @@ def test_rendering_type_requires_review_status(tmp_path, ptype):
 
 @pytest.mark.parametrize("value", ["none", "pending", "approved", "rejected"])
 def test_all_page_review_status_values_pass(tmp_path, value):
-    _write(tmp_path / "wiki", "Concepts", "c.md", _concept_fm(review_status=value))
+    _write(tmp_path / "wiki", "Items", "c.md", _item_fm(review_status=value))
     assert vf.main([str(tmp_path)]) == 0

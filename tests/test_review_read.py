@@ -209,14 +209,19 @@ def _graph_with(tmp_path):
     return gdb, graph.connect(gdb)
 
 
+ITM = "itm_" + "1" * 16
+
+
 def test_promote_pending_is_pending_apply(tmp_path):
     rv = tmp_path / "reviews"
     gdb, conn = _graph_with(tmp_path)
-    graph.upsert_node(conn, node_id="cpt_1", node_type="concept", slug="x", status="candidate")
+    graph.upsert_node(conn, node_id=ITM, node_type="item", slug="x", status="candidate",
+                      item_type="method_technique")
     conn.close()
     _write_item(rv, "pending", _item("rev_p", "promote_candidate_node",
-                                     subject={"node_id": "cpt_1"},
-                                     proposal={"to_status": "active", "node_type": "concept"}))
+                                     subject={"node_id": ITM},
+                                     proposal={"to_status": "active", "name": "X",
+                                               "item_type": "method_technique"}))
     prev = review_read.get_review(rv, "rev_p", graph_db=gdb, wiki_dir=tmp_path / "wiki")["preview"]
     assert prev["apply"]["effect_status"] == review_read.PENDING_APPLY
     assert prev["current_status"] == "candidate"
@@ -225,11 +230,13 @@ def test_promote_pending_is_pending_apply(tmp_path):
 def test_promote_approved_node_active_is_effected(tmp_path):
     rv = tmp_path / "reviews"
     gdb, conn = _graph_with(tmp_path)
-    graph.upsert_node(conn, node_id="cpt_1", node_type="concept", slug="x", status="active")
+    graph.upsert_node(conn, node_id=ITM, node_type="item", slug="x", status="active",
+                      item_type="method_technique")
     conn.close()
     _write_item(rv, "approved", _item("rev_p", "promote_candidate_node", status="approved",
-                                      subject={"node_id": "cpt_1"},
-                                      proposal={"to_status": "active", "node_type": "concept"}))
+                                      subject={"node_id": ITM},
+                                      proposal={"to_status": "active", "name": "X",
+                                                "item_type": "method_technique"}))
     prev = review_read.get_review(rv, "rev_p", graph_db=gdb, wiki_dir=tmp_path / "wiki")["preview"]
     assert prev["apply"]["effect_status"] == review_read.EFFECTED
     assert prev["apply"]["effected"] is True
@@ -397,15 +404,17 @@ def test_deprecate_in_scope_effected_when_page_and_graph_agree(tmp_path):
 def test_deprecate_in_scope_pending_apply_when_page_not_yet_marked(tmp_path):
     rv = tmp_path / "reviews"
     gdb, conn = _graph_with(tmp_path)
-    graph.upsert_node(conn, node_id="cpt_1", node_type="concept", slug="thing", status="active")
+    graph.upsert_node(conn, node_id=ITM, node_type="item", slug="thing", status="active",
+                      item_type="method_technique")
     conn.close()
-    page = tmp_path / "wiki" / "Concepts" / "thing.md"
+    page = tmp_path / "wiki" / "Items" / "thing.md"
     page.parent.mkdir(parents=True)
-    page.write_text("---\ntype: concept\nstatus: active\nreview_status: none\n---\n", encoding="utf-8")
+    page.write_text("---\ntype: item\nitem_type: method_technique\nstatus: active\n"
+                    "review_status: none\n---\n", encoding="utf-8")
     _write_item(rv, "approved", _item("rev_d", "deprecate_wiki_page", status="approved",
-                                      subject={"node_id": "cpt_1", "page": "Concepts/thing.md"},
+                                      subject={"node_id": ITM, "page": "Items/thing.md"},
                                       proposal={"to_status": "deprecated_candidate", "reason": "x"},
-                                      context={"node_type": "concept"}))
+                                      context={"node_type": "item"}))
     prev = review_read.get_review(rv, "rev_d", graph_db=gdb, wiki_dir=tmp_path / "wiki")["preview"]
     assert prev["apply"]["effect_status"] == review_read.PENDING_APPLY
 
@@ -539,3 +548,95 @@ def test_preview_paths_are_repository_relative(tmp_path):
     for p in prev["affected_paths"]:
         assert not Path(p).is_absolute()
         assert str(tmp_path) not in p
+
+
+# --- ADR-0059: executor registry / scope vocabulary --------------------------
+
+
+def test_executor_registry_uses_item_taxonomy_types():
+    # The identity-surgery + classification types are the ADR-0059 names; the typed-family
+    # vocabulary (merge_entities/merge_concepts/split_entity/change_entity_subtype) is gone.
+    assert review_read.EXECUTOR_BY_TYPE["merge_items"] == "apply_merges"
+    assert review_read.EXECUTOR_BY_TYPE["change_item_type"] == "apply_retypes"
+    assert review_read.EXECUTOR_BY_TYPE["split_item"] == "apply_splits"
+    for gone in ("merge_entities", "merge_concepts", "split_entity", "change_entity_subtype"):
+        assert gone not in review_read.EXECUTOR_BY_TYPE, gone
+    # Per-type projectors exist under the new names.
+    assert callable(review_read.preview_merge_items)
+    assert callable(review_read.preview_change_item_type)
+    assert callable(review_read.preview_split_item)
+
+
+def test_scope_dirs_are_items_family():
+    assert review_read.DEPRECATION_SCOPE_DIRS == frozenset({"Claims", "Items"})
+    assert review_read.HIDE_SEMANTIC_SCOPE_DIRS == frozenset({"Items"})
+    assert review_read._DUP_NODE_TYPES == frozenset({"item"})
+
+
+# --- ADR-0059: change_item_type effect projector ------------------------------
+
+
+def _retype_fixture(tmp_path, *, page_type: str | None, graph_type: str | None,
+                    status: str = "approved"):
+    """An item node + Items page + a change_item_type item targeting `model`."""
+    rv = tmp_path / "reviews"
+    gdb, conn = _graph_with(tmp_path)
+    graph.upsert_node(conn, node_id=ITM, node_type="item", slug="thing", status="candidate",
+                      item_type=graph_type or "method_technique")
+    conn.close()
+    if page_type is not None:
+        page = tmp_path / "wiki" / "Items" / "thing.md"
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text(f"---\ntype: item\nitem_type: {page_type}\nstatus: candidate\n"
+                        "review_status: none\n---\n", encoding="utf-8")
+    state = "pending" if status in ("pending", "deferred") else status
+    _write_item(rv, state, _item("rev_r", "change_item_type", status=status,
+                                 subject={"node_id": ITM, "to_item_type": "model"},
+                                 proposal={"to_item_type": "model"},
+                                 context={"source_id": "src_1", "name": "Thing",
+                                          "from_item_type": "method_technique"}))
+    return rv, gdb
+
+
+def test_retype_effected_requires_page_and_graph_mirror(tmp_path):
+    rv, gdb = _retype_fixture(tmp_path, page_type="model", graph_type="model")
+    prev = review_read.get_review(rv, "rev_r", graph_db=gdb, wiki_dir=tmp_path / "wiki")["preview"]
+    assert prev["apply"]["executor"] == "apply_retypes"
+    assert prev["apply"]["effect_status"] == review_read.EFFECTED
+    assert prev["proposed_status"] is None            # a retype never changes lifecycle status
+    assert prev["affected_paths"] == ["Items/thing.md"]
+    assert prev["details"]["from_item_type"] == "method_technique"
+
+
+@pytest.mark.parametrize("page_type,graph_type", [("model", "method_technique"),
+                                                  ("method_technique", "model")])
+def test_retype_partial_xor_is_unknown(tmp_path, page_type, graph_type):
+    rv, gdb = _retype_fixture(tmp_path, page_type=page_type, graph_type=graph_type)
+    prev = review_read.get_review(rv, "rev_r", graph_db=gdb, wiki_dir=tmp_path / "wiki")["preview"]
+    assert prev["apply"]["effect_status"] == review_read.UNKNOWN
+    assert "partial_retype_state" in prev["apply"]["warnings"]
+
+
+def test_retype_not_yet_applied_is_pending_apply(tmp_path):
+    rv, gdb = _retype_fixture(tmp_path, page_type="method_technique",
+                              graph_type="method_technique")
+    prev = review_read.get_review(rv, "rev_r", graph_db=gdb, wiki_dir=tmp_path / "wiki")["preview"]
+    assert prev["apply"]["effect_status"] == review_read.PENDING_APPLY
+
+
+def test_retype_rejected_is_no_effect_required(tmp_path):
+    rv, gdb = _retype_fixture(tmp_path, page_type="method_technique",
+                              graph_type="method_technique", status="rejected")
+    prev = review_read.get_review(rv, "rev_r", graph_db=gdb, wiki_dir=tmp_path / "wiki")["preview"]
+    assert prev["apply"]["effect_status"] == review_read.NO_EFFECT_REQUIRED
+
+
+def test_retype_sentinel_target_is_invalid_subject(tmp_path):
+    # The sentinel is never a valid retype target (a retype clears uncertainty).
+    rv = tmp_path / "reviews"
+    _write_item(rv, "approved", _item("rev_r", "change_item_type", status="approved",
+                                      subject={"node_id": ITM,
+                                               "to_item_type": "unclassified_review_required"},
+                                      proposal={"to_item_type": "unclassified_review_required"}))
+    prev = review_read.get_review(rv, "rev_r", wiki_dir=tmp_path / "wiki")["preview"]
+    assert prev["apply"]["effect_status"] == review_read.INVALID_SUBJECT

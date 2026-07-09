@@ -33,8 +33,8 @@ EVALS_FILE = ROOT / "evals" / "golden_retrieval.yaml"
 # Fixture ids (kept stable so the YAML cases can reference them).
 SRC_A = "src_aaaaaaaaaaaaaaaa"          # active source
 SRC_ARCH = "src_bbbbbbbbbbbbbbbb"       # archived source (retention)
-CPT_ACT = "cpt_activexxxxxxxxx"         # active concept  -> answer_eligible true
-CPT_DEP = "cpt_deprecatedxxxx"          # deprecated_candidate concept -> searchable but eligible false
+ITM_ACT = "itm_activexxxxxxxxx"         # active item  -> answer_eligible true
+ITM_DEP = "itm_deprecatedxxxx"          # deprecated_candidate item -> searchable but eligible false
 CLM_1 = "clm_1111111111111111"
 CLM_2 = "clm_2222222222222222"
 CHUNK0 = "Synergy capture drives post-merger value."
@@ -83,12 +83,14 @@ def _build_vault(root: Path):
     _write_page(root, f"wiki/Sources/{SRC_ARCH}.md",
                 {"type": "source", "source_id": SRC_ARCH, "title": "Archived deck", "status": "archived",
                  "language": "en"}, "old synergy notes")
-    _write_page(root, f"wiki/Concepts/{CPT_ACT}.md",
-                {"type": "concept", "concept_id": CPT_ACT, "title": "Synergy capture", "status": "active",
+    _write_page(root, f"wiki/Items/{ITM_ACT}.md",
+                {"type": "item", "item_id": ITM_ACT, "item_type": "method_technique",
+                 "title": "Synergy capture", "status": "active",
                  "review_status": "none"}, "How synergy is captured after a merger.")
-    _write_page(root, f"wiki/Concepts/{CPT_DEP}.md",
-                {"type": "concept", "concept_id": CPT_DEP, "title": "Synergy deprecated",
-                 "status": "deprecated_candidate", "review_status": "rejected"}, "A deprecated synergy concept.")
+    _write_page(root, f"wiki/Items/{ITM_DEP}.md",
+                {"type": "item", "item_id": ITM_DEP, "item_type": "method_technique",
+                 "title": "Synergy deprecated",
+                 "status": "deprecated_candidate", "review_status": "rejected"}, "A deprecated synergy item.")
 
     keyword_index.reindex(root, force=True)
     kconn = keyword_index.connect(root / keyword_index.DB_RELPATH)
@@ -97,12 +99,14 @@ def _build_vault(root: Path):
     graph.init_db(gdb)
     gconn = graph.connect(gdb)
     graph.reindex_nodes(gconn, source_ids=[SRC_A, SRC_ARCH], page_nodes=[
-        {"node_id": CPT_ACT, "node_type": "concept", "slug": "syn", "status": "active"},
-        {"node_id": CPT_DEP, "node_type": "concept", "slug": "dep", "status": "deprecated_candidate"},
+        {"node_id": ITM_ACT, "node_type": "item", "item_type": "method_technique",
+         "slug": "syn", "status": "active"},
+        {"node_id": ITM_DEP, "node_type": "item", "item_type": "method_technique",
+         "slug": "dep", "status": "deprecated_candidate"},
         {"node_id": CLM_1, "node_type": "claim", "slug": None, "status": "active"},
         {"node_id": CLM_2, "node_type": "claim", "slug": None, "status": "active"},
     ], now="t0")
-    graph.upsert_assertion(gconn, src_id=SRC_A, dst_id=CPT_ACT, edge_type="mentions",
+    graph.upsert_assertion(gconn, src_id=SRC_A, dst_id=ITM_ACT, edge_type="mentions",
                            asserted_by="llm", status="active")
     graph.upsert_assertion(gconn, src_id=CLM_1, dst_id=CLM_2, edge_type="contradicts",
                            asserted_by="llm", status="active")

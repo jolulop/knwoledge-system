@@ -20,7 +20,7 @@ cases:
       top_channels:
         - keyword
 
-  # 2. Status-aware navigation: active concept is answer_eligible, deprecated_candidate is not
+  # 2. Status-aware navigation: active item is answer_eligible, deprecated_candidate is not
   # (deprecated_candidate is searchable by default; strict `candidate` would need node_status=).
   -
     id: status_aware_navigation
@@ -29,8 +29,8 @@ cases:
     query: synergy
     expect:
       nav_eligible:
-        wiki/Concepts/cpt_activexxxxxxxxx.md: true
-        wiki/Concepts/cpt_deprecatedxxxx.md: false
+        wiki/Items/itm_activexxxxxxxxx.md: true
+        wiki/Items/itm_deprecatedxxxx.md: false
 
   # 3. Graph bounds: the /search graph group is depth/cap-bounded and not truncated for this fixture.
   -
@@ -40,7 +40,7 @@ cases:
     query: synergy
     expect:
       graph_node_ids_include:
-        - cpt_activexxxxxxxxx
+        - itm_activexxxxxxxxx
       graph_max_distance: 2
       graph_truncated: false
 

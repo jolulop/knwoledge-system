@@ -14,7 +14,7 @@ Finding classes:
 - **Structural (report-only):** the `validate_*` suite (frontmatter, wikilinks, citations, summary
   callouts, …) — defects fixed by regeneration, not governance.
 - **Governance (→ review items):** a catalogued **raw file gone missing** → `missing_raw_source`
-  (record-only, high severity); an **under-supported active concept** (<2 distinct mentioning sources)
+  (record-only, high severity); an **under-supported active item** (<2 distinct mentioning sources)
   → `deprecate_wiki_page` proposal. An **uncited active claim** is reported (a backstop; the claim worker
   already tombstones evidence-less claims).
 
@@ -30,15 +30,15 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from app.backend import db, graph, search
+from app.backend import db, graph, search, taxonomy
 from app.backend.manifests import get_provenance, is_source_id, iso_now, valid_manifests
 from app.backend.paths import safe_child, safe_under
 from app.workers import citations, enrichment_artifact, reviews, synthesis
 from app.workers.enrichment_artifact import artifact_fingerprint
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter
 
-# Concept/entity family — the promotable node types a source "mentions" (ADR-0017/0018).
-_CONCEPT_FAMILY = ("concept", "entity", "person", "organization", "project")
+# Knowledge-item family — the promotable node type a source "mentions" (ADR-0059).
+_ITEM_FAMILY = ("item",)
 
 
 def run_validators(root: Path) -> list[dict[str, Any]]:
@@ -158,20 +158,20 @@ def _check_missing_raw(manifests_dir: Path, root: Path, reviews_dir: Path, *, fi
 
 def _check_graph(gconn, wiki_dir: Path, reviews_dir: Path, *, file_items: bool, now: str,
                  filed: list[str], existing: list[str]) -> list[dict[str, Any]]:
-    """Under-supported active concepts (→ deprecate proposal) + uncited active claims (report-only)."""
+    """Under-supported active items (→ deprecate proposal) + uncited active claims (report-only)."""
     findings: list[dict[str, Any]] = []
-    for node_type in _CONCEPT_FAMILY:
+    for node_type in _ITEM_FAMILY:
         for node in graph.nodes_of_type(gconn, node_type):
             if node["status"] != "active":
                 continue
             # Live support follows default retrieval visibility: archived/deleted sources still exist
-            # as evidence, but they no longer keep a concept active by themselves.
+            # as evidence, but they no longer keep an item active by themselves.
             n = graph.count_independent_sources(
                 gconn, node["node_id"], source_statuses=search.RETENTION_DEFAULT_STATUSES)
             if n >= 2:
                 continue
             findings.append({
-                "check": "under_supported_concept", "severity": "high" if n == 0 else "medium",
+                "check": "under_supported_item", "severity": "high" if n == 0 else "medium",
                 "subject": node["node_id"], "detail": f"active {node_type} with {n} mentioning source(s)"})
             if file_items:
                 _file_review(
@@ -202,7 +202,7 @@ def _check_summary_rot(enrichment_dir: Path, markdown_dir: Path, wiki_dir: Path,
     degraded = False
     if enrichment_dir.exists() and summary_model_ref:
         for apath in sorted(enrichment_dir.glob("*.json")):
-            # Positive-only allowlist (ADR-0037): exactly `src_<16 hex>.json`. `.claims`/`.concepts`/
+            # Positive-only allowlist (ADR-0037): exactly `src_<16 hex>.json`. `.claims`/`.items`/
             # `.synthesis` artifacts have non-canonical stems and are rejected here — no blocklist.
             sid = apath.stem
             if not is_source_id(sid):
@@ -255,22 +255,22 @@ def _check_summary_rot(enrichment_dir: Path, markdown_dir: Path, wiki_dir: Path,
     return findings, degraded
 
 
-def _check_concept_starvation(enrichment_dir: Path) -> list[dict[str, Any]]:
-    """Substantive sources whose concepts artifact extracted zero concepts (ADR-0055). Report-only.
+def _check_topic_starvation(enrichment_dir: Path) -> list[dict[str, Any]]:
+    """Substantive sources whose items artifact extracted no thematic topic layer (ADR-0059). Report-only.
 
-    The F1 pattern: `concepts == 0 AND (entity_family >= threshold OR claims >= 1)` per source,
-    read from the durable `<sid>.concepts.json` / `<sid>.claims.json` artifacts via the shared
-    `enrichment_artifact.concept_starved` predicate. Artifact/claim state ONLY — never raw text
+    The starvation pattern: `thematic == 0 AND (named >= threshold OR claims >= 1)` per source,
+    read from the durable `<sid>.items.json` / `<sid>.claims.json` artifacts via the shared
+    `enrichment_artifact.topic_starved` predicate. Artifact/claim state ONLY — never raw text
     length or normalized text shape (that would reopen the "substantive document" classifier
     problem). Graph-independent and key-free; severity medium (it suppresses the source's entire
-    topic layer); remediation `rerun_extract_concepts`. Unreadable/spoofed artifacts are skipped
+    topic layer); remediation `rerun_extract_items`. Unreadable/spoofed artifacts are skipped
     (validators own artifact integrity); a missing claims artifact counts as zero claims.
     """
     findings: list[dict[str, Any]] = []
     if not enrichment_dir.exists():
         return findings
-    for apath in sorted(enrichment_dir.glob("*.concepts.json")):
-        sid = apath.name[:-len(".concepts.json")]
+    for apath in sorted(enrichment_dir.glob("*.items.json")):
+        sid = apath.name[:-len(".items.json")]
         if not is_source_id(sid):  # positive-only allowlist, as in _check_summary_rot
             continue
         try:
@@ -283,14 +283,13 @@ def _check_concept_starvation(enrichment_dir: Path) -> list[dict[str, Any]]:
         if not isinstance(nodes, list):
             continue
         claim_count = enrichment_artifact.stored_claim_count(enrichment_dir, sid)
-        if enrichment_artifact.concept_starved(nodes, claim_count):
-            entity_family = sum(1 for n in nodes
-                                if n.get("node_type") in enrichment_artifact._ENTITY_FAMILY_TYPES)
+        if enrichment_artifact.topic_starved(nodes, claim_count):
+            named = sum(1 for n in nodes if n.get("item_type") in taxonomy.NAMED_TYPES)
             findings.append({
-                "check": "concept_starvation", "severity": "medium", "subject": sid,
-                "detail": "substantive source extracted zero concepts (entities/claims present)",
-                "data": {"source_id": sid, "concept_count": 0, "entity_family_count": entity_family,
-                         "claim_count": claim_count, "remediation": "rerun_extract_concepts"}})
+                "check": "topic_starvation", "severity": "medium", "subject": sid,
+                "detail": "substantive source extracted no thematic topic layer (named items/claims present)",
+                "data": {"source_id": sid, "thematic_item_count": 0, "named_item_count": named,
+                         "claim_count": claim_count, "remediation": "rerun_extract_items"}})
     return findings
 
 
@@ -486,8 +485,8 @@ def run_lint(
             enrichment_dir, markdown_dir, wiki_dir, summary_model_ref)
         findings += rot_findings
 
-        # concept_starvation is artifact-driven and graph-independent — runs always (ADR-0055).
-        findings += _check_concept_starvation(enrichment_dir)
+        # topic_starvation is artifact-driven and graph-independent — runs always (ADR-0059).
+        findings += _check_topic_starvation(enrichment_dir)
 
         gconn = _open_graph_ro(graph_db)
         graph_available = gconn is not None

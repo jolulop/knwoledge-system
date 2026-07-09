@@ -40,7 +40,7 @@ def _write_review(tmp_path, state, item):
 def _pending_promote(tmp_path, rid="rev_a"):
     _write_review(tmp_path, "pending", {
         "review_id": rid, "type": "promote_candidate_node", "status": "pending", "priority": "low",
-        "subject": {"node_id": "cpt_1"}, "proposal": {"to_status": "active", "node_type": "concept"},
+        "subject": {"node_id": "itm_1"}, "proposal": {"to_status": "active", "item_type": "method_technique"},
         "context": {}})
 
 
@@ -136,18 +136,18 @@ def _approved_concept_deprecation(tmp_path):
     gdb.parent.mkdir(parents=True, exist_ok=True)
     graph.init_db(gdb)
     conn = graph.connect(gdb)
-    graph.upsert_node(conn, node_id="cpt_x", node_type="concept", slug="thing", status="active")
+    graph.upsert_node(conn, node_id="itm_x", node_type="item", item_type="method_technique", slug="thing", status="active")
     conn.commit()
     conn.close()
-    page = tmp_path / "wiki" / "Concepts" / "thing.md"
+    page = tmp_path / "wiki" / "Items" / "thing.md"
     page.parent.mkdir(parents=True, exist_ok=True)
-    page.write_text('---\ntype: concept\nconcept_id: "cpt_x"\ntitle: "Thing"\nstatus: active\n'
+    page.write_text('---\ntype: item\nitem_id: "itm_x"\nitem_type: method_technique\ntitle: "Thing"\nstatus: active\n'
                     "review_status: none\naliases: []\n---\n", encoding="utf-8")
     _write_review(tmp_path, "approved", {
         "review_id": "rev_d", "type": "deprecate_wiki_page", "status": "approved",
-        "subject": {"node_id": "cpt_x", "page": "Concepts/thing.md"},
+        "subject": {"node_id": "itm_x", "page": "Items/thing.md"},
         "proposal": {"to_status": "deprecated_candidate", "reason": "x"},
-        "context": {"node_type": "concept"}})
+        "context": {"node_type": "item"}})
 
 
 def test_apply_confirm_shows_dry_run_preview(client, tmp_path):
@@ -168,13 +168,15 @@ def test_apply_post_renders_summary(client, tmp_path):
     resp = client.post("/ui/reviews/apply")
     assert resp.status_code == 200
     assert "Apply result" in resp.text and "deprecations" in resp.text
+    # ADR-0059 review round: the summary shows the RETYPED counts (the old rekeyed key is gone).
+    assert "retyped" in resp.text and "rekeyed" not in resp.text
 
 
 def test_apply_graph_missing_is_html_503(client, tmp_path):
     _write_review(tmp_path, "approved", {
         "review_id": "rev_d", "type": "deprecate_wiki_page", "status": "approved",
-        "subject": {"node_id": "cpt_x", "page": "Concepts/thing.md"},
-        "proposal": {"to_status": "deprecated_candidate"}, "context": {"node_type": "concept"}})
+        "subject": {"node_id": "itm_x", "page": "Items/thing.md"},
+        "proposal": {"to_status": "deprecated_candidate"}, "context": {"node_type": "item"}})
     resp = client.post("/ui/reviews/apply")
     assert resp.status_code == 503
     assert "Error 503" in resp.text
@@ -214,7 +216,7 @@ def test_detail_renders_full_synthesis_proposal_payload(client, tmp_path):
         "subject": {"topic_node_id": "cpt_topic"},
         "proposal": {"to_status": "active", "synthesis_id": "syn_1", "title": "Big Finding",
                      "claim_ids": ["clm_1", "clm_2"], "summary": "It all connects."},
-        "context": {"node_type": "concept"}})
+        "context": {"node_type": "item"}})
     body = client.get("/ui/reviews/rev_s").text
     # the curated projection keeps only topic_node_id; the Stored Proposal section shows the rest
     assert "Stored proposal" in body
@@ -241,7 +243,7 @@ def test_detail_renders_contradiction_sides_and_winner(client, tmp_path):
 def test_terminal_item_hides_decision_forms(client, tmp_path):
     _write_review(tmp_path, "approved", {
         "review_id": "rev_t", "type": "promote_candidate_node", "status": "approved",
-        "subject": {"node_id": "cpt_1"}, "proposal": {}, "context": {}, "decided_by": "human"})
+        "subject": {"node_id": "itm_1"}, "proposal": {}, "context": {}, "decided_by": "human"})
     body = client.get("/ui/reviews/rev_t").text
     assert "Decision (recorded)" in body
     assert "/ui/reviews/rev_t/decide" not in body          # no approve/reject/defer form

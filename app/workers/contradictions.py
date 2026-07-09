@@ -4,7 +4,7 @@
 Tier-3 LLM pass that finds where *independent* sources disagree. It never compares all claim
 pairs (O(N²) heavy-model calls); a deterministic **graph-neighborhood blocking** step bounds
 the work first: two `active` claims are a candidate pair iff their sources co-mention a
-concept/entity (`claim → source → concept` via `active` edges) **and** at least one of those
+knowledge item (`claim → source → item` via `active` edges) **and** at least one of those
 source pairs is mutually independent (ADR-0018 — a source cannot contradict itself, and
 same-author/same-family is not real disagreement). `candidate_pairs` is the deterministic,
 LLM-free core and is unit-tested offline.
@@ -91,7 +91,7 @@ def candidate_pairs(gconn, prov: dict[str, dict[str, Any]]) -> list[dict[str, An
 
     Deterministic and LLM-free. Two `active` claims A,B (ids sorted, A < B) qualify iff there
     exist sources sA derived-from A and sB derived-from B with sA ≠ sB, sA/sB mutually
-    independent (ADR-0018), and sA, sB co-mentioning ≥1 concept/entity. `shared_nodes` is the
+    independent (ADR-0018), and sA, sB co-mentioning ≥1 knowledge item. `shared_nodes` is the
     union of those co-mentioned node ids (the blocking topics). Returns dicts
     `{claim_a, claim_b, shared_nodes}` ordered deterministically.
     """
@@ -99,7 +99,7 @@ def candidate_pairs(gconn, prov: dict[str, dict[str, Any]]) -> list[dict[str, An
     claim_sources = {c: graph.sources_for_claim(gconn, c) for c in claims}
     # Concept neighborhood + provenance per source, computed once.
     source_ids = {s for srcs in claim_sources.values() for s in srcs}
-    src_concepts = {s: graph.concept_ids_for_source(gconn, s) for s in source_ids}
+    src_items = {s: graph.item_ids_for_source(gconn, s) for s in source_ids}
 
     pairs: list[dict[str, Any]] = []
     for i in range(len(claims)):
@@ -112,7 +112,7 @@ def candidate_pairs(gconn, prov: dict[str, dict[str, Any]]) -> list[dict[str, An
                         continue  # a source cannot contradict itself
                     if not independent_sources(prov.get(sa, {}), prov.get(sb, {})):
                         continue
-                    shared |= src_concepts[sa] & src_concepts[sb]
+                    shared |= src_items[sa] & src_items[sb]
             if shared:
                 pairs.append({"claim_a": a, "claim_b": b, "shared_nodes": sorted(shared)})
     return pairs

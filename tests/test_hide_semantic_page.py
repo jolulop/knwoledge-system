@@ -1,6 +1,6 @@
 """ADR-0046 semantic-page hiding: hide_semantic_page governance executor.
 
-Extends ADR-0043 source hiding to the concept/entity family via the deprecation render seam
+Extends ADR-0043 source hiding to the knowledge-item family via the deprecation render seam
 (recompose_semantic_node_page at status='hidden' + review_status='approved'), graph-required, active-only.
 Tests the executor, the status vocab, the projector (effect_status), the API apply + summary + stricter
 reindex posture, and that hidden semantic pages drop from /query, /search nav + graph channel while raw
@@ -25,11 +25,12 @@ from app.backend import main as main_module
 from app.backend import review_read
 from app.backend.config import get_settings
 from app.workers import deprecations
-from app.workers.wiki_render import parse_frontmatter, render_concept_page
+from app.workers.wiki_render import parse_frontmatter, render_item_page
 
-NID = "cpt_aaaaaaaaaaaaaaaa"
+NID = "itm_aaaaaaaaaaaaaaaa"
+ITEM_TYPE = "method_technique"
 SLUG = "thing"
-PAGE = f"Concepts/{SLUG}.md"
+PAGE = f"Items/{SLUG}.md"
 
 
 # --- fixtures ---------------------------------------------------------------
@@ -42,18 +43,19 @@ def _graph(tmp_path):
     return graph.connect(gdb)
 
 
-def _write_concept(tmp_path, conn, *, node_status="active", review_status="approved"):
-    page = tmp_path / "wiki" / "Concepts" / f"{SLUG}.md"
+def _write_item(tmp_path, conn, *, node_status="active", review_status="approved"):
+    page = tmp_path / "wiki" / "Items" / f"{SLUG}.md"
     page.parent.mkdir(parents=True, exist_ok=True)
-    page.write_text(render_concept_page({
-        "node_type": "concept", "node_id": NID, "id_field": "concept_id", "title": "Thing",
+    page.write_text(render_item_page({
+        "node_id": NID, "item_type": ITEM_TYPE, "title": "Thing",
         "aliases": ["TH"], "confidence": "low", "source_ids": [], "status": node_status,
     }, review_status=review_status), encoding="utf-8")
-    graph.upsert_node(conn, node_id=NID, node_type="concept", slug=SLUG, status=node_status)
+    graph.upsert_node(conn, node_id=NID, node_type="item", slug=SLUG, status=node_status,
+                      item_type=ITEM_TYPE)
     return page
 
 
-def _approve_hide(tmp_path, *, node_id=NID, page=PAGE, node_type="concept", rid="rev_h",
+def _approve_hide(tmp_path, *, node_id=NID, page=PAGE, node_type="item", rid="rev_h",
                   to_status="hidden"):
     item = {"review_id": rid, "type": "hide_semantic_page", "status": "approved",
             "subject": {"node_id": node_id, "page": page},
@@ -69,16 +71,16 @@ def _apply(tmp_path, conn):
 
 
 def _page_status(tmp_path):
-    fm = parse_frontmatter((tmp_path / "wiki" / "Concepts" / f"{SLUG}.md").read_text())
+    fm = parse_frontmatter((tmp_path / "wiki" / "Items" / f"{SLUG}.md").read_text())
     return fm.get("status"), fm.get("review_status")
 
 
 # --- executor ---------------------------------------------------------------
 
 
-def test_apply_hides_active_concept_page_and_graph_node(tmp_path):
+def test_apply_hides_active_item_page_and_graph_node(tmp_path):
     conn = _graph(tmp_path)
-    _write_concept(tmp_path, conn)
+    _write_item(tmp_path, conn)
     _approve_hide(tmp_path)
     res = _apply(tmp_path, conn)
     conn.commit()
@@ -90,7 +92,7 @@ def test_apply_hides_active_concept_page_and_graph_node(tmp_path):
 
 def test_apply_idempotent_noop_when_already_hidden(tmp_path):
     conn = _graph(tmp_path)
-    _write_concept(tmp_path, conn, node_status="hidden", review_status="approved")
+    _write_item(tmp_path, conn, node_status="hidden", review_status="approved")
     _approve_hide(tmp_path)
     res = _apply(tmp_path, conn)
     assert res["applied"] == 0 and res["normalized"] == 0 and res["changed_pages"] == []
@@ -100,7 +102,7 @@ def test_apply_idempotent_noop_when_already_hidden(tmp_path):
 def test_apply_normalizes_when_page_and_graph_hidden_but_review_pending(tmp_path):
     # page+graph hidden, but review_status not approved -> a normalization apply (review_status fixed).
     conn = _graph(tmp_path)
-    _write_concept(tmp_path, conn, node_status="hidden", review_status="pending")
+    _write_item(tmp_path, conn, node_status="hidden", review_status="pending")
     _approve_hide(tmp_path)
     res = _apply(tmp_path, conn)
     conn.commit()
@@ -111,7 +113,7 @@ def test_apply_normalizes_when_page_and_graph_hidden_but_review_pending(tmp_path
 
 def test_active_only_non_active_node_skips_node_not_active(tmp_path):
     conn = _graph(tmp_path)
-    _write_concept(tmp_path, conn, node_status="deprecated_candidate", review_status="approved")
+    _write_item(tmp_path, conn, node_status="deprecated_candidate", review_status="approved")
     _approve_hide(tmp_path)
     res = _apply(tmp_path, conn)
     assert res["applied"] == 0 and res["skipped"] == [{"review_id": "rev_h", "reason": "node_not_active"}]
@@ -123,8 +125,8 @@ def test_partial_graph_hidden_page_active_skips_no_mutation(tmp_path):
     # Drift: graph node hidden but page still active -> node_not_active skip; the page is NEVER mutated
     # (active-only: a real apply requires the graph node to be active).
     conn = _graph(tmp_path)
-    _write_concept(tmp_path, conn, node_status="active", review_status="approved")  # page active
-    graph.upsert_node(conn, node_id=NID, node_type="concept", slug=SLUG, status="hidden")  # graph hidden
+    _write_item(tmp_path, conn, node_status="active", review_status="approved")  # page active
+    graph.upsert_node(conn, node_id=NID, node_type="item", slug=SLUG, status="hidden")  # graph hidden
     conn.commit()
     _approve_hide(tmp_path)
     res = _apply(tmp_path, conn)
@@ -138,8 +140,8 @@ def test_partial_page_hidden_graph_active_completes_the_hide(tmp_path):
     # Drift: page hidden but graph still active -> apply completes the transition (graph is active, so the
     # approved hide safely finishes; graph node -> hidden).
     conn = _graph(tmp_path)
-    _write_concept(tmp_path, conn, node_status="hidden", review_status="approved")  # page hidden
-    graph.upsert_node(conn, node_id=NID, node_type="concept", slug=SLUG, status="active")  # graph active
+    _write_item(tmp_path, conn, node_status="hidden", review_status="approved")  # page hidden
+    graph.upsert_node(conn, node_id=NID, node_type="item", slug=SLUG, status="active")  # graph active
     conn.commit()
     _approve_hide(tmp_path)
     res = _apply(tmp_path, conn)
@@ -159,12 +161,12 @@ def test_node_missing_skips(tmp_path):
 
 def test_unexpected_to_status_and_page_node_mismatch_skip(tmp_path):
     conn = _graph(tmp_path)
-    _write_concept(tmp_path, conn)
+    _write_item(tmp_path, conn)
     _approve_hide(tmp_path, to_status="deprecated_candidate")   # wrong to_status
     assert _apply(tmp_path, conn)["skipped"] == [
         {"review_id": "rev_h", "reason": "unexpected_to_status"}]
     # page != node's canonical page
-    _approve_hide(tmp_path, page="Concepts/wrong.md", rid="rev_h")
+    _approve_hide(tmp_path, page="Items/wrong.md", rid="rev_h")
     assert _apply(tmp_path, conn)["skipped"] == [
         {"review_id": "rev_h", "reason": "page_node_mismatch"}]
     conn.close()
@@ -182,8 +184,8 @@ def test_out_of_scope_claim_page_skips(tmp_path):
 
 def test_traversal_page_is_invalid_path(tmp_path):
     conn = _graph(tmp_path)
-    _write_concept(tmp_path, conn)
-    _approve_hide(tmp_path, page="Concepts/../../raw/x.md")
+    _write_item(tmp_path, conn)
+    _approve_hide(tmp_path, page="Items/../../raw/x.md")
     assert _apply(tmp_path, conn)["skipped"] == [{"review_id": "rev_h", "reason": "invalid_page_path"}]
     conn.close()
 
@@ -201,18 +203,18 @@ def test_hide_semantic_page_in_review_vocab():
 
 def _effect(tmp_path, conn, item_status="approved"):
     item = {"type": "hide_semantic_page", "status": item_status,
-            "subject": {"node_id": NID, "page": PAGE}, "context": {"node_type": "concept"}}
+            "subject": {"node_id": NID, "page": PAGE}, "context": {"node_type": "item"}}
     return review_read._effect_hide_semantic(item, conn, tmp_path / "wiki")
 
 
 def test_projector_effected_requires_page_review_status_and_graph(tmp_path):
     conn = _graph(tmp_path)
     # page hidden + approved + graph hidden -> EFFECTED
-    _write_concept(tmp_path, conn, node_status="hidden", review_status="approved")
+    _write_item(tmp_path, conn, node_status="hidden", review_status="approved")
     assert _effect(tmp_path, conn)[0] == review_read.EFFECTED
     # both hidden but review_status pending -> a PARTIAL live hide -> UNKNOWN (NOT reopen-safe), not
     # plain PENDING_APPLY (ADR-0045 reopen safety).
-    _write_concept(tmp_path, conn, node_status="hidden", review_status="pending")
+    _write_item(tmp_path, conn, node_status="hidden", review_status="pending")
     status, warnings = _effect(tmp_path, conn)
     assert status == review_read.UNKNOWN and warnings == ["partial_hide_state"]
     conn.close()
@@ -220,11 +222,11 @@ def test_projector_effected_requires_page_review_status_and_graph(tmp_path):
 
 def test_projector_pending_apply_and_node_not_active_warning(tmp_path):
     conn = _graph(tmp_path)
-    _write_concept(tmp_path, conn, node_status="active", review_status="approved")
+    _write_item(tmp_path, conn, node_status="active", review_status="approved")
     status, warnings = _effect(tmp_path, conn)
     assert status == review_read.PENDING_APPLY and warnings == []      # active, not yet hidden
     # a non-active node -> node_not_active warning so preview doesn't overpromise
-    _write_concept(tmp_path, conn, node_status="deprecated_candidate", review_status="approved")
+    _write_item(tmp_path, conn, node_status="deprecated_candidate", review_status="approved")
     assert _effect(tmp_path, conn)[1] == ["node_not_active"]
     conn.close()
 
@@ -234,8 +236,8 @@ def test_projector_partial_live_hide_is_unknown_not_reopenable(tmp_path, page_st
     # A partial live hide (page XOR graph hidden) -> UNKNOWN partial_hide_state (not PENDING_APPLY), so
     # the ADR-0045 reopen gate blocks it (a hide effect is already live).
     conn = _graph(tmp_path)
-    _write_concept(tmp_path, conn, node_status=page_status, review_status="approved")
-    graph.upsert_node(conn, node_id=NID, node_type="concept", slug=SLUG, status=graph_status)
+    _write_item(tmp_path, conn, node_status=page_status, review_status="approved")
+    graph.upsert_node(conn, node_id=NID, node_type="item", slug=SLUG, status=graph_status)
     conn.commit()
     status, warnings = _effect(tmp_path, conn)
     assert status == review_read.UNKNOWN and warnings == ["partial_hide_state"]
@@ -245,13 +247,13 @@ def test_projector_partial_live_hide_is_unknown_not_reopenable(tmp_path, page_st
 
 def test_projector_rejected_is_no_effect_required(tmp_path):
     conn = _graph(tmp_path)
-    _write_concept(tmp_path, conn)
+    _write_item(tmp_path, conn)
     assert _effect(tmp_path, conn, item_status="rejected")[0] == review_read.NO_EFFECT_REQUIRED
     conn.close()
 
 
 def test_projector_graph_unavailable_is_unknown(tmp_path):
-    _write_concept(tmp_path, _graph(tmp_path))
+    _write_item(tmp_path, _graph(tmp_path))
     assert _effect(tmp_path, None)[0] == review_read.UNKNOWN
 
 
@@ -266,9 +268,9 @@ def client(tmp_path, monkeypatch):
     return TestClient(main_module.app)
 
 
-def _live_concept(tmp_path):
+def _live_item(tmp_path):
     conn = _graph(tmp_path)
-    _write_concept(tmp_path, conn)
+    _write_item(tmp_path, conn)
     conn.commit()
     conn.close()
 
@@ -277,8 +279,8 @@ def _setup_state(tmp_path, *, page_status, page_review, graph_status, rid="rev_h
     # Write the page at page_status (+ page_review) and the graph node at graph_status (override), then
     # file an APPROVED hide_semantic_page item. Used to construct partial / clean hide states.
     conn = _graph(tmp_path)
-    _write_concept(tmp_path, conn, node_status=page_status, review_status=page_review)
-    graph.upsert_node(conn, node_id=NID, node_type="concept", slug=SLUG, status=graph_status)
+    _write_item(tmp_path, conn, node_status=page_status, review_status=page_review)
+    graph.upsert_node(conn, node_id=NID, node_type="item", slug=SLUG, status=graph_status)
     conn.commit()
     conn.close()
     _approve_hide(tmp_path, rid=rid)
@@ -308,7 +310,7 @@ def test_reopen_allowed_for_cleanly_unapplied_hide(client, tmp_path):
 
 def test_api_apply_hides_semantic_page_and_reports_summary(client, tmp_path, monkeypatch):
     monkeypatch.setattr(main_module.retention, "reindex_keyword", lambda root: None)
-    _live_concept(tmp_path)
+    _live_item(tmp_path)
     _approve_hide(tmp_path)
     body = client.post("/reviews/apply").json()
     assert body["status"] == "applied"
@@ -348,14 +350,14 @@ def test_api_apply_graph_required_503_when_graph_absent(client, tmp_path):
 
 
 def test_hidden_semantic_page_index_row_is_suppressed(client, tmp_path):
-    # After hide, the navigation index row for the concept reads status=hidden + answer_eligible=0 — the
+    # After hide, the navigation index row for the item reads status=hidden + answer_eligible=0 — the
     # data the default RETENTION_DEFAULT node-status filter uses to drop it from /search nav (the
     # end-to-end /search exclusion is asserted separately). (/query cites source chunks, not semantic
-    # pages, ADR-0034 — so concepts are not /query citations regardless of status.)
+    # pages, ADR-0034 — so items are not /query citations regardless of status.)
     import sqlite3
 
     from app.backend import keyword_index
-    _live_concept(tmp_path)
+    _live_item(tmp_path)
     keyword_index.reindex(tmp_path, force=True)
     idx = tmp_path / "indexes" / "keyword" / "keyword.sqlite"
 
@@ -377,10 +379,10 @@ def test_hidden_semantic_page_index_row_is_suppressed(client, tmp_path):
 
 
 def test_hidden_semantic_page_excluded_from_search_navigation_end_to_end(client, tmp_path):
-    # End-to-end /search: a hidden concept's navigation row is excluded by default; an explicit
+    # End-to-end /search: a hidden item's navigation row is excluded by default; an explicit
     # node_status=hidden surfaces it again (mirrors the source-hide round-trip).
     from app.backend import keyword_index
-    _live_concept(tmp_path)
+    _live_item(tmp_path)
     keyword_index.reindex(tmp_path, force=True)
     nav = lambda r: {n.get("node_id") for n in r.json()["navigation"]}  # noqa: E731
     q = {"q": "Thing", "mode": "navigation"}
@@ -393,13 +395,14 @@ def test_hidden_semantic_page_excluded_from_search_navigation_end_to_end(client,
 
 
 def test_hidden_semantic_node_excluded_from_search_graph_channel(client, tmp_path):
-    # End-to-end /search graph channel: after hide, the concept node is excluded as a graph adjacent by
+    # End-to-end /search graph channel: after hide, the item node is excluded as a graph adjacent by
     # default (search_subgraph node_status filter); explicit include surfaces it; raw inspection sees it.
     from app.backend import graph_read, search
     conn = _graph(tmp_path)
-    _write_concept(tmp_path, conn)
-    seed = "cpt_ssssssssssssssss"
-    graph.upsert_node(conn, node_id=seed, node_type="concept", slug="seed", status="active")
+    _write_item(tmp_path, conn)
+    seed = "itm_ssssssssssssssss"
+    graph.upsert_node(conn, node_id=seed, node_type="item", slug="seed", status="active",
+                      item_type=ITEM_TYPE)
     graph.upsert_assertion(conn, src_id=seed, dst_id=NID, edge_type="related_to",
                            asserted_by="deterministic", status="active")
     conn.commit()
@@ -422,7 +425,7 @@ def test_api_reindex_failure_makes_semantic_hide_non_clean(client, tmp_path, mon
     def boom(root):
         raise RuntimeError("reindex blew up")
     monkeypatch.setattr(main_module.retention, "reindex_keyword", boom)
-    _live_concept(tmp_path)
+    _live_item(tmp_path)
     _approve_hide(tmp_path)
     body = client.post("/reviews/apply").json()
     assert body["status"] == "validation_failed"

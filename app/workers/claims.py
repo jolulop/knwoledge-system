@@ -249,7 +249,7 @@ def recompose_claim(gconn, *, cid, claims_dir, reviews_dir, now, markdown_dir, t
             reviews.withdraw_review_item(reviews_dir, rid, reason="endpoint claim retracted", now=now)
             if contradiction_affected is not None:
                 contradiction_affected.add(other)
-        # Tombstone -> review-gated deprecation, same as concept/entity tombstones (B1).
+        # Tombstone -> review-gated deprecation, same as knowledge-item tombstones (B1).
         reviews.create_review_item(
             reviews_dir, review_type="deprecate_wiki_page",
             subject={"node_id": cid, "page": f"Claims/{cid}.md"},

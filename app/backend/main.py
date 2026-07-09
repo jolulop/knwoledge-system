@@ -23,7 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from app.backend import (
     apply_sandbox, db, embeddings, graph, graph_read, keyword_index, manifests, review_html,
-    review_read, search, vector_index,
+    review_read, search, taxonomy, vector_index,
 )
 from app.backend.config import get_settings
 from app.backend.paths import safe_under
@@ -63,7 +63,7 @@ from app.llm.cache import ResponseCache
 from app.llm.client import ConfigError, ParseError, build_client
 from app.workers import (
     claims, contradictions, deprecations, duplicates, eval_answers, extract, human_add, intake,
-    lint, merges, promote, query, rekeys, retention, reviews, splits, synthesis, wiki,
+    lint, merges, promote, query, retention, retypes, reviews, splits, synthesis, wiki,
 )
 from app.workers.wiki_render import parse_frontmatter, render_query_page
 
@@ -455,7 +455,7 @@ def _require_active_claims(item: dict[str, Any]) -> None:
                 detail=f"claim {cid} is no longer active or its page is missing — cannot supersede")
 
 
-_AMENDMENT_FIELDS = frozenset({"title", "aliases", "description"})
+_AMENDMENT_FIELDS = frozenset({"title", "aliases", "description", "item_type"})
 _AMEND_MAX_TITLE, _AMEND_MAX_ALIAS, _AMEND_MAX_ALIASES, _AMEND_MAX_DESCRIPTION = 200, 120, 16, 2000
 
 
@@ -464,10 +464,12 @@ def _validate_amendments(decision: str, rtype: str,
     """Normalize + validate the ADR-0058 amendments payload; 400 on any shape violation.
 
     Valid ONLY for a promote_candidate_node on approve (frozen into the ledger) or defer
-    (preserved as a mutable draft). Allowed fields exactly title/aliases/description; a blank
-    title is treated as not-provided (a title can be corrected, never erased); a blank
-    description explicitly clears the page field. Returns the normalized payload, or None when
-    nothing effective was provided.
+    (preserved as a mutable draft). Allowed fields exactly title/aliases/description/item_type
+    (ADR-0059: item_type must be one of the 15 production types — the sentinel is never an
+    amendment target — and it is REQUIRED before an unclassified candidate's approval can
+    apply); a blank title is treated as not-provided (a title can be corrected, never erased);
+    a blank description explicitly clears the page field. Returns the normalized payload, or
+    None when nothing effective was provided.
     """
     if rtype != "promote_candidate_node":
         raise HTTPException(
@@ -502,6 +504,13 @@ def _validate_amendments(decision: str, rtype: str,
         # Canonical single-line prose (review round): whitespace collapsed at the boundary; an
         # explicitly-blank description clears the page field.
         out["description"] = re.sub(r"\s+", " ", description).strip()[:_AMEND_MAX_DESCRIPTION]
+    item_type = amendments.get("item_type")
+    if item_type is not None:
+        if not taxonomy.is_production_item_type(item_type):
+            raise HTTPException(
+                status_code=400,
+                detail="amendment item_type must be one of the production taxonomy values")
+        out["item_type"] = item_type
     return out or None
 
 
@@ -623,8 +632,8 @@ _APPLY_TYPES = frozenset({
     "propose_synthesis", "resolve_contradiction", "promote_candidate_node", "deprecate_wiki_page",
     "archive_source", "mark_semantic_duplicate", "hide_content", "hide_semantic_page",
     "unhide_content", "unhide_semantic_page", "hide_claim", "unhide_claim",
-    "hide_synthesis", "unhide_synthesis", "merge_entities", "merge_concepts",
-    "change_entity_subtype", "split_entity"})
+    "hide_synthesis", "unhide_synthesis", "merge_items",
+    "change_item_type", "split_item"})
 # Types whose application *requires* the graph (so a missing graph with such approved items -> 503).
 # archive_source + hide_content + unhide_content are executor-backed but NOT graph-required — their core
 # effect is the manifest status + Source page; the graph source-node mirror is best-effort (skipped when
@@ -800,15 +809,15 @@ def run_apply(st: Any) -> dict[str, Any]:
                         syn_evidence_restored += 1
             dups = duplicates.apply_marked_duplicates(
                 gconn, reviews_dir, wiki_dir=wiki_dir, now=now)
-            # ADR-0050: identity-surgery merge (entity/concept), forward-only; re-points active edges +
+            # ADR-0050/0059: identity-surgery merge (knowledge items), forward-only; re-points active edges +
             # tombstones the absorbed id + unions aliases. GRAPH-REQUIRED. Source pages whose mentions were
             # re-pointed are re-rendered after the commit (affected_sources, like the claim fan-out).
             merged = merges.apply_merges(gconn, reviews_dir, wiki_dir=wiki_dir, now=now)
-            # ADR-0051: identity-surgery subtype rekey (single-node, entity family), forward-only; mints the
-            # new-subtype node + re-points the old node's active edges + tombstones the old id. GRAPH-REQUIRED.
-            # Source pages whose mentions were re-pointed re-render after the commit (affected_sources).
-            rekeyed = rekeys.apply_rekeys(gconn, reviews_dir, wiki_dir=wiki_dir, now=now)
-            # ADR-0052: identity-surgery entity split (inverse of merge), forward-only; mints the spin-off +
+            # ADR-0059: governed classification flip (NON-rekeying) — page item_type + graph mirror; no
+            # id change, no page move, no edge re-point. GRAPH-REQUIRED. Mentioning Source pages re-render
+            # after the commit (affected_sources — their Items sections group by item_type).
+            rekeyed = retypes.apply_retypes(gconn, reviews_dir, wiki_dir=wiki_dir, now=now)
+            # ADR-0052/0059: identity-surgery item split (inverse of merge), forward-only; mints the spin-off +
             # re-points the human-partitioned mentions + re-renders the primary. GRAPH-REQUIRED. The moved
             # sources' Source pages re-render after the commit (affected_sources). Runs before promote_
             # candidates (below) so a spin-off with >=2 independent sources can promote in the same apply.
@@ -862,7 +871,7 @@ def run_apply(st: Any) -> dict[str, Any]:
         claim_source_pages = [f"Sources/{sid}.md" for sid in existing_sources]
 
     # pages_changed counts every page write: contradiction re-projections, deprecations, the synthesis
-    # pages apply_resolved_syntheses re-rendered, the concept/entity pages promotion rewrote, archives.
+    # pages apply_resolved_syntheses re-rendered, the item pages promotion rewrote, archives.
     pages_changed = (len(contra["changed_pages"]) + len(deprec["changed_pages"])
                      + len(archive["changed_pages"]) + len(hidden["changed_pages"])
                      + len(unhidden["changed_pages"])
@@ -965,12 +974,12 @@ def run_apply(st: Any) -> dict[str, Any]:
     if merge_stale:
         warnings.append("merge_discovery_reindex_not_guaranteed")
 
-    # ADR-0051: a subtype rekey drops the old id from discovery (status: rekeyed) + re-points its backlinks
-    # to the new-subtype id; a failed reindex leaves a stale nav index that can still surface the old
-    # identity, so it's non-clean.
+    # ADR-0059: a retype changes what navigation/grouping surfaces say about a node (item_type on the
+    # nav row + the Source-page/index groupings); a failed reindex leaves a stale nav index that still
+    # advertises the old classification, so it's non-clean.
     rekey_stale = reindex_failed and rekey_work > 0
     if rekey_stale:
-        warnings.append("rekey_discovery_reindex_not_guaranteed")
+        warnings.append("retype_discovery_reindex_not_guaranteed")
 
     # ADR-0052: a split re-points the primary's mentions + re-renders the moved sources' Source pages; a
     # failed reindex leaves a stale nav/keyword index that may still surface the pre-split projection.
@@ -1028,7 +1037,7 @@ def run_apply(st: Any) -> dict[str, Any]:
                                    "restored": syn_evidence_restored,
                                    "unreconciled": syn_fanout_unreconciled},
             "merged": {"applied": merged["applied"], "skipped": merged["skipped"]},
-            "rekeyed": {"applied": rekeyed["applied"], "skipped": rekeyed["skipped"]},
+            "retyped": {"applied": rekeyed["applied"], "skipped": rekeyed["skipped"]},
             "split": {"applied": split_res["applied"], "skipped": split_res["skipped"]},
             "pages_changed": pages_changed,
             "index_rebuilt": index_status == "rebuilt",
@@ -1260,7 +1269,7 @@ def ui_review_sources() -> HTMLResponse:
 
 @app.get("/ui/reviews/sources/{source_id}", response_class=HTMLResponse)
 def ui_review_source_screen(source_id: str) -> HTMLResponse:
-    """One source's screen: its candidates + subtype items + retired section, one batch form."""
+    """One source's screen: its candidates + type changes + retired section, one batch form."""
     if not manifests.is_source_id(source_id):
         return HTMLResponse(
             review_html.render_error(404, f"unknown source: {source_id}"), status_code=404)
@@ -1299,7 +1308,7 @@ async def ui_review_source_decide(source_id: str, request: Request) -> HTMLRespo
     if not view["graph_available"]:
         return _source_flow_unavailable()
     visible = {str(r["review_id"])
-               for r in (view["candidates"] + view["subtype_items"] + view["retired"])}
+               for r in (view["candidates"] + view["retype_items"] + view["retired"])}
     form = await request.form()
     note = str(form.get("note") or "").strip() or f"per-source flow: {source_id}"
     results: list[dict[str, Any]] = []
@@ -1325,12 +1334,15 @@ async def ui_review_source_decide(source_id: str, request: Request) -> HTMLRespo
         title = str(form.get(f"amend_title_{rid}") or "").strip()
         aliases = str(form.get(f"amend_aliases_{rid}") or "").strip()
         description = str(form.get(f"amend_description_{rid}") or "").strip()
+        item_type = str(form.get(f"amend_item_type_{rid}") or "").strip()
         if title:
             amendments["title"] = title
         if aliases:
             amendments["aliases"] = [a.strip() for a in aliases.split(",") if a.strip()]
         if description:
             amendments["description"] = description
+        if item_type:
+            amendments["item_type"] = item_type
         # Amendments ride approvals (frozen) and defers (draft) only; a reject discards them.
         send = amendments if (amendments and decision in ("approved", "deferred")) else None
         try:
@@ -1346,7 +1358,7 @@ async def ui_review_source_decide(source_id: str, request: Request) -> HTMLRespo
 
 @app.post("/ui/reviews/sources/{source_id}/add", response_model=None)
 def ui_review_source_add(
-    source_id: str, title: str = Form(""), node_type: str = Form("concept"),
+    source_id: str, title: str = Form(""), item_type: str = Form(""),
     aliases: str = Form(""), description: str = Form(""),
 ) -> HTMLResponse | RedirectResponse:
     """Human-add (ADR-0058): a PRODUCER-side act — candidate node + anchorless human mention +
@@ -1360,7 +1372,7 @@ def ui_review_source_add(
         return _source_flow_unavailable()
     try:
         result = human_add.add_candidate(
-            gconn, root=settings.root, source_id=source_id, node_type=node_type.strip(),
+            gconn, root=settings.root, source_id=source_id, item_type=item_type.strip(),
             title=title, aliases=[a.strip() for a in aliases.split(",") if a.strip()],
             description=description, wiki_dir=settings.wiki_dir,
             reviews_dir=settings.reviews_dir)

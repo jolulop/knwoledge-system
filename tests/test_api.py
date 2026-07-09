@@ -156,7 +156,7 @@ def test_generate_wiki_endpoint_and_pages(client, tmp_path):
 def _build_graph(tmp_path: Path) -> tuple[str, str]:
     """Seed a minimal graph (a source mentions an active concept) and return their ids."""
     src = "src_aaaaaaaaaaaaaaaa"
-    cpt = "cpt_xxxxxxxxxxxxxxxx"
+    cpt = "itm_xxxxxxxxxxxxxxxx"
     db_path = tmp_path / "db" / "graph.sqlite"
     graph.init_db(db_path)
     conn = graph.connect(db_path)
@@ -164,7 +164,7 @@ def _build_graph(tmp_path: Path) -> tuple[str, str]:
         graph.reindex_nodes(
             conn,
             source_ids=[src],
-            page_nodes=[{"node_id": cpt, "node_type": "concept", "slug": "x", "status": "active"}],
+            page_nodes=[{"node_id": cpt, "node_type": "item", "item_type": "method_technique", "slug": "x", "status": "active"}],
             now="t0",
         )
         graph.upsert_assertion(conn, src_id=src, dst_id=cpt, edge_type="mentions",
@@ -188,7 +188,7 @@ def test_graph_node_endpoint(client, tmp_path):
     assert inc["evidence"]["advisory"] is True
 
     # Unknown node and bad include_status.
-    assert client.get("/graph/node/cpt_missing").status_code == 404
+    assert client.get("/graph/node/itm_missing").status_code == 404
     assert client.get(f"/graph/node/{cpt}?include_status=bogus").status_code == 400
 
 
@@ -206,13 +206,13 @@ def test_graph_neighborhood_endpoint(client, tmp_path):
     assert client.get(f"/graph/neighborhood/{cpt}?depth=3").status_code == 422
     # Bad filters -> 400.
     assert client.get(f"/graph/neighborhood/{cpt}?node_types=widget").status_code == 400
-    assert client.get("/graph/neighborhood/cpt_missing").status_code == 404
+    assert client.get("/graph/neighborhood/itm_missing").status_code == 404
 
 
 def test_graph_endpoints_404_without_graph_db(client):
     # No graph built yet (the client fixture lays down no db/graph.sqlite).
-    assert client.get("/graph/node/cpt_x").status_code == 404
-    assert client.get("/graph/neighborhood/cpt_x").status_code == 404
+    assert client.get("/graph/node/itm_x").status_code == 404
+    assert client.get("/graph/neighborhood/itm_x").status_code == 404
 
 
 def _build_graph_with_contradiction(tmp_path: Path) -> tuple[str, str]:
@@ -286,7 +286,7 @@ def test_graph_stale_schema_returns_503(client, tmp_path):
 def _build_search_corpus(tmp_path: Path) -> str:
     """Write one chunk + a source page + a matching active concept page, then build the index
     and a graph (source mentions concept). Returns the concept node id."""
-    src, cpt = "src_eeeeeeeeeeeeeeee", "cpt_searchxxxxxxxxx"
+    src, cpt = "src_eeeeeeeeeeeeeeee", "itm_searchxxxxxxxxx"
     chunks = tmp_path / "normalized" / "chunks" / f"{src}.jsonl"
     chunks.parent.mkdir(parents=True, exist_ok=True)
     text = "Synergy capture is central to post-merger integration."
@@ -300,8 +300,9 @@ def _build_search_corpus(tmp_path: Path) -> str:
         (f"wiki/Sources/{src}.md",
          {"type": "source", "source_id": src, "title": "Deck", "status": "active", "language": "en"},
          "synergy in M&A"),
-        (f"wiki/Concepts/{cpt}.md",
-         {"type": "concept", "concept_id": cpt, "title": "Synergy capture", "status": "active",
+        (f"wiki/Items/{cpt}.md",
+         {"type": "item", "item_id": cpt, "item_type": "method_technique",
+          "title": "Synergy capture", "status": "active",
           "review_status": "none"},
          "How synergy is captured."),
     ]:
@@ -316,7 +317,7 @@ def _build_search_corpus(tmp_path: Path) -> str:
     conn = graph.connect(gdb)
     try:
         graph.reindex_nodes(conn, source_ids=[src],
-                            page_nodes=[{"node_id": cpt, "node_type": "concept", "slug": "s", "status": "active"}],
+                            page_nodes=[{"node_id": cpt, "node_type": "item", "item_type": "method_technique", "slug": "s", "status": "active"}],
                             now="t0")
         graph.upsert_assertion(conn, src_id=src, dst_id=cpt, edge_type="mentions",
                                asserted_by="llm", status="active")
@@ -899,8 +900,8 @@ def _write_review(tmp_path, state, item):
 def test_reviews_list_default_pending_excludes_deferred(client, tmp_path):
     _write_review(tmp_path, "pending", {
         "review_id": "rev_a", "type": "promote_candidate_node", "status": "pending",
-        "priority": "high", "created_at": "2026-01-01T00:00:00Z", "subject": {"node_id": "cpt_1"},
-        "proposal": {"to_status": "active", "node_type": "concept"}, "context": {}})
+        "priority": "high", "created_at": "2026-01-01T00:00:00Z", "subject": {"node_id": "itm_1"},
+        "proposal": {"to_status": "active", "item_type": "method_technique"}, "context": {}})
     _write_review(tmp_path, "pending", {
         "review_id": "rev_b", "type": "deprecate_wiki_page", "status": "deferred",
         "priority": "low", "subject": {}, "proposal": {}, "context": {}})
@@ -953,15 +954,15 @@ def test_reviews_detail_404_for_schema_invalid(client, tmp_path):
 def test_reviews_detail_returns_item_and_preview(client, tmp_path):
     _write_review(tmp_path, "pending", {
         "review_id": "rev_a", "type": "promote_candidate_node", "status": "pending",
-        "priority": "low", "subject": {"node_id": "cpt_1"},
-        "proposal": {"to_status": "active", "node_type": "concept", "name": "thing"}, "context": {}})
+        "priority": "low", "subject": {"node_id": "itm_1"},
+        "proposal": {"to_status": "active", "item_type": "method_technique", "name": "thing"}, "context": {}})
     body = client.get("/reviews/rev_a").json()
     assert body["item"]["review_id"] == "rev_a"
     prev = body["preview"]
     assert prev["type"] == "promote_candidate_node"
     assert prev["apply"]["supported"] is True
     assert prev["apply"]["effect_status"] == "pending_apply"
-    assert prev["node_ids"] == ["cpt_1"]
+    assert prev["node_ids"] == ["itm_1"]
 
 
 def test_reviews_detail_404_for_missing(client, tmp_path):
@@ -990,7 +991,7 @@ def test_reviews_detail_no_server_path_leak(client, tmp_path):
 def _pending_promote(tmp_path, rid="rev_a"):
     _write_review(tmp_path, "pending", {
         "review_id": rid, "type": "promote_candidate_node", "status": "pending",
-        "subject": {"node_id": "cpt_1"}, "proposal": {"to_status": "active", "node_type": "concept"},
+        "subject": {"node_id": "itm_1"}, "proposal": {"to_status": "active", "item_type": "method_technique"},
         "context": {}})
 
 
@@ -1076,18 +1077,18 @@ def _approved_concept_deprecation(tmp_path):
     gdb.parent.mkdir(parents=True, exist_ok=True)
     graph.init_db(gdb)
     conn = graph.connect(gdb)
-    graph.upsert_node(conn, node_id="cpt_x", node_type="concept", slug="thing", status="active")
+    graph.upsert_node(conn, node_id="itm_x", node_type="item", item_type="method_technique", slug="thing", status="active")
     conn.commit()
     conn.close()
-    page = tmp_path / "wiki" / "Concepts" / "thing.md"
+    page = tmp_path / "wiki" / "Items" / "thing.md"
     page.parent.mkdir(parents=True, exist_ok=True)
-    page.write_text('---\ntype: concept\nconcept_id: "cpt_x"\ntitle: "Thing"\nstatus: active\n'
+    page.write_text('---\ntype: item\nitem_id: "itm_x"\nitem_type: method_technique\ntitle: "Thing"\nstatus: active\n'
                     "review_status: none\naliases: []\n---\n\n# Thing\n", encoding="utf-8")
     _write_review(tmp_path, "approved", {
         "review_id": "rev_d", "type": "deprecate_wiki_page", "status": "approved",
-        "subject": {"node_id": "cpt_x", "page": "Concepts/thing.md"},
+        "subject": {"node_id": "itm_x", "page": "Items/thing.md"},
         "proposal": {"to_status": "deprecated_candidate", "reason": "x"},
-        "context": {"node_type": "concept"}})
+        "context": {"node_type": "item"}})
     return page
 
 
@@ -1107,7 +1108,7 @@ def test_apply_runs_deprecation_executor_and_summary(client, tmp_path):
     fm = main_module.parse_frontmatter(page.read_text(encoding="utf-8"))
     assert fm["status"] == "deprecated_candidate" and fm["review_status"] == "approved"
     assert graph.connect(tmp_path / "db" / "graph.sqlite").execute(
-        "SELECT status FROM nodes WHERE node_id='cpt_x'").fetchone()["status"] == "deprecated_candidate"
+        "SELECT status FROM nodes WHERE node_id='itm_x'").fetchone()["status"] == "deprecated_candidate"
 
 
 def test_apply_is_idempotent(client, tmp_path):
@@ -1147,8 +1148,8 @@ def test_apply_graph_missing_with_approved_items_is_503(client, tmp_path):
     # silent "applied" (and before promote_candidates would init an empty graph)
     _write_review(tmp_path, "approved", {
         "review_id": "rev_d", "type": "deprecate_wiki_page", "status": "approved",
-        "subject": {"node_id": "cpt_x", "page": "Concepts/thing.md"},
-        "proposal": {"to_status": "deprecated_candidate"}, "context": {"node_type": "concept"}})
+        "subject": {"node_id": "itm_x", "page": "Items/thing.md"},
+        "proposal": {"to_status": "deprecated_candidate"}, "context": {"node_type": "item"}})
     assert client.post("/reviews/apply").status_code == 503
 
 

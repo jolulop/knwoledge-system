@@ -2,8 +2,10 @@
 """Phase 3.5b promotion lifecycle (slice 5, ADR-0018): candidate -> active by recurrence.
 
 A deterministic, rerunnable maintenance pass over the graph + manifests + review state (no
-LLM). A candidate concept/entity promotes to `active` once **≥2 mutually-independent**
-sources mention it. Independence is judged from manifest provenance
+LLM). A candidate knowledge item promotes to `active` once **≥2 mutually-independent**
+sources mention it (a candidate carrying the `unclassified_review_required` sentinel is
+excluded from recurrence, and its approval cannot apply without a real `item_type`
+amendment — ADR-0059 decision 5). Independence is judged from manifest provenance
 (`author/publisher/report_family/canonical_url`, ADR-0018): two sources are independent only
 if there is at least one *comparable* key (known on both) whose values differ and no
 comparable key is equal — non-comparable/unknown keys never prove independence. Manifests
@@ -26,14 +28,12 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from app.backend import db, graph
+from app.backend import db, graph, taxonomy
 from app.backend.manifests import get_provenance, independent_sources, iso_now, valid_manifests
-from app.workers import concepts, reviews, wiki
-from app.workers.wiki_render import NODE_DIR, parse_frontmatter, render_concept_page
+from app.workers import items, reviews, wiki
+from app.workers.wiki_render import NODE_DIR, parse_frontmatter, render_item_page
 
-PROMOTABLE = ("concept", "entity", "person", "organization", "project")
-_ID_FIELD = {"concept": "concept_id", "entity": "entity_id", "person": "person_id",
-             "organization": "organization_id", "project": "project_id"}
+PROMOTABLE = ("item",)
 _TITLE_RE = re.compile(r'(?m)^title:\s*"(.*)"\s*$')
 
 
@@ -55,6 +55,8 @@ def _read_meta(page_path: Path) -> dict[str, Any] | None:
     aliases = fm.get("aliases")
     return {"title": re.sub(r"\\(.)", r"\1", m.group(1)),
             "aliases": aliases if isinstance(aliases, list) else [],
+            # ADR-0059: the page owns the governed classification.
+            "item_type": fm.get("item_type"),
             # ADR-0052: preserve a spin-off's split lineage when the promote pass re-renders it active.
             "split_from": fm.get("split_from"), "split_review_id": fm.get("split_review_id"),
             # ADR-0058: preserve the page-owned human description.
@@ -75,23 +77,29 @@ def _read_amendments(reviews_dir: Path, rid: str) -> dict[str, Any] | None:
 
 
 def _apply_amendments(meta: dict[str, Any], amendments: dict[str, Any] | None) -> dict[str, Any]:
-    """Resolve the effective title/aliases/description (ADR-0058 approve-with-amendments).
+    """Resolve the effective title/aliases/description/item_type (ADR-0058 approve-with-amendments,
+    extended with `item_type` by ADR-0059 — retype is a metadata flip under the type-neutral id,
+    and it is REQUIRED to clear the unclassified sentinel).
 
     Node id stays frozen regardless; only display identity moves. The old title is auto-added
     to the alias list when the title changes (page-authoritative aliases, normalized/deduped)."""
     title = meta["title"]
     aliases = list(meta["aliases"])
     description = meta.get("description")
+    item_type = meta.get("item_type")
     if amendments:
         new_title = str(amendments.get("title") or "").strip()
         if isinstance(amendments.get("aliases"), list):
             aliases = [str(a).strip() for a in amendments["aliases"] if str(a).strip()]
         if new_title and new_title != title:
-            aliases = concepts._union(aliases, [title])  # old title stays findable
+            aliases = items._union(aliases, [title])  # old title stays findable
             title = new_title
         if amendments.get("description") is not None:
             description = str(amendments["description"]).strip() or None
-    return {"title": title, "aliases": concepts._union(aliases, []), "description": description}
+        if taxonomy.is_production_item_type(amendments.get("item_type")):
+            item_type = amendments["item_type"]
+    return {"title": title, "aliases": items._union(aliases, []), "description": description,
+            "item_type": item_type}
 
 
 def _rebuild_index(root: Path) -> bool:
@@ -163,16 +171,23 @@ def promote_candidates(
                     # frozen — only the slug (display path) may move, and this executor owns the move.
                     amendments = _read_amendments(reviews_dir, rid) if pre_approved else None
                     eff = _apply_amendments(meta, amendments)
-                    slug = concepts._slug(eff["title"]) if amendments else node["slug"]
+                    # ADR-0059 sentinel gate: an unclassified candidate never promotes — the
+                    # recurrence path silently leaves it candidate, and an approved item without
+                    # a real item_type amendment is a typed scope-skip (never a partial apply).
+                    if not taxonomy.is_production_item_type(eff.get("item_type")):
+                        if pre_approved:
+                            skipped.append({"review_id": rid,
+                                            "reason": "missing_required_item_type"})
+                        continue
+                    slug = items._slug(eff["title"]) if amendments else node["slug"]
                     new_page = page_dir / f"{slug}.md"
                     if slug != node["slug"] and new_page.exists():
                         # Another page already owns the amended slug — scope-guard skip, no writes.
                         skipped.append({"review_id": rid, "reason": "amended_slug_collision"})
                         continue
                     new_page.write_text(
-                        render_concept_page({
-                            "node_type": node["node_type"], "node_id": nid,
-                            "id_field": _ID_FIELD[node["node_type"]], "title": eff["title"],
+                        render_item_page({
+                            "node_id": nid, "item_type": eff["item_type"], "title": eff["title"],
                             "aliases": eff["aliases"], "confidence": "low",
                             "source_ids": sources, "status": "active",
                             "duplicates": graph.active_duplicates(gconn, nid),
@@ -183,7 +198,7 @@ def promote_candidates(
                     if amendments:
                         amended += 1
                     graph.upsert_node(gconn, node_id=nid, node_type=node["node_type"],
-                                      slug=slug, status="active", now=now)
+                                      slug=slug, status="active", item_type=eff["item_type"], now=now)
                     if slug != node["slug"]:
                         old_page.unlink(missing_ok=True)
                         # Inbound links hold the old slug: mentioning Source pages re-render via the
@@ -191,8 +206,8 @@ def promote_candidates(
                         # the slug mirror update their ## Duplicates projection reads.
                         affected_sources.update(sources)
                         for dup in graph.active_duplicates(gconn, nid):
-                            concepts._recompose_node(gconn, node_id=dup["node_id"], wiki_dir=wiki_dir,
-                                                     reviews_dir=reviews_dir, now=now)
+                            items._recompose_node(gconn, node_id=dup["node_id"], wiki_dir=wiki_dir,
+                                                  reviews_dir=reviews_dir, now=now)
                     if pre_approved:
                         promoted_review += 1  # human-approved early promotion; loop already closed
                     else:
@@ -201,7 +216,7 @@ def promote_candidates(
                         reviews.create_review_item(
                             reviews_dir, review_type="promote_candidate_node",
                             subject={"node_id": nid},
-                            proposal={"to_status": "active", "node_type": node["node_type"]},
+                            proposal={"to_status": "active", "item_type": eff["item_type"]},
                             now=now)
                         reviews.resolve_review_item(
                             reviews_dir, rid, decision="approved", decided_by="recurrence",

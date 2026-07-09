@@ -17,21 +17,21 @@ import validate_projection  # noqa: E402
 from app.backend import graph, manifests  # noqa: E402
 from app.llm.cache import ResponseCache  # noqa: E402
 from app.llm.client import LLMClient  # noqa: E402
-from app.workers import claims, concepts, contradictions, extract, intake, reviews, wiki  # noqa: E402
+from app.workers import claims, contradictions, extract, intake, items, reviews, wiki  # noqa: E402
 from app.workers.wiki_render import render_claim_page  # noqa: E402
 
 TEMPLATES = ROOT / "templates"
 CLAIM_MODEL = "anthropic:claude-sonnet-4-6"
 HEAVY = "anthropic:claude-opus-4-8"
 
-# Two independent sources that both make a checkable claim about the same shared concept.
+# Two independent sources that both make a checkable claim about the same shared knowledge item.
 DOC_A = "# Report A\n\nThe Q3 revenue increased by ten percent. Margins improved.\n"
 DOC_B = "# Report B\n\nThe Q3 revenue decreased by five percent. Costs rose.\n"
 CLAIM_A = "Q3 revenue increased by ten percent."
 QUOTE_A = "The Q3 revenue increased by ten percent."
 CLAIM_B = "Q3 revenue decreased by five percent."
 QUOTE_B = "The Q3 revenue decreased by five percent."
-CONCEPT = "Q3 revenue"
+ITEM = "Q3 revenue"
 
 
 class ClaimAdapter:
@@ -55,8 +55,8 @@ class ClaimAdapter:
         return {"claims": out}
 
 
-class ConceptAdapter:
-    """Fake tier-2 adapter: both sources mention the same shared concept."""
+class ItemAdapter:
+    """Fake tier-2 adapter: both sources mention the same shared knowledge item."""
     name = "anthropic"
     supports_batch = False
 
@@ -67,7 +67,7 @@ class ConceptAdapter:
         return self._available
 
     def parse(self, messages, schema, model_id, *, max_tokens):
-        return {"concepts": [{"name": CONCEPT, "aliases": []}], "entities": []}
+        return {"items": [{"name": ITEM, "item_type": "method_technique", "aliases": []}]}
 
 
 class ContradictionAdapter:
@@ -113,8 +113,8 @@ def _sid(tmp_path, name):
     raise KeyError(name)
 
 
-def _build_graph(tmp_path, *, independent=True, claim_adapter=None, concept_adapter=None):
-    """Ingest two sources, extract claims + concepts, optionally mark them independent."""
+def _build_graph(tmp_path, *, independent=True, claim_adapter=None, item_adapter=None):
+    """Ingest two sources, extract claims + items, optionally mark them independent."""
     jobs = tmp_path / "db" / "jobs.sqlite"
     _ingest(tmp_path, "a.md", DOC_A)
     _ingest(tmp_path, "b.md", DOC_B)
@@ -126,9 +126,9 @@ def _build_graph(tmp_path, *, independent=True, claim_adapter=None, concept_adap
         manifests.set_provenance(tmp_path / "raw" / "manifests", _sid(tmp_path, "b.md"), author="Bob")
     claims.extract_claims(tmp_path, client=_client(tmp_path, claim_adapter or ClaimAdapter()),
                           model_ref=CLAIM_MODEL, jobs_db=jobs, rebuild_index=False)
-    concepts.extract_concepts(tmp_path, client=_client(tmp_path, concept_adapter or ConceptAdapter()),
-                              model_ref=CLAIM_MODEL, jobs_db=jobs, rebuild_index=False)
-    # Refresh Source pages so their Claims/Concepts sections project the new edges (the CLI does
+    items.extract_items(tmp_path, client=_client(tmp_path, item_adapter or ItemAdapter()),
+                        model_ref=CLAIM_MODEL, jobs_db=jobs, rebuild_index=False)
+    # Refresh Source pages so their Claims/Items sections project the new edges (the CLI does
     # this after extraction); keeps validate_projection green on the Source side.
     wiki.generate_wiki(tmp_path, jobs_db=jobs, templates_dir=TEMPLATES, rebuild_index=False)
     return jobs
@@ -147,7 +147,7 @@ def _gconn(tmp_path):
 # --- candidate-pair blocking (deterministic core) --------------------------
 
 
-def test_candidate_pairs_blocks_on_shared_concept_and_independence(tmp_path):
+def test_candidate_pairs_blocks_on_shared_item_and_independence(tmp_path):
     _build_graph(tmp_path)
     conn = _gconn(tmp_path)
     try:
@@ -159,7 +159,7 @@ def test_candidate_pairs_blocks_on_shared_concept_and_independence(tmp_path):
     assert len(pairs) == 1
     p = pairs[0]
     assert p["claim_a"] < p["claim_b"]          # canonical ordering
-    assert p["shared_nodes"]                      # blocked on the shared concept node
+    assert p["shared_nodes"]                      # blocked on the shared co-mentioned item node
 
 
 def test_no_pairs_when_sources_not_independent(tmp_path):
@@ -177,9 +177,9 @@ def test_no_pairs_when_sources_not_independent(tmp_path):
     assert pairs == []
 
 
-def test_no_pairs_without_shared_concept(tmp_path):
-    # Each source mentions a different concept -> no co-mention -> no candidate pair.
-    class SplitConcepts:
+def test_no_pairs_without_shared_item(tmp_path):
+    # Each source mentions a different item -> no co-mention -> no candidate pair.
+    class SplitItems:
         name = "anthropic"
         supports_batch = False
 
@@ -189,9 +189,9 @@ def test_no_pairs_without_shared_concept(tmp_path):
         def parse(self, messages, schema, model_id, *, max_tokens):
             body = messages[-1]["content"]
             name = "alpha topic" if "Report A" in body else "beta topic"
-            return {"concepts": [{"name": name, "aliases": []}], "entities": []}
+            return {"items": [{"name": name, "item_type": "method_technique", "aliases": []}]}
 
-    _build_graph(tmp_path, concept_adapter=SplitConcepts())
+    _build_graph(tmp_path, item_adapter=SplitItems())
     conn = _gconn(tmp_path)
     try:
         prov = {m["source_id"]: manifests.get_provenance(m)
@@ -292,7 +292,7 @@ def test_stale_pair_superseded_and_review_withdrawn(tmp_path):
         conn.close()
     assert statuses == ["superseded"]
     # The pending contradiction review was withdrawn (re-fileable later, not a blocking
-    # rejection). Other pending items (e.g. the shared concept's promotion) are untouched.
+    # rejection). Other pending items (e.g. the shared item's promotion) are untouched.
     pending = [json.loads(p.read_text()) for p in (tmp_path / "reviews" / "pending").glob("*.json")]
     assert not [i for i in pending if i["type"] == "resolve_contradiction"]
 
@@ -539,7 +539,7 @@ def test_two_sided_evidence_required_before_verdict(tmp_path):
 
 
 def test_reprojection_rebuilds_index(tmp_path, monkeypatch):
-    # The contradiction worker honours the rebuild_index contract (like claims/concepts/promote):
+    # The contradiction worker honours the rebuild_index contract (like claims/items/promote):
     # it rebuilds wiki/index.md exactly when it re-projects Claim pages, and not otherwise. The
     # real rebuild script lives in the repo, not tmp_path, so the call itself is monkeypatched.
     calls = []
@@ -619,11 +619,11 @@ def test_cache_key_busts_on_anchor_or_topic_change():
         return cache_key(msgs, "anthropic:m", prompts.CONTRADICTION_SCHEMA,
                          schema_version="v", prompt_version="v")
 
-    k0 = key(base, ["cpt_x"])
-    assert key(base, ["cpt_x"]) == k0                    # identical inputs -> hit
-    assert key(diff_src, ["cpt_x"]) != k0                # changed source_id -> miss
-    assert key(diff_range, ["cpt_x"]) != k0              # changed char range -> miss
-    assert key(base, ["cpt_y"]) != k0                    # changed shared node -> miss
+    k0 = key(base, ["itm_x"])
+    assert key(base, ["itm_x"]) == k0                    # identical inputs -> hit
+    assert key(diff_src, ["itm_x"]) != k0                # changed source_id -> miss
+    assert key(diff_range, ["itm_x"]) != k0              # changed char range -> miss
+    assert key(base, ["itm_y"]) != k0                    # changed shared node -> miss
 
 
 def test_confidence_is_clamped(tmp_path):

@@ -14,7 +14,7 @@ from typing import Any
 
 JOB_TYPES = frozenset(
     {"intake_scan", "manifest_create", "duplicate_check", "extract", "generate_wiki",
-     "enrich", "extract_claims", "extract_concepts", "promote", "detect_contradictions",
+     "enrich", "extract_claims", "extract_items", "promote", "detect_contradictions",
      "generate_synthesis",
      # Phase 7 autonomous-maintenance passes (ADR-0036). No `eval` job ships in v1 — the golden set is
      # a fake CI fixture, so a real-vault eval is deferred (decision 14).

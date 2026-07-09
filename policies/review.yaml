@@ -5,9 +5,8 @@ requires_human_approval:
   - archive_source          # reversible source status transition active -> archive_candidate (ADR-0036, Phase 7)
   - deprecate_wiki_page
   - resolve_contradiction
-  - merge_entities
-  - split_entity
-  - merge_concepts
+  - merge_items
+  - split_item
   - mark_semantic_duplicate
   - hide_content
   - hide_semantic_page
@@ -17,8 +16,8 @@ requires_human_approval:
   - unhide_claim
   - hide_synthesis              # governance synthesis visibility: active -> hidden (ADR-0049)
   - unhide_synthesis            # the inverse: hidden -> active (ADR-0049)
-  - promote_candidate_node      # candidate concept/entity -> active (ADR-0018, Phase 3.5b)
-  - change_entity_subtype       # re-keys a node's id; gated like a merge/split
+  - promote_candidate_node      # candidate knowledge item -> active (ADR-0018/0059)
+  - change_item_type            # governed classification flip; metadata only, id unchanged (ADR-0059)
   - propose_synthesis           # candidate synthesis -> active; review-only, NO recurrence (ADR-0031, Phase 3.5c)
   - missing_raw_source          # catalogued raw file missing; record-only governance (ADR-0036, Phase 7)
   - purge_response_cache        # aggregate record-only proposal to manually purge the LLM cache (ADR-0036)

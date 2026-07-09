@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Phase 3.5c slice 2 cross-source synthesis (ADR-0031).
 
-Tier-3 LLM pass that writes one **candidate** synthesis per `active` concept/entity that is
+Tier-3 LLM pass that writes one **candidate** synthesis per `active` knowledge item that is
 evidenced by ≥2 `active` claims (each with grounded citations) from ≥2 *independent* sources
-(ADR-0018; the `claim → source → mentions → concept` neighborhood). The synthesis is grounded on
+(ADR-0018; the `claim → source → mentions → item` neighborhood). The synthesis is grounded on
 the claim **nodes**: the page's Supporting-Evidence links and `derived_from` (synthesis → claim)
 edges are the graph authority, the LLM supplies only the prose, and the artifact
 (`normalized/enrichment/<topic_node_id>.synthesis.json`) is the record of that prose.
@@ -23,8 +23,8 @@ Governance (ADR-0031 §7; review-only promotion, **no recurrence**):
 
 No API key → a `skipped` job, but resolution + retraction still run. v1 scope (ADR-0031 §6
 permits both): the prose stands on claim nodes and emits **no direct source quotes** — a guard
-rejects output that copies a long verbatim run from a contributing source; the concept→synthesis
-backlink is a `related_to` edge, not yet projected on the concept page.
+rejects output that copies a long verbatim run from a contributing source; the item→synthesis
+backlink is a `related_to` edge, not yet projected on the item page.
 """
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ from app.workers import enrichment_artifact as art
 from app.workers import reviews
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter, render_synthesis_page
 
-_PROMOTABLE = ("concept", "entity", "person", "organization", "project")
+_PROMOTABLE = ("item",)
 _CLAIM_TEXT_RE = re.compile(r'(?m)^claim_text:\s*"(.*)"\s*$')
 _TITLE_RE = re.compile(r'(?m)^title:\s*"(.*)"\s*$')
 _WS = re.compile(r"\s+")
@@ -141,7 +141,7 @@ def _has_independent_pair(sources: set[str], prov: dict[str, dict[str, Any]]) ->
 
 
 def eligible_topics(gconn, prov, *, claims_dir: Path, markdown_dir: Path) -> list[dict[str, Any]]:
-    """Active concept/entity topics with **≥2 grounded active claims from ≥2 independent
+    """Active knowledge-item topics with **≥2 grounded active claims from ≥2 independent
     sources**, checked over the *surviving* claim contexts — a claim whose page/citations are
     missing is dropped, then the trigger is re-verified (ADR-0031)."""
     topics: list[dict[str, Any]] = []

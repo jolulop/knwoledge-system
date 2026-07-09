@@ -26,13 +26,14 @@ from app.backend import manifests
 from app.backend import review_read
 from app.backend.config import get_settings
 from app.workers import deprecations, retention, wiki
-from app.workers.wiki_render import parse_frontmatter, render_concept_page
+from app.workers.wiki_render import parse_frontmatter, render_item_page
 
 SID = "src_0123456789abcdef"
 OLD = "2000-01-01T00:00:00+00:00"
-NID = "cpt_aaaaaaaaaaaaaaaa"
+NID = "itm_aaaaaaaaaaaaaaaa"
+ITEM_TYPE = "method_technique"
 SLUG = "thing"
-PAGE = f"Concepts/{SLUG}.md"
+PAGE = f"Items/{SLUG}.md"
 
 
 @pytest.fixture
@@ -146,14 +147,15 @@ def _graph(tmp_path):
     return graph.connect(gdb)
 
 
-def _write_concept(tmp_path, conn, *, node_status, review_status):
-    page = tmp_path / "wiki" / "Concepts" / f"{SLUG}.md"
+def _write_item(tmp_path, conn, *, node_status, review_status):
+    page = tmp_path / "wiki" / "Items" / f"{SLUG}.md"
     page.parent.mkdir(parents=True, exist_ok=True)
-    page.write_text(render_concept_page({
-        "node_type": "concept", "node_id": NID, "id_field": "concept_id", "title": "Thing",
+    page.write_text(render_item_page({
+        "node_id": NID, "item_type": ITEM_TYPE, "title": "Thing",
         "aliases": ["TH"], "confidence": "low", "source_ids": [], "status": node_status,
     }, review_status=review_status), encoding="utf-8")
-    graph.upsert_node(conn, node_id=NID, node_type="concept", slug=SLUG, status=node_status)
+    graph.upsert_node(conn, node_id=NID, node_type="item", slug=SLUG, status=node_status,
+                      item_type=ITEM_TYPE)
 
 
 def _approve_unhide_semantic(tmp_path, rid="rev_u"):
@@ -162,7 +164,7 @@ def _approve_unhide_semantic(tmp_path, rid="rev_u"):
     (d / f"{rid}.json").write_text(json.dumps({
         "review_id": rid, "type": "unhide_semantic_page", "status": "approved",
         "subject": {"node_id": NID, "page": PAGE}, "proposal": {"to_status": "active"},
-        "context": {"node_type": "concept"}}), encoding="utf-8")
+        "context": {"node_type": "item"}}), encoding="utf-8")
 
 
 def _apply_semantic(tmp_path, conn):
@@ -170,13 +172,13 @@ def _apply_semantic(tmp_path, conn):
 
 
 def _page_status(tmp_path):
-    fm = parse_frontmatter((tmp_path / "wiki" / "Concepts" / f"{SLUG}.md").read_text())
+    fm = parse_frontmatter((tmp_path / "wiki" / "Items" / f"{SLUG}.md").read_text())
     return fm.get("status"), fm.get("review_status")
 
 
 def test_semantic_unhide_flips_hidden_to_active_default(tmp_path):
     conn = _graph(tmp_path)
-    _write_concept(tmp_path, conn, node_status="hidden", review_status="approved")
+    _write_item(tmp_path, conn, node_status="hidden", review_status="approved")
     _approve_unhide_semantic(tmp_path)
     res = _apply_semantic(tmp_path, conn)
     conn.commit()
@@ -188,7 +190,7 @@ def test_semantic_unhide_flips_hidden_to_active_default(tmp_path):
 
 def test_semantic_unhide_idempotent_when_already_active(tmp_path):
     conn = _graph(tmp_path)
-    _write_concept(tmp_path, conn, node_status="active", review_status="none")
+    _write_item(tmp_path, conn, node_status="active", review_status="none")
     _approve_unhide_semantic(tmp_path)
     assert _apply_semantic(tmp_path, conn)["applied"] == 0           # already active -> no-op
     conn.close()
@@ -197,7 +199,7 @@ def test_semantic_unhide_idempotent_when_already_active(tmp_path):
 def test_semantic_unhide_completes_page_hidden_graph_hidden(tmp_path):
     # the normal case: page+graph hidden -> both flip to active
     conn = _graph(tmp_path)
-    _write_concept(tmp_path, conn, node_status="hidden", review_status="approved")
+    _write_item(tmp_path, conn, node_status="hidden", review_status="approved")
     _approve_unhide_semantic(tmp_path)
     assert _apply_semantic(tmp_path, conn)["applied"] == 1
     conn.close()
@@ -207,8 +209,8 @@ def test_semantic_unhide_graph_active_page_hidden_skips_node_not_hidden(tmp_path
     # drift: graph already active but page hidden -> graph is not in from-status (hidden) -> skip, never
     # mutate (mirrors hide's node_not_active for the inverse drift).
     conn = _graph(tmp_path)
-    _write_concept(tmp_path, conn, node_status="hidden", review_status="approved")  # page hidden
-    graph.upsert_node(conn, node_id=NID, node_type="concept", slug=SLUG, status="active")  # graph active
+    _write_item(tmp_path, conn, node_status="hidden", review_status="approved")  # page hidden
+    graph.upsert_node(conn, node_id=NID, node_type="item", slug=SLUG, status="active")  # graph active
     conn.commit()
     _approve_unhide_semantic(tmp_path)
     res = _apply_semantic(tmp_path, conn)
@@ -218,17 +220,17 @@ def test_semantic_unhide_graph_active_page_hidden_skips_node_not_hidden(tmp_path
 
 def _effect_sem(tmp_path, conn, status="approved"):
     item = {"type": "unhide_semantic_page", "status": status,
-            "subject": {"node_id": NID, "page": PAGE}, "context": {"node_type": "concept"}}
+            "subject": {"node_id": NID, "page": PAGE}, "context": {"node_type": "item"}}
     return review_read._effect_unhide_semantic(item, conn, tmp_path / "wiki")
 
 
 def test_semantic_unhide_projector_effected_pending_and_partial(tmp_path):
     conn = _graph(tmp_path)
     # both active -> EFFECTED
-    _write_concept(tmp_path, conn, node_status="active", review_status="none")
+    _write_item(tmp_path, conn, node_status="active", review_status="none")
     assert _effect_sem(tmp_path, conn)[0] == review_read.EFFECTED
     # both hidden -> PENDING_APPLY (still hidden; reopenable)
-    _write_concept(tmp_path, conn, node_status="hidden", review_status="approved")
+    _write_item(tmp_path, conn, node_status="hidden", review_status="approved")
     assert _effect_sem(tmp_path, conn)[0] == review_read.PENDING_APPLY
     conn.close()
 
@@ -236,8 +238,8 @@ def test_semantic_unhide_projector_effected_pending_and_partial(tmp_path):
 @pytest.mark.parametrize("page_status,graph_status", [("active", "hidden"), ("hidden", "active")])
 def test_semantic_unhide_projector_partial_is_unknown(tmp_path, page_status, graph_status):
     conn = _graph(tmp_path)
-    _write_concept(tmp_path, conn, node_status=page_status, review_status="none")
-    graph.upsert_node(conn, node_id=NID, node_type="concept", slug=SLUG, status=graph_status)
+    _write_item(tmp_path, conn, node_status=page_status, review_status="none")
+    graph.upsert_node(conn, node_id=NID, node_type="item", slug=SLUG, status=graph_status)
     conn.commit()
     status, warnings = _effect_sem(tmp_path, conn)
     assert status == review_read.UNKNOWN and warnings == ["partial_unhide_state"]
@@ -247,7 +249,7 @@ def test_semantic_unhide_projector_partial_is_unknown(tmp_path, page_status, gra
 
 def test_semantic_unhide_projector_rejected_and_graph_unavailable(tmp_path):
     conn = _graph(tmp_path)
-    _write_concept(tmp_path, conn, node_status="hidden", review_status="approved")
+    _write_item(tmp_path, conn, node_status="hidden", review_status="approved")
     assert _effect_sem(tmp_path, conn, status="rejected")[0] == review_read.NO_EFFECT_REQUIRED
     conn.close()
     assert _effect_sem(tmp_path, None)[0] == review_read.UNKNOWN     # graph unavailable
@@ -258,8 +260,8 @@ def test_semantic_unhide_projector_rejected_and_graph_unavailable(tmp_path):
 
 def _setup_sem_state(tmp_path, *, page_status, graph_status, review_status="none", rid="rev_u"):
     conn = _graph(tmp_path)
-    _write_concept(tmp_path, conn, node_status=page_status, review_status=review_status)
-    graph.upsert_node(conn, node_id=NID, node_type="concept", slug=SLUG, status=graph_status)
+    _write_item(tmp_path, conn, node_status=page_status, review_status=review_status)
+    graph.upsert_node(conn, node_id=NID, node_type="item", slug=SLUG, status=graph_status)
     conn.commit()
     conn.close()
     _approve_unhide_semantic(tmp_path, rid=rid)
@@ -288,7 +290,7 @@ def test_api_apply_unhides_source_and_semantic_with_summary(client, tmp_path, mo
     _hidden_source(tmp_path)
     _approve_unhide_source(tmp_path, rid="rev_us")
     conn = _graph(tmp_path)
-    _write_concept(tmp_path, conn, node_status="hidden", review_status="approved")
+    _write_item(tmp_path, conn, node_status="hidden", review_status="approved")
     conn.commit()
     conn.close()
     _approve_unhide_semantic(tmp_path, rid="rev_usem")
@@ -305,8 +307,8 @@ def test_graph_only_unhide_completion_triggers_reindex(client, tmp_path, monkeyp
     called = []
     monkeypatch.setattr(main_module.retention, "reindex_keyword", lambda root: called.append(root))
     conn = _graph(tmp_path)
-    _write_concept(tmp_path, conn, node_status="active", review_status="none")   # page already active
-    graph.upsert_node(conn, node_id=NID, node_type="concept", slug=SLUG, status="hidden")  # graph hidden
+    _write_item(tmp_path, conn, node_status="active", review_status="none")   # page already active
+    graph.upsert_node(conn, node_id=NID, node_type="item", slug=SLUG, status="hidden")  # graph hidden
     conn.commit()
     conn.close()
     _approve_unhide_semantic(tmp_path)
@@ -329,7 +331,7 @@ def test_api_unhide_reindex_failure_is_non_clean(client, tmp_path, monkeypatch):
         raise RuntimeError("reindex blew up")
     monkeypatch.setattr(main_module.retention, "reindex_keyword", boom)
     conn = _graph(tmp_path)
-    _write_concept(tmp_path, conn, node_status="hidden", review_status="approved")
+    _write_item(tmp_path, conn, node_status="hidden", review_status="approved")
     conn.commit()
     conn.close()
     _approve_unhide_semantic(tmp_path)
@@ -341,7 +343,7 @@ def test_api_unhide_reindex_failure_is_non_clean(client, tmp_path, monkeypatch):
 def test_unhidden_semantic_page_reenters_search_navigation(client, tmp_path):
     from app.backend import keyword_index
     conn = _graph(tmp_path)
-    _write_concept(tmp_path, conn, node_status="hidden", review_status="approved")
+    _write_item(tmp_path, conn, node_status="hidden", review_status="approved")
     conn.commit()
     conn.close()
     keyword_index.reindex(tmp_path, force=True)
@@ -356,9 +358,10 @@ def test_unhidden_semantic_page_reenters_search_navigation(client, tmp_path):
 def test_unhidden_semantic_node_reenters_search_graph_channel(client, tmp_path):
     from app.backend import graph_read, search
     conn = _graph(tmp_path)
-    _write_concept(tmp_path, conn, node_status="hidden", review_status="approved")
-    seed = "cpt_ssssssssssssssss"
-    graph.upsert_node(conn, node_id=seed, node_type="concept", slug="seed", status="active")
+    _write_item(tmp_path, conn, node_status="hidden", review_status="approved")
+    seed = "itm_ssssssssssssssss"
+    graph.upsert_node(conn, node_id=seed, node_type="item", slug="seed", status="active",
+                      item_type=ITEM_TYPE)
     graph.upsert_assertion(conn, src_id=seed, dst_id=NID, edge_type="related_to",
                            asserted_by="deterministic", status="active")
     conn.commit()
@@ -405,7 +408,7 @@ def test_dry_run_unhide_reindex_failure_is_non_clean(client, tmp_path, monkeypat
         raise RuntimeError("reindex blew up")
     monkeypatch.setattr(main_module.retention, "reindex_keyword", boom)
     conn = _graph(tmp_path)
-    _write_concept(tmp_path, conn, node_status="hidden", review_status="approved")
+    _write_item(tmp_path, conn, node_status="hidden", review_status="approved")
     conn.commit()
     conn.close()
     _approve_unhide_semantic(tmp_path)

@@ -68,14 +68,16 @@ def _seed(root: Path) -> None:
     b0 = "Carve-outs depend on day one readiness and clean data reconciliation."
     _write_chunks(root, "src_bbbbbbbbbbbbbbbb", [_chunk("src_bbbbbbbbbbbbbbbb", 0, b0, 0, page=1)])
 
-    # Typed wiki pages: an active concept (answer_eligible), a candidate concept (not), a source.
-    _write_page(root, "wiki/Concepts/cpt_merger.md", {
-        "type": "concept", "concept_id": "cpt_merger", "title": "Post-merger integration",
+    # Typed wiki pages: an active item (answer_eligible), a candidate item (not), a source.
+    _write_page(root, "wiki/Items/post-merger-integration.md", {
+        "type": "item", "item_id": "itm_merger", "item_type": "method_technique",
+        "title": "Post-merger integration",
         "status": "active", "review_status": "none", "confidence": "high",
         "aliases": ["PMI", "post-merger integration"], "tags": ["mergers"],
     }, "Integrating two companies after a merger to capture synergies.")
-    _write_page(root, "wiki/Concepts/cpt_carveout.md", {
-        "type": "concept", "concept_id": "cpt_carveout", "title": "Carve-out",
+    _write_page(root, "wiki/Items/carve-out.md", {
+        "type": "item", "item_id": "itm_carveout", "item_type": "method_technique",
+        "title": "Carve-out",
         "status": "candidate", "review_status": "pending", "confidence": "low",
         "aliases": [], "tags": [],
     }, "Separating a business unit from its parent.")
@@ -102,7 +104,7 @@ def test_full_build_indexes_chunks_and_typed_pages(tmp_path):
     assert stats.full_rebuild is True
     assert stats.evidence_sources_indexed == 2
     assert stats.evidence_chunks == 3
-    # Two concepts + one source; index.md and log.md (untyped) are skipped.
+    # Two items + one source; index.md and log.md (untyped) are skipped.
     assert stats.navigation_pages_indexed == 3
 
     conn = _conn(tmp_path)
@@ -140,13 +142,17 @@ def test_navigation_answer_eligibility(tmp_path):
     keyword_index.reindex(tmp_path, force=True)
     conn = _conn(tmp_path)
     try:
-        eligible = {
-            r["path"]: r["answer_eligible"]
-            for r in conn.execute("SELECT path, answer_eligible FROM navigation")
-        }
-        assert eligible["wiki/Concepts/cpt_merger.md"] == "1"   # active concept -> eligible
-        assert eligible["wiki/Concepts/cpt_carveout.md"] == "0"  # candidate -> not eligible
+        rows = conn.execute(
+            "SELECT path, answer_eligible, node_id, page_type FROM navigation"
+        ).fetchall()
+        eligible = {r["path"]: r["answer_eligible"] for r in rows}
+        assert eligible["wiki/Items/post-merger-integration.md"] == "1"   # active item -> eligible
+        assert eligible["wiki/Items/carve-out.md"] == "0"  # candidate -> not eligible
         assert eligible["wiki/Sources/src_aaaaaaaaaaaaaaaa.md"] == "0"  # source prose never eligible
+        # Item pages resolve node_id from the `item_id` frontmatter (type item -> item_id).
+        by_path = {r["path"]: r for r in rows}
+        merger = by_path["wiki/Items/post-merger-integration.md"]
+        assert merger["node_id"] == "itm_merger" and merger["page_type"] == "item"
     finally:
         conn.close()
 
@@ -158,12 +164,12 @@ def test_navigation_search_matches_title_summary_aliases(tmp_path):
     try:
         # alias term
         by_alias = conn.execute("SELECT path FROM navigation WHERE navigation MATCH 'PMI'").fetchall()
-        assert [r["path"] for r in by_alias] == ["wiki/Concepts/cpt_merger.md"]
+        assert [r["path"] for r in by_alias] == ["wiki/Items/post-merger-integration.md"]
         # summary term
         by_summary = conn.execute(
             "SELECT path FROM navigation WHERE navigation MATCH 'synergies'"
         ).fetchall()
-        assert "wiki/Concepts/cpt_merger.md" in [r["path"] for r in by_summary]
+        assert "wiki/Items/post-merger-integration.md" in [r["path"] for r in by_summary]
     finally:
         conn.close()
 
@@ -210,7 +216,7 @@ def test_incremental_removes_deleted_source_and_page(tmp_path):
     _seed(tmp_path)
     keyword_index.reindex(tmp_path, force=True)
     (tmp_path / "normalized" / "chunks" / "src_bbbbbbbbbbbbbbbb.jsonl").unlink()
-    (tmp_path / "wiki" / "Concepts" / "cpt_carveout.md").unlink()
+    (tmp_path / "wiki" / "Items" / "carve-out.md").unlink()
     stats = keyword_index.reindex(tmp_path)
 
     assert stats.evidence_sources_removed == 1
@@ -221,7 +227,7 @@ def test_incremental_removes_deleted_source_and_page(tmp_path):
             "SELECT count(*) FROM evidence WHERE source_id = 'src_bbbbbbbbbbbbbbbb'"
         ).fetchone()[0] == 0
         assert conn.execute(
-            "SELECT count(*) FROM navigation WHERE path = 'wiki/Concepts/cpt_carveout.md'"
+            "SELECT count(*) FROM navigation WHERE path = 'wiki/Items/carve-out.md'"
         ).fetchone()[0] == 0
         assert "src_bbbbbbbbbbbbbbbb" not in keyword_index.indexed_source_ids(conn)
     finally:
@@ -321,7 +327,7 @@ def test_validator_fails_on_stale_evidence_source(tmp_path):
 def test_validator_fails_on_stale_navigation_page(tmp_path):
     _seed(tmp_path)
     keyword_index.reindex(tmp_path, force=True)
-    (tmp_path / "wiki" / "Concepts" / "cpt_merger.md").unlink()
+    (tmp_path / "wiki" / "Items" / "post-merger-integration.md").unlink()
     assert validate_index_consistency.main([str(tmp_path)]) == 1
 
 
@@ -347,17 +353,17 @@ def test_validator_fails_on_chunk_fingerprint_drift(tmp_path):
 def test_validator_fails_when_new_page_not_indexed(tmp_path):
     _seed(tmp_path)
     keyword_index.reindex(tmp_path, force=True)
-    _write_page(tmp_path, "wiki/Concepts/cpt_new.md", {
-        "type": "concept", "concept_id": "cpt_new", "title": "New concept",
-        "status": "active", "aliases": [], "tags": [],
-    }, "A freshly authored concept.")
+    _write_page(tmp_path, "wiki/Items/new-item.md", {
+        "type": "item", "item_id": "itm_new", "item_type": "method_technique",
+        "title": "New item", "status": "active", "aliases": [], "tags": [],
+    }, "A freshly authored item.")
     assert validate_index_consistency.main([str(tmp_path)]) == 1
 
 
 def test_validator_fails_on_page_fingerprint_drift(tmp_path):
     _seed(tmp_path)
     keyword_index.reindex(tmp_path, force=True)
-    page = tmp_path / "wiki" / "Concepts" / "cpt_merger.md"
+    page = tmp_path / "wiki" / "Items" / "post-merger-integration.md"
     page.write_text(page.read_text(encoding="utf-8") + "\nEdited body.\n", encoding="utf-8")
     assert validate_index_consistency.main([str(tmp_path)]) == 1
 

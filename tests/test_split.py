@@ -1,4 +1,4 @@
-"""ADR-0052 identity surgery: entity split (split_entity), forward-only — the inverse of merge.
+"""ADR-0052/0059 identity surgery: item split (split_item), forward-only — the inverse of merge.
 
 Split divides one entity-family node's evidence into a surviving primary A (keeps id+name) and a
 freshly-minted spin-off B (candidate). The human partitions A's mentions (spinoff_sources, MOVE) + aliases;
@@ -25,12 +25,12 @@ if str(SCRIPTS) not in sys.path:
 from app.backend import graph, review_read
 from app.backend import main as main_module
 from app.backend.config import get_settings
-from app.workers import concepts, merges, reviews, splits, wiki
-from app.workers.wiki_render import NODE_DIR, parse_frontmatter, render_concept_page
+from app.workers import items, merges, reviews, splits, wiki
+from app.workers.wiki_render import NODE_DIR, parse_frontmatter, render_item_page
 
-A = concepts.node_id("entity", "Washington")
+A = items.node_id("Washington")
 SPINOFF = "George Washington"
-B = concepts.node_id("entity", SPINOFF)
+B = items.node_id(SPINOFF)
 S1, S2, S3 = "src_1111111111111111", "src_2222222222222222", "src_3333333333333333"
 _OLD = "2020-01-01T00:00:00+00:00"
 
@@ -43,12 +43,13 @@ def _graph(tmp_path):
 
 
 def _entity(tmp_path, conn, nid, title, *, status="active", aliases=(), slug=None):
-    slug = slug or concepts._slug(title)
-    graph.upsert_node(conn, node_id=nid, node_type="entity", slug=slug, status=status)
-    page = tmp_path / "wiki" / "Entities" / f"{slug}.md"
+    slug = slug or items._slug(title)
+    graph.upsert_node(conn, node_id=nid, node_type="item", slug=slug, status=status,
+                      item_type="provider_institution")
+    page = tmp_path / "wiki" / "Items" / f"{slug}.md"
     page.parent.mkdir(parents=True, exist_ok=True)
-    page.write_text(render_concept_page({
-        "node_type": "entity", "node_id": nid, "id_field": "entity_id", "title": title,
+    page.write_text(render_item_page({
+        "node_id": nid, "item_type": "provider_institution", "title": title,
         "aliases": list(aliases), "confidence": "low",
         "source_ids": graph.sources_for_node(conn, nid), "status": status,
         "duplicates": graph.active_duplicates(conn, nid),
@@ -71,9 +72,9 @@ def _approve(tmp_path, *, a=A, spinoff_name=SPINOFF, sources=(S3,), aliases=(), 
              spinoff_id=None):
     d = tmp_path / "reviews" / "approved"
     d.mkdir(parents=True, exist_ok=True)
-    b = spinoff_id if spinoff_id is not None else concepts.node_id("entity", spinoff_name)
+    b = spinoff_id if spinoff_id is not None else items.node_id(spinoff_name)
     (d / f"{rid}.json").write_text(json.dumps({
-        "review_id": rid, "type": "split_entity", "status": "approved",
+        "review_id": rid, "type": "split_item", "status": "approved",
         "subject": {"node_id": a, "spinoff_node_id": b},
         "proposal": {"spinoff_name": spinoff_name, "spinoff_sources": list(sources),
                      "spinoff_aliases": list(aliases)}}), encoding="utf-8")
@@ -86,7 +87,7 @@ def _approve_raw(tmp_path, *, subject, proposal, rid="rev_s"):
     d = tmp_path / "reviews" / "approved"
     d.mkdir(parents=True, exist_ok=True)
     (d / f"{rid}.json").write_text(json.dumps({
-        "review_id": rid, "type": "split_entity", "status": "approved",
+        "review_id": rid, "type": "split_item", "status": "approved",
         "subject": subject, "proposal": proposal}), encoding="utf-8")
     return rid
 
@@ -95,7 +96,7 @@ def _apply(tmp_path, conn):
     return splits.apply_splits(conn, tmp_path / "reviews", wiki_dir=tmp_path / "wiki")
 
 
-def _fm(tmp_path, slug, node_type="entity"):
+def _fm(tmp_path, slug, node_type="item"):
     return parse_frontmatter((tmp_path / "wiki" / NODE_DIR[node_type] / f"{slug}.md").read_text())
 
 
@@ -119,7 +120,7 @@ def test_clean_split(tmp_path):
     assert graph.sources_for_node(conn, B) == [S3]                  # S3 moved to B
     assert set(graph.sources_for_node(conn, A)) == {S1, S2}         # A keeps the rest
     assert graph.get_node(conn, A)["status"] == "active"            # A status unchanged
-    fm_b = _fm(tmp_path, concepts._slug(SPINOFF))
+    fm_b = _fm(tmp_path, items._slug(SPINOFF))
     assert fm_b["split_from"] == A and fm_b["split_review_id"] == "rev_s"
     # spin-off name auto-moved off A's aliases (it was an A alias); the other alias stays
     fm_a = _fm(tmp_path, "washington")
@@ -153,7 +154,7 @@ def test_moved_aliases_partition(tmp_path):
     _approve(tmp_path, sources=[S2], aliases=["GW", "Potomac"])
     _apply(tmp_path, conn)
     assert set(_fm(tmp_path, "washington")["aliases"]) == {"DC"}   # moved aliases removed from A
-    assert set(_fm(tmp_path, concepts._slug(SPINOFF))["aliases"]) == {"GW", "Potomac"}  # present on B
+    assert set(_fm(tmp_path, items._slug(SPINOFF))["aliases"]) == {"GW", "Potomac"}  # present on B
     conn.close()
 
 
@@ -214,7 +215,8 @@ def test_target_spinoff_id_exists_other_identity(tmp_path):
     # the spin-off id is occupied by an UNRELATED node (no matching split lineage) -> virgin gate blocks.
     conn = _graph(tmp_path)
     _full(tmp_path, conn)
-    graph.upsert_node(conn, node_id=B, node_type="entity", slug=concepts._slug(SPINOFF), status="active")
+    graph.upsert_node(conn, node_id=B, node_type="item", slug=items._slug(SPINOFF), status="active",
+                      item_type="provider_institution")
     conn.commit()
     _approve(tmp_path, sources=[S3])
     assert _apply(tmp_path, conn)["skipped"] == [{"review_id": "rev_s", "reason": "target_spinoff_id_exists"}]
@@ -235,7 +237,7 @@ def test_invalid_proposal_missing_name(tmp_path):
 def test_spinoff_id_mismatch(tmp_path):
     conn = _graph(tmp_path)
     _full(tmp_path, conn)
-    _approve(tmp_path, sources=[S3], spinoff_id="ent_deadbeefdeadbeef")   # wrong precomputed id
+    _approve(tmp_path, sources=[S3], spinoff_id="itm_deadbeefdeadbeef")   # wrong precomputed id
     assert _apply(tmp_path, conn)["skipped"] == [{"review_id": "rev_s", "reason": "spinoff_id_mismatch"}]
     conn.close()
 
@@ -248,21 +250,22 @@ def test_spinoff_equals_primary(tmp_path):
     conn.close()
 
 
-@pytest.mark.parametrize("status", ["deprecated_candidate", "hidden", "archived", "merged", "rekeyed"])
+@pytest.mark.parametrize("status", ["deprecated_candidate", "hidden", "archived", "merged"])
 def test_node_not_splittable(tmp_path, status):
     conn = _graph(tmp_path)
-    graph.upsert_node(conn, node_id=A, node_type="entity", slug="washington", status=status)
+    graph.upsert_node(conn, node_id=A, node_type="item", slug="washington", status=status,
+                      item_type="provider_institution")
     conn.commit()
     _approve(tmp_path, sources=[S3])
     assert _apply(tmp_path, conn)["skipped"] == [{"review_id": "rev_s", "reason": "node_not_splittable"}]
     conn.close()
 
 
-def test_out_of_scope_concept_subject(tmp_path):
+def test_out_of_scope_non_item_subject(tmp_path):
     conn = _graph(tmp_path)
-    C = concepts.node_id("concept", "Idea")
-    graph.upsert_node(conn, node_id=C, node_type="concept", slug="idea", status="active")
-    conn.commit()
+    C = items.node_id("Idea")                                      # canonical itm_ shape...
+    graph.upsert_node(conn, node_id=C, node_type="claim", slug="idea", status="active")
+    conn.commit()                                                  # ...but not an item node
     _approve(tmp_path, a=C, sources=[S3])
     assert _apply(tmp_path, conn)["skipped"] == [{"review_id": "rev_s", "reason": "out_of_scope"}]
     conn.close()
@@ -332,7 +335,7 @@ def test_malformed_proposal_is_typed_skip_not_raise(tmp_path, proposal, reason):
 def test_target_spinoff_page_exists(tmp_path):
     conn = _graph(tmp_path)
     _full(tmp_path, conn)
-    orphan = tmp_path / "wiki" / "Entities" / f"{concepts._slug(SPINOFF)}.md"
+    orphan = tmp_path / "wiki" / "Items" / f"{items._slug(SPINOFF)}.md"
     orphan.write_text("orphan page\n", encoding="utf-8")           # page but no graph node
     _approve(tmp_path, sources=[S3])
     assert _apply(tmp_path, conn)["skipped"] == [{"review_id": "rev_s", "reason": "target_spinoff_page_exists"}]
@@ -365,7 +368,7 @@ def test_approved_unapplied_references_primary(tmp_path):
     d.mkdir(parents=True, exist_ok=True)
     (d / f"{a_promo}.json").write_text(json.dumps({
         "review_id": a_promo, "type": "promote_candidate_node", "status": "approved",
-        "subject": {"node_id": A}, "proposal": {"to_status": "active", "node_type": "entity"}}),
+        "subject": {"node_id": A}, "proposal": {"to_status": "active", "item_type": "provider_institution"}}),
         encoding="utf-8")
     _approve(tmp_path, sources=[S2])
     assert _apply(tmp_path, conn)["skipped"] == [
@@ -409,7 +412,8 @@ def test_projector_half_mint_partial_move_is_unknown(tmp_path):
     _full(tmp_path, conn)
     _approve(tmp_path, sources=[S3])
     # B minted but the mention NOT moved (crash before repoint) -> partial
-    graph.upsert_node(conn, node_id=B, node_type="entity", slug=concepts._slug(SPINOFF), status="candidate")
+    graph.upsert_node(conn, node_id=B, node_type="item", slug=items._slug(SPINOFF), status="candidate",
+                      item_type="provider_institution")
     conn.commit()
     st, warns = review_read._effect_split(_item(tmp_path), conn, tmp_path / "wiki")
     assert st == review_read.UNKNOWN and "partial_split_state" in warns
@@ -441,9 +445,9 @@ def test_split_from_preserved_across_recompose(tmp_path):
     _approve(tmp_path, sources=[S3])
     _apply(tmp_path, conn)
     # a later recompose of B (e.g. deprecation/hide seam) must keep split_from/split_review_id
-    concepts.recompose_semantic_node_page(conn, node_id=B, wiki_dir=tmp_path / "wiki",
+    items.recompose_semantic_node_page(conn, node_id=B, wiki_dir=tmp_path / "wiki",
                                           status="candidate", review_status="none")
-    fm_b = _fm(tmp_path, concepts._slug(SPINOFF))
+    fm_b = _fm(tmp_path, items._slug(SPINOFF))
     assert fm_b["split_from"] == A and fm_b["split_review_id"] == "rev_s"
     conn.close()
 
@@ -465,12 +469,12 @@ def test_rollback_via_merge_after_promotion(tmp_path):
     _approve(tmp_path, sources=[S3])
     _apply(tmp_path, conn)
     # promote B to active (its page + node) so merge (active-only) can absorb it
-    concepts.recompose_semantic_node_page(conn, node_id=B, wiki_dir=tmp_path / "wiki",
+    items.recompose_semantic_node_page(conn, node_id=B, wiki_dir=tmp_path / "wiki",
                                           status="active", review_status="none")
     conn.commit()
     d = tmp_path / "reviews" / "approved"
     (d / "rev_merge.json").write_text(json.dumps({
-        "review_id": "rev_merge", "type": "merge_entities", "status": "approved",
+        "review_id": "rev_merge", "type": "merge_items", "status": "approved",
         "subject": {"survivor_node_id": A, "absorbed_node_id": B},
         "proposal": {"to_status": "merged"}}), encoding="utf-8")
     merges.apply_merges(conn, tmp_path / "reviews", wiki_dir=tmp_path / "wiki")
@@ -507,22 +511,22 @@ def test_e2e_source_fanout_and_validate_projection(tmp_path):
     # and the full graph<->wiki projection must validate clean.
     import validate_projection
     conn = _graph(tmp_path)
-    _full(tmp_path, conn)                                          # entity A (active) + mentions S1,S2,S3 -> A
+    _full(tmp_path, conn)                                          # item A (active) + mentions S1,S2,S3 -> A
     shutil.copytree(ROOT / "templates", tmp_path / "templates", dirs_exist_ok=True)
     for s in (S1, S2, S3):
         _real_source(tmp_path, s)
     wiki.generate_wiki(tmp_path, source_ids=[S1, S2, S3], rebuild_index=False, record_job=False)
-    assert "[[Entities/washington|" in (tmp_path / "wiki" / "Sources" / f"{S3}.md").read_text()  # initially -> A
+    assert "[[Items/washington|" in (tmp_path / "wiki" / "Sources" / f"{S3}.md").read_text()  # initially -> A
 
     _approve(tmp_path, sources=[S3])
-    _apply(tmp_path, conn)                                         # split: S3 -> B; A & B entity pages re-rendered
+    _apply(tmp_path, conn)                                         # split: S3 -> B; A & B item pages re-rendered
     conn.commit()
     wiki.generate_wiki(tmp_path, source_ids=[S3], rebuild_index=False, record_job=False)   # caller's fan-out
     conn.close()
 
     s3_page = (tmp_path / "wiki" / "Sources" / f"{S3}.md").read_text()
-    assert "[[Entities/george-washington|" in s3_page             # moved Source page now links the spin-off B
-    assert "[[Entities/washington|" not in s3_page                # ...and dropped the primary A
+    assert "[[Items/george-washington|" in s3_page             # moved Source page now links the spin-off B
+    assert "[[Items/washington|" not in s3_page                # ...and dropped the primary A
     assert validate_projection.main([str(tmp_path)]) == 0         # graph<->wiki projection consistent
 
 

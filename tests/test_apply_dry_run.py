@@ -143,30 +143,30 @@ def test_build_sandbox_copies_writes_readonly_and_referenced_raw(tmp_path):
 
 def test_diff_states_graph_wiki_manifest_and_noop(tmp_path):
     before = apply_sandbox.StateSnapshot(
-        nodes={"cpt_x": {"type": "concept", "status": "active"}},
+        nodes={"itm_x": {"type": "item", "item_type": "method_technique", "status": "active"}},
         edges={"e1": {"src": "clm_a", "rel": "contradicts", "dst": "clm_b",
                       "status": "proposed", "review_id": "rev_1"}},
-        wiki={"wiki/Concepts/x.md": "old\n"},
+        wiki={"wiki/Items/x.md": "old\n"},
         reviews={"rev_d": "approved"},
         manifests={"src_b": "active"})
     after = apply_sandbox.StateSnapshot(
-        nodes={"cpt_x": {"type": "concept", "status": "deprecated_candidate"}},
+        nodes={"itm_x": {"type": "item", "item_type": "method_technique", "status": "deprecated_candidate"}},
         # same edge_id, status flipped proposed -> rejected (NOT an active-set change)
         edges={"e1": {"src": "clm_a", "rel": "contradicts", "dst": "clm_b",
                       "status": "rejected", "review_id": "rev_1"}},
-        wiki={"wiki/Concepts/x.md": "new\n"},
+        wiki={"wiki/Items/x.md": "new\n"},
         reviews={"rev_d": None},  # moved out of approved
         manifests={"src_b": "archive_candidate"})
     diff = apply_sandbox.diff_states(before, after)
     assert diff["graph"]["nodes_status_changed"] == [
-        {"id": "cpt_x", "type": "concept", "from": "active", "to": "deprecated_candidate"}]
+        {"id": "itm_x", "type": "item", "from": "active", "to": "deprecated_candidate"}]
     # the governed status transition is reported even though the active set never changed
     assert diff["graph"]["edges_status_changed"] == [
         {"src": "clm_a", "rel": "contradicts", "dst": "clm_b",
          "from": "proposed", "to": "rejected", "review_id": "rev_1"}]
     assert diff["manifests"] == [{"source_id": "src_b", "field": "status",
                                   "from": "active", "to": "archive_candidate"}]
-    assert diff["wiki"][0]["path"] == "wiki/Concepts/x.md" and "+new" in diff["wiki"][0]["unified_diff"]
+    assert diff["wiki"][0]["path"] == "wiki/Items/x.md" and "+new" in diff["wiki"][0]["unified_diff"]
     assert not apply_sandbox.diff_is_empty(diff)
     # identical snapshots -> empty
     assert apply_sandbox.diff_is_empty(apply_sandbox.diff_states(before, before))
@@ -251,14 +251,14 @@ def test_dry_run_parity_with_real_apply(client, tmp_path):
 
 def test_dry_run_graph_unavailable_blocked_mirrors_503(client, tmp_path):
     # An approved graph-required item with NO graph: dry-run is blocked, live apply 503s — same refusal.
-    page = tmp_path / "wiki" / "Concepts" / "thing.md"
+    page = tmp_path / "wiki" / "Items" / "thing.md"
     page.parent.mkdir(parents=True, exist_ok=True)
-    page.write_text('---\ntype: concept\nconcept_id: "cpt_x"\ntitle: "T"\nstatus: active\n'
+    page.write_text('---\ntype: item\nitem_id: "itm_x"\nitem_type: method_technique\ntitle: "T"\nstatus: active\n'
                     "review_status: none\n---\n", encoding="utf-8")
     _approve(tmp_path, {"review_id": "rev_d", "type": "deprecate_wiki_page", "status": "approved",
-                        "subject": {"node_id": "cpt_x", "page": "Concepts/thing.md"},
+                        "subject": {"node_id": "itm_x", "page": "Items/thing.md"},
                         "proposal": {"to_status": "deprecated_candidate", "reason": "x"},
-                        "context": {"node_type": "concept"}})
+                        "context": {"node_type": "item"}})
 
     dry = client.post("/reviews/apply/dry-run").json()
     assert dry["status"] == "blocked" and dry["reason"] == "graph_unavailable"
@@ -294,9 +294,9 @@ def test_dry_run_runs_scripts_validators_and_catches_failure(client, tmp_path):
     _rendered_source(tmp_path, "src_0000000000000c33")
     _graph_source_node(tmp_path, "src_0000000000000c33")
     _approve_archive(tmp_path, "src_0000000000000c33")  # a real change -> rebuild + validate run
-    bad = tmp_path / "wiki" / "Concepts" / "bad.md"
+    bad = tmp_path / "wiki" / "Items" / "bad.md"
     bad.parent.mkdir(parents=True, exist_ok=True)
-    bad.write_text("---\ntype: concept\n---\n\nNo summary, missing required fields.\n", encoding="utf-8")
+    bad.write_text("---\ntype: item\n---\n\nNo summary, missing required fields.\n", encoding="utf-8")
 
     dry = client.post("/reviews/apply/dry-run").json()
     assert dry["status"] == "validation_failed"

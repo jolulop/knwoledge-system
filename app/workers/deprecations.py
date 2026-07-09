@@ -8,7 +8,7 @@ genuinely new executor Phase 6 ships, because `deprecate_wiki_page` is the domin
 existing producers don't apply it.
 
 Scope (the dominant review type would otherwise be un-actionable, but identity/raw types stay deferred):
-- **In scope:** Claim pages and the concept/entity family (`concept/entity/person/organization/project`).
+- **In scope:** Claim pages and knowledge items (`Items/`, ADR-0059).
 - **Out of scope (skipped with a typed reason):** `Synthesis/` (owned by the synthesis apply path),
   `Sources/`/`Queries/`/`Tags/`, and any raw-delete/archive/hide type.
 
@@ -29,7 +29,7 @@ from typing import Any
 
 from app.backend import graph
 from app.backend.manifests import iso_now
-from app.workers import claims, concepts
+from app.workers import claims, items
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter
 
 # A well-formed wiki page is exactly `<Dir>/<file>.md` — one directory segment, one filename, no path
@@ -42,7 +42,7 @@ _WIKI_PAGE_RE = re.compile(r"[A-Za-z]+/[^/\\\n]+\.md")
 # Page directory -> node type (canonical reverse of NODE_DIR; no ad-hoc singularization).
 _DIR_TO_NODE_TYPE = {dir_name: node_type for node_type, dir_name in NODE_DIR.items()}
 # Node types the deprecation executor may apply in v1 (claim + concept/entity family).
-_IN_SCOPE_TYPES = frozenset({"claim", "concept", "entity", "person", "organization", "project"})
+_IN_SCOPE_TYPES = frozenset({"claim", "item"})
 # recompose_claim success outcomes (an evidenced deprecation writes "written"; a no-evidence claim
 # renders its tombstone and returns "tombstoned" — both leave the page deprecated_candidate).
 _CLAIM_SUCCESS = frozenset({"written", "tombstoned"})
@@ -71,7 +71,7 @@ def _deprecate_page(gconn, node_type: str, node_id: str, *, wiki_dir: Path, clai
         return claims.recompose_claim(
             gconn, cid=node_id, claims_dir=claims_dir, reviews_dir=reviews_dir,
             markdown_dir=markdown_dir, now=now, deprecate=True, review_status="approved")
-    return concepts.recompose_semantic_node_page(
+    return items.recompose_semantic_node_page(
         gconn, node_id=node_id, wiki_dir=wiki_dir, status="deprecated_candidate",
         review_status="approved", now=now)
 
@@ -155,9 +155,9 @@ def apply_approved_deprecations(
             "changed_pages": changed_pages, "graph_changed": bool(applied or normalized)}
 
 
-# v1 semantic-hide scope: the concept/entity family only (the single recompose_semantic_node_page seam).
+# v1 semantic-hide scope: knowledge items only (the single recompose_semantic_node_page seam).
 # claim (recompose_claim) + synthesis (separate executor) are deferred fast-follows (ADR-0046 decision 1).
-_HIDE_SEMANTIC_SCOPE_TYPES = frozenset({"concept", "entity", "person", "organization", "project"})
+_HIDE_SEMANTIC_SCOPE_TYPES = frozenset({"item"})
 
 
 def _apply_semantic_visibility_transition(
@@ -232,7 +232,7 @@ def _apply_semantic_visibility_transition(
             skipped.append({"review_id": rid, "reason": not_in_from_reason})
             continue
 
-        outcome = concepts.recompose_semantic_node_page(
+        outcome = items.recompose_semantic_node_page(
             gconn, node_id=nid, wiki_dir=wiki_dir, status=to_status, review_status=to_review_status, now=now)
         # "written" = page changed; "unchanged" = page already matched but the graph-node mirror still
         # ran (both are SUCCESS — the mirror is the point); anything else is a typed skip reason.

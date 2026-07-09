@@ -1,6 +1,6 @@
 """ADR-0048 claim visibility: hide_claim / unhide_claim (evidence-derived status + backlink re-render).
 
-Claims differ from concepts: status is evidence-derived (recompose_claim), a hidden status must be
+Claims differ from items: status is evidence-derived (recompose_claim), a hidden status must be
 preserved across re-render, unhide re-derives (active|tombstone), and a hidden partner is omitted from
 the rendered "Contradicting Claims" section (the edge stays active).
 """

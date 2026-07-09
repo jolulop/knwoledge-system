@@ -17,6 +17,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from app.backend import taxonomy
+
 SCHEMA_VERSION = "enrich-summary-tags-v1"
 PROMPT_VERSION = "enrich-summary-tags-prompt-v1"
 # Phase 3.5b claim-extraction pass (separate artifact + versions, tier-2).
@@ -24,33 +26,34 @@ PROMPT_VERSION = "enrich-summary-tags-prompt-v1"
 # states "segment i of N" + local section context).
 CLAIM_SCHEMA_VERSION = "enrich-claims-v1"
 CLAIM_PROMPT_VERSION = "enrich-claims-prompt-v2"
-# Phase 3.5b concept/entity extraction pass. v2 = the ADR-0055 tier-2 extraction contract
-# (concept elicitation band + entity-noise boundary); v3 = the ADR-0056 entity soft band
-# (typically up to ~25 central entities — full-document input made unbounded entity output a
-# truncation + review-flood risk). Each bump makes every prior artifact stale, so the next
-# extract_concepts run re-extracts opt-in — no --force machinery.
-CONCEPT_SCHEMA_VERSION = "enrich-concepts-v1"
-CONCEPT_PROMPT_VERSION = "enrich-concepts-prompt-v3"
+# Tier-2 knowledge-item extraction pass (ADR-0059): ONE items array classified by
+# knowledge-object role, replacing the concepts/entities two-array contract of
+# ADR-0055/0056 (fresh version lineage — the clean-repository restart means there is no
+# prior artifact to stay compatible with). The elicitation contract, noise boundaries, and
+# full-doc coverage strategy carry over. Each bump makes every prior artifact stale, so the
+# next extract_items run re-extracts opt-in — no --force machinery.
+ITEMS_SCHEMA_VERSION = "enrich-items-v1"
+ITEMS_PROMPT_VERSION = "enrich-items-prompt-v1"
 
 # ADR-0056 extraction-strategy identity. The strategy ref is the explicit coverage component
 # of tier-2 identity — composed alongside (never folded into) schema/prompt versions in both
 # the artifact freshness fingerprint and the response-cache key. The knob VALUES are part of
-# the ref: changing `ENRICH_CLAIM_WINDOW_CHARS` / `ENRICH_CONCEPT_INPUT_MAX_CHARS` restales
+# the ref: changing `ENRICH_CLAIM_WINDOW_CHARS` / `ENRICH_ITEMS_INPUT_MAX_CHARS` restales
 # that pass vault-wide (cost-bearing semantic knobs, ADR-0033 config-ref precedent).
 CLAIM_WINDOW_STRATEGY = "chunk-greedy-v1"
-CONCEPT_COVERAGE_STRATEGY = "full-doc-v1"
+ITEMS_COVERAGE_STRATEGY = "full-doc-v1"
 
 
 def claims_strategy_ref(window_chars: int) -> str:
     return f"{CLAIM_WINDOW_STRATEGY}:{window_chars}"
 
 
-def concepts_strategy_ref(input_max_chars: int) -> str:
-    return f"{CONCEPT_COVERAGE_STRATEGY}:{input_max_chars}"
+def items_strategy_ref(input_max_chars: int) -> str:
+    return f"{ITEMS_COVERAGE_STRATEGY}:{input_max_chars}"
 # Phase 3.5c contradiction-detection pass (tier-3; per claim pair, response-cache replayed).
 CONTRADICTION_SCHEMA_VERSION = "enrich-contradiction-v1"
 CONTRADICTION_PROMPT_VERSION = "enrich-contradiction-prompt-v1"
-# Phase 3.5c cross-source synthesis pass (tier-3; per active concept/entity).
+# Phase 3.5c cross-source synthesis pass (tier-3; per active knowledge item).
 SYNTHESIS_SCHEMA_VERSION = "enrich-synthesis-v1"
 SYNTHESIS_PROMPT_VERSION = "enrich-synthesis-prompt-v1"
 
@@ -107,36 +110,37 @@ def claims_fingerprint(normalized_markdown: str, model_ref: str,
                         CLAIM_PROMPT_VERSION, strategy_ref)
 
 
-def concepts_artifact_path(enrichment_dir: Path, source_id: str) -> Path:
-    return Path(enrichment_dir) / f"{source_id}.concepts.json"
+def items_artifact_path(enrichment_dir: Path, source_id: str) -> Path:
+    return Path(enrichment_dir) / f"{source_id}.items.json"
 
 
-def concepts_fingerprint(normalized_markdown: str, model_ref: str,
-                         strategy_ref: str | None = None) -> str:
-    return _fingerprint(normalized_markdown, model_ref, CONCEPT_SCHEMA_VERSION,
-                        CONCEPT_PROMPT_VERSION, strategy_ref)
+def items_fingerprint(normalized_markdown: str, model_ref: str,
+                      strategy_ref: str | None = None) -> str:
+    return _fingerprint(normalized_markdown, model_ref, ITEMS_SCHEMA_VERSION,
+                        ITEMS_PROMPT_VERSION, strategy_ref)
 
 
-# --- concept starvation (ADR-0055) -----------------------------------------
+# --- topic starvation (ADR-0059, redefining ADR-0055's concept starvation) --
 #
-# The F1 failure signature: a substantive document extracts zero concepts. The predicate reads
-# existing artifact/claim state ONLY — never raw text length or normalized text shape (that would
-# reopen the "substantive document" classifier problem). The threshold is a module constant, not
-# config: a quality heuristic; configurability would add noise before operational evidence exists.
-CONCEPT_STARVATION_ENTITY_THRESHOLD = 5
-_ENTITY_FAMILY_TYPES = ("entity", "person", "organization", "project")
+# The F1 failure signature generalized: a substantive document extracts no thematic topic
+# layer. The predicate reads existing artifact/claim state ONLY — never raw text length or
+# normalized text shape (that would reopen the "substantive document" classifier problem).
+# The threshold is a module constant, not config: a quality heuristic; configurability would
+# add noise before operational evidence exists.
+TOPIC_STARVATION_NAMED_THRESHOLD = 5
 
 
-def concept_starved(nodes: list[dict[str, Any]], claim_count: int) -> bool:
-    """True when a concepts artifact's node list shows the F1 pattern for a source.
+def topic_starved(nodes: list[dict[str, Any]], claim_count: int) -> bool:
+    """True when an items artifact's node list shows the starvation pattern for a source.
 
-    `concepts == 0 AND (entity_family >= threshold OR claims >= 1)` — one stored claim proves
-    semantic substance; many entities without concepts is the starvation signature. A degenerate
-    document (no entities, no claims) is not starved.
+    `thematic == 0 AND (named >= threshold OR claims >= 1)` — one stored claim proves
+    semantic substance; many named items without a thematic layer is the starvation
+    signature. The sentinel counts toward NEITHER group; a degenerate document (no named
+    items, no claims) is not starved.
     """
-    concepts = sum(1 for n in nodes if n.get("node_type") == "concept")
-    entity_family = sum(1 for n in nodes if n.get("node_type") in _ENTITY_FAMILY_TYPES)
-    return concepts == 0 and (entity_family >= CONCEPT_STARVATION_ENTITY_THRESHOLD
+    thematic = sum(1 for n in nodes if n.get("item_type") in taxonomy.THEMATIC_TYPES)
+    named = sum(1 for n in nodes if n.get("item_type") in taxonomy.NAMED_TYPES)
+    return thematic == 0 and (named >= TOPIC_STARVATION_NAMED_THRESHOLD
                               or claim_count >= 1)
 
 

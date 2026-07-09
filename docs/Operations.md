@@ -26,15 +26,15 @@ private network / sidecar behind a TLS/auth proxy) and is **not** a substitute f
 
 | Pass | Endpoint | Script-equivalent | What it does |
 |---|---|---|---|
-| **Lint** | `POST /jobs/lint` | — | Structural validators + semantic checks (orphan/under-supported concept, uncited claim, **missing raw**) + quality heuristics (**summary rot**, **stale claim citations**, **concept starvation**) → health report + governance review items. |
+| **Lint** | `POST /jobs/lint` | — | Structural validators + semantic checks (orphan/under-supported item, uncited claim, **missing raw**) + quality heuristics (**summary rot**, **stale claim citations**, **topic starvation**) → health report + governance review items. |
 | **Stale / retention** | `POST /jobs/stale-check` | — | Stale sources → `archive_source` candidates; ephemeral past window → `delete_raw_file` (record-only); **LLM-cache** over TTL/size → `purge_response_cache` (record-only). Reports **live cache stats** every run. |
 | **Reindex** | `POST /jobs/reindex` | `scripts/rebuild_index.py` + `scripts/reindex_keyword.py` | Rebuild `wiki/index.md` + refresh the keyword index. **Never the vector index.** |
 | **Backup** | — | `scripts/backup.py` | Snapshot manifests, db (incl. graph), wiki, reviews, policies. |
 | **Review reconciliation** | — | `scripts/reconcile_reviews.py` | Withdraw extraction-stale unresolved review items (ADR-0057): pending/deferred promotes for tombstoned/missing nodes, recompose-provenance deprecations for resurrected nodes. Idempotent, audited per withdrawal; never touches approved/rejected. **Preflight fail-closed** (exits non-zero, withdraws nothing) on missing/empty/schema-mismatched graph DB or graph↔wiki status drift over the reviewed nodes. |
-| **Apply** (human-gated) | `POST /reviews/apply` | — | Deterministically apply *approved* decisions: promotion, contradiction, synthesis, deprecation, **archive** (`active→archive_candidate`), **duplicate annotation** (`mark_semantic_duplicate` → `## Duplicates`, ADR-0041), the **visibility family** — hide/unhide for sources (`hide_content`/`unhide_content`, ADR-0043/0047), semantic pages (`hide_semantic_page`/`unhide_semantic_page`, ADR-0046/0047), claims (ADR-0048) and synthesis (ADR-0049, `evidence_hidden`) — and the **identity-surgery family** — `merge_entities`/`merge_concepts` (ADR-0050), `change_entity_subtype` subtype rekey (ADR-0051), and `split_entity` (ADR-0052). |
+| **Apply** (human-gated) | `POST /reviews/apply` | — | Deterministically apply *approved* decisions: promotion, contradiction, synthesis, deprecation, **archive** (`active→archive_candidate`), **duplicate annotation** (`mark_semantic_duplicate` → `## Duplicates`, ADR-0041), the **visibility family** — hide/unhide for sources (`hide_content`/`unhide_content`, ADR-0043/0047), semantic pages (`hide_semantic_page`/`unhide_semantic_page`, ADR-0046/0047), claims (ADR-0048) and synthesis (ADR-0049, `evidence_hidden`) — the **identity-surgery family** — `merge_items` (ADR-0050/0059) and `split_item` (ADR-0052/0059) — and the non-rekeying **`change_item_type`** classification flip (ADR-0059). |
 | **Apply preview** (dry-run) | `POST /reviews/apply/dry-run` | — | Apply-on-a-copy preview (ADR-0040): runs the same executors against a throwaway sandbox and returns the semantic mutation diff (graph/wiki/reviews/manifests) **without touching live state**. `GET /ui/reviews/apply` renders it before enabling Apply. |
 
-Maintenance passes are **key-free**. Only the LLM *producers* (claims/concepts/contradictions/synthesis)
+Maintenance passes are **key-free**. Only the LLM *producers* (claims/items/contradictions/synthesis)
 and `POST /query` need `ANTHROPIC_API_KEY`.
 
 ### Executor-backed review types (`POST /reviews/apply`)
@@ -45,19 +45,19 @@ honestly under `unapplied` (record-only / raw-touching).
 
 | Review type | ADR | Effect on apply |
 |---|---|---|
-| `promote_candidate_node` | 0018/0035 | Candidate concept/entity → `active`. |
+| `promote_candidate_node` | 0018/0035/0059 | Candidate knowledge item → `active` (an unclassified-sentinel candidate needs an `item_type` amendment first). |
 | `resolve_contradiction` | 0031 | Acknowledge / supersede / reject a `contradicts` edge. |
 | `propose_synthesis` | 0031 | Activate a `candidate` synthesis node. |
 | `deprecate_wiki_page` | 0035 | Scoped page deprecation → `deprecated_candidate`. |
 | `archive_source` | 0036 | Source `active` → `archive_candidate` (raw bytes untouched; manifest status flips). |
 | `mark_semantic_duplicate` | 0041 | `## Duplicates` annotation edge (no id rewrite). |
 | `hide_content` / `unhide_content` | 0043 / 0047 | Hide / unhide a source. |
-| `hide_semantic_page` / `unhide_semantic_page` | 0046 / 0047 | Hide / unhide a concept/entity page. |
+| `hide_semantic_page` / `unhide_semantic_page` | 0046 / 0047 | Hide / unhide an item page. |
 | `hide_claim` / `unhide_claim` | 0048 | Hide / unhide a claim. |
 | `hide_synthesis` / `unhide_synthesis` | 0049 | Hide / unhide a synthesis (`evidence_hidden`). |
-| `merge_entities` / `merge_concepts` | 0050 | Merge two same-type nodes (survivor + tombstone). |
-| `change_entity_subtype` | 0051 | Entity subtype rekey (id-prefix + directory change). |
-| `split_entity` | 0052 | Split an entity into a surviving primary + a minted spin-off. |
+| `merge_items` | 0050/0059 | Merge two knowledge items (survivor + tombstone; survivor keeps its own item_type). |
+| `change_item_type` | 0059 | Governed classification flip — page `item_type` + graph mirror; id, page path, and edges unchanged. |
+| `split_item` | 0052/0059 | Split an item into a surviving primary + a minted spin-off (spin-off inherits the primary's item_type). |
 
 ## Cron recipe (example)
 
@@ -82,12 +82,13 @@ Each pass writes a job row to `db/jobs.sqlite` and appends `wiki/log.md`, so pro
 (state is on disk, never chat context). **Review the queue** (`/ui/reviews`) and **apply** on your own
 cadence — nothing is applied automatically. For high-volume candidate review, the **per-source flow**
 (`/ui/reviews/sources`, ADR-0058) walks the sources in ingest order — each screen batch-decides that
-source's promotes/subtype changes/retirements, supports approve-with-amendments (title/aliases/
-description) and human-added candidates; the flat queue stays canonical for everything cross-source.
+source's promotes/type changes/retirements, supports approve-with-amendments (title/aliases/
+description/item_type — item_type is required to clear an unclassified-sentinel candidate) and
+human-added candidates; the flat queue stays canonical for everything cross-source.
 A human-added candidate rebuilds `wiki/index.md` immediately; its **keyword** rows follow the next
 reindex pass (`/jobs/reindex` or the apply chain) like every other producer's output.
 
-## Lint quality heuristics — remediation codes (ADR-0037, ADR-0055)
+## Lint quality heuristics — remediation codes (ADR-0037, ADR-0059)
 
 `/jobs/lint` also reports **report-only** quality findings (deterministic, key-free; they never file
 review items and never turn lint `failing` on their own — they surface as maintenance debt in `by_check`).
@@ -98,7 +99,7 @@ Each finding carries a stable `data.remediation` code; act on it by re-running a
 | `summary_rot` | low | An enriched Source summary's artifact fingerprint no longer matches the current normalized markdown / configured summary model. | `rerun_enrich` → run enrichment for the source(s): `uv run python scripts/enrich.py` (needs the configured enrichment provider's API key — provider/model-dependent). |
 | `stale_claim_citation` | medium | A claim's stored citation quote no longer grounds at its anchor in the current markdown. | `rerun_extract_claims` → re-run extraction + claim maintenance: `uv run python scripts/extract_claims.py` (needs the configured provider's key; stages the replacement claim set before superseding — a failed run preserves the existing layer and validators stay red until a run succeeds, ADR-0056). |
 | `synthesis_rot` | low | An active synthesis's topic evidence (claims/citations/disagreements) drifted since approval — its artifact fingerprint no longer matches the current topic. | `rerun_synthesis` → **`uv run python scripts/generate_synthesis.py --force`** (needs the configured provider's key). `--force` is required: a normal run only *reports* the stale active synthesis (governance gate) and won't rewrite it. |
-| `concept_starvation` | medium | A substantive source extracted zero concepts — its concepts artifact has ≥5 entity-family nodes (or ≥1 stored claim) but no `concept` nodes, suppressing the source's topic layer (ADR-0055). Artifact/claim state only, never text-shape inference. | `rerun_extract_concepts` → re-run the tier-2 pass: `uv run python scripts/extract_concepts.py` (needs the configured provider's key; a prompt/model change makes the artifact stale so a plain run re-extracts). |
+| `topic_starvation` | medium | A substantive source extracted no thematic topic layer — its items artifact has ≥5 named-type items (or ≥1 stored claim) but zero thematic-type items (ADR-0059, redefining ADR-0055's concept starvation). Artifact/claim state only, never text-shape inference. | `rerun_extract_items` → re-run the tier-2 pass: `uv run python scripts/extract_items.py` (needs the configured provider's key; a prompt/model change makes the artifact stale so a plain run re-extracts). |
 
 Three coverage findings (`summary_unverifiable`, `claim_evidence_unverifiable`, `synthesis_unverifiable`,
 low severity) mark lint `degraded` when an enriched page / active claim / active synthesis expects a
