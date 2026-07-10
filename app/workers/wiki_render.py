@@ -159,11 +159,28 @@ def _render_tag_list(tags: list[Any]) -> str:
 _PENDING = "_Pending semantic enrichment._"
 
 
-def _claim_alias(title: str) -> str:
-    """Wikilink-safe display alias for a claim link: de-linked, no `[]|`, collapsed, short."""
+def display_link_label(title: str) -> str:
+    """The rendered link label (ADR-0060 decision 2a): wikilink-safe display text for
+    `[[target|label]]` position — de-linked, no `[]|`, collapsed, capped at 78 chars.
+
+    The single family-wide seam (promoted from the claim-specific `_claim_alias`): every
+    generated link alias flows through here, and the `display_alias_rot` lint compares
+    against THIS rendering of the target's current label — never the raw frontmatter
+    `title:`, which stays full-length for search (the two-layer label contract)."""
     safe = _delink(_WS.sub(" ", str(title))).replace("[", "").replace("]", "").replace("|", " ")
     safe = _WS.sub(" ", safe).strip()
     return (safe[:77].rstrip() + "…") if len(safe) > 78 else safe
+
+
+def _wl(target: str, labels: dict[str, str] | None) -> str:
+    """A wikilink carrying its display alias when the target's label is known (ADR-0060).
+
+    `labels` maps link targets ("Sources/src_x", "Claims/clm_x", "Items/<slug>") to display
+    labels, resolved worker-side (labels.display_labels) so renderers stay IO-free. No label
+    -> bare link, legal under validate_link_aliases only when the target has none resolvable."""
+    label = (labels or {}).get(target, "")
+    rendered = display_link_label(label) if str(label).strip() else ""
+    return f"[[{target}|{rendered}]]" if rendered else f"[[{target}]]"
 
 
 def _link_list(items: list[dict[str, Any]] | None) -> str:
@@ -178,7 +195,7 @@ def _link_list(items: list[dict[str, Any]] | None) -> str:
     lines = []
     for it in items:
         target = it["target"]
-        alias = _claim_alias(it.get("title")) if it.get("title") else ""
+        alias = display_link_label(it.get("title")) if it.get("title") else ""
         lines.append(f"- [[{target}|{alias}]]" if alias else f"- [[{target}]]")
     return "\n".join(lines)
 
@@ -322,7 +339,8 @@ def _fm_quote(text: str) -> str:
             .replace("[", "\\[").replace("]", "\\]"))
 
 
-def render_claim_page(claim: dict[str, Any], *, review_status: str | None = None) -> str:
+def render_claim_page(claim: dict[str, Any], *, review_status: str | None = None,
+                      labels: dict[str, str] | None = None) -> str:
     """Render a deterministic Claim page from a grounded claim record (ADR-0019/0020/0022).
 
     The frontmatter `citations:` list is the machine-readable record (validated by
@@ -363,14 +381,20 @@ def render_claim_page(claim: dict[str, Any], *, review_status: str | None = None
         status, derived_review_status = "active", "none"
     rs = _resolve_review_status(review_status, derived_review_status)
 
+    # ADR-0060: display-only projection — `title:` is derived from claim_text (never authored),
+    # and `aliases:` carries exactly that one entry so Obsidian's quick switcher matches the
+    # id-named file by readable text. claim_text stays the wording authority.
+    title = _claim_title(claim_text)
     fm_lines = [
         "---",
         "type: claim",
         f'claim_id: "{claim_id}"',
+        f'title: "{_fm_quote(title)}"',
         f"status: {status}",
         f"review_status: {rs}",
         "generation_status: enriched",
         f"confidence: {confidence}",
+        f"aliases: {_render_tag_list([title])}",
         # claim_text is the durable authority for the claim's wording (ADR-0030 node
         # metadata lives in frontmatter); escaped so it round-trips and carries no [[.
         f'claim_text: "{_fm_quote(claim_text)}"',
@@ -388,8 +412,9 @@ def render_claim_page(claim: dict[str, Any], *, review_status: str | None = None
                 '    chunk_id: null',
                 f'    quote: "{_fm_quote(c.get("quote", ""))}"',
             ])
+            src_link = _wl(f'Sources/{c["source_id"]}', labels)
             evidence_rows.append(
-                f'| [[Sources/{c["source_id"]}]] | {c["char_start"]}–{c["char_end"]} | '
+                f'| {src_link} | {c["char_start"]}–{c["char_end"]} | '
                 f'{_delink(_quote_cell(c.get("quote", "")))} |'
             )
     else:
@@ -454,7 +479,7 @@ def render_claim_page(claim: dict[str, Any], *, review_status: str | None = None
         body += [
             "## Contradicting Claims",
             "",
-            *(f"- [[Claims/{cid}]]" for cid in contradicts),
+            *(f"- {_wl(f'Claims/{cid}', labels)}" for cid in contradicts),
             "",
         ]
     body += [
@@ -466,7 +491,8 @@ def render_claim_page(claim: dict[str, Any], *, review_status: str | None = None
     return draft.replace('input_fingerprint: ""', f'input_fingerprint: "{fingerprint}"', 1)
 
 
-def render_item_page(node: dict[str, Any], *, review_status: str | None = None) -> str:
+def render_item_page(node: dict[str, Any], *, review_status: str | None = None,
+                     labels: dict[str, str] | None = None) -> str:
     """Render a deterministic knowledge-item stub page (ADR-0059; mechanics from ADR-0017/0018).
 
     No LLM-authored prose: frontmatter (item_id, item_type, title, aliases, status, confidence)
@@ -494,7 +520,7 @@ def render_item_page(node: dict[str, Any], *, review_status: str | None = None) 
         # the FULL frontmatter schema preserved + `merged_into`; only the body collapses to a redirect note.
         merged_into = node.get("merged_into", "")
         link = node.get("merged_into_link")            # "Items/<survivor-slug>" of the active survivor
-        target = f"[[{link}]]" if link else merged_into
+        target = _wl(link, labels) if link else merged_into
         fm_lines = [
             "---",
             "type: item",
@@ -553,7 +579,7 @@ def render_item_page(node: dict[str, Any], *, review_status: str | None = None) 
     type_label = str(item_type).replace("_", " ")
     if active_mentions:
         summary = f"{label.capitalize()} item ({type_label}) mentioned by {len(source_ids)} source(s)."
-        mentioned = [f"- [[Sources/{s}]]" for s in source_ids]
+        mentioned = [f"- {_wl(f'Sources/{s}', labels)}" for s in source_ids]
     else:
         # Callout prose tracks the resolved review_status (ADR-0035 A5); default `pending` byte-stable.
         review_note = "approved for deprecation" if rs == "approved" else "pending review"
@@ -586,7 +612,7 @@ def render_item_page(node: dict[str, Any], *, review_status: str | None = None) 
         body += [
             "## Duplicates",
             "",
-            *(f"- [[{NODE_DIR[d['node_type']]}/{d['slug']}]]" for d in duplicates),
+            *(f"- {_wl(NODE_DIR[d['node_type']] + '/' + d['slug'], labels)}" for d in duplicates),
             "",
         ]
     body += [
@@ -598,7 +624,7 @@ def render_item_page(node: dict[str, Any], *, review_status: str | None = None) 
     return draft.replace('input_fingerprint: ""', f'input_fingerprint: "{fingerprint}"', 1)
 
 
-def render_synthesis_page(node: dict[str, Any]) -> str:
+def render_synthesis_page(node: dict[str, Any], *, labels: dict[str, str] | None = None) -> str:
     """Render a deterministic cross-source Synthesis page (Phase 3.5c slice 2, ADR-0031).
 
     The LLM supplies only the `summary`/`synthesis` prose; the renderer composes it with the
@@ -633,6 +659,9 @@ def render_synthesis_page(node: dict[str, Any]) -> str:
         f"review_status: {review_status}",
         "generation_status: enriched",
         f"confidence: {confidence}",
+        # ADR-0060: full-title alias (never truncated here — the search surface) so the
+        # quick switcher matches the id-named file; link-position labels are capped separately.
+        f"aliases: {_render_tag_list([title])}",
         f'topic_node: "{topic_node}"',
     ]
     if claim_ids:
@@ -663,14 +692,15 @@ def render_synthesis_page(node: dict[str, Any]) -> str:
         "",
         "## Supporting Evidence",
         "",
-        *([f"- [[Claims/{cid}]]" for cid in claim_ids] or ["_No supporting claims._"]),
+        *([f"- {_wl(f'Claims/{cid}', labels)}" for cid in claim_ids] or ["_No supporting claims._"]),
         "",
     ]
     if disagreements:
         body += [
             "## Disagreements or Contradictions",
             "",
-            *(f"- [[Claims/{a}]] contradicts [[Claims/{b}]]" for a, b in disagreements),
+            *(f"- {_wl(f'Claims/{a}', labels)} contradicts {_wl(f'Claims/{b}', labels)}"
+              for a, b in disagreements),
             "",
         ]
     body += ["## Review Notes", ""]
@@ -704,7 +734,7 @@ def render_source_page(
     return draft.replace('input_fingerprint: ""', f'input_fingerprint: "{fingerprint}"', 1)
 
 
-def render_query_page(query: dict[str, Any]) -> str:
+def render_query_page(query: dict[str, Any], *, labels: dict[str, str] | None = None) -> str:
     """Render a deterministic saved Query page (Phase 5, ADR-0034) from a grounded answer.
 
     The frontmatter `citations:` list is the machine-readable record (grounded by
@@ -727,6 +757,8 @@ def render_query_page(query: dict[str, Any]) -> str:
         "type: query",
         f'query_id: "{qid}"',
         f'title: "{_fm_quote(title)}"',
+        # ADR-0060: full-title alias — question-shaped titles must stay quick-switcher-matchable.
+        f"aliases: {_render_tag_list([title])}",
         f'question: "{_fm_quote(question)}"',
         "status: active",
         "review_status: none",
@@ -753,8 +785,9 @@ def render_query_page(query: dict[str, Any]) -> str:
                 f'    quote: "{_fm_quote(c.get("quote", ""))}"',
             ])
             loc = c.get("section") or (f"p.{c['page']}" if c.get("page") is not None else "—")
+            src_link = _wl(f'Sources/{c["source_id"]}', labels)
             evidence_rows.append(
-                f'| [[Sources/{c["source_id"]}]] | {_delink(_quote_cell(str(loc)))} | '
+                f'| {src_link} | {_delink(_quote_cell(str(loc)))} | '
                 f'{c["char_start"]}–{c["char_end"]} | {_delink(_quote_cell(c.get("quote", "")))} |'
             )
     else:

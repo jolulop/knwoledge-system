@@ -22,22 +22,18 @@ from typing import Any
 
 from app.backend import db, graph
 from app.backend.manifests import iso_now, valid_manifests
-from app.workers import enrichment_artifact, wiki_render
-
-_CLAIM_TEXT_RE = re.compile(r'(?m)^claim_text:\s*"(.*)"\s*$')
+from app.workers import enrichment_artifact, labels, wiki_render
 
 
 def _claim_label(claims_dir: Path, claim_id: str) -> str | None:
-    """Resolve a claim's display label from its durable Claim page (claim_text frontmatter).
+    """Resolve a claim's display label from its durable Claim page.
 
     Worker-side IO so the renderer stays pure; returns None (-> bare link) if the page or
-    field is unavailable, never the gitignored enrichment record.
-    """
-    page = claims_dir / f"{claim_id}.md"
-    if not page.exists():
-        return None
-    match = _CLAIM_TEXT_RE.search(page.read_text(encoding="utf-8", errors="replace"))
-    return re.sub(r"\\(.)", r"\1", match.group(1)) if match else None
+    field is unavailable, never the gitignored enrichment record. ADR-0060: the label is the
+    page's `title:` (falling back to deriving from `claim_text` for pre-0060 pages) so every
+    claim alias agrees with what `display_alias_rot` recomputes."""
+    label = labels._page_label(claims_dir / f"{claim_id}.md", f"Claims/{claim_id}")
+    return label or None
 
 
 _TITLE_RE = re.compile(r'(?m)^title:\s*"(.*)"\s*$')

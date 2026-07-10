@@ -250,7 +250,7 @@ def test_duplicates_collapse_re_renders_partner_dropping_b(tmp_path):
     _approve(tmp_path)
     _apply(tmp_path, conn)
     txt = (tmp_path / "wiki" / "Items" / f"{c_slug}.md").read_text()
-    assert "[[Items/alpha]]" in txt and "[[Items/beta]]" not in txt   # C now lists only A
+    assert "[[Items/alpha|Alpha]]" in txt and "[[Items/beta" not in txt   # C now lists only A
     conn.close()
 
 

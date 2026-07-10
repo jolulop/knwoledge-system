@@ -1,8 +1,13 @@
 # ADR-0060 — Wiki display aliases (Obsidian readability over id-keyed pages)
 
-- **Status:** accepted (design-locked 2026-07-10, not yet implemented; **review round 1 applied
-  2026-07-10** — flagged default 1 revised into the two-layer label contract of decision 2a,
-  defaults 2–4 accepted)
+- **Status:** implemented (2026-07-10; **review round 1 applied at design-lock** — flagged
+  default 1 revised into the two-layer label contract of decision 2a, defaults 2–4 accepted;
+  **impl review round 2 fixed 2026-07-10:** the decision-2 frontmatter contract gained its hard
+  backstop (`validate_frontmatter.py` requires claim `title:`+`aliases:` and source/synthesis/
+  query `aliases:`; `validate_wiki.py` requires source `aliases:`), Tags removed from the two
+  ADR-0060 scans (out-of-scope surface; `validate_wikilinks` still covers its link integrity),
+  and the standalone validator's label parser aligned exactly with `labels._page_label`
+  (quoted OR bare scalar titles) so producer and validator agree by construction)
 - **Date:** 2026-07-10
 - **Drivers:** UAT finding W2 — id-keyed pages read as node ids in Obsidian: `Claims/clm_…`,
   `Synthesis/syn_…`, `Sources/src_…` filenames surface as note titles, and generated pages emit

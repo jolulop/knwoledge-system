@@ -23,6 +23,7 @@ Idempotent: review items key on `(type, subject={source_id|node_id})`, so re-run
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import uuid
@@ -33,9 +34,9 @@ from typing import Any
 from app.backend import db, graph, search, taxonomy
 from app.backend.manifests import get_provenance, is_source_id, iso_now, valid_manifests
 from app.backend.paths import safe_child, safe_under
-from app.workers import citations, enrichment_artifact, reviews, synthesis
+from app.workers import citations, enrichment_artifact, labels, reviews, synthesis
 from app.workers.enrichment_artifact import artifact_fingerprint
-from app.workers.wiki_render import NODE_DIR, parse_frontmatter
+from app.workers.wiki_render import NODE_DIR, display_link_label, parse_frontmatter
 
 # Knowledge-item family — the promotable node type a source "mentions" (ADR-0059).
 _ITEM_FAMILY = ("item",)
@@ -422,6 +423,60 @@ def _check_synthesis_rot(gconn, manifests_dir: Path, claims_dir: Path, markdown_
     return findings, degraded
 
 
+_ALIAS_LINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
+_ALIAS_FM_RE = re.compile(r"^---\s*\n.*?\n---\s*\n", re.DOTALL)
+_ALIAS_FENCE_RE = re.compile(r"(?ms)^```.*?^```[ \t]*$")
+
+
+def _check_display_alias_rot(wiki_dir: Path) -> list[dict[str, Any]]:
+    """Aliased links whose display text drifted from the target's current label (ADR-0060).
+
+    Report-only, severity low, graph-independent (pages only, never a model call). Compares the
+    link's alias against `display_link_label(target's current label)` — the RENDERED link label,
+    never the raw frontmatter `title:` (the two-layer contract: a capped alias on a long-titled
+    target is current, not rot). Bare links are the alias-shape validator's contract, not lint's;
+    remediation is the free ADR-0060 §6 re-render chain — no review item is ever filed."""
+    findings: list[dict[str, Any]] = []
+    label_cache: dict[str, str] = {}
+    pages: list[Path] = []
+    # ADR-0060 scope exactly: the five generated families + index.md (Tags deliberately absent).
+    for subdir in ("Sources", "Items", "Claims", "Synthesis", "Queries"):
+        folder = wiki_dir / subdir
+        if folder.exists():
+            pages.extend(sorted(folder.rglob("*.md")))
+    if (wiki_dir / "index.md").exists():
+        pages.append(wiki_dir / "index.md")
+    for path in pages:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        body = _ALIAS_FENCE_RE.sub("", _ALIAS_FM_RE.sub("", text, count=1))
+        for match in _ALIAS_LINK_RE.finditer(body):
+            raw = match.group(1)
+            target_part, sep, alias = raw.partition("|")
+            if not sep or not alias.strip():
+                continue  # bare/blank -> validate_link_aliases' contract
+            target = target_part.split("#", 1)[0].strip()
+            if not target:
+                continue
+            if target not in label_cache:
+                label_cache[target] = labels._page_label(wiki_dir / f"{target}.md", target)
+            current = label_cache[target]
+            if not current:
+                continue  # target missing/unlabelled -> dangling is validate_wikilinks' contract
+            expected = display_link_label(current)
+            if alias.strip() != expected:
+                findings.append({
+                    "check": "display_alias_rot", "severity": "low",
+                    "subject": path.relative_to(wiki_dir).as_posix(),
+                    "detail": "link alias drifted from the target's current display label",
+                    "data": {"page": path.relative_to(wiki_dir).as_posix(), "target": target,
+                             "alias": alias.strip(), "current_label": expected,
+                             "remediation": "rerun_render_chain"}})
+    return findings
+
+
 def run_lint(
     root: Path,
     *,
@@ -487,6 +542,9 @@ def run_lint(
 
         # topic_starvation is artifact-driven and graph-independent — runs always (ADR-0059).
         findings += _check_topic_starvation(enrichment_dir)
+
+        # display_alias_rot reads wiki pages only — runs always (ADR-0060, report-only).
+        findings += _check_display_alias_rot(wiki_dir)
 
         gconn = _open_graph_ro(graph_db)
         graph_available = gconn is not None

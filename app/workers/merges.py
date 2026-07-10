@@ -24,7 +24,7 @@ from typing import Any
 
 from app.backend import graph, taxonomy
 from app.backend.manifests import iso_now
-from app.workers import items, reviews
+from app.workers import items, labels, reviews
 from app.workers.wiki_render import NODE_DIR, render_item_page
 
 # ADR-0059: one item family, one merge type. Same-structural-type by construction (both
@@ -157,15 +157,17 @@ def _render_survivor(gconn, *, a: str, na: dict[str, Any], nt: str, aliases: lis
     page = wiki_dir / NODE_DIR[nt] / f"{na['slug']}.md"
     meta = items._read_node_meta(page)
     item_type = (meta or {}).get("item_type") or na.get("item_type")
+    node_sources = graph.sources_for_node(gconn, a)
+    duplicates = graph.active_duplicates(gconn, a)
     rendered = render_item_page({
         "node_id": a, "item_type": item_type, "title": title,
         "aliases": aliases, "confidence": (meta or {}).get("confidence", "low"),
-        "source_ids": graph.sources_for_node(gconn, a), "status": "active",
-        "duplicates": graph.active_duplicates(gconn, a),
+        "source_ids": node_sources, "status": "active",
+        "duplicates": duplicates,
         "split_from": (meta or {}).get("split_from"),
         "split_review_id": (meta or {}).get("split_review_id"),
         "description": (meta or {}).get("description"),
-    })
+    }, labels=items._link_labels(wiki_dir, node_sources, duplicates))
     changed = (not page.exists()) or page.read_text(encoding="utf-8") != rendered
     if changed:
         page.parent.mkdir(parents=True, exist_ok=True)
@@ -183,12 +185,13 @@ def _render_tombstone(gconn, *, b: str, nb: dict[str, Any], nt: str, a: str, a_s
     meta = items._read_node_meta(page)
     item_type = (meta or {}).get("item_type") or nb.get("item_type")
     page.parent.mkdir(parents=True, exist_ok=True)
+    survivor_link = f"{NODE_DIR[nt]}/{a_slug}"
     page.write_text(render_item_page({
         "node_id": b, "item_type": item_type, "title": b_title,
         "aliases": b_aliases, "confidence": (meta or {}).get("confidence", "low"), "status": "merged",
-        "merged_into": a, "merged_into_link": f"{NODE_DIR[nt]}/{a_slug}",
+        "merged_into": a, "merged_into_link": survivor_link,
         "merged_at": now, "merge_review_id": rid,
-    }), encoding="utf-8")
+    }, labels=labels.display_labels(wiki_dir, [survivor_link])), encoding="utf-8")
     graph.upsert_node(gconn, node_id=b, node_type=nt, slug=nb["slug"], status="merged",
                       item_type=item_type, now=now)
     return f"{NODE_DIR[nt]}/{nb['slug']}.md"

@@ -31,6 +31,7 @@ def _item_fm(**over):
 
 def _source_fm(**over):
     fm = {"type": "source", "source_id": "src_0123456789abcdef", "title": "Doc",
+          "aliases": '["Doc"]',  # ADR-0060: quick-switcher alias, required on id-titled families
           "relative_raw_path": "raw/inbox/doc.pdf", "normalized_path": "normalized/markdown/x.md",
           "sha256": "a" * 64, "file_type": "pdf", "status": "active", "ingestion_status": "extracted",
           "summary_status": "stub", "generation_status": "deterministic", "input_fingerprint": "fp"}
@@ -78,12 +79,14 @@ def test_source_with_review_status_fails(tmp_path):
 
 # Every page type that renders review_status (NOT source/tag), with its other required fields + subdir.
 _RENDERING_PAGES = {
-    "claim": ("Claims", {"type": "claim", "claim_id": "clm_x", "status": "active", "confidence": "low"}),
+    # ADR-0060: claim gains title:, and every id-titled family carries aliases:.
+    "claim": ("Claims", {"type": "claim", "claim_id": "clm_x", "title": "T", "aliases": '["T"]',
+                         "status": "active", "confidence": "low"}),
     "item": ("Items", {"type": "item", "item_id": "itm_x", "item_type": "method_technique",
                        "title": "T", "status": "active", "confidence": "low"}),
     "synthesis": ("Synthesis", {"type": "synthesis", "synthesis_id": "syn_x", "title": "T",
-                                "status": "candidate"}),
-    "query": ("Queries", {"type": "query", "query_id": "qry_x", "title": "T",
+                                "aliases": '["T"]', "status": "candidate"}),
+    "query": ("Queries", {"type": "query", "query_id": "qry_x", "title": "T", "aliases": '["T"]',
                           "question": "Q?", "status": "active"}),
 }
 

@@ -44,6 +44,7 @@ from app.llm import prompts
 from app.llm.client import LLMClient, ParseError
 from app.workers import enrichment_artifact as art
 from app.workers import reviews
+from app.workers import labels
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter, render_synthesis_page
 
 _PROMOTABLE = ("item",)
@@ -240,11 +241,14 @@ def _render_page(gconn, *, syn_id, topic_node, title, summary, synthesis_text, c
                  if e["edge_type"] == "derived_from"
                  and (graph.get_node(gconn, e["dst_id"]) or {}).get("status") != "hidden"]
     disagreements = _disagreement_pairs(gconn, set(claim_ids))
+    # ADR-0060: page-local display labels for the claim links; renderer stays IO-free.
+    link_labels = labels.display_labels(
+        synthesis_dir.parent, [f"Claims/{cid}" for cid in claim_ids])
     content = render_synthesis_page({
         "synthesis_id": syn_id, "title": title, "status": status, "review_status": review_status,
         "confidence": confidence, "topic_node": topic_node, "summary": summary,
         "synthesis_text": synthesis_text, "claim_ids": claim_ids, "disagreements": disagreements,
-    })
+    }, labels=link_labels)
     synthesis_dir.mkdir(parents=True, exist_ok=True)
     page_path = synthesis_dir / f"{syn_id}.md"
     page_changed = (not page_path.exists()) or page_path.read_text(encoding="utf-8") != content

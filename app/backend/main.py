@@ -66,6 +66,7 @@ from app.workers import (
     claims, contradictions, deprecations, duplicates, eval_answers, extract, human_add, intake,
     lint, merges, promote, query, retention, retypes, reviews, splits, synthesis, wiki,
 )
+from app.workers import labels
 from app.workers.wiki_render import parse_frontmatter, render_query_page
 
 # Hosts on which serving the unauthenticated API is acceptable (loopback only).
@@ -1763,12 +1764,15 @@ def run_query_endpoint(req: QueryRequest) -> dict[str, Any]:
     if req.save:  # explicit save -> deterministic wiki/Queries/<id>.md (no graph edges, no review)
         saved_id = query.query_id(q, mode=req.mode, source_id=req.source_id,
                                   source_status=req.source_status, language=req.language)
+        # ADR-0060: page-local display labels for the citation-table source links.
+        link_labels = labels.display_labels(
+            settings.wiki_dir, [f"Sources/{c['source_id']}" for c in answer.citations])
         page = render_query_page({
             "query_id": saved_id, "question": q, "answer": answer.answer,
             "citations": answer.citations, "retrieval_modes": result["retrieval_path"],
             "unsourced_claims": answer.unsourced_claims,
             "security_rejected_count": answer.security_rejected_count,
-        })
+        }, labels=link_labels)
         qpath = settings.wiki_dir / "Queries" / f"{saved_id}.md"
         qpath.parent.mkdir(parents=True, exist_ok=True)
         qpath.write_text(page, encoding="utf-8")

@@ -46,6 +46,7 @@ from app.llm import prompts
 from app.llm.client import LLMClient, ParseError
 from app.workers import citations, reviews
 from app.workers import enrichment_artifact as art
+from app.workers import labels
 from app.workers.wiki_render import render_claim_page, title_from_filename
 
 _ENRICHABLE_STATUSES = {"extracted", "partial"}
@@ -227,11 +228,16 @@ def recompose_claim(gconn, *, cid, claims_dir, reviews_dir, now, markdown_dir, t
     # claim is never also deprecated (hide is active-only; hidden has precedence).
     deprecated = bool(cites) and not hidden and (deprecate or current_status == "deprecated_candidate")
     claims_dir.mkdir(parents=True, exist_ok=True)
+    # ADR-0060: resolve display labels worker-side (page-local) for the evidence-table source
+    # links and contradicting-claim backlinks; the renderer stays IO-free.
+    link_labels = labels.display_labels(
+        claims_dir.parent,
+        [f"Sources/{c['source_id']}" for c in cites] + [f"Claims/{p}" for p in contradicts])
     page_path.write_text(
         render_claim_page({"claim_id": cid, "claim_text": claim_text, "confidence": "low",
                            "citations": cites, "contradicts": contradicts, "deprecated": deprecated,
                            "hidden": hidden},
-                          review_status=review_status),
+                          review_status=review_status, labels=link_labels),
         encoding="utf-8",
     )
     # Mirror the page's status into the derived node index (hidden > deprecated/tombstone > active).

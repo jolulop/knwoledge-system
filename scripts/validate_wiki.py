@@ -22,7 +22,8 @@ from app.workers.wiki_render import parse_frontmatter
 
 _EXTRACTED = {"extracted", "partial"}
 _REQUIRED_FIELDS = (
-    "type", "source_id", "title", "relative_raw_path", "normalized_path",
+    # `aliases` — ADR-0060: the quick-switcher search alias for the id-titled page.
+    "type", "source_id", "title", "aliases", "relative_raw_path", "normalized_path",
     "sha256", "file_type", "language", "page_count", "chunk_count",
     "status", "ingestion_status", "summary_status", "generation_status",
     "input_fingerprint",

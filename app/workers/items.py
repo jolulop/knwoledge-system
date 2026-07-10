@@ -38,6 +38,7 @@ from app.llm import prompts
 from app.llm.client import LLMClient, ParseError
 from app.workers import citations, reconcile, reviews
 from app.workers import enrichment_artifact as art
+from app.workers import labels
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter, render_item_page, title_from_filename
 
 _ENRICHABLE_STATUSES = {"extracted", "partial"}
@@ -121,6 +122,14 @@ def _rebuild_index(root: Path) -> bool:
     return subprocess.run([sys.executable, str(script), str(root)]).returncode == 0
 
 
+def _link_labels(wiki_dir: Path, source_ids, duplicates) -> dict[str, str]:
+    """ADR-0060: page-local display labels for an item page's Mentioned-By and Duplicates
+    links (worker-side IO; every item-page writer routes through this so the renderer stays pure)."""
+    targets = [f"Sources/{s}" for s in source_ids or []]
+    targets += [NODE_DIR[d["node_type"]] + "/" + d["slug"] for d in duplicates or []]
+    return labels.display_labels(wiki_dir, targets)
+
+
 def _recompose_node(gconn, *, node_id, wiki_dir, reviews_dir, now, text_hint=None) -> str:
     """Render a node's stub page from its active mentions (tombstone if none).
 
@@ -163,14 +172,15 @@ def _recompose_node(gconn, *, node_id, wiki_dir, reviews_dir, now, text_hint=Non
     else:
         status = "candidate"
     page_dir.mkdir(parents=True, exist_ok=True)
+    duplicates = graph.active_duplicates(gconn, node_id)
     page_path.write_text(render_item_page({
         "node_id": node_id, "item_type": item_type,
         "title": title, "aliases": aliases, "confidence": "low", "source_ids": sources,
-        "status": status, "duplicates": graph.active_duplicates(gconn, node_id),
+        "status": status, "duplicates": duplicates,
         "split_from": (existing or {}).get("split_from"),               # ADR-0052: preserve spin-off lineage
         "split_review_id": (existing or {}).get("split_review_id"),
         "description": (existing or {}).get("description"),            # ADR-0058: preserve human description
-    }), encoding="utf-8")
+    }, labels=_link_labels(wiki_dir, sources, duplicates)), encoding="utf-8")
     graph.upsert_node(gconn, node_id=node_id, node_type=node_type, slug=slug,
                       status=status, item_type=item_type, now=now)
     page_rel = f"{NODE_DIR[node_type]}/{slug}.md"
@@ -217,15 +227,16 @@ def recompose_semantic_node_page(
     if not taxonomy.is_item_type(item_type):
         return "page_missing"
     sources = graph.sources_for_node(gconn, node_id)
+    duplicates = graph.active_duplicates(gconn, node_id)
     rendered = render_item_page({
         "node_id": node_id, "item_type": item_type,
         "title": meta["title"], "aliases": meta["aliases"], "confidence": meta["confidence"],
         "source_ids": sources, "status": status,
-        "duplicates": graph.active_duplicates(gconn, node_id),
+        "duplicates": duplicates,
         "split_from": meta.get("split_from"),                           # ADR-0052: preserve spin-off lineage
         "split_review_id": meta.get("split_review_id"),
         "description": meta.get("description"),                        # ADR-0058: preserve human description
-    }, review_status=review_status)
+    }, review_status=review_status, labels=_link_labels(wiki_dir, sources, duplicates))
     # Write only when content differs (avoid churn; ADR-0041). confidence is page-owned, preserved.
     # Returns "written" only when the page actually changed, "unchanged" otherwise (the graph node-status
     # mirror always runs, idempotently). Callers that gate on `== "written"` get an honest signal.

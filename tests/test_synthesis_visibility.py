@@ -191,7 +191,7 @@ def test_hidden_render_keeps_sections_with_banner(tmp_path):
     conn.commit()
     txt = (tmp_path / "wiki" / "Synthesis" / f"{SYN}.md").read_text()
     assert "Synthesis hidden — suppressed from default discovery" in txt
-    assert "## Supporting Evidence" in txt and f"[[Claims/{CX}]]" in txt
+    assert "## Supporting Evidence" in txt and f"[[Claims/{CX}|" in txt
     conn.close()
 
 
@@ -517,7 +517,7 @@ def test_hide_claim_fans_out_to_citing_synthesis(tmp_path):
     conn = _graph(tmp_path)
     _active_synthesis(tmp_path, conn, claim_ids=(CX, CY))
     txt0 = (tmp_path / "wiki" / "Synthesis" / f"{SYN}.md").read_text()
-    assert f"[[Claims/{CX}]]" in txt0 and f"[[Claims/{CY}]]" in txt0   # baseline: both linked
+    assert f"[[Claims/{CX}|" in txt0 and f"[[Claims/{CY}|" in txt0   # baseline: both linked
     (tmp_path / "reviews" / "approved").mkdir(parents=True, exist_ok=True)
     (tmp_path / "reviews" / "approved" / "rev_c.json").write_text(json.dumps({
         "review_id": "rev_c", "type": "hide_claim", "status": "approved",
@@ -532,7 +532,7 @@ def test_hide_claim_fans_out_to_citing_synthesis(tmp_path):
         enrichment_dir=tmp_path / "normalized" / "enrichment")
     conn.commit()
     txt1 = (tmp_path / "wiki" / "Synthesis" / f"{SYN}.md").read_text()
-    assert f"[[Claims/{CX}]]" not in txt1 and f"[[Claims/{CY}]]" in txt1   # hidden dropped, visible kept
+    assert f"[[Claims/{CX}" not in txt1 and f"[[Claims/{CY}|" in txt1   # hidden dropped, visible kept
     edge = [e for e in graph.outgoing_active(conn, SYN)
             if e["edge_type"] == "derived_from" and e["dst_id"] == CX]
     assert edge and edge[0]["status"] == "active"        # edge preserved (no surgery)
@@ -553,7 +553,7 @@ def test_api_hide_claim_rerenders_citing_synthesis(client, tmp_path, monkeypatch
     body = client.post("/reviews/apply").json()
     assert body["status"] == "applied"                   # validators pass (projection now filters hidden)
     txt = (tmp_path / "wiki" / "Synthesis" / f"{SYN}.md").read_text()
-    assert f"[[Claims/{CX}]]" not in txt                  # fan-out dropped the hidden claim
+    assert f"[[Claims/{CX}" not in txt                  # fan-out dropped the hidden claim
 
 
 # --- ADR-0049 decision 10: synthesis evidence-suppression (active <-> evidence_hidden) -----
@@ -601,7 +601,7 @@ def test_claim_hide_suppresses_synthesis_to_evidence_hidden(tmp_path):
     assert graph.get_node(conn, SYN)["status"] == "evidence_hidden"
     txt = (tmp_path / "wiki" / "Synthesis" / f"{SYN}.md").read_text()
     assert "Synthesis suppressed — supporting evidence hidden" in txt
-    assert f"[[Claims/{CX}]]" not in txt                 # hidden claim dropped from Supporting Evidence
+    assert f"[[Claims/{CX}" not in txt                 # hidden claim dropped from Supporting Evidence
     assert any(e["dst_id"] == CX and e["status"] == "active"   # derived_from edge preserved (graph SoT)
                for e in graph.outgoing_active(conn, SYN) if e["edge_type"] == "derived_from")
     conn.close()
@@ -614,7 +614,7 @@ def test_claim_unhide_restores_evidence_hidden_synthesis_to_active(tmp_path):
     assert graph.get_node(conn, SYN)["status"] == "evidence_hidden"
     _unhide_claim_and_fanout(tmp_path, conn, CX)
     assert graph.get_node(conn, SYN)["status"] == "active"     # evidence visible again -> restored
-    assert f"[[Claims/{CX}]]" in (tmp_path / "wiki" / "Synthesis" / f"{SYN}.md").read_text()
+    assert f"[[Claims/{CX}|" in (tmp_path / "wiki" / "Synthesis" / f"{SYN}.md").read_text()
     conn.close()
 
 
@@ -777,7 +777,7 @@ def test_claim_hide_fanout_missing_artifact_is_non_clean_and_stale(client, tmp_p
     assert "synthesis_evidence_suppression_not_guaranteed" in body["warnings"]
     assert body["summary"]["synthesis_evidence"]["unreconciled"] == 1
     txt = (tmp_path / "wiki" / "Synthesis" / f"{SYN}.md").read_text()
-    assert "status: active" in txt and f"[[Claims/{CX}]]" in txt   # stale (un-reconciled)
+    assert "status: active" in txt and f"[[Claims/{CX}|" in txt   # stale (un-reconciled)
 
 
 def test_repair_then_rerun_reconciles_unreconciled_synthesis(client, tmp_path, monkeypatch):
@@ -808,7 +808,7 @@ def test_repair_then_rerun_reconciles_unreconciled_synthesis(client, tmp_path, m
     assert b2["summary"]["synthesis_evidence"] == {"suppressed": 1, "restored": 0, "unreconciled": 0}
     assert "synthesis_evidence_suppression_not_guaranteed" not in b2["warnings"]
     txt = (tmp_path / "wiki" / "Synthesis" / f"{SYN}.md").read_text()
-    assert "status: evidence_hidden" in txt and f"[[Claims/{CX}]]" not in txt
+    assert "status: evidence_hidden" in txt and f"[[Claims/{CX}" not in txt
     gconn = graph.connect(tmp_path / "db" / "graph.sqlite")
     assert graph.get_node(gconn, SYN)["status"] == "evidence_hidden"
     gconn.close()

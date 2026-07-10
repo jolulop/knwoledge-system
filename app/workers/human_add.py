@@ -149,12 +149,14 @@ def add_candidate(
     if node_created and description:
         # A brand-new page may carry the human description immediately (page-owned field).
         page_path = wiki_dir / NODE_DIR["item"] / f"{slug}.md"
+        node_sources = graph.sources_for_node(gconn, nid)
+        duplicates = graph.active_duplicates(gconn, nid)
         page_path.write_text(render_item_page({
             "node_id": nid, "item_type": used_type,
             "title": title, "aliases": clean_aliases, "confidence": "low",
-            "source_ids": graph.sources_for_node(gconn, nid), "status": "candidate",
-            "duplicates": graph.active_duplicates(gconn, nid), "description": description,
-        }), encoding="utf-8")
+            "source_ids": node_sources, "status": "candidate",
+            "duplicates": duplicates, "description": description,
+        }, labels=items._link_labels(wiki_dir, node_sources, duplicates)), encoding="utf-8")
 
     # The Source page's Items section is a graph projection — re-render so the human
     # mention shows immediately (and validate_projection stays green).

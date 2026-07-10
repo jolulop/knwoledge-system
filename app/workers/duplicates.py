@@ -41,8 +41,10 @@ def _projects(text: str, partner_slug: str, node_type: str) -> bool:
     """Whether a page renders the partner link *inside its `## Duplicates` section* (ADR-0041).
 
     Section-scoped, matching `validate_projection`: a partner wikilink elsewhere (e.g. in Notes) does
-    NOT count as projected, so a stale page can't be misread as a true no-op."""
-    link = f"[[{NODE_DIR[node_type]}/{partner_slug}]]"
+    NOT count as projected, so a stale page can't be misread as a true no-op. Matches the link
+    TARGET, alias-insensitive (ADR-0060: projected links carry a display alias when resolvable)."""
+    target = f"{NODE_DIR[node_type]}/{partner_slug}"
+    forms = (f"[[{target}]]", f"[[{target}|")
     lines = text.splitlines()
     try:
         start = next(i for i, ln in enumerate(lines) if ln.strip() == "## Duplicates")
@@ -51,7 +53,7 @@ def _projects(text: str, partner_slug: str, node_type: str) -> bool:
     for ln in lines[start + 1:]:
         if ln.startswith("## "):
             break
-        if link in ln:
+        if any(form in ln for form in forms):
             return True
     return False
 

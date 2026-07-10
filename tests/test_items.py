@@ -124,7 +124,7 @@ def test_extracts_items_routes_pages_and_writes_mentions(tmp_path):
     assert parse_frontmatter(acme.read_text(encoding="utf-8"))["item_type"] == "provider_institution"
     assert parse_frontmatter(model.read_text(encoding="utf-8"))["item_type"] == "model"
     assert "PMI" in pmi.read_text(encoding="utf-8")  # alias rendered
-    assert f"[[Sources/{sid}]]" in pmi.read_text(encoding="utf-8")  # mentioned-by
+    assert f"[[Sources/{sid}|" in pmi.read_text(encoding="utf-8")  # mentioned-by (aliased, ADR-0060)
 
     # mentions edges are active provenance.
     conn = graph.connect(tmp_path / "db" / "graph.sqlite")
@@ -430,7 +430,9 @@ def test_item_aggregates_mentions_across_sources(tmp_path):
     _extract(tmp_path, FakeAdapter(payload=payload), source_ids=[a])
     _extract(tmp_path, FakeAdapter(payload=payload), source_ids=[b])
     page = (tmp_path / "wiki" / "Items" / "shared-topic.md").read_text(encoding="utf-8")
-    assert f"[[Sources/{a}]]" in page and f"[[Sources/{b}]]" in page  # one page, both sources
+    # One page, both sources. Bare links pinned: this fixture renders no Source pages, so no
+    # display label resolves — ADR-0060 keeps the link bare rather than inventing a label.
+    assert f"[[Sources/{a}]]" in page and f"[[Sources/{b}]]" in page
     assert "mentioned by 2 source(s)" in page
 
 

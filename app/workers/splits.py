@@ -269,23 +269,27 @@ def apply_splits(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = 
             graph.repoint_edge(gconn, e["edge_id"], new_dst=b, now=now)   # source→A ⇒ source→B
         # render the spin-off B (candidate; its moved mentions; split lineage; inherited item_type)
         b_page_abs.parent.mkdir(parents=True, exist_ok=True)
+        b_sources = graph.sources_for_node(gconn, b)
+        b_dups = graph.active_duplicates(gconn, b)
         b_page_abs.write_text(render_item_page({
             "node_id": b, "item_type": a_item_type,
             "title": spinoff_name, "aliases": aliases_move, "confidence": meta_a.get("confidence", "low"),
-            "source_ids": graph.sources_for_node(gconn, b), "status": "candidate",
-            "duplicates": graph.active_duplicates(gconn, b), "split_from": a, "split_review_id": rid,
-        }), encoding="utf-8")
+            "source_ids": b_sources, "status": "candidate",
+            "duplicates": b_dups, "split_from": a, "split_review_id": rid,
+        }, labels=items._link_labels(wiki_dir, b_sources, b_dups)), encoding="utf-8")
         # re-render primary A: aliases minus spinoff_aliases AND the auto-moved spin-off name; status unchanged
         drop = {items._normalize_name(x) for x in aliases_move} | {items._normalize_name(spinoff_name)}
         a_aliases_final = [x for x in meta_a["aliases"] if items._normalize_name(x) not in drop]
+        a_sources = graph.sources_for_node(gconn, a)
+        a_dups = graph.active_duplicates(gconn, a)
         (wiki_dir / a_page).write_text(render_item_page({
             "node_id": a, "item_type": a_item_type,
             "title": meta_a["title"], "aliases": a_aliases_final, "confidence": meta_a.get("confidence", "low"),
-            "source_ids": graph.sources_for_node(gconn, a), "status": n_a["status"],
-            "duplicates": graph.active_duplicates(gconn, a),
+            "source_ids": a_sources, "status": n_a["status"],
+            "duplicates": a_dups,
             "split_from": meta_a.get("split_from"), "split_review_id": meta_a.get("split_review_id"),
             "description": meta_a.get("description"),
-        }), encoding="utf-8")
+        }, labels=items._link_labels(wiki_dir, a_sources, a_dups)), encoding="utf-8")
         graph.upsert_node(gconn, node_id=a, node_type=a_type, slug=n_a["slug"], status=n_a["status"],
                           item_type=a_item_type, now=now)
         # file B's promote_candidate_node so the new candidate enters the promotion ledger (the promote pass

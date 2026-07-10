@@ -94,9 +94,9 @@ def test_approve_creates_canonical_active_edge_and_projects_both_pages(tmp_path)
     e = edges[0]
     assert (e["src_id"], e["dst_id"]) == ("itm_aaaaaaaaaaaaaaaa", "itm_bbbbbbbbbbbbbbbb")  # canonical
     assert e["status"] == "active" and e["asserted_by"] == "human" and e["review_id"] == "rev_dup"
-    # both pages gained a body-only ## Duplicates section linking the other
-    assert "## Duplicates" in pa.read_text() and "[[Items/bravo]]" in pa.read_text()
-    assert "## Duplicates" in pb.read_text() and "[[Items/alpha]]" in pb.read_text()
+    # both pages gained a body-only ## Duplicates section linking the other (ADR-0060: aliased)
+    assert "## Duplicates" in pa.read_text() and "[[Items/bravo|Bravo]]" in pa.read_text()
+    assert "## Duplicates" in pb.read_text() and "[[Items/alpha|Alpha]]" in pb.read_text()
     # no frontmatter key, status/metadata preserved
     assert "duplicates:" not in pa.read_text().split("\n---\n", 1)[0]
     assert parse_frontmatter(pa.read_text())["status"] == "active"
@@ -145,7 +145,7 @@ def test_stale_projection_is_normalized_not_applied(tmp_path):
     res = duplicates.apply_marked_duplicates(gconn, tmp_path / "reviews", wiki_dir=tmp_path / "wiki")
     gconn.commit()
     assert res["applied"] == 0 and res["normalized"] == 1 and res["graph_changed"] is False
-    assert "## Duplicates" in pa.read_text() and "[[Items/bravo]]" in pa.read_text()
+    assert "## Duplicates" in pa.read_text() and "[[Items/bravo|" in pa.read_text()
     assert len(_edges(gconn)) == 1            # still one edge, no new write
 
 
@@ -383,7 +383,7 @@ def test_validate_projection_both_directions(tmp_path):
 
     # tamper the existing section to link a node with no active edge -> invented-link error (and the
     # real active partner now missing) -> both directions fire
-    pa.write_text(pa.read_text().replace("[[Items/bravo]]", "[[Items/ghost]]", 1),
+    pa.write_text(pa.read_text().replace("[[Items/bravo|", "[[Items/ghost|", 1),
                   encoding="utf-8")
     assert _run_validator("validate_projection.py", tmp_path).returncode == 1
 

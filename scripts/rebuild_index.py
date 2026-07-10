@@ -92,9 +92,24 @@ def page_title(path: Path, frontmatter: dict[str, Any], text: str) -> str:
     return path.stem.replace("-", " ").title()
 
 
-def wiki_link(path: Path, wiki_root: Path) -> str:
+WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
+
+
+def display_link_label(title: str) -> str:
+    # ADR-0060 rendered link label — LOCAL copy of wiki_render.display_link_label (this
+    # script is dependency-free by design; a parity test pins the behaviour).
+    collapsed = re.sub(r"\s+", " ", str(title))
+    safe = WIKILINK_RE.sub(lambda m: m.group(1).split("|", 1)[-1].strip(), collapsed)
+    safe = safe.replace("[", "").replace("]", "").replace("|", " ")
+    safe = re.sub(r"\s+", " ", safe).strip()
+    return (safe[:77].rstrip() + "…") if len(safe) > 78 else safe
+
+
+def wiki_link(path: Path, wiki_root: Path, title: str = "") -> str:
+    # ADR-0060: the primary index link carries the display alias (no duplicated title text).
     rel = path.relative_to(wiki_root).with_suffix("")
-    return f"[[{rel.as_posix()}]]"
+    label = display_link_label(title) if str(title).strip() else ""
+    return f"[[{rel.as_posix()}|{label}]]" if label else f"[[{rel.as_posix()}]]"
 
 
 def collect_pages(wiki_root: Path) -> dict[str, list[dict[str, Any]]]:
@@ -106,11 +121,12 @@ def collect_pages(wiki_root: Path) -> dict[str, list[dict[str, Any]]]:
         for path in sorted(section_dir.rglob("*.md")):
             text = path.read_text(encoding="utf-8", errors="replace")
             fm = parse_frontmatter(text)
+            title = page_title(path, fm, text)
             sections[section].append(
                 {
                     "path": path,
-                    "link": wiki_link(path, wiki_root),
-                    "title": page_title(path, fm, text),
+                    "link": wiki_link(path, wiki_root, title),
+                    "title": title,
                     "type": fm.get("type", section.lower().rstrip("s")),
                     "item_type": fm.get("item_type", ""),
                     "status": fm.get("status", "unknown"),

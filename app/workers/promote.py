@@ -185,16 +185,18 @@ def promote_candidates(
                         # Another page already owns the amended slug — scope-guard skip, no writes.
                         skipped.append({"review_id": rid, "reason": "amended_slug_collision"})
                         continue
+                    duplicates = graph.active_duplicates(gconn, nid)
                     new_page.write_text(
                         render_item_page({
                             "node_id": nid, "item_type": eff["item_type"], "title": eff["title"],
                             "aliases": eff["aliases"], "confidence": "low",
                             "source_ids": sources, "status": "active",
-                            "duplicates": graph.active_duplicates(gconn, nid),
+                            "duplicates": duplicates,
                             "split_from": meta.get("split_from"),        # ADR-0052: preserve spin-off lineage
                             "split_review_id": meta.get("split_review_id"),
                             "description": eff["description"],           # ADR-0058: page-owned description
-                        }), encoding="utf-8")
+                        }, labels=items._link_labels(wiki_dir, sources, duplicates)),
+                        encoding="utf-8")
                     if amendments:
                         amended += 1
                     graph.upsert_node(gconn, node_id=nid, node_type=node["node_type"],

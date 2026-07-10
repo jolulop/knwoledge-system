@@ -242,8 +242,9 @@ def test_index_sentinel_renders_only_as_qa_bucket_last(tmp_path):
         '---\ntype: item\nitem_id: "itm_z"\nitem_type: unclassified_review_required\n'
         'title: "Zeta"\nstatus: candidate\n---\n\n> [!summary] s\n> Zeta.\n', encoding="utf-8")
     text = rebuild_index.render_index(rebuild_index.collect_pages(wiki))
-    # Full listing preserved: BOTH pages are indexed; the sentinel only under its QA bucket, last.
-    assert "[[Items/alpha]]" in text and "[[Items/zeta]]" in text
+    # Full listing preserved: BOTH pages are indexed (ADR-0060: primary links carry the
+    # display alias); the sentinel only under its QA bucket, last.
+    assert "[[Items/alpha|Alpha]]" in text and "[[Items/zeta|Zeta]]" in text
     assert "### Model (1)" in text
     assert "### Unclassified (review required) (1)" in text
     assert text.index("### Model (1)") < text.index("### Unclassified (review required) (1)")

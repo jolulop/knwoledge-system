@@ -19,19 +19,22 @@ VALID_TYPES = {"source", "item", "claim", "tag", "synthesis", "query"}
 # Field contracts per page type (ADR-0016/0020/0021/0022). Source pages use
 # relative_raw_path (never absolute raw_path) and the shared lifecycle fields.
 REQUIRED_BY_TYPE = {
+    # ADR-0060: `aliases` is required on every id-titled family (the Obsidian quick-switcher
+    # matches filenames and aliases, not `title:`) and Claims gain a display-only `title:` —
+    # the hard backstop for the search-surface half of the display-alias contract.
     "source": [
-        "type", "source_id", "title", "relative_raw_path", "normalized_path",
+        "type", "source_id", "title", "aliases", "relative_raw_path", "normalized_path",
         "sha256", "file_type", "status", "ingestion_status", "summary_status",
         "generation_status", "input_fingerprint",
     ],
     # `review_status` is required on every page type that renders it (ADR-0022) — NOT Source, which
     # intentionally does not carry it (its review state lives in the ledger, owned by no renderer).
     "item": ["type", "item_id", "item_type", "title", "status", "confidence", "review_status"],
-    "claim": ["type", "claim_id", "status", "confidence", "review_status"],
-    "synthesis": ["type", "synthesis_id", "title", "status", "review_status"],
+    "claim": ["type", "claim_id", "title", "aliases", "status", "confidence", "review_status"],
+    "synthesis": ["type", "synthesis_id", "title", "aliases", "status", "review_status"],
     # No wall-clock fields: a saved Query page is a deterministic derived artifact (ADR-0023/0034),
     # like claim/synthesis pages — byte-stable, so no `created`/`last_compiled_at`.
-    "query": ["type", "query_id", "title", "question", "status", "review_status"],
+    "query": ["type", "query_id", "title", "aliases", "question", "status", "review_status"],
 }
 
 
