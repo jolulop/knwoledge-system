@@ -77,6 +77,10 @@ embedding server.
 
 ### 1.2 Clone `.env` — what embeddings need
 
+```bash
+cp '/home/jolulop/code/knowledge-system/.env (UAT)' ./.env
+```
+
 Create `/tmp/ks-uat/.env` by hand. GPU embeddings need the `EMBEDDING_*` block below (same values as
 `.env.example`); add `ANTHROPIC_API_KEY` only if you will run the billable steps (6, and `POST /query`
 in 8). Keep comments on their own lines.
