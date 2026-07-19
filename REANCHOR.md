@@ -1,6 +1,6 @@
 # REANCHOR — session status
 
-_Last updated: 2026-07-09. **Reanchor command:** "read REANCHOR.md and reanchor". Read this
+_Last updated: 2026-07-19. **Reanchor command:** "read REANCHOR.md and reanchor". Read this
 first after an app restart, then `wiki/index.md` if working in the vault._
 
 > [!warning] This is a periodically-refreshed snapshot and can lag the live state. The authoritative
@@ -12,13 +12,13 @@ first after an app restart, then `wiki/index.md` if working in the vault._
 
 Local-first **LLM Wiki** knowledge-system. Immutable `raw/` → derived `normalized/` →
 generated `wiki/` (gitignored, regenerable) → `db/` SQLite (graph, jobs, llm_cache) →
-`reviews/`, `policies/`. ADR-driven (`docs/adr/0001–0059`). See `CLAUDE.md` for the
+`reviews/`, `policies/`. ADR-driven (`docs/adr/0001–0060`). See `CLAUDE.md` for the
 critical rules and `CONTEXT.md` for the glossary.
 
 ## Where we are
 
-- **Branch:** `main` — pushed tip at refresh time: `fa9c593`; local `80b953f` (UAT round 1)
-  sits unpushed on top. Run `git log --oneline origin/main..HEAD` for the live unpushed set.
+- **Branch:** `main` — pushed tip at refresh time: `a1e4511`, **in sync with origin, nothing
+  unpushed, tree clean**. Run `git log --oneline origin/main..HEAD` for the live unpushed set.
   The per-slice rhythm: grill (design-lock, docs-only) → implement (on "implement now") → test →
   external review (user pastes) → analyze+recommend+**wait** → fix → commit (user says so) → push.
 - **PHASES 1–7 COMPLETE + pushed** (intake · extract/normalize · deterministic wiki · LLM semantic
@@ -65,7 +65,7 @@ critical rules and `CONTEXT.md` for the glossary.
   raw/normalized/wiki/db/indexes/reviews (3101 paths; tracked skeleton + `wiki/.obsidian`
   preserved) → **vault is EMPTY, all 10 validators pass**. The old vault exists only in that
   backup. Review ledger reset (it held zero human decisions).
-- **UAT round 1 (2026-07-09, `80b953f`, unpushed):** user relaunched UAT on the empty vault; UI
+- **UAT round 1 (2026-07-09, `80b953f`, pushed):** user relaunched UAT on the empty vault; UI
   feedback implemented — "— leave pending" radio label (records nothing, unlike audited defer),
   explicit `?preselect=approve` link (pre-checks PENDING rows only; deferred stay parked),
   alphabetical `item_type` selects, **`GET /raw/{source_id}`** "view original" links
@@ -73,18 +73,39 @@ critical rules and `CONTEXT.md` for the glossary.
   HTML/SVG/unknown = attachment, nosniff always + CSP sandbox on inline — untrusted raw must
   never render same-origin; lifecycle-status-agnostic operator access pinned), and the taxonomy
   **label revision** `sub_domain`→`ai_topic_area`, `ai_model_family`→`model_family_architecture`.
-- **Tests/lint green:** `1232 passed, 2 skipped` (opt-in `gpu`/`model` marks), ruff clean, all 10
-  validators pass on the empty vault. Newest test files: `tests/test_items.py` (items worker:
-  extraction contract, type-conflict routing, sentinel coercion, prompt pin),
-  `tests/test_retype.py` (metadata-flip executor + effect projector), plus rewritten
-  `test_source_flow` / `test_merge` / `test_split` / `test_reconcile` / `test_graph` (v1-DB
-  refusal pins) / `test_wiki_render` (sentinel QA-bucket negatives).
+- **UAT round 2 (2026-07-09, `f9d7043`, pushed): FINISHED, PASSED.** Sole comment — pre-select
+  approve link → button (GET form + hidden `preselect=approve`; same URL semantics,
+  pending-rows-only behavior unchanged; `test_source_flow` re-pinned to form/button markup).
+  F5 dissolution implicitly confirmed by UAT.
+- **ADR-0060 — W2 Obsidian readability / wiki display aliases (2026-07-10, complete + pushed):**
+  design-lock `ef5a0fa` + impl `1f7d04e` (27 files) + user's UAT-Guide §1.2 cp-`.env (UAT)` step
+  `a1e4511`. **Filenames stay id-keyed permanently**; readability = `[[id|label]]` aliased links
+  + frontmatter `title:`/`aliases:`. **Two-layer label contract:** full sanitised titles in
+  frontmatter/search vs shared `display_link_label` (≤78 chars) in link position. NEW
+  `app/workers/labels.py` page-local label resolution threaded through all 10 writer call sites
+  (renderers stay IO-free) + `_wl` aliased-link helper; all bare link surfaces aliased (claim
+  evidence cells + contradicts, synthesis evidence + disagreements, item mentioned-by/duplicates/
+  merged-redirect, query citations, `index.md` rows). NEW blocking validator
+  `scripts/validate_link_aliases.py` (**validators 10→11**) + report-only `display_alias_rot`
+  lint (rendered-label comparison); `duplicates._projects` made alias-insensitive; frontmatter
+  backstops in `validate_frontmatter`/`validate_wiki`. **Explorer/tabs/graph still show ids BY
+  DESIGN** — aliases render in link position and page frontmatter only. Old UAT-clone pages need
+  re-render or fresh ingest to show aliases (user recreating the clone). Live e2e verified.
+- **Tests/lint green:** `1259 passed, 2 skipped` (opt-in `gpu`/`model` marks), ruff clean, all 11
+  validators pass. Newest test files: alias-slice tests (labels resolution, `validate_link_aliases`,
+  `display_alias_rot`), `tests/test_items.py` (items worker: extraction contract, type-conflict
+  routing, sentinel coercion, prompt pin), `tests/test_retype.py` (metadata-flip executor + effect
+  projector), plus rewritten `test_source_flow` / `test_merge` / `test_split` / `test_reconcile` /
+  `test_graph` (v1-DB refusal pins) / `test_wiki_render` (sentinel QA-bucket negatives).
 
 ## Viewing the vault (Obsidian)
 
 - The `wiki/` layer is **Obsidian-native** (`[[wikilinks]]` + `> [!summary]` callouts). View the
   real vault by opening **`/home/jolulop/code/knowledge-system/wiki`** as a vault. Semantic pages
   live flat under `wiki/Items/` (one folder for all 15 types; `item_type` in frontmatter).
+- **Display aliases (ADR-0060):** links render human-readable labels via `[[id|label]]` and pages
+  carry `title:`/`aliases:` frontmatter; page **filenames remain id-keyed**, and the file
+  explorer/tabs/graph therefore show ids — that is by design, not a bug.
 - **Obsidian is installed in WSL** (apt `.deb`, WSLg). Launch `obsidian --no-sandbox &` (add
   `--disable-gpu` if it won't start). Use the WSL Obsidian, not Windows-over-`\\wsl$`.
 - `wiki/` is **regenerated by the pipeline** — Obsidian is a viewer; manual edits are overwritten.
@@ -103,29 +124,30 @@ critical rules and `CONTEXT.md` for the glossary.
 | ADR-0050–0052 identity surgery (merge · subtype-rekey · split) | **Complete + pushed** (0051 retired for items by 0059) |
 | ADR-0053 BGE-M3 · 0054 de-hyphenation · 0055/0056 tier-2 contract+coverage | **Complete + pushed** |
 | ADR-0057/0058 W1 review-flow family | **Complete + pushed** |
-| **ADR-0059 knowledge-item taxonomy + type-neutral identity** | **Complete**: design-lock `19930d5` + impl `fa9c593` **pushed**; wipe executed 2026-07-09; UAT round 1 `80b953f` **unpushed** |
+| **ADR-0059 knowledge-item taxonomy + type-neutral identity** | **Complete + pushed** (`19930d5` design-lock · `fa9c593` impl · `80b953f` UAT r1 · `f9d7043` UAT r2); wipe executed 2026-07-09; UAT rounds 1–2 **passed** |
+| **ADR-0060 W2 wiki display aliases (Obsidian readability)** | **Complete + pushed** (`ef5a0fa` design-lock · `1f7d04e` impl); validators 10→11, live e2e verified |
 
 ## Next step
 
-- **UAT in progress on the empty vault** (user-driven): drop corpus into `raw/inbox/` →
-  `scan_inbox` → `extract_sources` → `generate_wiki` → `reindex_keyword` + `rebuild_index`
-  (free) → billable: `enrich` → `extract_claims` → **`extract_items`** → `promote` →
-  `detect_contradictions` → `generate_synthesis` → `reindex_keyword` + `rebuild_index` →
-  `validate_all`; `reindex_vector` for the vector channel. Watch: `topic_starved` /
-  `unclassified_items` counters, sentinel volume, priority-order classification quality (the old
-  F5 misrouting is structurally gone), per-source flow retype items.
-- **Push `80b953f`** when the user says so.
-- **Then (user picks, each starts with a `grill-phase`):** W2 Obsidian readability (id-titled
-  Claims/Synthesis pages → display-text links/aliases; Items pages are already slug-titled),
-  W3 local-model-first pass + commercial escalation, F4 reference-chunk down-ranking (eval-gated
-  per ADR-0038), HF weight-download/offline policy (own knob, **not** `EMBEDDING_ALLOW_CLOUD`),
-  dead-surface cleanup (illustrative templates incl. `templates/item.md` note, empty
-  `app/frontend/`, compose `qdrant`; align CLAUDE/AGENTS "use templates" wording). Old F5
-  (concept starvation misrouting) is **dissolved by design** — verify empirically during UAT.
-- **ADR-0059 named deferrals:** retrieval-side `item_type` faceting (the taxonomy's payoff
-  slice), `provenance.people[]` roles slice, taxonomy-evolution-is-ADR-gated, sentinel-volume
-  lint tuning, cross-builder Title-outside-delimiter hardening, ADR-0058's carried deferrals
-  (guarded sweep shortcut, rename-of-active, JSON twins).
+- **UAT rounds 1–2 passed; UAT continues on the recreated clone** (user-driven — the user is
+  recreating the UAT clone so aliased pages render; old clone pages need re-render or fresh
+  ingest). Pipeline: drop corpus into `raw/inbox/` → `scan_inbox` → `extract_sources` →
+  `generate_wiki` → `reindex_keyword` + `rebuild_index` (free) → billable: `enrich` →
+  `extract_claims` → **`extract_items`** → `promote` → `detect_contradictions` →
+  `generate_synthesis` → `reindex_keyword` + `rebuild_index` → `validate_all`; `reindex_vector`
+  for the vector channel. Watch: `topic_starved` / `unclassified_items` counters, sentinel
+  volume, priority-order classification quality, per-source flow retype items. Old F5
+  (concept starvation misrouting) **dissolved by design — implicitly confirmed by UAT**.
+- **Then (user picks, each starts with a `grill-phase`):** W3 local-model-first pass +
+  commercial escalation, F4 reference-chunk down-ranking (eval-gated per ADR-0038),
+  retrieval-side `item_type` faceting (the taxonomy's payoff slice), HF weight-download/offline
+  policy (own knob, **not** `EMBEDDING_ALLOW_CLOUD`), dead-surface cleanup (illustrative
+  templates incl. `templates/item.md` note, empty `app/frontend/`, compose `qdrant`; align
+  CLAUDE/AGENTS "use templates" wording).
+- **ADR-0059 named deferrals:** `provenance.people[]` roles slice (item_type faceting moved to
+  the active queue above), taxonomy-evolution-is-ADR-gated, sentinel-volume lint tuning,
+  cross-builder Title-outside-delimiter hardening, ADR-0058's carried deferrals (guarded sweep
+  shortcut, rename-of-active, JSON twins).
 - **Deferred (long-standing):** identity-surgery follow-ups (cross-item merge variants, un-merge/
   un-split, N-way split, `rename_node`), Phase 8 auth/CSRF (needs a non-loopback requirement),
   LLM-judge eval lane, scheduled evals, in-repo CI runner.
@@ -169,7 +191,10 @@ restated over items by 0059), 0057 (review-queue reconciliation), 0058 (per-sour
 **0059 (knowledge-item taxonomy + type-neutral identity — the current ontology: 15 types +
 sentinel, `itm_` ids, `item_type` metadata + `change_item_type` flip, single items[] extraction,
 topic_starved guard, clean-repository restart; supersedes 0017 + semantic half of 0021, retires
-0051; where older docs conflict, 0059 is dominant)** —
+0051; where older docs conflict, 0059 is dominant)**, **0060 (wiki display aliases: id-keyed
+filenames permanent, readability via `[[id|label]]` links + frontmatter `title:`/`aliases:`,
+two-layer label contract w/ `display_link_label`, blocking `validate_link_aliases` + report-only
+`display_alias_rot` lint)** —
 full glossary entries in `CONTEXT.md` (historical superseded entries carry supersession notes).
 
 **Path safety:** `app/backend/paths.py` (`safe_under` containment, `safe_child` basename-only) is the
