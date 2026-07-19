@@ -35,7 +35,9 @@ _VALID_STATUS = {"active", "candidate", "stale_candidate", "deprecated_candidate
 _VALID_GENERATION = {"deterministic", "enriched", "human_edited"}
 _VALID_SUMMARY = {"stub", "enriched"}
 _WIKILINK = re.compile(r"\[\[([^\]]+)\]\]")
-_ABSOLUTE = re.compile(r':\s*"?/')  # a frontmatter value beginning with "/"
+# A frontmatter value beginning with "/". The (?!/) keeps URL schemes ("http://...") in
+# untrusted excerpt text from matching; file:///home/... is still caught by the "/home/" check.
+_ABSOLUTE = re.compile(r':\s*"?/(?!/)')
 
 
 def _manifest_index(manifests_dir: Path) -> dict[str, dict]:

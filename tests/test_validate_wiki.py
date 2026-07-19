@@ -99,6 +99,24 @@ def test_absolute_path_leak_fails(tmp_path):
     assert v.main([str(tmp_path)]) == 1
 
 
+def test_url_in_excerpt_text_passes(tmp_path):
+    _setup(tmp_path)
+    page = _page(tmp_path)
+    page.write_text(
+        page.read_text()
+        + "\nStable URL: http://links.jstor.org/sici?sici=0022-362X%28199101%2988%3A1\n",
+        encoding="utf-8",
+    )
+    assert v.main([str(tmp_path)]) == 0
+
+
+def test_absolute_frontmatter_value_fails(tmp_path):
+    _setup(tmp_path)
+    page = _page(tmp_path)
+    page.write_text(page.read_text() + "\ndata_path: /var/data/vault.pdf\n", encoding="utf-8")
+    assert v.main([str(tmp_path)]) == 1
+
+
 def test_unlabelled_stub_summary_fails(tmp_path):
     _setup(tmp_path)
     page = _page(tmp_path)
