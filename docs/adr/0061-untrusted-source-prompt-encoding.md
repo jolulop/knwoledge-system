@@ -1,6 +1,6 @@
 # ADR-0061 — Serialized/escaped encoding for untrusted source text in LLM prompts
 
-Status: **design-locked** (grill 2026-07-20; implementation pending "implement now")
+Status: **implemented** (grill + design-lock `e751631`; implementation `b6f55ad` + doc reconciliation `64d39f7`, 2026-07-20)
 
 Extends [ADR-0026](0026-llm-untrusted-input-and-grounding.md) (untrusted-input contract +
 grounding gate). Generalizes two point-fixes already in code: the query evidence pack's
