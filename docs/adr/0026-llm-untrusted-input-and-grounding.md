@@ -49,3 +49,11 @@ summary must carry a **machine-checkable generated/unverified marker** (`summary
 enriched` in frontmatter plus a labelled `> [!summary]` callout), and the linter enforces
 the marker's presence — it does not demand span citations on summary prose, but it does
 fail an enriched summary that is unlabelled or claims authority it has not earned.
+
+**Encoding of the delimited data (ADR-0061).** "Clearly-delimited data" above is a
+contract on *placement*; the *encoding* is specified by ADR-0061: untrusted text in
+XML-like prompt blocks is entity-escaped (`&`, `<`, `>`) so a source cannot close its
+delimiter and become instruction-adjacent, JSON payloads (the query evidence pack) use
+`json.dumps`, and no untrusted value is interpolated raw. Where escaped source is quoted
+back for grounding, the quote is `html.unescape()`-d once before `locate_quote` so the
+verbatim gate here is unaffected and the stored quote stays source-faithful.
