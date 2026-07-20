@@ -91,6 +91,16 @@ def test_adr_0056_rollout_chain_includes_keyword_reindex():
     assert reindex_at < validate_at, "reindex_keyword.py must come before validate_all.py"
 
 
+def test_build_spec_and_retention_carry_adr_0061_reconciliation_notes():
+    # ADR-0061 doc reconciliation: the Build Spec File Formats list must flag the ADR-0010
+    # image/audio deferral (so it doesn't read as an unmet requirement), and retention.yaml must
+    # record that raw-byte durability is the operator's responsibility when backup is off.
+    spec = (ROOT / "docs" / "Build Specification v0.1.md").read_text(encoding="utf-8")
+    assert "Implementation status" in spec and "ADR-0010" in spec
+    retention = (ROOT / "policies" / "retention.yaml").read_text(encoding="utf-8")
+    assert "Operator responsibility" in retention and "BACKUP_INCLUDE_RAW" in retention
+
+
 # Runbook/operational docs may WARN against a bare uvicorn launch, but must never RECOMMEND one: the
 # blessed ``python -m app.backend`` entrypoint is the only launch routed through the assert_safe_bind
 # loopback guard (ADR-0009). A direct ``uvicorn app.backend.main:app --host ...`` overrides the bind

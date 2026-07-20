@@ -11,6 +11,9 @@ raw_files:
   # Inclusion is manifest-driven (ADR-0039): relative_raw_path + every occurrences[].relative_path,
   # wherever they live under raw/ incl. raw/inbox/ (intake never moves sources out of inbox; ADR-0007).
   # raw/manifests/ is always backed up; un-manifested staging files are not. NOT a subdir allowlist.
+  # Operator responsibility (ADR-0061 reconciliation): raw is the system of record but excluded from
+  # backup by default (large, immutable, operator-owned). When backup=false, raw-byte DURABILITY is
+  # the operator's responsibility — either set BACKUP_INCLUDE_RAW or maintain an independent copy.
 wiki_pages:
   auto_delete: false
   deprecation_requires_review: true

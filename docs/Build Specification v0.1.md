@@ -73,6 +73,13 @@ The system must support:
 - Video/audio transcripts.
 - Optional future support for additional formats.
 
+> **Implementation status (ADR-0010, ADR-0061 reconciliation).** Implemented today: PDF, DOCX,
+> HTML, Markdown, CSV/XLSX spreadsheets (`app/workers/extract.py`). **Deferred per
+> [ADR-0010](adr/0010-phase-2-extraction-scope-and-boundary.md):** Images, Screenshots, and
+> video/audio transcripts require OCR / image captioning / transcription, which are not in the
+> dependency set; such inputs are catalogued with a `needs_ocr` warning and re-processed once
+> those capabilities land. The list above is the target scope, not the current one.
+
 ### 2.4 Languages
 
 - Primary language: English.
