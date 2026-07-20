@@ -311,6 +311,28 @@ sed -n '1,160p' wiki/index.md
 find wiki -maxdepth 2 -type f | sort | less
 ```
 
+### Obsidian graph
+
+The clone ships a committed graph-view preset (`wiki/.obsidian/graph.json`): the **Claims** layer is
+filtered out (`-path:Claims`) and **Sources**/**Items** are color-coded, so the graph opens as a
+readable ~120-node knowledge map instead of all ~460 pages. To see a page's claims, open it and use
+**"Open local graph"** (command palette) rather than un-filtering the global view.
+
+### Readable titles (optional community plugin)
+
+Page **filenames stay id-keyed by design** (ADR-0060: `itm_…`, `clm_…`, `src_…`), so Obsidian's file
+explorer, tabs, and graph label nodes by id out of the box. Wiki **links** already show titles via
+`[[id|Title]]` aliases; to make the explorer/tabs/**graph** show `title:` frontmatter too, install the
+**Front Matter Title** community plugin (not vendored in the repo — a deliberate supply-chain choice):
+
+1. Settings → **Community plugins** → turn off Restricted mode → **Browse** → search *Front Matter
+   Title* (by Snezhig) → Install → Enable.
+2. In its settings, confirm the frontmatter field is `title` (the default), and turn **on** the
+   **Graph** feature toggle (the File Explorer feature is on by default; Graph is off by default).
+
+Titles then replace ids in the explorer, tab headers, and graph. This is per-clone (the plugin binary
+is not committed); the graph preset above is committed and needs no setup.
+
 ## 12. Error-handling checks
 
 These create UAT input data but do not edit existing raw files.

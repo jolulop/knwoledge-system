@@ -54,7 +54,13 @@ wiki/Projects/*.md
 wiki/Tags/*.md
 wiki/Synthesis/*.md
 wiki/Queries/*.md
-wiki/.obsidian/
+# Obsidian vault config is per-machine local state (open tabs, window layout, plugin caches, plugin
+# binaries) and stays untracked — EXCEPT the graph-view preset, so a fresh UAT clone opens with a
+# sane, filtered graph (Claims layer hidden, Items/Sources colored) instead of all ~460 nodes.
+# Community-plugin code is NOT vendored here (would need its own ADR); title display is a documented
+# manual install (see docs/UAT Guide.md).
+wiki/.obsidian/*
+!wiki/.obsidian/graph.json
 # Phase 6 review ledger is durable local runtime state, never committed (like wiki/ and db/): the
 # JSON items churn as they are decided/applied, and durability is scripts/backup.py, not git. The
 # per-subdir .gitkeep files stay tracked so the ledger structure exists on a fresh checkout.
