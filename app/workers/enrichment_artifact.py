@@ -19,13 +19,17 @@ from typing import Any
 
 from app.backend import taxonomy
 
+# Prompt versions carry a `-enc2` suffix for the ADR-0061 untrusted-source encoding change:
+# every builder now entity-escapes interpolated source text. That alters model-visible input
+# even though instruction wording is unchanged, so the fingerprint/cache must refresh or a
+# cached pre-hardening response would replay. (Free on the empty UAT vault.)
 SCHEMA_VERSION = "enrich-summary-tags-v1"
-PROMPT_VERSION = "enrich-summary-tags-prompt-v1"
+PROMPT_VERSION = "enrich-summary-tags-prompt-v1-enc2"
 # Phase 3.5b claim-extraction pass (separate artifact + versions, tier-2).
 # v2 = the ADR-0056 segment-framed prompt (claims are extracted per claim window; each call
-# states "segment i of N" + local section context).
+# states "segment i of N" + local section context); v3 = ADR-0061 encoding.
 CLAIM_SCHEMA_VERSION = "enrich-claims-v1"
-CLAIM_PROMPT_VERSION = "enrich-claims-prompt-v2"
+CLAIM_PROMPT_VERSION = "enrich-claims-prompt-v3"
 # Tier-2 knowledge-item extraction pass (ADR-0059): ONE items array classified by
 # knowledge-object role, replacing the concepts/entities two-array contract of
 # ADR-0055/0056 (fresh version lineage — the clean-repository restart means there is no
@@ -33,7 +37,7 @@ CLAIM_PROMPT_VERSION = "enrich-claims-prompt-v2"
 # full-doc coverage strategy carry over. Each bump makes every prior artifact stale, so the
 # next extract_items run re-extracts opt-in — no --force machinery.
 ITEMS_SCHEMA_VERSION = "enrich-items-v2"      # v2: label renames ai_topic_area / model_family_architecture
-ITEMS_PROMPT_VERSION = "enrich-items-prompt-v2"
+ITEMS_PROMPT_VERSION = "enrich-items-prompt-v3"   # v3: ADR-0061 encoding
 
 # ADR-0056 extraction-strategy identity. The strategy ref is the explicit coverage component
 # of tier-2 identity — composed alongside (never folded into) schema/prompt versions in both
@@ -52,10 +56,10 @@ def items_strategy_ref(input_max_chars: int) -> str:
     return f"{ITEMS_COVERAGE_STRATEGY}:{input_max_chars}"
 # Phase 3.5c contradiction-detection pass (tier-3; per claim pair, response-cache replayed).
 CONTRADICTION_SCHEMA_VERSION = "enrich-contradiction-v1"
-CONTRADICTION_PROMPT_VERSION = "enrich-contradiction-prompt-v1"
+CONTRADICTION_PROMPT_VERSION = "enrich-contradiction-prompt-v1-enc2"
 # Phase 3.5c cross-source synthesis pass (tier-3; per active knowledge item).
 SYNTHESIS_SCHEMA_VERSION = "enrich-synthesis-v1"
-SYNTHESIS_PROMPT_VERSION = "enrich-synthesis-prompt-v1"
+SYNTHESIS_PROMPT_VERSION = "enrich-synthesis-prompt-v1-enc2"
 
 
 def synthesis_artifact_path(enrichment_dir: Path, node_id: str) -> Path:

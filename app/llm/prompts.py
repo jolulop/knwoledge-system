@@ -9,10 +9,43 @@ refresh.
 """
 from __future__ import annotations
 
+import html
+import re
 from typing import Any
 
 from app.backend import taxonomy
 from app.workers.enrichment_artifact import PROMPT_VERSION, SCHEMA_VERSION  # noqa: F401
+
+# --- untrusted-source prompt encoding (ADR-0061) ---------------------------
+#
+# Every value interpolated into an XML-like prompt block is entity-escaped first, so a source
+# that contains a builder's own closing tag (`</source_document>`, `</claims>`, …) can never
+# close the block and become instruction-adjacent. `html.escape(quote=False)` escapes `&`, `<`,
+# `>` (and `&` first, so an existing `<` is not double-encoded to `&amp;lt;`). IDs are NOT
+# escaped — a corrupt id must fail loudly (below), not become a silent prompt artifact.
+_CONTROL_WS = re.compile(r"[\x00-\x1f\x7f]+")  # newlines, tabs, and other control chars
+_CANONICAL_ID = re.compile(r"[a-z]{3}_[0-9a-f]{16}")  # src_/itm_/clm_/syn_ … (validate_graph grammar)
+
+
+def _escape_untrusted(text: str) -> str:
+    """Entity-escape untrusted text (`&`, `<`, `>`) before XML-like-block interpolation (ADR-0061)."""
+    return html.escape(text, quote=False)
+
+
+def _sanitize_title(title: str) -> str:
+    """Titles derive from the untrusted `original_filename` and sit OUTSIDE the document
+    delimiter, so collapse newlines/tabs/control chars to a single inert space, then escape."""
+    return _escape_untrusted(_CONTROL_WS.sub(" ", title).strip())
+
+
+def _assert_id(value: str) -> str:
+    """Return a structurally-valid node/source/claim id unchanged, or raise. IDs flow into a
+    prompt raw (not escaped): an id carrying `<`, a newline, or whitespace is corrupt state that
+    must fail loudly (ADR-0061), never be silently escaped into a prompt artifact."""
+    if not isinstance(value, str) or not _CANONICAL_ID.fullmatch(value):
+        raise ValueError(f"non-canonical id in prompt assembly: {value!r}")
+    return value
+
 
 SUMMARY_TAGS_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -36,9 +69,9 @@ _SYSTEM = (
 
 def build_messages(title: str, normalized_markdown: str, *, max_chars: int = 12000) -> list[dict[str, str]]:
     """System + user messages for the summary/tags pass; source text is delimited data."""
-    body = normalized_markdown[:max_chars]
+    body = _escape_untrusted(normalized_markdown[:max_chars])
     user = (
-        f"Title: {title}\n\n"
+        f"Title: {_sanitize_title(title)}\n\n"
         "Summarize the following source document and propose topical tags.\n\n"
         f"<source_document>\n{body}\n</source_document>"
     )
@@ -102,24 +135,21 @@ def build_claim_messages(
     `<segment_metadata>` delimiter (review round 2), kept separate from
     `<source_document_segment>` so the verbatim-quote contract stays scoped to the segment.
     """
-    # Entity-encode the tag characters so document-derived metadata can never close the
-    # delimiter and become instruction-adjacent again (review round 3): a heading containing
+    # Entity-escape document-derived metadata so it can never close the delimiter and become
+    # instruction-adjacent (ADR-0061, generalizing ADR-0056 review round 3): a heading with a
     # literal `</segment_metadata>` arrives as `&lt;/segment_metadata&gt;`.
-    escaped_context = (
-        section_context.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        if section_context else None
-    )
+    escaped_context = _escape_untrusted(section_context) if section_context else None
     metadata_block = (
         f"<segment_metadata>\nSection context: {escaped_context}\n</segment_metadata>\n"
         if escaped_context else ""
     )
     user = (
-        f"Title: {title}\n"
-        f"Segment {segment_index} of {segment_count} of this document.\n"
+        f"Title: {_sanitize_title(title)}\n"
+        f"Segment {int(segment_index)} of {int(segment_count)} of this document.\n"
         f"{metadata_block}\n"
         "Extract the atomic factual claims this document segment makes, each with a verbatim "
         "supporting quote.\n\n"
-        f"<source_document_segment>\n{window_text}\n</source_document_segment>"
+        f"<source_document_segment>\n{_escape_untrusted(window_text)}\n</source_document_segment>"
     )
     return [
         {"role": "system", "content": _CLAIMS_SYSTEM},
@@ -230,9 +260,9 @@ def build_items_messages(title: str, normalized_markdown: str, *, max_chars: int
     ADR-0056 (carried over by ADR-0059): one full-document call — the worker passes
     `ENRICH_ITEMS_INPUT_MAX_CHARS` as `max_chars` and marks an above-cap document
     `coverage: truncated` in its artifact."""
-    body = normalized_markdown[:max_chars]
+    body = _escape_untrusted(normalized_markdown[:max_chars])
     user = (
-        f"Title: {title}\n\n"
+        f"Title: {_sanitize_title(title)}\n\n"
         "Identify the knowledge items this source document is about.\n\n"
         f"<source_document>\n{body}\n</source_document>"
     )
@@ -280,7 +310,8 @@ def _evidence_block(citations: list[dict[str, Any]]) -> str:
     if not citations:
         return "(no evidence)"
     return "\n".join(
-        f'[{c.get("source_id")} {c.get("char_start")}–{c.get("char_end")}] "{c.get("quote", "")}"'
+        f'[{_assert_id(c.get("source_id"))} {int(c.get("char_start"))}–{int(c.get("char_end"))}] '
+        f'"{_escape_untrusted(c.get("quote", ""))}"'
         for c in citations
     )
 
@@ -292,13 +323,13 @@ def build_contradiction_messages(
     """System + user messages for one claim-pair contradiction verdict; claims/quotes are
     delimited untrusted data. The shared blocking node ids and the full citation anchors of
     both claims are embedded so the cache key is a faithful per-pair fingerprint (ADR-0031)."""
-    topics = ", ".join(sorted(shared_nodes)) if shared_nodes else "(none)"
+    topics = ", ".join(_assert_id(n) for n in sorted(shared_nodes)) if shared_nodes else "(none)"
     user = (
         f"Shared topic node(s): {topics}\n\n"
         "Do these two claims directly contradict each other?\n\n"
-        f"<claim_a>\n{claim_a}\n</claim_a>\n"
+        f"<claim_a>\n{_escape_untrusted(claim_a)}\n</claim_a>\n"
         f"<evidence_a>\n{_evidence_block(cites_a)}\n</evidence_a>\n\n"
-        f"<claim_b>\n{claim_b}\n</claim_b>\n"
+        f"<claim_b>\n{_escape_untrusted(claim_b)}\n</claim_b>\n"
         f"<evidence_b>\n{_evidence_block(cites_b)}\n</evidence_b>"
     )
     return [
@@ -339,10 +370,10 @@ def _claims_block(claims: list[dict[str, Any]]) -> str:
     part of the cache key so a changed claim set / span re-synthesizes — ADR-0031)."""
     out = []
     for i, c in enumerate(claims, 1):
-        out.append(f"[{i}] ({c['claim_id']}) {c['claim_text']}")
+        out.append(f"[{i}] ({_assert_id(c['claim_id'])}) {_escape_untrusted(c['claim_text'])}")
         for cite in c.get("citations", []):
-            out.append(f"    - [{cite.get('source_id')} {cite.get('char_start')}–"
-                       f"{cite.get('char_end')}] \"{cite.get('quote', '')}\"")
+            out.append(f"    - [{_assert_id(cite.get('source_id'))} {int(cite.get('char_start'))}–"
+                       f"{int(cite.get('char_end'))}] \"{_escape_untrusted(cite.get('quote', ''))}\"")
     return "\n".join(out)
 
 
@@ -351,9 +382,9 @@ def build_synthesis_messages(
 ) -> list[dict[str, str]]:
     """System + user messages for a per-topic synthesis; claims are delimited untrusted data.
     `disagreements` are human-readable notes about active contradictions among the claims."""
-    dis = "\n".join(f"- {d}" for d in disagreements) if disagreements else "(none)"
+    dis = "\n".join(f"- {_escape_untrusted(d)}" for d in disagreements) if disagreements else "(none)"
     user = (
-        f"Topic: {topic}\n\n"
+        f"Topic: {_escape_untrusted(topic)}\n\n"
         "Synthesize what these independently-sourced claims collectively say about the topic.\n\n"
         f"<claims>\n{_claims_block(claims)}\n</claims>\n\n"
         f"<disagreements>\n{dis}\n</disagreements>"

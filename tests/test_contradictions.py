@@ -619,11 +619,13 @@ def test_cache_key_busts_on_anchor_or_topic_change():
         return cache_key(msgs, "anthropic:m", prompts.CONTRADICTION_SCHEMA,
                          schema_version="v", prompt_version="v")
 
-    k0 = key(base, ["itm_x"])
-    assert key(base, ["itm_x"]) == k0                    # identical inputs -> hit
-    assert key(diff_src, ["itm_x"]) != k0                # changed source_id -> miss
-    assert key(diff_range, ["itm_x"]) != k0              # changed char range -> miss
-    assert key(base, ["itm_y"]) != k0                    # changed shared node -> miss
+    # Shared node ids must be canonical (ADR-0061 asserts id shape at prompt assembly).
+    itm_x, itm_y = "itm_" + "1" * 16, "itm_" + "2" * 16
+    k0 = key(base, [itm_x])
+    assert key(base, [itm_x]) == k0                       # identical inputs -> hit
+    assert key(diff_src, [itm_x]) != k0                   # changed source_id -> miss
+    assert key(diff_range, [itm_x]) != k0                 # changed char range -> miss
+    assert key(base, [itm_y]) != k0                       # changed shared node -> miss
 
 
 def test_confidence_is_clamped(tmp_path):

@@ -446,9 +446,9 @@ def test_items_prompt_contract_pinned():
     from app.workers import enrichment_artifact as art
 
     # v2 = the 2026-07-09 UAT label revision (sub_domain -> ai_topic_area,
-    # ai_model_family -> model_family_architecture); labels changed both the enum (schema)
-    # and the priority-order wording (prompt), so BOTH versions bumped.
-    assert art.ITEMS_PROMPT_VERSION == "enrich-items-prompt-v2"
+    # ai_model_family -> model_family_architecture); v3 = the ADR-0061 encoding change (the
+    # builder now entity-escapes the source body). Schema (enum) unchanged since v2.
+    assert art.ITEMS_PROMPT_VERSION == "enrich-items-prompt-v3"
     assert art.ITEMS_SCHEMA_VERSION == "enrich-items-v2"
     text = prompts._ITEMS_SYSTEM
     assert "UNTRUSTED" in text                                   # untrusted-data framing kept

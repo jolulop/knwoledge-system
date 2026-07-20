@@ -92,29 +92,35 @@ def test_coverage_gap_fails(tmp_path):
     assert v.main([str(tmp_path)]) == 1
 
 
-def test_absolute_path_leak_fails(tmp_path):
+def _inject_frontmatter(page: Path, line: str) -> None:
+    """Insert a frontmatter line before the body separator (ADR-0061: leak scan is fm-only)."""
+    page.write_text(page.read_text().replace("\n---\n", f"\n{line}\n---\n", 1), encoding="utf-8")
+
+
+def test_absolute_path_leak_in_frontmatter_fails(tmp_path):
     _setup(tmp_path)
-    page = _page(tmp_path)
-    page.write_text(page.read_text() + "\nSee /home/user/secret.pdf\n", encoding="utf-8")
+    _inject_frontmatter(_page(tmp_path), "leaked_path: /home/user/secret.pdf")
     assert v.main([str(tmp_path)]) == 1
-
-
-def test_url_in_excerpt_text_passes(tmp_path):
-    _setup(tmp_path)
-    page = _page(tmp_path)
-    page.write_text(
-        page.read_text()
-        + "\nStable URL: http://links.jstor.org/sici?sici=0022-362X%28199101%2988%3A1\n",
-        encoding="utf-8",
-    )
-    assert v.main([str(tmp_path)]) == 0
 
 
 def test_absolute_frontmatter_value_fails(tmp_path):
     _setup(tmp_path)
-    page = _page(tmp_path)
-    page.write_text(page.read_text() + "\ndata_path: /var/data/vault.pdf\n", encoding="utf-8")
+    _inject_frontmatter(_page(tmp_path), "data_path: /var/data/vault.pdf")
     assert v.main([str(tmp_path)]) == 1
+
+
+def test_absolute_paths_in_body_prose_pass(tmp_path):
+    # ADR-0061: Source excerpts are rendered source DATA; path-shaped strings in body prose are
+    # not leaks. A JSTOR URL, a /home path, a /var/log path, and a Windows path all pass.
+    _setup(tmp_path)
+    page = _page(tmp_path)
+    page.write_text(
+        page.read_text()
+        + "\nStable URL: http://links.jstor.org/sici?sici=0022-362X%28199101%2988%3A1\n"
+        + "The config lived at /home/user/secret.pdf and logs under /var/log/app; on Windows C:\\Data.\n",
+        encoding="utf-8",
+    )
+    assert v.main([str(tmp_path)]) == 0
 
 
 def test_unlabelled_stub_summary_fails(tmp_path):

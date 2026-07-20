@@ -32,6 +32,7 @@ synchronous, the 3.5a shape: fingerprint-idempotent per source; no API key → t
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import re
 import subprocess
@@ -423,7 +424,10 @@ def extract_claims(
                 window_text = md[window_start:w["char_end"]]
                 for item in result["claims"]:
                     text = str(item.get("claim", "")).strip()
-                    quote = str(item.get("quote", ""))
+                    # The window body is entity-escaped in the prompt (ADR-0061), so the model
+                    # may return the escaped form (`AT&amp;T`, `a &lt; b`); unescape exactly once
+                    # here so grounding runs against — and stores — the source-faithful quote.
+                    quote = html.unescape(str(item.get("quote", "")))
                     if not text:
                         continue
                     # Locate inside the WINDOW text, then translate to full-document offsets

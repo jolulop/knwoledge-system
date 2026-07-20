@@ -103,12 +103,17 @@ def _check_page(root: Path, path: Path, manifests: dict[str, dict]) -> list[str]
     if fm.get("summary_status") and fm["summary_status"] not in _VALID_SUMMARY:
         errors.append(f"{sid}: invalid summary_status {fm['summary_status']!r}")
 
-    # No absolute paths may leak (ADR-0009).
+    # No absolute paths may leak into structured metadata (ADR-0009/0061). The scan is
+    # FRONTMATTER-ONLY: body prose — especially Source excerpts — is rendered source *data* and
+    # may legitimately contain path-shaped strings (a source can discuss `/var/log/app`, a JSTOR
+    # `http://…` URL, `C:\…`). A genuine server-path leak originates in the renderer writing a
+    # structured field, which lands in frontmatter, so that is the only surface policed.
     if "raw_path" in fm:
         errors.append(f"{sid}: frontmatter has absolute 'raw_path' (use relative_raw_path)")
-    for line in text.splitlines():
+    fm_block = text.split("\n---\n", 1)[0]
+    for line in fm_block.splitlines():
         if _ABSOLUTE.search(line) or "/home/" in line:
-            errors.append(f"{sid}: leaks an absolute path: {line.strip()[:60]}")
+            errors.append(f"{sid}: frontmatter leaks an absolute path: {line.strip()[:60]}")
             break
 
     # Summary callout present and labelled for what it is: an extractive stub, or a
