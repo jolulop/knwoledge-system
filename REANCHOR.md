@@ -1,6 +1,6 @@
 # REANCHOR — session status
 
-_Last updated: 2026-07-19. **Reanchor command:** "read REANCHOR.md and reanchor". Read this
+_Last updated: 2026-07-22. **Reanchor command:** "read REANCHOR.md and reanchor". Read this
 first after an app restart, then `wiki/index.md` if working in the vault._
 
 > [!warning] This is a periodically-refreshed snapshot and can lag the live state. The authoritative
@@ -12,12 +12,12 @@ first after an app restart, then `wiki/index.md` if working in the vault._
 
 Local-first **LLM Wiki** knowledge-system. Immutable `raw/` → derived `normalized/` →
 generated `wiki/` (gitignored, regenerable) → `db/` SQLite (graph, jobs, llm_cache) →
-`reviews/`, `policies/`. ADR-driven (`docs/adr/0001–0060`). See `CLAUDE.md` for the
+`reviews/`, `policies/`. ADR-driven (`docs/adr/0001–0062`). See `CLAUDE.md` for the
 critical rules and `CONTEXT.md` for the glossary.
 
 ## Where we are
 
-- **Branch:** `main` — pushed tip at refresh time: `a1e4511`, **in sync with origin, nothing
+- **Branch:** `main` — pushed tip at refresh time: `a16596e`, **in sync with origin, nothing
   unpushed, tree clean**. Run `git log --oneline origin/main..HEAD` for the live unpushed set.
   The per-slice rhythm: grill (design-lock, docs-only) → implement (on "implement now") → test →
   external review (user pastes) → analyze+recommend+**wait** → fix → commit (user says so) → push.
@@ -91,12 +91,47 @@ critical rules and `CONTEXT.md` for the glossary.
   backstops in `validate_frontmatter`/`validate_wiki`. **Explorer/tabs/graph still show ids BY
   DESIGN** — aliases render in link position and page frontmatter only. Old UAT-clone pages need
   re-render or fresh ingest to show aliases (user recreating the clone). Live e2e verified.
-- **Tests/lint green:** `1259 passed, 2 skipped` (opt-in `gpu`/`model` marks), ruff clean, all 11
-  validators pass. Newest test files: alias-slice tests (labels resolution, `validate_link_aliases`,
-  `display_alias_rot`), `tests/test_items.py` (items worker: extraction contract, type-conflict
-  routing, sentinel coercion, prompt pin), `tests/test_retype.py` (metadata-flip executor + effect
-  projector), plus rewritten `test_source_flow` / `test_merge` / `test_split` / `test_reconcile` /
-  `test_graph` (v1-DB refusal pins) / `test_wiki_render` (sentinel QA-bucket negatives).
+- **UAT round 3 (2026-07-18/19, PASSED on the recreated clone):** first corpus under ADR-0060
+  aliases. Two incidents, both resolved: (1) `validate_wiki` absolute-path leak regex false-
+  positived on a JSTOR `http://` URL inside a Source excerpt → fixed `2a64484` (regex
+  `':\s*"?/(?!/)'`, frontmatter-only scan later generalized by ADR-0061); (2) "10 files found" for
+  5 PDFs = Windows NTFS alternate-data-stream artifacts (`*.pdf:Zone.Identifier` / `*.pdf:mshield`)
+  materialized by an Explorer copy — extractor correctly skipped them (avoid via `cp` from WSL).
+  Obsidian graph preset committed `9274018` (`wiki/.obsidian/graph.json` tracked: Claims filtered
+  `-path:Claims`, Sources/Items colored) + UAT-Guide Front Matter Title manual-install note
+  `159a71f` (plugin binary NOT vendored — would need its own ADR; graph still shows ids by design).
+- **ADR-0061 — untrusted-source prompt encoding (2026-07-20, complete + pushed):** design-lock
+  `e751631` + impl `b6f55ad` + doc reconciliation `64d39f7`. Closed a delimiter-injection gap: all
+  five prompt builders in `app/llm/prompts.py` interpolated untrusted source text RAW between
+  XML-like tags. Now **container-driven encoding** — XML-tagged blocks entity-escape `&`/`<`/`>`
+  (`_escape_untrusted`, `_sanitize_title` single-lines the filename-derived title), JSON payloads
+  (query evidence pack) use `json.dumps`, no raw untrusted interpolation. IDs are asserted to the
+  canonical `<prefix>_[0-9a-f]{16}` grammar (`_assert_id` raises on corrupt, never silently
+  escapes). `claims.py` `html.unescape()`s the model quote once at the grounding boundary so the
+  stored citation stays source-faithful. All five `*_PROMPT_VERSION` bumped (free on the empty
+  vault). NB2 folded in: `validate_wiki` absolute-path leak scan is now **frontmatter-only** (Source
+  excerpts are rendered source data). Extends ADR-0026; generalizes ADR-0034 B1 + ADR-0056 R3.
+- **ADR-0062 — item_type retrieval faceting (2026-07-22, complete + pushed):** design-lock
+  `3cfb398` + impl `1b89241` + **review round 1** `a16596e`. Fulfills the ADR-0059 faceting
+  deferral (the taxonomy's retrieval payoff). `item_type` lives on graph item nodes but the citable
+  layer is source-chunk-keyed, so faceting is **precise-where-native / advisory-where-bridged**:
+  hard `item_type IN (…)` filter on navigation (new UNINDEXED nav-index column, Item pages only;
+  `keyword_index.INDEX_VERSION` 1→2) + graph (native), and a bounded **advisory boost** on evidence
+  chunks (never a filter — protects citability). Facet = multi-value set, validated vs the 15
+  `taxonomy.ITEM_TYPES`; unknown + the sentinel → 400. A TYPE predicate, not a layer filter
+  (non-item results pass through). API: `/search?item_type=` (repeatable) + `/query` body
+  `item_type[]`. **Review round 1 fixes** (all in `a16596e`): saved-query `query_id` + frontmatter
+  now include the facet (pre-cap boost changes the answer — no overwrite); `item_type_boost` is
+  **hard-clamped** to `min(0.005, 1/(rrf_k+1) − 1/(rrf_k+prefusion))` so a config typo can't become
+  a hidden filter; `keyword_index.schema_usable()` gates `/search` so a stale v1 index **degrades**
+  (keyword+nav unavailable + reindex note) instead of a 500; honest boost notes; malformed Item
+  pages (missing `item_type`) get the sentinel in the nav index so a facet excludes them.
+- **Tests/lint green:** `1311 passed, 2 skipped` (opt-in `gpu`/`model` marks), ruff clean, all 11
+  validators pass. Newest test files: `tests/test_prompt_encoding.py` (ADR-0061: per-builder
+  breakout, escape ordering, title sanitize, ID-shape reject, escaped-quote grounding, version
+  pins), `tests/test_item_type_faceting.py` (ADR-0062: active-only bridge, tie-break +
+  anti-hidden-filter boost, nav-index column + v1→v2 gate, disabled/unavailable notes, malformed-
+  item exclusion), plus faceting cases in `golden_retrieval.yaml` + `test_api`/`test_policy`.
 
 ## Viewing the vault (Obsidian)
 
@@ -124,26 +159,31 @@ critical rules and `CONTEXT.md` for the glossary.
 | ADR-0050–0052 identity surgery (merge · subtype-rekey · split) | **Complete + pushed** (0051 retired for items by 0059) |
 | ADR-0053 BGE-M3 · 0054 de-hyphenation · 0055/0056 tier-2 contract+coverage | **Complete + pushed** |
 | ADR-0057/0058 W1 review-flow family | **Complete + pushed** |
-| **ADR-0059 knowledge-item taxonomy + type-neutral identity** | **Complete + pushed** (`19930d5` design-lock · `fa9c593` impl · `80b953f` UAT r1 · `f9d7043` UAT r2); wipe executed 2026-07-09; UAT rounds 1–2 **passed** |
+| **ADR-0059 knowledge-item taxonomy + type-neutral identity** | **Complete + pushed** (`19930d5` design-lock · `fa9c593` impl · `80b953f` UAT r1 · `f9d7043` UAT r2); wipe executed 2026-07-09; UAT rounds 1–3 **passed** |
 | **ADR-0060 W2 wiki display aliases (Obsidian readability)** | **Complete + pushed** (`ef5a0fa` design-lock · `1f7d04e` impl); validators 10→11, live e2e verified |
+| **ADR-0061 untrusted-source prompt encoding** | **Complete + pushed** (`e751631` design-lock · `b6f55ad` impl · `64d39f7` doc reconciliation) |
+| **ADR-0062 item_type retrieval faceting** | **Complete + pushed** (`3cfb398` design-lock · `1b89241` impl · `a16596e` review round 1); nav-index `INDEX_VERSION` 1→2 |
 
 ## Next step
 
-- **UAT rounds 1–2 passed; UAT continues on the recreated clone** (user-driven — the user is
-  recreating the UAT clone so aliased pages render; old clone pages need re-render or fresh
-  ingest). Pipeline: drop corpus into `raw/inbox/` → `scan_inbox` → `extract_sources` →
-  `generate_wiki` → `reindex_keyword` + `rebuild_index` (free) → billable: `enrich` →
-  `extract_claims` → **`extract_items`** → `promote` → `detect_contradictions` →
-  `generate_synthesis` → `reindex_keyword` + `rebuild_index` → `validate_all`; `reindex_vector`
-  for the vector channel. Watch: `topic_starved` / `unclassified_items` counters, sentinel
-  volume, priority-order classification quality, per-source flow retype items. Old F5
-  (concept starvation misrouting) **dissolved by design — implicitly confirmed by UAT**.
-- **Then (user picks, each starts with a `grill-phase`):** W3 local-model-first pass +
-  commercial escalation, F4 reference-chunk down-ranking (eval-gated per ADR-0038),
-  retrieval-side `item_type` faceting (the taxonomy's payoff slice), HF weight-download/offline
-  policy (own knob, **not** `EMBEDDING_ALLOW_CLOUD`), dead-surface cleanup (illustrative
-  templates incl. `templates/item.md` note, empty `app/frontend/`, compose `qdrant`; align
-  CLAUDE/AGENTS "use templates" wording).
+- **UAT rounds 1–3 passed.** After a schema change (e.g. ADR-0062's `INDEX_VERSION` 1→2) a fresh
+  clone / existing vault must run `reindex_keyword` — `/search` now degrades on a stale index and
+  `validate_index_consistency` flags it. Full pipeline: drop corpus into `raw/inbox/` →
+  `scan_inbox` → `extract_sources` → `generate_wiki` → `reindex_keyword` + `rebuild_index` (free)
+  → billable: `enrich` → `extract_claims` → **`extract_items`** → `promote` →
+  `detect_contradictions` → `generate_synthesis` → `reindex_keyword` + `rebuild_index` →
+  `validate_all`; `reindex_vector` for the vector channel. Watch: `topic_starved` /
+  `unclassified_items` counters, sentinel volume, priority-order classification quality,
+  per-source flow retype items. Old F5 (concept starvation misrouting) **dissolved by design**.
+- **Next queue (user picks, each starts with a `grill-phase`):** W3 local-model-first pass +
+  commercial escalation, F4 reference-chunk down-ranking (eval-gated per ADR-0038), HF
+  weight-download/offline policy (own knob, **not** `EMBEDDING_ALLOW_CLOUD`), dead-surface
+  cleanup (illustrative templates incl. `templates/item.md` note, empty `app/frontend/`, compose
+  `qdrant`; align CLAUDE/AGENTS "use templates" wording). **W2 (ADR-0060) and item_type faceting
+  (ADR-0062) are DONE** — dropped from the queue.
+- **ADR-0062 deferred:** **item-seeded retrieval** ("answer within this item class" — facet selects
+  items → their sources scope evidence as a real filter) is a future retrieval mode, revisited only
+  if the advisory boost proves insufficient; a real-corpus faceted relevance eval case.
 - **ADR-0059 named deferrals:** `provenance.people[]` roles slice (item_type faceting moved to
   the active queue above), taxonomy-evolution-is-ADR-gated, sentinel-volume lint tuning,
   cross-builder Title-outside-delimiter hardening, ADR-0058's carried deferrals (guarded sweep
@@ -194,7 +234,12 @@ topic_starved guard, clean-repository restart; supersedes 0017 + semantic half o
 0051; where older docs conflict, 0059 is dominant)**, **0060 (wiki display aliases: id-keyed
 filenames permanent, readability via `[[id|label]]` links + frontmatter `title:`/`aliases:`,
 two-layer label contract w/ `display_link_label`, blocking `validate_link_aliases` + report-only
-`display_alias_rot` lint)** —
+`display_alias_rot` lint)**, **0061 (untrusted-source prompt encoding: container-driven —
+XML-tagged blocks entity-escape `&<>`, JSON payloads `json.dumps`, IDs asserted not escaped,
+claims quote `html.unescape`d at grounding; extends 0026, generalizes 0034 B1 + 0056 R3)**,
+**0062 (item_type retrieval faceting: precise filter on nav/graph, bounded advisory boost on
+evidence chunks via the active-only source→item bridge, `item_type_boost` hard-capped, nav-index
+`INDEX_VERSION` 1→2 + runtime `schema_usable` gate; fulfills the 0059 faceting deferral)** —
 full glossary entries in `CONTEXT.md` (historical superseded entries carry supersession notes).
 
 **Path safety:** `app/backend/paths.py` (`safe_under` containment, `safe_child` basename-only) is the
