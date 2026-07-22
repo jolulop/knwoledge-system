@@ -333,6 +333,8 @@ explorer, tabs, and graph label nodes by id out of the box. Wiki **links** alrea
 Titles then replace ids in the explorer, tab headers, and graph. This is per-clone (the plugin binary
 is not committed); the graph preset above is committed and needs no setup.
 
+The exact install path, for reference: Settings → Community plugins → turn off Restricted mode → Browse → search Front Matter Title → Install → Enable, then in its settings turn on the Graph feature toggle (File Explorer is on by default; Graph is off).
+
 ## 12. Error-handling checks
 
 These create UAT input data but do not edit existing raw files.
