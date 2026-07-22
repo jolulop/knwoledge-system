@@ -290,13 +290,20 @@ def search_navigation(
     page_type: str | None,
     node_statuses: tuple[str, ...],
     language: str | None,
+    item_types: frozenset[str] | None = None,
     prefusion_limit: int,
     limit: int,
 ) -> list[dict[str, Any]]:
-    """Status-aware page discovery over the Phase 4a navigation index."""
+    """Status-aware page discovery over the Phase 4a navigation index.
+
+    ``item_types`` (ADR-0062) is a type predicate, not a layer filter: it narrows rows that *have*
+    an item_type (Item pages) to the requested set, while non-item pages (item_type stored as '')
+    pass through untouched.
+    """
     sql = (
-        "SELECT path, page_type, node_id, status, review_status, language, answer_eligible, "
-        "title, summary, bm25(navigation) AS score FROM navigation WHERE navigation MATCH ?"
+        "SELECT path, page_type, node_id, item_type, status, review_status, language, "
+        "answer_eligible, title, summary, bm25(navigation) AS score FROM navigation "
+        "WHERE navigation MATCH ?"
     )
     params: list[Any] = [match]
     if page_type:
@@ -305,6 +312,10 @@ def search_navigation(
     if language:
         sql += " AND language = ?"
         params.append(language)
+    if item_types:
+        placeholders = ",".join("?" for _ in item_types)
+        sql += f" AND (item_type = '' OR item_type IN ({placeholders}))"
+        params.extend(sorted(item_types))
     sql += " ORDER BY score, path LIMIT ?"
     params.append(prefusion_limit)
     rows = conn.execute(sql, params).fetchall()
@@ -317,6 +328,7 @@ def search_navigation(
             "path": r["path"],
             "page_type": r["page_type"],
             "node_id": r["node_id"] or None,
+            "item_type": r["item_type"] or None,
             "title": r["title"],
             "summary": r["summary"],
             "status": r["status"],
@@ -445,6 +457,28 @@ def fuse_evidence(
     return out
 
 
+def apply_item_type_boost(
+    pool: list[dict[str, Any]],
+    *,
+    source_types: dict[str, frozenset[str]],
+    requested: frozenset[str],
+    boost: float,
+) -> list[dict[str, Any]]:
+    """ADR-0062 advisory evidence boost: add ``boost`` to the RRF ``score`` of on-type chunks (their
+    source bridges to a requested item_type), then re-sort. In place; returns the same list.
+
+    Advisory, never a filter: the boost is bounded (weaker than primary relevance), so it breaks
+    ties and nudges a few positions but a much-more-relevant off-type chunk still outranks a weak
+    on-type one. Deterministic tie-break matches :func:`fuse_evidence`."""
+    for e in pool:
+        if requested & source_types.get(e["source_id"], frozenset()):
+            e["score"] += boost
+            e["item_type_boosted"] = True  # debug metadata: this chunk got the advisory boost
+    pool.sort(key=lambda e: (-e["score"], e["source_id"], e.get("ordinal") or 0,
+                             e["char_start"], e["char_end"]))
+    return pool
+
+
 def _empty_graph(depth: int) -> dict[str, Any]:
     return {"seeds": [], "nodes": [], "edges": [], "depth": depth, "truncated": False}
 
@@ -458,6 +492,7 @@ def graph_group(
     edge_statuses: tuple[str, ...],
     node_statuses: tuple[str, ...],
     node_types: frozenset[str] | None,
+    item_types: frozenset[str] | None = None,
     node_cap: int,
     edge_cap: int,
 ) -> dict[str, Any]:
@@ -480,7 +515,8 @@ def graph_group(
         return _empty_graph(depth)
     return graph_read.search_subgraph(
         conn, seeds, depth=depth, edge_statuses=edge_statuses, node_statuses=node_statuses,
-        node_types=node_types, edge_types=edge_types, node_cap=node_cap, edge_cap=edge_cap,
+        node_types=node_types, item_types=item_types, edge_types=edge_types,
+        node_cap=node_cap, edge_cap=edge_cap,
     )
 
 
@@ -497,6 +533,7 @@ def run_search(
     source_id: str | None = None,
     page_type: str | None = None,
     node_type: str | None = None,
+    item_types: frozenset[str] | None = None,
     language: str | None = None,
     source_statuses: tuple[str, ...] = RETENTION_DEFAULT_STATUSES,
     node_statuses: tuple[str, ...] = RETENTION_DEFAULT_STATUSES,
@@ -538,7 +575,7 @@ def run_search(
         if ("navigation" in modes or "graph" in modes) and nav_match is not None:
             nav_hits = search_navigation(
                 keyword_conn, nav_match, page_type=page_type, node_statuses=node_statuses,
-                language=language, prefusion_limit=prefusion, limit=nav_limit,
+                language=language, item_types=item_types, prefusion_limit=prefusion, limit=nav_limit,
             )
             if "navigation" in modes:
                 navigation = nav_hits
@@ -547,7 +584,8 @@ def run_search(
     if "graph" in modes and graph_conn is not None:
         graph_result = graph_group(
             graph_conn, nav_hits, shape=shape, depth=depth, edge_statuses=edge_statuses,
-            node_statuses=node_statuses, node_types=node_types, node_cap=node_cap, edge_cap=edge_cap,
+            node_statuses=node_statuses, node_types=node_types, item_types=item_types,
+            node_cap=node_cap, edge_cap=edge_cap,
         )
 
     # Vector-channel decision (ADR-0032 addenda 5–6). Explicit mode=vector always runs vector. In
@@ -579,7 +617,26 @@ def run_search(
         notes.append(f"vector channel unavailable — degraded to keyword-only: {vector_unavailable_reason}")
 
     # RRF-fuse the chunk-evidence channels into one ranked evidence[] (ADR-0032 addendum 7).
-    evidence = fuse_evidence(channel_hits, k=policy.cap("rrf_k"), limit=ev_limit)
+    # ADR-0062 evidence faceting: an item_type facet applies a bounded, ADVISORY boost — never a
+    # filter. Fuse the full candidate pool, add item_type_boost to on-type chunks (bridged via
+    # active items + active mentions), re-sort, THEN cap. The boost is weaker than primary
+    # relevance, so it breaks ties / nudges a few positions but cannot exclude off-type evidence.
+    boost = policy.weight("item_type_boost")
+    if item_types and boost > 0 and graph_conn is not None and channel_hits:
+        pool = fuse_evidence(channel_hits, k=policy.cap("rrf_k"), limit=max(ev_limit, prefusion))
+        bridge = graph_read.source_item_types(graph_conn, {e["source_id"] for e in pool})
+        apply_item_type_boost(pool, source_types=bridge, requested=item_types, boost=boost)
+        evidence = pool[:ev_limit]
+    else:
+        evidence = fuse_evidence(channel_hits, k=policy.cap("rrf_k"), limit=ev_limit)
+
+    if item_types:
+        if "navigation" in modes or "graph" in modes:
+            notes.append("item_type facet applied to item page/graph results; non-item results "
+                         "retained; evidence received advisory boost only")
+        else:
+            notes.append("item_type facet used as advisory evidence boost only; off-type "
+                         "evidence retained")
 
     counts = {
         "evidence": len(evidence),

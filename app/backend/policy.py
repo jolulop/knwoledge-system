@@ -148,6 +148,13 @@ _DEFAULT_CAPS = {
     "escalation_primary_below_k": 3,
     "rrf_k": 60,  # Reciprocal Rank Fusion constant (Phase 4e); canonical default
 }
+# Fractional retrieval weights (ADR-0062) — kept apart from the integer `caps` because they are
+# compared against RRF scores (Σ 1/(k+rank) ≈ 0.016/rank at k=60). `item_type_boost` is the additive
+# on-type bonus for the evidence faceting boost; 0.0 disables it. Small so it re-ranks within a few
+# positions but never outranks a much-more-relevant off-type chunk.
+_DEFAULT_WEIGHTS = {
+    "item_type_boost": 0.005,
+}
 
 
 @dataclass(frozen=True)
@@ -155,9 +162,13 @@ class RetrievalPolicy:
     router_rules: dict[str, list[str]] = field(default_factory=lambda: dict(_DEFAULT_ROUTER_RULES))
     default_mode_set: list[str] = field(default_factory=lambda: list(_DEFAULT_MODE_SET))
     caps: dict[str, int] = field(default_factory=lambda: dict(_DEFAULT_CAPS))
+    weights: dict[str, float] = field(default_factory=lambda: dict(_DEFAULT_WEIGHTS))
 
     def cap(self, key: str) -> int:
         return int(self.caps.get(key, _DEFAULT_CAPS[key]))
+
+    def weight(self, key: str) -> float:
+        return float(self.weights.get(key, _DEFAULT_WEIGHTS[key]))
 
     def modes_for_shape(self, shape: str) -> list[str]:
         return list(self.router_rules.get(shape, self.default_mode_set))
@@ -166,6 +177,7 @@ class RetrievalPolicy:
 def load_retrieval_policy(path: Path) -> RetrievalPolicy:
     """Load `retrieval.yaml` over the defaults. Missing file / keys fall back to defaults."""
     caps = dict(_DEFAULT_CAPS)
+    weights = dict(_DEFAULT_WEIGHTS)
     router_rules = {k: list(v) for k, v in _DEFAULT_ROUTER_RULES.items()}
     default_mode_set = list(_DEFAULT_MODE_SET)
 
@@ -180,6 +192,12 @@ def load_retrieval_policy(path: Path) -> RetrievalPolicy:
                     for key, value in block.items():
                         if isinstance(value, int):
                             caps[key] = value
+            # Fractional weights (ADR-0062) under `weights:`.
+            wblock = data.get("weights")
+            if isinstance(wblock, dict):
+                for key, value in wblock.items():
+                    if isinstance(value, (int, float)) and not isinstance(value, bool):
+                        weights[key] = float(value)
             router = data.get("router")
             if isinstance(router, dict):
                 rules = router.get("rules")
@@ -208,4 +226,8 @@ def load_retrieval_policy(path: Path) -> RetrievalPolicy:
     # escalation) falls back to the default.
     if not isinstance(caps.get("escalation_primary_below_k"), int) or caps["escalation_primary_below_k"] < 0:
         caps["escalation_primary_below_k"] = _DEFAULT_CAPS["escalation_primary_below_k"]
-    return RetrievalPolicy(router_rules=router_rules, default_mode_set=default_mode_set, caps=caps)
+    # A negative item_type_boost would invert the intent (demote on-type); clamp to the default.
+    if not isinstance(weights.get("item_type_boost"), (int, float)) or weights["item_type_boost"] < 0:
+        weights["item_type_boost"] = _DEFAULT_WEIGHTS["item_type_boost"]
+    return RetrievalPolicy(router_rules=router_rules, default_mode_set=default_mode_set,
+                           caps=caps, weights=weights)

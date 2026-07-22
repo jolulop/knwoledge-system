@@ -132,3 +132,36 @@ cases:
         - src_aaaaaaaaaaaaaaaa
       evidence_excludes_sources:
         - src_bbbbbbbbbbbbbbbb
+
+  # 9. item_type facet (ADR-0062): a type predicate on the navigation channel, not a layer filter.
+  # The fixture's Item pages are method_technique; the Source page carries no item_type.
+  #
+  # 9a. Faceting on the item's own type keeps it AND retains the non-item Source page.
+  -
+    id: item_type_facet_narrows_on_type
+    category: item_type_facet
+    mode: navigation
+    query: synergy
+    item_type:
+      - method_technique
+    expect:
+      nav_includes_paths:
+        - wiki/Items/itm_activexxxxxxxxx.md
+        - wiki/Sources/src_aaaaaaaaaaaaaaaa.md
+      notes_include:
+        - non-item results retained
+  # 9b. Faceting on a DIFFERENT type drops the off-type Item pages but retains the Source page
+  # (item_type='' passes) — proves type-predicate-not-layer-filter + non-item retention.
+  -
+    id: item_type_facet_excludes_off_type_items
+    category: item_type_facet
+    mode: navigation
+    query: synergy
+    item_type:
+      - model
+    expect:
+      nav_includes_paths:
+        - wiki/Sources/src_aaaaaaaaaaaaaaaa.md
+      nav_excludes_paths:
+        - wiki/Items/itm_activexxxxxxxxx.md
+        - wiki/Items/itm_deprecatedxxxx.md

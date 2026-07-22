@@ -1,6 +1,6 @@
 # ADR-0062 — item_type retrieval faceting
 
-Status: **design-locked** (grill 2026-07-22; implementation pending "implement now")
+Status: **implemented** (grill + design-lock `3cfb398`; implementation 2026-07-22)
 
 Fulfills the **retrieval-side `item_type` faceting** deferral named in
 [ADR-0059](0059-knowledge-item-taxonomy-and-type-neutral-identity.md) ("the taxonomy's payoff
@@ -94,11 +94,16 @@ The knob's default is finalized during the structural eval so the anti-hidden-fi
 ### 5. Response `notes` — distinct wording per endpoint
 
 `/search` has nav/graph result surfaces; `/query` does not (it is evidence-only synthesis), so
-the notes differ:
+the notes differ. **Implementation note:** the note keys on the **channels that actually ran**,
+not the endpoint name — which is stricter than "per endpoint" and can't misdescribe the result.
+`/query` never runs nav/graph, so it always gets the evidence-only note; a keyword-only `/search`
+(the common `auto` default shape) does too, and a `/search` that actually ran nav/graph gets the
+fuller note:
 
-- **/search:** `item_type facet applied to item page/graph results; non-item results retained;
-  evidence received advisory boost only.`
-- **/query:** `item_type facet used as advisory evidence boost only; off-type evidence retained.`
+- **nav/graph channels ran:** `item_type facet applied to item page/graph results; non-item
+  results retained; evidence received advisory boost only`
+- **evidence-only (all `/query`, keyword-only `/search`):** `item_type facet used as advisory
+  evidence boost only; off-type evidence retained`
 
 ## Eval (ADR-0038) — structural lane only
 

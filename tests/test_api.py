@@ -357,6 +357,41 @@ def test_search_errors(client, tmp_path):
     assert client.get("/search?q=x&evidence_limit=0").status_code == 422
 
 
+def test_search_item_type_facet_boosts_on_type_evidence(client, tmp_path):
+    # ADR-0062: the corpus source bridges to a method_technique item, so faceting on that type
+    # boosts its chunk and the notes surface the advisory behavior.
+    _build_search_corpus(tmp_path)
+    body = client.get("/search?q=synergy&item_type=method_technique").json()
+    assert body["counts"]["evidence"] >= 1
+    assert body["evidence"][0]["item_type_boosted"] is True
+    # auto "synergy" is keyword-only (no nav/graph ran), so the note is the evidence-only wording.
+    assert any("advisory evidence boost only" in n for n in body["notes"])
+
+
+def test_search_item_type_facet_is_multi_value_and_predicate_only(client, tmp_path):
+    # Multi-value accepted; a facet is a type predicate, so the non-item Source page is retained
+    # even when faceting on a type no item has.
+    _build_search_corpus(tmp_path)
+    body = client.get("/search?q=synergy&mode=navigation&item_type=model&item_type=domain").json()
+    nav_types = {h["page_type"] for h in body["navigation"]}
+    assert "source" in nav_types                       # non-item retained
+    assert "item" not in nav_types                     # off-type items dropped
+    assert any("non-item results retained" in n for n in body["notes"])
+
+
+def test_search_item_type_facet_rejects_unknown_and_sentinel(client, tmp_path):
+    _build_search_corpus(tmp_path)
+    assert client.get("/search?q=x&item_type=bogus").status_code == 400
+    assert client.get("/search?q=x&item_type=unclassified_review_required").status_code == 400
+
+
+def test_query_item_type_facet_rejects_unknown_before_llm(client, tmp_path):
+    # Validation runs before the (unconfigured) LLM check, so a bad facet is a clean 400, not 503.
+    _build_search_corpus(tmp_path)
+    r = client.post("/query", json={"question": "what about synergy?", "item_type": ["bogus"]})
+    assert r.status_code == 400
+
+
 def test_search_without_index_is_structural_empty(client):
     # No keyword index built in this fresh client; /search degrades to a structural empty result.
     body = client.get("/search?q=synergy").json()

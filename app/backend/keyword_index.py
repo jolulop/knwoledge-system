@@ -40,7 +40,7 @@ from app.backend.eligibility import ANSWER_ELIGIBLE_TYPES
 
 # Bump when the index schema or row shape changes; recorded via PRAGMA user_version so a stale
 # on-disk index is detected and fully rebuilt rather than silently mixed (ADR-0032 §7).
-INDEX_VERSION = 1
+INDEX_VERSION = 2  # v2 (ADR-0062): navigation gains an item_type column
 
 # Path of the derived keyword index, relative to the project root (ADR-0032 §7).
 DB_RELPATH = Path("indexes") / "keyword" / "keyword.sqlite"
@@ -68,6 +68,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS navigation USING fts5(
     path UNINDEXED,
     page_type UNINDEXED,
     node_id UNINDEXED,
+    item_type UNINDEXED,
     status UNINDEXED,
     review_status UNINDEXED,
     language UNINDEXED,
@@ -244,10 +245,14 @@ def navigation_row(path: Path, root: Path) -> tuple | None:
     )
     status = str(fm.get("status") or "unknown")
     answer_eligible = status == "active" and page_type in ANSWER_ELIGIBLE_TYPES
+    # ADR-0062: item_type is populated only for Item pages (page frontmatter), '' for every other
+    # page type. The nav facet then narrows only where a row actually has an item_type.
+    item_type = str(fm.get("item_type") or "") if page_type == "item" else ""
     return (
         path.relative_to(root).as_posix(),
         page_type,
         str(node_id),
+        item_type,
         status,
         str(fm.get("review_status") or "none"),
         str(fm.get("language") or "unknown"),
@@ -520,9 +525,9 @@ def reindex(root: Path, *, force: bool = False) -> ReindexStats:
                 continue
             conn.execute("DELETE FROM navigation WHERE path = ?", (rel,))
             conn.execute(
-                "INSERT INTO navigation(path, page_type, node_id, status, review_status, language, "
-                "answer_eligible, title, aliases, tags, summary) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO navigation(path, page_type, node_id, item_type, status, review_status, "
+                "language, answer_eligible, title, aliases, tags, summary) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 row,
             )
             conn.execute(

@@ -1584,6 +1584,22 @@ def _vector_capability(
     return searcher, None, False
 
 
+def _parse_item_type_facet(values: list[str] | None) -> frozenset[str] | None:
+    """Validate an item_type facet (ADR-0062): each value must be one of the 15 production types.
+    Unknown values AND the unclassified_review_required sentinel are rejected (400) — the facet is
+    never silently ignored. Empty/absent → None (no faceting)."""
+    if not values:
+        return None
+    bad = [v for v in values if not taxonomy.is_production_item_type(v)]
+    if bad:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"unknown item_type {bad!r}; allowed: {sorted(taxonomy.ITEM_TYPES)} "
+                    "(the unclassified_review_required sentinel is not a facet value)"),
+        )
+    return frozenset(values)
+
+
 @app.get("/search", response_model=SearchResponse)
 def run_search_endpoint(
     q: str,
@@ -1591,6 +1607,7 @@ def run_search_endpoint(
     source_id: str | None = None,
     page_type: str | None = None,
     node_type: str | None = None,
+    item_type: list[str] | None = Query(None),
     language: str | None = None,
     source_status: str | None = None,
     node_status: str | None = None,
@@ -1607,6 +1624,7 @@ def run_search_endpoint(
                 status_code=400,
                 detail=f"unknown {label} {value!r}; allowed: {sorted(graph.NODE_TYPES)}",
             )
+    item_types = _parse_item_type_facet(item_type)
     if language is not None and language not in {"en", "es", "unknown"}:
         raise HTTPException(
             status_code=400,
@@ -1620,7 +1638,8 @@ def run_search_endpoint(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return _run_search(
-        q, mode=mode, source_id=source_id, page_type=page_type, node_type=node_type, language=language,
+        q, mode=mode, source_id=source_id, page_type=page_type, node_type=node_type,
+        item_types=item_types, language=language,
         source_statuses=source_statuses, node_statuses=node_statuses, edge_statuses=edge_statuses,
         evidence_limit=evidence_limit, navigation_limit=navigation_limit, graph_limit=graph_limit,
     )
@@ -1628,6 +1647,7 @@ def run_search_endpoint(
 
 def _run_search(
     q: str, *, mode: str, source_id: str | None, page_type: str | None, node_type: str | None,
+    item_types: frozenset[str] | None = None,
     language: str | None, source_statuses, node_statuses, edge_statuses,
     evidence_limit: int | None = None, navigation_limit: int | None = None,
     graph_limit: int | None = None,
@@ -1662,7 +1682,8 @@ def _run_search(
 
         result = search.run_search(
             q=q, mode=mode, keyword_conn=keyword_conn, graph_conn=graph_conn, policy=policy,
-            source_id=source_id, page_type=page_type, node_type=node_type, language=language,
+            source_id=source_id, page_type=page_type, node_type=node_type, item_types=item_types,
+            language=language,
             source_statuses=source_statuses, node_statuses=node_statuses, edge_statuses=edge_statuses,
             evidence_limit=evidence_limit, navigation_limit=navigation_limit, graph_limit=graph_limit,
             vector_search=vector_search, vector_unavailable_reason=vector_reason,
@@ -1726,6 +1747,7 @@ def run_query_endpoint(req: QueryRequest) -> dict[str, Any]:
         source_statuses = search.parse_statuses(req.source_status, graph.NODE_STATUSES, search.RETENTION_DEFAULT_STATUSES)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    item_types = _parse_item_type_facet(req.item_type)
 
     try:
         client = _query_client()
@@ -1737,7 +1759,8 @@ def run_query_endpoint(req: QueryRequest) -> dict[str, Any]:
             )
         # Retrieve citable chunk evidence (graph/navigation are not answer-citation sources, ADR-0034).
         result = _run_search(
-            q, mode=req.mode, source_id=req.source_id, page_type=None, node_type=None, language=req.language,
+            q, mode=req.mode, source_id=req.source_id, page_type=None, node_type=None,
+            item_types=item_types, language=req.language,
             source_statuses=source_statuses,
             node_statuses=search.parse_statuses(None, graph.NODE_STATUSES, search.RETENTION_DEFAULT_STATUSES),
             edge_statuses=graph_read.DEFAULT_EDGE_STATUSES,

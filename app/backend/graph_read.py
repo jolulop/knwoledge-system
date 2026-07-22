@@ -373,6 +373,34 @@ def active_contradiction_endpoints(conn: sqlite3.Connection) -> list[str]:
     return sorted(ids)
 
 
+def source_item_types(
+    conn: sqlite3.Connection, source_ids: set[str]
+) -> dict[str, frozenset[str]]:
+    """The active-only chunk↔item_type bridge for ADR-0062 evidence faceting.
+
+    Map each ``source_id`` → the set of ``item_type``s of the **active** item nodes that reach it
+    by an **active** ``mentions`` edge (mentions is ``source → item``, so the source is ``src_id``).
+    Batched (one query over all candidate sources), never per chunk. A deprecated/candidate item or
+    a superseded mention does not bridge — this is a ranking signal, and only live topics steer it.
+    """
+    out: dict[str, set[str]] = {}
+    if not source_ids:
+        return {}
+    ph = ",".join("?" for _ in source_ids)
+    rows = conn.execute(
+        f"""SELECT e.src_id AS source_id, n.item_type AS item_type
+            FROM edges e JOIN nodes n ON n.node_id = e.dst_id
+            WHERE e.edge_type = 'mentions' AND e.status = 'active'
+              AND n.node_type = 'item' AND n.status = 'active'
+              AND n.item_type IS NOT NULL
+              AND e.src_id IN ({ph})""",
+        tuple(source_ids),
+    ).fetchall()
+    for r in rows:
+        out.setdefault(r["source_id"], set()).add(r["item_type"])
+    return {sid: frozenset(types) for sid, types in out.items()}
+
+
 def search_subgraph(
     conn: sqlite3.Connection,
     seed_ids: list[str],
@@ -381,6 +409,7 @@ def search_subgraph(
     edge_statuses: tuple[str, ...] = DEFAULT_EDGE_STATUSES,
     node_statuses: tuple[str, ...] | None = None,
     node_types: frozenset[str] | None = None,
+    item_types: frozenset[str] | None = None,
     edge_types: tuple[str, ...] | None = None,
     node_cap: int,
     edge_cap: int,
@@ -392,6 +421,10 @@ def search_subgraph(
     filter — a node is admitted only if its status is allowed — so the search layer can exclude
     archived/deleted nodes (ADR-0032 addendum 2: retention is ``/search``'s job, not the raw graph
     projection's). Seeds that do not exist or fail the filters are dropped.
+
+    ``item_types`` (ADR-0062) is a **type predicate, not a layer filter**: an *item* node is
+    admitted only if its ``item_type`` is in the set, but non-item nodes (claim/synthesis) always
+    pass — the facet narrows the item layer without dropping the rest.
     """
     depth = max(0, min(depth, MAX_DEPTH))
     statuses = tuple(edge_statuses)
@@ -400,6 +433,8 @@ def search_subgraph(
         if meta is None:
             return False
         if node_types is not None and meta["node_type"] not in node_types:
+            return False
+        if item_types is not None and meta["node_type"] == "item" and meta["item_type"] not in item_types:
             return False
         if node_statuses is not None and meta["status"] not in node_statuses:
             return False

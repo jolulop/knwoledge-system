@@ -20,6 +20,13 @@ budgets:
   max_candidate_sources_initial: 8
   max_graph_depth_default: 2
   max_answer_unsourced_claims: 0
+# Fractional retrieval weights (ADR-0062). item_type_boost is the additive on-type bonus applied
+# post-fusion/pre-cap when an item_type facet is present; it is compared against RRF scores
+# (~0.016/rank at rrf_k=60), so it is deliberately small — it re-ranks a few positions and breaks
+# ties but must never outrank a much-more-relevant off-type chunk. 0.0 disables the evidence boost
+# (the nav/graph filter still applies). Tuned so the ADR-0062 anti-hidden-filter eval case holds.
+weights:
+  item_type_boost: 0.005
 # Phase 4c deterministic router (ADR-0032 decision 4). The query *shape* is detected in code
 # (deterministic signal matching against Build Spec §8.2); this maps a detected shape to a set of
 # retrieval modes. `mode=auto` uses these; an explicit `mode=` forces a single path. Explicit

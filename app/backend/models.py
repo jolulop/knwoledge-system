@@ -247,12 +247,14 @@ class EvidenceHit(BaseModel):
     score: float
     retrieval_path: list[str]
     channels: dict[str, ChannelRank] = {}
+    item_type_boosted: bool = False  # ADR-0062: this chunk got the advisory item_type boost
 
 
 class NavigationHit(BaseModel):
     path: str
     page_type: str
     node_id: str | None = None
+    item_type: str | None = None  # ADR-0062: present for Item pages (the faceted subset)
     title: str
     summary: str
     status: str
@@ -297,6 +299,7 @@ class QueryRequest(BaseModel):
     source_id: str | None = None
     source_status: str | None = None
     language: str | None = None
+    item_type: list[str] | None = None  # ADR-0062 facet: advisory evidence boost only on /query
     include_unsourced: bool = False  # LOCAL/DEBUG only: return ungrounded claim *text* (counts always present)
     save: bool = False  # persist the answer to wiki/Queries/<query_id>.md (explicit; ADR-0034)
 

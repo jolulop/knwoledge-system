@@ -130,8 +130,9 @@ def _run_case(harness, case):
     def vector_search(*, limit):
         return vector_index.search(root, fake.embed([q])[0], limit=limit, metric="cosine")
 
+    item_types = frozenset(case["item_type"]) if case.get("item_type") else None
     return search.run_search(q=q, mode=case.get("mode", "auto"), keyword_conn=kconn, graph_conn=gconn,
-                             policy=RetrievalPolicy(), vector_search=vector_search)
+                             policy=RetrievalPolicy(), item_types=item_types, vector_search=vector_search)
 
 
 # Map each `expect` predicate key to an assertion over the /search result.
@@ -168,6 +169,16 @@ def _assert_expect(res, expect, harness, case):
         by_path = {h["path"]: h for h in res["navigation"]}
         for rel, eligible in expect["nav_eligible"].items():
             assert by_path[rel]["answer_eligible"] is eligible
+    if "nav_includes_paths" in expect:
+        nav_paths = {h["path"] for h in res["navigation"]}
+        assert set(expect["nav_includes_paths"]) <= nav_paths
+    if "nav_excludes_paths" in expect:
+        nav_paths = {h["path"] for h in res["navigation"]}
+        assert nav_paths.isdisjoint(expect["nav_excludes_paths"])
+    if "notes_include" in expect:
+        joined = " ".join(res["notes"])
+        for needle in expect["notes_include"]:
+            assert needle in joined
     if "graph_node_ids_include" in expect:
         assert set(expect["graph_node_ids_include"]) <= gnodes
     if "graph_max_distance" in expect:
@@ -188,9 +199,9 @@ def test_golden_retrieval(case, harness):
     _assert_expect(res, case.get("expect", {}), harness, case)
 
 
-def test_eval_file_covers_all_eight_categories():
+def test_eval_file_covers_all_categories():
     cats = {c["category"] for c in _load_cases()}
     assert cats == {
         "exact_anchor", "status_nav", "graph_caps", "router_taxonomy",
-        "fts_safe", "vector_carry", "rrf_determinism", "retention",
+        "fts_safe", "vector_carry", "rrf_determinism", "retention", "item_type_facet",
     }
