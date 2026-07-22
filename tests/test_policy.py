@@ -90,6 +90,46 @@ def test_invalid_rrf_k_falls_back_to_default(tmp_path):
     assert policy.load_retrieval_policy(f).cap("rrf_k") == 60  # <1 -> default, never a divisor of 0
 
 
+def test_item_type_boost_default_and_negative_clamp(tmp_path):
+    # The shipped default is the ceiling at default k/prefusion; a negative value falls back to it.
+    assert policy.load_retrieval_policy(ROOT / "policies" / "retrieval.yaml").weight("item_type_boost") == 0.005
+    f = tmp_path / "retrieval.yaml"
+    f.write_text("weights:\n  item_type_boost: -0.5\n", encoding="utf-8")
+    assert policy.load_retrieval_policy(f).weight("item_type_boost") == 0.005
+
+
+def test_item_type_boost_is_hard_capped_to_the_rrf_derived_bound(tmp_path):
+    # ADR-0062 review round 1 (Blocking 2): a config value above the architectural cap is clamped —
+    # it can NEVER become a hidden evidence filter. At the default k=60/prefusion=50 the cap is 0.005.
+    f = tmp_path / "retrieval.yaml"
+    f.write_text("weights:\n  item_type_boost: 1\n", encoding="utf-8")
+    capped = policy.load_retrieval_policy(f).weight("item_type_boost")
+    assert capped == 0.005                    # min(0.005, 1/61 - 1/110) == 0.005
+    assert capped < 1.0 / (60 + 1)            # strictly below a rank-1 single-channel RRF unit
+    # Config can still LOWER it (or disable).
+    f.write_text("weights:\n  item_type_boost: 0\n", encoding="utf-8")
+    assert policy.load_retrieval_policy(f).weight("item_type_boost") == 0.0
+
+
+def test_item_type_boost_never_lifts_tail_on_type_above_rank1_off_type(tmp_path):
+    # Anti-hidden-filter through the LOADED policy (not just the helper): even a config value that
+    # tries to exceed the cap cannot lift a tail single-channel on-type hit above a rank-1
+    # single-channel off-type hit.
+    from app.backend import search
+    f = tmp_path / "retrieval.yaml"
+    f.write_text("weights:\n  item_type_boost: 999\n", encoding="utf-8")
+    pol = policy.load_retrieval_policy(f)
+    k = pol.cap("rrf_k")
+    rank1_off = 1.0 / (k + 1)                                  # off-type, best rank
+    tail_on = 1.0 / (k + pol.cap("per_channel_prefusion_limit"))  # on-type, worst rank
+    SRC_ON, SRC_OFF = "src_" + "1" * 16, "src_" + "2" * 16
+    pool = [{"source_id": SRC_OFF, "char_start": 0, "char_end": 1, "ordinal": 0, "score": rank1_off},
+            {"source_id": SRC_ON, "char_start": 0, "char_end": 1, "ordinal": 9, "score": tail_on}]
+    out = search.apply_item_type_boost(pool, source_types={SRC_ON: frozenset({"model"})},
+                                       requested=frozenset({"model"}), boost=pol.weight("item_type_boost"))
+    assert out[0]["source_id"] == SRC_OFF     # rank-1 off-type still wins under the capped boost
+
+
 def test_negative_escalation_threshold_falls_back(tmp_path):
     f = tmp_path / "retrieval.yaml"
     f.write_text("caps:\n  escalation_primary_below_k: -2\n", encoding="utf-8")

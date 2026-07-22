@@ -365,7 +365,7 @@ def test_search_item_type_facet_boosts_on_type_evidence(client, tmp_path):
     assert body["counts"]["evidence"] >= 1
     assert body["evidence"][0]["item_type_boosted"] is True
     # auto "synergy" is keyword-only (no nav/graph ran), so the note is the evidence-only wording.
-    assert any("advisory evidence boost only" in n for n in body["notes"])
+    assert any("received an advisory boost only" in n for n in body["notes"])
 
 
 def test_search_item_type_facet_is_multi_value_and_predicate_only(client, tmp_path):
@@ -630,6 +630,20 @@ def test_query_returns_grounded_answer(client, tmp_path, monkeypatch):
     assert "keyword" in body["retrieval_path"]
 
 
+def test_query_facet_threads_through_and_saves_scoped_page(client, tmp_path, monkeypatch):
+    # ADR-0062: a valid /query facet is accepted, produces a DISTINCT saved id from the unfaceted
+    # question (no clobber), and the saved page records the facet in frontmatter.
+    _build_query_corpus(tmp_path)
+    _use_client(monkeypatch, _FakeQueryClient(
+        {"claims": [{"text": "Synergy is captured.", "evidence_ids": ["e1"]}]}))
+    plain = client.post("/query", json=_q("synergy capture", save=True)).json()["query_id"]
+    faceted = client.post("/query", json=_q("synergy capture", save=True,
+                                           item_type=["method_technique"])).json()["query_id"]
+    assert plain != faceted  # the facet is answer-affecting -> distinct page, no overwrite
+    page = (tmp_path / "wiki" / "Queries" / f"{faceted}.md").read_text(encoding="utf-8")
+    assert "item_type_facet: [method_technique]" in page
+
+
 def test_query_abstains_when_no_evidence(client, tmp_path, monkeypatch):
     _build_query_corpus(tmp_path)
     _use_client(monkeypatch, _FakeQueryClient({"claims": [{"text": "x", "evidence_ids": ["e1"]}]}))
@@ -822,6 +836,25 @@ def test_query_id_source_status_order_insensitive():
     b = qmod.query_id("q", source_status="deprecated_candidate,active")
     assert a == b  # same scope regardless of filter order
     assert a != qmod.query_id("q", source_status="active")  # but a different status set differs
+
+
+def test_query_id_includes_item_type_facet_order_insensitive():
+    # ADR-0062: the facet is answer-affecting (pre-cap boost), so it is part of the saved-query id.
+    from app.workers import query as qmod
+    base = qmod.query_id("q")
+    faceted = qmod.query_id("q", item_type=["model", "method_technique"])
+    assert faceted != base                                         # a facet changes the id
+    assert faceted == qmod.query_id("q", item_type=["method_technique", "model"])  # order-insensitive
+    assert faceted != qmod.query_id("q", item_type=["model"])      # a different set differs
+    assert qmod.query_id("q", item_type=[]) == base                # empty facet == no facet
+
+
+def test_saved_query_page_records_item_type_facet():
+    from app.workers.wiki_render import parse_frontmatter, render_query_page
+    fm = parse_frontmatter(render_query_page(
+        {"query_id": "qry_x", "question": "What?", "item_type": ["model", "method_technique"]}))
+    # Deterministic sorted facet in frontmatter (parsed back to a list).
+    assert fm["item_type_facet"] == ["method_technique", "model"]
 
 
 def test_query_distinct_scope_gets_distinct_ids(client, tmp_path, monkeypatch):

@@ -1660,6 +1660,17 @@ def _run_search(
         keyword_index.connect(settings.keyword_index_path)
         if settings.keyword_index_path.exists() else None
     )
+    # ADR-0062 review round 1 (Blocking 3): the served /search opens whatever index exists, so an
+    # index built before a schema bump (e.g. a v1 navigation table with no item_type column) would
+    # crash a query. Gate on the cheap structural usability check: if stale/mismatched, treat the
+    # keyword+navigation channels as UNAVAILABLE (degrade + reindex-required note) rather than 500.
+    # Full fingerprint freshness stays offline in validate_index_consistency.
+    stale_index_note: str | None = None
+    if keyword_conn is not None and not keyword_index.schema_usable(keyword_conn):
+        keyword_conn.close()
+        keyword_conn = None
+        stale_index_note = ("keyword/navigation index schema is stale — run "
+                            "scripts/reindex_keyword.py (keyword/navigation/vector degraded)")
     graph_conn = _open_graph_safe()
     try:
         # Build the vector capability for explicit mode=vector and mode=auto (it may blend vector).
@@ -1688,6 +1699,8 @@ def _run_search(
             evidence_limit=evidence_limit, navigation_limit=navigation_limit, graph_limit=graph_limit,
             vector_search=vector_search, vector_unavailable_reason=vector_reason,
         )
+        if stale_index_note is not None:
+            result["notes"].append(stale_index_note)
     except search.VectorChannelError as exc:  # explicit mode=vector failed at query time
         raise HTTPException(status_code=503, detail=f"vector search unavailable: {exc}") from exc
     finally:
@@ -1786,13 +1799,15 @@ def run_query_endpoint(req: QueryRequest) -> dict[str, Any]:
     navigation_stale = False
     if req.save:  # explicit save -> deterministic wiki/Queries/<id>.md (no graph edges, no review)
         saved_id = query.query_id(q, mode=req.mode, source_id=req.source_id,
-                                  source_status=req.source_status, language=req.language)
+                                  source_status=req.source_status, language=req.language,
+                                  item_type=req.item_type)
         # ADR-0060: page-local display labels for the citation-table source links.
         link_labels = labels.display_labels(
             settings.wiki_dir, [f"Sources/{c['source_id']}" for c in answer.citations])
         page = render_query_page({
             "query_id": saved_id, "question": q, "answer": answer.answer,
             "citations": answer.citations, "retrieval_modes": result["retrieval_path"],
+            "item_type": req.item_type,  # ADR-0062: record the facet in the saved page
             "unsourced_claims": answer.unsourced_claims,
             "security_rejected_count": answer.security_rejected_count,
         }, labels=link_labels)

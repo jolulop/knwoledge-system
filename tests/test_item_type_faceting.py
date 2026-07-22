@@ -12,6 +12,8 @@ if str(ROOT) not in sys.path:
 
 from app.backend import graph, keyword_index, search  # noqa: E402
 from app.backend import graph_read  # noqa: E402
+from app.backend import taxonomy  # noqa: E402
+from app.backend.policy import RetrievalPolicy  # noqa: E402
 
 SRC_M = "src_" + "a" * 16   # bridges to a method_technique item
 SRC_D = "src_" + "b" * 16   # bridges to a deprecated method_technique item (must NOT bridge)
@@ -165,3 +167,60 @@ def test_stale_v1_nav_index_is_rebuilt_or_flagged(tmp_path):
     assert keyword_index.index_version(conn) == keyword_index.INDEX_VERSION
     assert keyword_index.consistency_errors(tmp_path, conn) == []
     conn.close()
+
+
+def test_schema_usable_gate(tmp_path):
+    _write_page(tmp_path, "wiki/Items/itm_x.md",
+                {"type": "item", "item_id": "itm_x", "item_type": "model", "title": "X", "status": "active"})
+    keyword_index.reindex(tmp_path, force=True)
+    conn = keyword_index.connect(tmp_path / keyword_index.DB_RELPATH)
+    assert keyword_index.schema_usable(conn) is True
+    conn.execute("PRAGMA user_version = 1")   # simulate a pre-bump index
+    conn.commit()
+    assert keyword_index.schema_usable(conn) is False   # version mismatch → not usable
+    conn.close()
+
+
+def test_malformed_item_page_missing_item_type_excluded_from_facet(tmp_path):
+    # NB2: an Item page missing item_type must NOT pass a facet as a non-item — it is marked with the
+    # QA sentinel, so a production-type facet excludes it (rather than treating '' as inapplicable).
+    _write_page(tmp_path, "wiki/Items/itm_broken.md",
+                {"type": "item", "item_id": "itm_broken", "title": "Broken", "status": "active"})  # no item_type
+    keyword_index.reindex(tmp_path, force=True)
+    assert _nav_rows(tmp_path)["wiki/Items/itm_broken.md"] == taxonomy.UNCLASSIFIED
+    conn = keyword_index.connect(tmp_path / keyword_index.DB_RELPATH)
+    try:
+        hits = search.search_navigation(conn, "broken", page_type=None,
+                                        node_statuses=("active",), language=None,
+                                        item_types=frozenset({"model"}), prefusion_limit=10, limit=10)
+    finally:
+        conn.close()
+    assert all(h["path"] != "wiki/Items/itm_broken.md" for h in hits)  # excluded, not passed as non-item
+
+
+# --- notes honesty: boost disabled / graph unavailable ----------------------
+
+
+def _run(tmp_path, *, item_types, boost, graph_conn):
+    _write_page(tmp_path, "wiki/Items/itm_x.md",
+                {"type": "item", "item_id": "itm_x", "item_type": "model", "title": "synergy", "status": "active"})
+    keyword_index.reindex(tmp_path, force=True)
+    kconn = keyword_index.connect(tmp_path / keyword_index.DB_RELPATH)
+    pol = RetrievalPolicy(weights={"item_type_boost": boost})
+    try:
+        return search.run_search(q="synergy", mode="keyword", keyword_conn=kconn,
+                                 graph_conn=graph_conn, policy=pol, item_types=item_types)
+    finally:
+        kconn.close()
+
+
+def test_notes_say_boost_disabled_when_zero(tmp_path):
+    res = _run(tmp_path, item_types=frozenset({"model"}), boost=0.0, graph_conn=None)
+    assert any("evidence boost disabled" in n for n in res["notes"])
+    assert not any("received an advisory boost" in n for n in res["notes"])
+
+
+def test_notes_say_boost_unavailable_when_graph_missing(tmp_path):
+    # boost > 0 but no graph connection → cannot bridge → must say unavailable, not "received".
+    res = _run(tmp_path, item_types=frozenset({"model"}), boost=0.005, graph_conn=None)
+    assert any("evidence boost unavailable" in n for n in res["notes"])

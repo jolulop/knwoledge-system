@@ -14,9 +14,12 @@ tunes the numbers.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- minimal YAML subset
 
@@ -157,6 +160,18 @@ _DEFAULT_WEIGHTS = {
 }
 
 
+def _max_item_type_boost(rrf_k: int, prefusion: int) -> float:
+    """The architectural hard cap on the ADR-0062 evidence boost (review round 1). Derived from the
+    RRF scale so "bounded" is enforced, not conventional: the gap between a rank-1 single-channel hit
+    (``1/(k+1)``) and a tail single-channel hit (``1/(k+prefusion)``). At the ceiling a tail on-type
+    hit can rise to just *below* a rank-1 off-type hit, never above — so the facet can never lift an
+    on-type chunk over a clearly-more-relevant off-type one. Also floored at the 0.005 default so the
+    cap can't exceed the shipped default when k/prefusion are unusual."""
+    prefusion = max(2, prefusion)  # prefusion == 1 would make the gap 0; guard the divisor
+    gap = 1.0 / (rrf_k + 1) - 1.0 / (rrf_k + prefusion)
+    return max(0.0, min(0.005, gap))
+
+
 @dataclass(frozen=True)
 class RetrievalPolicy:
     router_rules: dict[str, list[str]] = field(default_factory=lambda: dict(_DEFAULT_ROUTER_RULES))
@@ -229,5 +244,14 @@ def load_retrieval_policy(path: Path) -> RetrievalPolicy:
     # A negative item_type_boost would invert the intent (demote on-type); clamp to the default.
     if not isinstance(weights.get("item_type_boost"), (int, float)) or weights["item_type_boost"] < 0:
         weights["item_type_boost"] = _DEFAULT_WEIGHTS["item_type_boost"]
+    # Enforce the architectural upper bound (ADR-0062 review round 1): a config value above the cap
+    # would turn the advisory boost into a hidden evidence filter. Clamp loudly; config can only
+    # lower it (or set 0), never raise it past the RRF-derived ceiling.
+    cap = _max_item_type_boost(caps["rrf_k"], caps["per_channel_prefusion_limit"])
+    if weights["item_type_boost"] > cap:
+        logger.warning("item_type_boost %.4f exceeds the architectural cap %.4f (rrf_k=%d, "
+                       "prefusion=%d); clamping to the cap", weights["item_type_boost"], cap,
+                       caps["rrf_k"], caps["per_channel_prefusion_limit"])
+        weights["item_type_boost"] = cap
     return RetrievalPolicy(router_rules=router_rules, default_mode_set=default_mode_set,
                            caps=caps, weights=weights)

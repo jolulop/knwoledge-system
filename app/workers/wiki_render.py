@@ -749,6 +749,7 @@ def render_query_page(query: dict[str, Any], *, labels: dict[str, str] | None = 
     answer = str(query.get("answer", "")).strip()
     citations = query.get("citations", []) or []
     modes = query.get("retrieval_modes", []) or []
+    item_type_facet = sorted(set(query.get("item_type") or []))  # ADR-0062: part of the answer scope
     title = _query_title(question)
     summary = _delink(_WS.sub(" ", answer))[:280] or "No answer."
 
@@ -766,6 +767,7 @@ def render_query_page(query: dict[str, Any], *, labels: dict[str, str] | None = 
         "confidence: low",
         "answer_eligible: false",  # a query is a navigable answer artifact, never itself citable
         f"retrieval_modes: [{', '.join(modes)}]",
+        f"item_type_facet: [{', '.join(item_type_facet)}]",
         "derived_from: []",
     ]
     evidence_rows = []

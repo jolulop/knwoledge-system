@@ -147,3 +147,34 @@ Falsifiable acceptance cases:
 Nav-index schema bump (`INDEX_VERSION` 1→2) → `reindex_keyword` required (free on the empty UAT
 vault); **no producer / LLM re-run**; the ADR-0038 relevance baseline is **not** re-recorded.
 Faceting is opt-in per request — absent facet changes nothing.
+
+## Review round 1 (post-implementation, 2026-07-22)
+
+An external review found three blocking gaps + two non-blocking, all fixed:
+
+- **B1 — saved-query identity ignored the facet.** `query_id` is the answer-affecting request
+  scope, and the facet's boost is pre-cap (it changes pack membership → the answer), so two
+  faceted answers could overwrite the same `wiki/Queries/<id>.md`. Fix: `item_type` (order-
+  insensitive set) is now in `query_id` and recorded as `item_type_facet` in the saved page
+  frontmatter.
+- **B2 — the boost was "bounded" only by convention.** A config `item_type_boost: 1` would swamp
+  RRF scores and become a hidden filter. Fix: `load_retrieval_policy` clamps to an architectural
+  cap `min(0.005, 1/(rrf_k+1) − 1/(rrf_k+prefusion))` — the gap between a rank-1 and a tail
+  single-channel hit, so a tail on-type hit can never rise above a rank-1 off-type hit; config can
+  only lower it (or set 0), never raise it. (At the default k=60/prefusion=50 the cap is exactly
+  the shipped 0.005.)
+- **B3 — `/search` didn't gate on index schema.** `search_navigation` unconditionally selects
+  `item_type`, so a pre-bump (v1) index crashed *any* navigation query with an `OperationalError`.
+  Fix: `keyword_index.schema_usable()` (cheap `PRAGMA user_version` + required-table/column probe)
+  is checked in `_run_search`; a stale/mismatched index degrades keyword+navigation to
+  **unavailable** with a reindex-required note, never a 500. Full fingerprint freshness stays
+  offline in `validate_index_consistency`.
+- **NB1 — notes could overclaim the boost.** When `item_type_boost=0` or the graph is unavailable,
+  the note now says the boost was disabled/unavailable instead of "received an advisory boost."
+- **NB2 — a malformed Item page missing `item_type`** was stored as `''` and passed a facet as if
+  non-item. Fix: an Item page with no `item_type` is marked with the QA sentinel in the nav index,
+  so a production-type facet excludes it (validators still reject the missing frontmatter).
+
+Tests added per the review: saved-query facet scope + frontmatter; loaded-policy clamp + the
+anti-hidden-filter through `load_retrieval_policy`; the `schema_usable` gate; disabled/unavailable
+boost notes; malformed-item facet exclusion; the valid `/query` facet path.

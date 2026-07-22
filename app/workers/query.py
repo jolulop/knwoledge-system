@@ -37,12 +37,16 @@ _WS = re.compile(r"\s+")
 
 
 def query_id(question: str, *, mode: str = "auto", source_id: str | None = None,
-             source_status: str | None = None, language: str | None = None) -> str:
+             source_status: str | None = None, language: str | None = None,
+             item_type: list[str] | None = None) -> str:
     """Deterministic content-key for a saved Query page (ADR-0023/0034) over the **answer-affecting
     request scope** — normalized question + mode + retrieval filters. The same scope → the same id
     (idempotent overwrite); a different scope (e.g. another `source_id`) → a different id, so a
     materially different answer never silently clobbers another. `include_unsourced`/`save` are
-    excluded (they don't change the answer), and retrieval output / model_ref are excluded (volatile)."""
+    excluded (they don't change the answer), and retrieval output / model_ref are excluded (volatile).
+
+    `item_type` (ADR-0062) is in scope: the facet's evidence boost is applied pre-cap, so it changes
+    which chunks enter the pack and therefore the answer. Order-insensitive (a set)."""
     scope = {
         "question": _WS.sub(" ", question).strip().lower(),
         "mode": mode,
@@ -50,6 +54,7 @@ def query_id(question: str, *, mode: str = "auto", source_id: str | None = None,
         # Order-insensitive: "active,deprecated_candidate" == "deprecated_candidate,active".
         "source_status": _canon_csv(source_status),
         "language": language,
+        "item_type": sorted(set(item_type)) if item_type else None,
     }
     canonical = json.dumps(scope, sort_keys=True, ensure_ascii=False)
     return f"qry_{hashlib.sha256(canonical.encode('utf-8')).hexdigest()[:16]}"

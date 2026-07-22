@@ -36,6 +36,7 @@ from typing import Any
 
 # Answer-eligibility is shared retrieval policy, not a keyword-index detail — it lives in a
 # neutral module (ADR-0032 decision 2). Re-exported here for backward compatibility.
+from app.backend import taxonomy
 from app.backend.eligibility import ANSWER_ELIGIBLE_TYPES
 
 # Bump when the index schema or row shape changes; recorded via PRAGMA user_version so a stale
@@ -246,8 +247,14 @@ def navigation_row(path: Path, root: Path) -> tuple | None:
     status = str(fm.get("status") or "unknown")
     answer_eligible = status == "active" and page_type in ANSWER_ELIGIBLE_TYPES
     # ADR-0062: item_type is populated only for Item pages (page frontmatter), '' for every other
-    # page type. The nav facet then narrows only where a row actually has an item_type.
-    item_type = str(fm.get("item_type") or "") if page_type == "item" else ""
+    # page type — so the nav facet narrows only where a row actually has an item_type. Review round 1
+    # (NB2): a corrupt Item page missing item_type must NOT store '' (that would let it pass a facet
+    # as if it were a non-item page); mark it with the QA sentinel so it is excluded from any
+    # production-type facet. (Validators still reject the missing frontmatter; this is defence.)
+    if page_type == "item":
+        item_type = str(fm.get("item_type") or taxonomy.UNCLASSIFIED)
+    else:
+        item_type = ""
     return (
         path.relative_to(root).as_posix(),
         page_type,
@@ -311,6 +318,22 @@ def _drop_all(conn: sqlite3.Connection) -> None:
 
 def index_version(conn: sqlite3.Connection) -> int:
     return int(conn.execute("PRAGMA user_version").fetchone()[0])
+
+
+def schema_usable(conn: sqlite3.Connection) -> bool:
+    """Cheap runtime schema-usability gate (ADR-0062 review round 1): the served ``/search`` opens
+    whatever index exists, so a stale index built before a schema bump would crash a query (e.g. a
+    v1 navigation table has no ``item_type`` column). This checks ONLY structure — ``user_version``
+    matches ``INDEX_VERSION``, the required tables exist, and navigation carries ``item_type``. It is
+    a PRAGMA + one column probe, not the expensive per-file fingerprint freshness pass (that stays in
+    ``consistency_errors`` / ``validate_index_consistency``). Mismatch → callers treat the index as
+    unavailable and add a reindex-required note, never a 500."""
+    if index_version(conn) != INDEX_VERSION:
+        return False
+    if not {"evidence", "navigation"} <= _tables(conn):
+        return False
+    nav_cols = {r[1] for r in conn.execute("PRAGMA table_info(navigation)").fetchall()}
+    return "item_type" in nav_cols
 
 
 def indexed_source_ids(conn: sqlite3.Connection) -> set[str]:

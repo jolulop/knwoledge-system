@@ -622,7 +622,8 @@ def run_search(
     # active items + active mentions), re-sort, THEN cap. The boost is weaker than primary
     # relevance, so it breaks ties / nudges a few positions but cannot exclude off-type evidence.
     boost = policy.weight("item_type_boost")
-    if item_types and boost > 0 and graph_conn is not None and channel_hits:
+    boost_ran = bool(item_types) and boost > 0 and graph_conn is not None and bool(channel_hits)
+    if boost_ran:
         pool = fuse_evidence(channel_hits, k=policy.cap("rrf_k"), limit=max(ev_limit, prefusion))
         bridge = graph_read.source_item_types(graph_conn, {e["source_id"] for e in pool})
         apply_item_type_boost(pool, source_types=bridge, requested=item_types, boost=boost)
@@ -631,12 +632,20 @@ def run_search(
         evidence = fuse_evidence(channel_hits, k=policy.cap("rrf_k"), limit=ev_limit)
 
     if item_types:
-        if "navigation" in modes or "graph" in modes:
-            notes.append("item_type facet applied to item page/graph results; non-item results "
-                         "retained; evidence received advisory boost only")
+        # ADR-0062 review round 1 (NB1): the boost clause must reflect what actually happened —
+        # a disabled (item_type_boost=0) or graph-unavailable boost must not claim it applied.
+        if boost_ran:
+            boost_clause = "evidence received an advisory boost only"
+        elif boost <= 0:
+            boost_clause = "evidence boost disabled (item_type_boost=0)"
+        elif graph_conn is None:
+            boost_clause = "evidence boost unavailable (graph index unavailable)"
         else:
-            notes.append("item_type facet used as advisory evidence boost only; off-type "
-                         "evidence retained")
+            boost_clause = "no evidence to boost"
+        prefix = ("item_type facet applied to item page/graph results; non-item results retained; "
+                  if ("navigation" in modes or "graph" in modes)
+                  else "item_type facet: ")
+        notes.append(f"{prefix}{boost_clause}; off-type evidence retained")
 
     counts = {
         "evidence": len(evidence),
