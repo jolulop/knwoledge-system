@@ -34,6 +34,7 @@ from typing import Any
 from app.backend import db, graph, search, taxonomy
 from app.backend.manifests import get_provenance, is_source_id, iso_now, valid_manifests
 from app.backend.paths import safe_child, safe_under
+from app.llm.client import ConfigError, parse_chain
 from app.workers import citations, enrichment_artifact, labels, reviews, synthesis
 from app.workers.enrichment_artifact import artifact_fingerprint
 from app.workers.wiki_render import NODE_DIR, display_link_label, parse_frontmatter
@@ -190,6 +191,19 @@ def _check_graph(gconn, wiki_dir: Path, reviews_dir: Path, *, file_items: bool, 
     return findings
 
 
+def _chain_refs(model_ref_chain: str | None) -> list[str]:
+    """Parse a tier model chain into its member refs for the sticky-to-chain rot checks (ADR-0063).
+
+    The lint receives the configured chain (e.g. `settings.enrich_model_light`). A malformed value
+    degrades to a single-member best-effort list rather than crashing the whole lint pass."""
+    if not model_ref_chain:
+        return []
+    try:
+        return parse_chain(model_ref_chain)
+    except ConfigError:
+        return [model_ref_chain.strip()]
+
+
 def _check_summary_rot(enrichment_dir: Path, markdown_dir: Path, wiki_dir: Path,
                        summary_model_ref: str | None) -> tuple[list[dict[str, Any]], bool]:
     """Enriched Source summaries whose artifact fingerprint no longer matches the current inputs (ADR-0037).
@@ -201,7 +215,8 @@ def _check_summary_rot(enrichment_dir: Path, markdown_dir: Path, wiki_dir: Path,
     `summary_status: enriched` whose artifact is missing/unreadable (page reads are coverage-only)."""
     findings: list[dict[str, Any]] = []
     degraded = False
-    if enrichment_dir.exists() and summary_model_ref:
+    chain_refs = _chain_refs(summary_model_ref)
+    if enrichment_dir.exists() and chain_refs:
         for apath in sorted(enrichment_dir.glob("*.json")):
             # Positive-only allowlist (ADR-0037): exactly `src_<16 hex>.json`. `.claims`/`.items`/
             # `.synthesis` artifacts have non-canonical stems and are rejected here — no blocklist.
@@ -223,8 +238,11 @@ def _check_summary_rot(enrichment_dir: Path, markdown_dir: Path, wiki_dir: Path,
                                  "data": {"source_id": sid}})
                 degraded = True
                 continue
-            current = artifact_fingerprint(md_path.read_text(encoding="utf-8"), summary_model_ref)
-            if art.get("input_fingerprint") != current:
+            md_text = md_path.read_text(encoding="utf-8")
+            # ADR-0063 sticky-to-chain: rot only if the recorded model left the chain OR its own-model
+            # fingerprint drifted; an availability flip (recorded model still in the chain) is not rot.
+            if not enrichment_artifact.chain_fresh(art, chain_refs,
+                                                   lambda m: artifact_fingerprint(md_text, m)):
                 findings.append({"check": "summary_rot", "severity": "low", "subject": sid,
                                  "detail": "enriched summary stale vs current normalized markdown / model",
                                  "data": {"source_id": sid, "remediation": "rerun_enrich"}})
@@ -389,7 +407,8 @@ def _check_synthesis_rot(gconn, manifests_dir: Path, claims_dir: Path, markdown_
     (degraded) — the only unverifiable trigger. Skipped when `model_ref` is None (can't recompute)."""
     findings: list[dict[str, Any]] = []
     degraded = False
-    if not model_ref:
+    chain_refs = _chain_refs(model_ref)
+    if not chain_refs:
         return findings, degraded
     prov = {m["source_id"]: get_provenance(m) for m in valid_manifests(manifests_dir)[0]}
     for topic in synthesis.eligible_topics(
@@ -402,20 +421,23 @@ def _check_synthesis_rot(gconn, manifests_dir: Path, claims_dir: Path, markdown_
         apath = safe_child(enrichment_dir, f"{tid}.synthesis.json")  # tid untrusted (basename only)
         if apath is None:
             continue  # path-like topic id -> skip read; validate_graph fails hard on it
-        stored = None
+        meta: dict[str, Any] = {}
         if apath.exists():
             try:
-                stored = json.loads(apath.read_text(encoding="utf-8")).get("input_fingerprint")
+                meta = json.loads(apath.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
-                stored = None
-        if stored is None:  # active synthesis but artifact missing/unreadable -> can't verify
+                meta = {}
+        if meta.get("input_fingerprint") is None:  # active synthesis but artifact missing/unreadable
             findings.append({"check": "synthesis_unverifiable", "severity": "low", "subject": syn_id,
                              "detail": "active synthesis but artifact missing/unreadable",
                              "data": {"synthesis_id": syn_id, "topic_node_id": tid,
                                       "remediation": "rerun_synthesis"}})
             degraded = True
             continue
-        if stored != synthesis._fingerprint(topic, model_ref):
+        # ADR-0063 sticky-to-chain: rot only if the recorded model left the chain OR its own-model
+        # fingerprint drifted; an availability flip (recorded model still in the chain) is not rot.
+        if not enrichment_artifact.chain_fresh(
+                meta, chain_refs, lambda m, topic=topic: synthesis._fingerprint(topic, m)):
             findings.append({"check": "synthesis_rot", "severity": "low", "subject": syn_id,
                              "detail": "active synthesis stale vs current topic evidence / model",
                              "data": {"synthesis_id": syn_id, "topic_node_id": tid,

@@ -212,14 +212,17 @@ def _contains_verbatim_quote(text: str, source_texts: list[str], window: int = _
     return False
 
 
-def _artifact_fp(enrichment_dir: Path, topic_node_id: str) -> str | None:
+def _artifact_meta(enrichment_dir: Path, topic_node_id: str) -> dict[str, Any]:
+    """The stored synthesis artifact dict (for its `input_fingerprint` + recorded `model_ref`), or {}.
+
+    ADR-0063 sticky-to-chain freshness needs the recorded model, not just the fingerprint."""
     apath = safe_child(enrichment_dir, f"{topic_node_id}.synthesis.json")  # tid untrusted
     if apath is None or not apath.exists():
-        return None
+        return {}
     try:
-        return json.loads(apath.read_text(encoding="utf-8")).get("input_fingerprint")
+        return json.loads(apath.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return None
+        return {}
 
 
 def _render_page(gconn, *, syn_id, topic_node, title, summary, synthesis_text, confidence,
@@ -576,6 +579,8 @@ def generate_syntheses(
     gconn = graph.connect(graph_db)
     # ADR-0063: resolve the tier's ordered chain once per run to the first available concrete
     # model_ref (availability-only, fixed for the run); first-preference ref when none available.
+    # `chain_refs` (pre-resolution) drives sticky-to-chain freshness below.
+    chain_refs = [c.strip() for c in model_ref.split(",") if c.strip()]
     model_ref, has_key = client.resolve_run_model(model_ref)
 
     try:
@@ -625,12 +630,16 @@ def generate_syntheses(
                 if (status in _PRESERVED_GENERATE_STATUSES
                         or _page_status(synthesis_dir, syn_id) in _PRESERVED_GENERATE_STATUSES):
                     continue
-                art_fp = _artifact_fp(enrichment_dir, tid)
+                # ADR-0063 sticky-to-chain: an existing artifact stays fresh while its recorded model is
+                # still a chain member and its own-model fingerprint matches, so an availability flip
+                # alone (heavy tier opted into a local chain) never re-nags or restales a reviewed node.
+                meta = _artifact_meta(enrichment_dir, tid)
+                fresh = art.chain_fresh(meta, chain_refs, lambda m, topic=t: _fingerprint(topic, m))
                 rejected_current = (reviews_dir / "rejected" / f"{rid}.json").exists()
 
                 # Governance gate (Q1/Q2): never rewrite a reviewed synthesis in the normal pass.
                 if status == "active":
-                    if art_fp == fp:
+                    if fresh:
                         continue                       # approved & current — done
                     stale_active += 1                  # evidence changed since approval
                     if not force:
@@ -638,7 +647,7 @@ def generate_syntheses(
                 elif rejected_current:
                     skipped_reviewed += 1              # this exact evidence was rejected — no re-nag
                     continue
-                elif status == "candidate" and art_fp == fp and not force:
+                elif status == "candidate" and fresh and not force:
                     skipped_fresh += 1                 # candidate already generated for this evidence
                     continue
 

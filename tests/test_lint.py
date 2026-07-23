@@ -541,15 +541,32 @@ SYN_TOPIC = {
 }
 
 
-def _synthesis_setup(tmp_path, conn, topic, stored_fp, *, syn_status="active"):
+def test_summary_rot_is_chain_aware(tmp_path):
+    # ADR-0063 sticky-to-chain: an availability flip (recorded model still a chain member) is NOT rot;
+    # the recorded model leaving the chain IS rot.
+    gdb, conn = _graph(tmp_path)
+    conn.close()
+    _summary_artifact(tmp_path, QSID, "# H\n\nBody.\n", "anthropic:a")  # fingerprint matches md
+    # local came up; chain is local-first but anthropic:a is still a member -> not rot.
+    res = _run(tmp_path, graph_db=gdb, summary_model_ref="local:x,anthropic:a")
+    assert not any(f["check"] == "summary_rot" for f in res["findings"])
+    # the recorded model is dropped from the chain entirely -> rot (re-derive on the new model).
+    res2 = _run(tmp_path, graph_db=gdb, summary_model_ref="local:x")
+    assert any(f["check"] == "summary_rot" and f["subject"] == QSID for f in res2["findings"])
+
+
+def _synthesis_setup(tmp_path, conn, topic, stored_fp, *, syn_status="active", model_ref=QMODEL):
     tid = topic["node_id"]
     syn_id = _synth.synthesis_id(tid)
     graph.upsert_node(conn, node_id=syn_id, node_type="synthesis", slug=topic["slug"], status=syn_status)
     edir = tmp_path / "normalized" / "enrichment"
     edir.mkdir(parents=True, exist_ok=True)
     if stored_fp is not None:
+        # ADR-0063: the real synthesis pass records the producing model_ref; sticky-to-chain rot keys
+        # on it, so the fixture must mirror it.
         (edir / f"{tid}.synthesis.json").write_text(json.dumps(
-            {"topic_node_id": tid, "generation_status": "enriched", "input_fingerprint": stored_fp}),
+            {"topic_node_id": tid, "generation_status": "enriched", "input_fingerprint": stored_fp,
+             "model_ref": model_ref}),
             encoding="utf-8")
     return syn_id
 

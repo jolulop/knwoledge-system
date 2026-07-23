@@ -1,8 +1,20 @@
 # Local-first tier fallback routing: per-tier model chains, availability-only resolution
 
-**Status:** design-locked (grill, docs-only) — 2026-07-23, on tip `b74bd37`. Extends ADR-0025
+**Status:** implemented — 2026-07-23. Design-lock `122b6c7`; slice 1 (resolver/config) `5d3e42a`;
+slice 2 (sticky-to-chain freshness + chain-aware lint rot) this commit. Extends ADR-0025
 (provider-agnostic adapter + tiered routing) and ADR-0027 (non-deterministic fingerprint +
 response cache). Supersedes nothing.
+
+**Implementation note.** The resolver is `LLMClient.resolve_run_model(chain) -> (concrete_ref,
+available)` (with `chain_available` + `parse_chain`); `validate_tiers` reworked to "every chain
+parses + ≥1 available member". Each producer resolves at the top, rebinding `model_ref` to the
+concrete ref, and keeps the chain-member list by a plain comma-split (validation already happens in
+`resolve_run_model`, so the split never re-validates — this keeps opaque test model_refs working and
+avoids a second parse). Sticky freshness is one shared helper, `enrichment_artifact.chain_fresh(
+existing, chain_refs, recompute)`, used by the enrich/claims/items/synthesis producer skips and by
+`lint._check_summary_rot` / `_check_synthesis_rot` (which parse the configured chain via
+`lint._chain_refs`). Contradiction detection has no artifact-freshness skip — its idempotency is the
+response cache, keyed on the exact `model_ref` by design (ADR-0027) — so it is out of slice-2 scope.
 
 ## Context
 

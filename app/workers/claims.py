@@ -314,7 +314,8 @@ def extract_claims(
     gconn = graph.connect(graph_db)
     # ADR-0063: resolve the tier's ordered chain once per run to the first available concrete
     # model_ref (availability-only); keep the first-preference ref when none is available so the
-    # no-key/stub fingerprint stays a valid concrete ref.
+    # no-key/stub fingerprint stays a valid concrete ref. `chain_refs` drives sticky freshness.
+    chain_refs = [c.strip() for c in model_ref.split(",") if c.strip()]
     model_ref, has_key = client.resolve_run_model(model_ref)
 
     considered = sources_with_claims = claims_written = claims_dropped_ungrounded = 0
@@ -341,16 +342,19 @@ def extract_claims(
 
             md_path = markdown_dir / f"{sid}.md"
             md = md_path.read_text(encoding="utf-8") if md_path.exists() else ""
-            fingerprint = art.claims_fingerprint(md, model_ref, strategy_ref)
             apath = art.claims_artifact_path(enrichment_dir, sid)
             if not force and apath.exists():
                 try:
-                    fresh = json.loads(apath.read_text(encoding="utf-8")).get("input_fingerprint") == fingerprint
+                    existing = json.loads(apath.read_text(encoding="utf-8"))
                 except (OSError, json.JSONDecodeError):
-                    fresh = False
-                if fresh:
+                    existing = {}
+                # ADR-0063 sticky-to-chain: fresh iff the recorded model is still a chain member and
+                # its own-model fingerprint matches — an availability flip alone never restales.
+                if art.chain_fresh(existing, chain_refs,
+                                   lambda m: art.claims_fingerprint(md, m, strategy_ref)):
                     skipped_fresh += 1
                     continue
+            fingerprint = art.claims_fingerprint(md, model_ref, strategy_ref)
 
             # ADR-0056 decision 3 (stage before replacing): a run that cannot produce the
             # complete replacement never supersedes existing evidence, so the no-key gate

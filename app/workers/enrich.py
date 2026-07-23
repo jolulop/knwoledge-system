@@ -79,7 +79,8 @@ def enrich_sources(
         # ADR-0063: the tier value is an ordered model chain; resolve once per run to the first
         # available concrete model_ref (availability-only, fixed for the run). No available member
         # -> skip, sources stay stubs (ADR-0025); keep the first-preference ref so any fingerprint/
-        # record stays a valid concrete ref.
+        # record stays a valid concrete ref. `chain_refs` (pre-resolution) drives sticky freshness.
+        chain_refs = [c.strip() for c in model_ref.split(",") if c.strip()]
         model_ref, has_key = client.resolve_run_model(model_ref)
 
         for manifest in manifests:
@@ -101,16 +102,19 @@ def enrich_sources(
                 skipped_empty += 1
                 continue
 
-            fingerprint = art.artifact_fingerprint(normalized_markdown, model_ref)
             artifact_path = art.artifact_path(enrichment_dir, source_id)
             if not force and artifact_path.exists():
                 try:
                     existing = json.loads(artifact_path.read_text(encoding="utf-8"))
                 except (OSError, json.JSONDecodeError):
                     existing = {}
-                if existing.get("input_fingerprint") == fingerprint:
+                # ADR-0063 sticky-to-chain: recompute the fingerprint under the artifact's OWN recorded
+                # model; an availability flip alone (recorded model still in chain) never restales.
+                if art.chain_fresh(existing, chain_refs,
+                                   lambda m: art.artifact_fingerprint(normalized_markdown, m)):
                     skipped_fresh += 1
                     continue
+            fingerprint = art.artifact_fingerprint(normalized_markdown, model_ref)
 
             title = title_from_filename(manifest.get("original_filename", source_id))
             messages = prompts.build_messages(title, normalized_markdown)

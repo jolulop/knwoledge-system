@@ -293,7 +293,8 @@ def extract_items(
     gconn = graph.connect(graph_db)
     # ADR-0063: resolve the tier's ordered chain once per run to the first available concrete
     # model_ref (availability-only); keep the first-preference ref when none is available so the
-    # no-key/stub fingerprint stays a valid concrete ref.
+    # no-key/stub fingerprint stays a valid concrete ref. `chain_refs` drives sticky freshness.
+    chain_refs = [c.strip() for c in model_ref.split(",") if c.strip()]
     model_ref, has_key = client.resolve_run_model(model_ref)
 
     strategy_ref = art.items_strategy_ref(input_max_chars)
@@ -378,16 +379,19 @@ def extract_items(
 
             md_path = markdown_dir / f"{sid}.md"
             md = md_path.read_text(encoding="utf-8") if md_path.exists() else ""
-            fingerprint = art.items_fingerprint(md, model_ref, strategy_ref)
             apath = art.items_artifact_path(enrichment_dir, sid)
             if not force and apath.exists():
                 try:
-                    fresh = json.loads(apath.read_text(encoding="utf-8")).get("input_fingerprint") == fingerprint
+                    existing = json.loads(apath.read_text(encoding="utf-8"))
                 except (OSError, json.JSONDecodeError):
-                    fresh = False
-                if fresh:
+                    existing = {}
+                # ADR-0063 sticky-to-chain: fresh iff the recorded model is still a chain member and
+                # its own-model fingerprint matches — an availability flip alone never restales.
+                if art.chain_fresh(existing, chain_refs,
+                                   lambda m: art.items_fingerprint(md, m, strategy_ref)):
                     skipped_fresh += 1
                     continue
+            fingerprint = art.items_fingerprint(md, model_ref, strategy_ref)
 
             # ADR-0055 rollout safety: supersede a source's prior mentions ONLY once this run can
             # produce the replacement state — after a successful parse (below), or deterministically

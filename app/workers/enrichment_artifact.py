@@ -91,6 +91,24 @@ def _fingerprint(
     return h.hexdigest()[:16]
 
 
+def chain_fresh(existing: dict[str, Any], chain_refs, recompute) -> bool:
+    """Sticky-to-chain freshness for a producer skip / lint rot check (ADR-0063).
+
+    An existing artifact stays fresh iff its recorded `model_ref` is still a member of `chain_refs`
+    **and** the pass's fingerprint recomputed under THAT recorded model still matches the stored
+    `input_fingerprint`. So an availability flip alone — the run resolves to a different but valid
+    chain member while inputs are unchanged — never restales the artifact; only a real input change
+    (text/prompt/schema/strategy) or the recorded model dropping out of the chain does. `recompute`
+    is `model_ref -> fingerprint` for the pass. A missing recorded model / stored fingerprint is not
+    fresh (re-derive).
+    """
+    recorded = existing.get("model_ref")
+    if not recorded or recorded not in chain_refs:
+        return False
+    stored = existing.get("input_fingerprint")
+    return stored is not None and stored == recompute(recorded)
+
+
 def artifact_path(enrichment_dir: Path, source_id: str) -> Path:
     return Path(enrichment_dir) / f"{source_id}.json"
 

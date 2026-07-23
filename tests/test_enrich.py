@@ -271,3 +271,52 @@ def test_artifact_regenerates_from_cache_without_provider_call(tmp_path):
     sid = _sid(tmp_path, "doc.md")
     _, fm = _page_fm(tmp_path, sid)
     assert fm["summary_status"] == "enriched"
+
+
+# --- ADR-0063 sticky-to-chain freshness -------------------------------------
+
+
+def test_chain_fresh_helper():
+    from app.workers.enrichment_artifact import chain_fresh
+    def recompute(m):
+        return f"fp-for-{m}"
+    art_a = {"model_ref": "anthropic:a", "input_fingerprint": "fp-for-anthropic:a"}
+    assert chain_fresh(art_a, ["local:x", "anthropic:a"], recompute) is True   # in chain + fp matches
+    assert chain_fresh(art_a, ["local:x"], recompute) is False                 # recorded left the chain
+    stale = {"model_ref": "anthropic:a", "input_fingerprint": "old"}
+    assert chain_fresh(stale, ["anthropic:a"], recompute) is False             # own-model fp drifted
+    assert chain_fresh({"input_fingerprint": "x"}, ["anthropic:a"], recompute) is False  # no recorded model
+
+
+def test_enrich_sticky_to_chain_availability_flip_does_not_re_enrich(tmp_path):
+    # ADR-0063: an artifact produced by a still-in-chain model is NOT restaled when the run resolves to a
+    # DIFFERENT (also in-chain) model because local availability changed.
+    _build(tmp_path)
+    cache = ResponseCache(tmp_path / "db" / "llm_cache.sqlite")
+    hosted = FakeAdapter()
+    c1 = LLMClient({"anthropic": hosted, "local": FakeAdapter(available=False)}, cache=cache)
+    r1 = enrich.enrich_sources(tmp_path, client=c1, model_ref="anthropic:h",
+                               jobs_db=tmp_path / "db" / "jobs.sqlite")
+    assert r1["enriched"] == 2 and hosted.calls == 2   # artifacts recorded anthropic:h
+
+    # Local now up; chain is local-first "local:x,anthropic:h" -> resolves to local, but the existing
+    # artifacts recorded anthropic:h which is STILL a chain member -> sticky-fresh, not re-enriched.
+    local = FakeAdapter()
+    c2 = LLMClient({"anthropic": FakeAdapter(), "local": local}, cache=cache)
+    r2 = enrich.enrich_sources(tmp_path, client=c2, model_ref="local:x,anthropic:h",
+                               jobs_db=tmp_path / "db" / "jobs.sqlite")
+    assert r2["skipped_fresh"] == 2 and r2["enriched"] == 0
+    assert local.calls == 0   # the flip alone never restales / re-derives
+
+
+def test_enrich_re_enriches_when_recorded_model_leaves_chain(tmp_path):
+    # ADR-0063: if the recorded model is no longer a chain member, the artifact IS stale and re-derives.
+    _build(tmp_path)
+    cache = ResponseCache(tmp_path / "db" / "llm_cache.sqlite")
+    enrich.enrich_sources(tmp_path, client=LLMClient({"anthropic": FakeAdapter()}, cache=cache),
+                          model_ref="anthropic:h", jobs_db=tmp_path / "db" / "jobs.sqlite")
+    local = FakeAdapter()
+    c2 = LLMClient({"anthropic": FakeAdapter(), "local": local}, cache=cache)
+    r = enrich.enrich_sources(tmp_path, client=c2, model_ref="local:x",   # anthropic:h dropped
+                              jobs_db=tmp_path / "db" / "jobs.sqlite")
+    assert r["enriched"] == 2 and local.calls == 2   # re-derived on the new (only) chain member
