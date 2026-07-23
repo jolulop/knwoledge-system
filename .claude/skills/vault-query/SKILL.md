@@ -34,7 +34,7 @@ Answer questions using the knowledge system without loading the whole vault into
 
 ## Budgets
 
-- Start with at most 5 candidate concepts.
+- Start with at most 5 candidate items.
 - Start with at most 8 candidate sources.
 - Follow graph links selectively.
 - Prefer opening summary callouts before full bodies.

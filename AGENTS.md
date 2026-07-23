@@ -16,7 +16,10 @@ This repository implements a local-first, agent-maintained LLM Wiki information 
 Before changing wiki content:
 
 1. Inspect relevant policy files in `policies/`.
-2. Use templates in `templates/`.
+2. Use templates in `templates/` as reference shape. Note: semantic pages (items, claims,
+   synthesis, queries) are **code-rendered** by `app/workers/wiki_render.py`, so their templates
+   are illustrative, not authoritative — never hand-write them. Only the deterministic Source
+   page follows `templates/source.md` directly.
 3. Preserve frontmatter conventions.
 4. Add or preserve summary callouts.
 5. Maintain bidirectional backlinks.

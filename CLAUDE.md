@@ -113,7 +113,7 @@ Check for:
 
 ## Page standards
 
-Use templates in `templates/`. Keep generated pages concise and navigable. The summary callout is a navigation layer, not decoration.
+Use templates in `templates/` as reference shape. Semantic pages (items, claims, synthesis, queries) are **code-rendered** by `app/workers/wiki_render.py` — their templates are illustrative, not a spec, and are never hand-authored; only the deterministic Source page follows its template directly. Keep generated pages concise and navigable. The summary callout is a navigation layer, not decoration.
 
 ## Output discipline
 

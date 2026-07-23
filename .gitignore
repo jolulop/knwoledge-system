@@ -45,12 +45,8 @@ normalized/enrichment/
 wiki/index.md
 wiki/log.md
 wiki/Sources/*.md
-wiki/Concepts/*.md
+wiki/Items/*.md
 wiki/Claims/*.md
-wiki/Entities/*.md
-wiki/People/*.md
-wiki/Organizations/*.md
-wiki/Projects/*.md
 wiki/Tags/*.md
 wiki/Synthesis/*.md
 wiki/Queries/*.md

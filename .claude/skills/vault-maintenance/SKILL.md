@@ -19,8 +19,8 @@ Keep the filing-cabinet/wiki/search/graph layers healthy over time.
 - Missing frontmatter.
 - Missing summary callouts.
 - Missing citations.
-- Orphan concepts.
-- Concepts with fewer than two sources.
+- Orphan items.
+- Items with fewer than two sources.
 - Summary rot.
 - Stale claims.
 - Duplicate sources.

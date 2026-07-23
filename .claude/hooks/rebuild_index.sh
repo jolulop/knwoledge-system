@@ -3,7 +3,7 @@ set -euo pipefail
 PAYLOAD="$(cat)"
 FILE_PATH="$(printf '%s' "$PAYLOAD" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("tool_input",{}).get("file_path", ""))')"
 case "$FILE_PATH" in
-  *wiki/Sources/*.md|*wiki/Concepts/*.md|*wiki/Claims/*.md|*wiki/Entities/*.md|*wiki/People/*.md|*wiki/Organizations/*.md|*wiki/Projects/*.md|*wiki/Tags/*.md|*wiki/Synthesis/*.md|*wiki/Queries/*.md)
+  *wiki/Sources/*.md|*wiki/Items/*.md|*wiki/Claims/*.md|*wiki/Tags/*.md|*wiki/Synthesis/*.md|*wiki/Queries/*.md)
     cd "${CLAUDE_PROJECT_DIR:-.}" || exit 0
     python3 scripts/rebuild_index.py . >&2
     ;;

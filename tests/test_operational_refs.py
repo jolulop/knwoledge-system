@@ -371,3 +371,66 @@ def test_env_example_and_config_agree_on_enrich_max_tokens():
     env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
     assert f"ENRICH_MAX_TOKENS={m.group(1)}" in env_example, (
         ".env.example ENRICH_MAX_TOKENS drifted from the config.py default")
+
+
+# --- ADR-0059 taxonomy drift guards -------------------------------------------------------------
+# ADR-0059 retired the Concept/Entity/Person/Organization/Project ontology for one flat knowledge-Item
+# taxonomy (`wiki/Items/`, classified by `item_type`). Active operating surfaces — the index-rebuild
+# hook, .gitignore, and the agent-facing skills — must move in lockstep or agents/automation drift onto
+# a dead vocabulary.
+_RETIRED_WIKI_DIRS = ("Concepts", "Entities", "People", "Organizations", "Projects")
+
+
+def test_rebuild_index_hook_watches_items_not_retired_dirs():
+    # The hook rebuilds wiki/index.md per changed wiki page (AGENTS "rebuild index on wiki change").
+    # It enumerates page dirs (not a blanket glob) to avoid firing on index.md/log.md, so the list must
+    # carry the live Items dir and drop the retired ones — else Item-page edits never rebuild the index.
+    hook = (ROOT / ".claude" / "hooks" / "rebuild_index.sh").read_text(encoding="utf-8")
+    assert "wiki/Items/*.md" in hook, "rebuild hook does not watch wiki/Items/*.md"
+    for retired in _RETIRED_WIKI_DIRS:
+        assert f"wiki/{retired}/" not in hook, f"rebuild hook still watches retired wiki/{retired}/"
+
+
+def test_gitignore_covers_items_not_retired_wiki_dirs():
+    # ADR-0014: the wiki layer is gitignored regenerable data. Items must be ignored (else the next
+    # ingest commits item pages into git); the retired dirs must be gone.
+    gi = (ROOT / ".gitignore").read_text(encoding="utf-8")
+    assert "wiki/Items/*.md" in gi, "wiki/Items/*.md is not gitignored — item pages would be committed"
+    for retired in _RETIRED_WIKI_DIRS:
+        assert f"wiki/{retired}/*.md" not in gi, f"retired wiki/{retired}/*.md still in .gitignore"
+
+
+_SKILL_FILES = sorted((ROOT / ".claude" / "skills").glob("*/SKILL.md"))
+# Retired vocabulary that must never appear in a post-ADR-0059 skill: the typed wiki page dirs, the
+# retired `concept_promotion` review action, and the ontology nouns themselves. `project`/`people`/
+# `person` are deliberately excluded (too common in plain English to ban outright); the path forms
+# already catch the People/Organizations/Projects dirs.
+_RETIRED_ONTOLOGY_RE = re.compile(
+    r"(?:Concepts|Entities|People|Organizations|Projects)/"
+    r"|concept_promotion"
+    r"|\bconcepts?\b|\bentities\b|\borganizations\b",
+    re.IGNORECASE,
+)
+
+
+def test_skills_do_not_reference_retired_ontology():
+    assert _SKILL_FILES, "expected vault skills to scan"
+    offenders: list[str] = []
+    for skill in _SKILL_FILES:
+        for lineno, line in enumerate(skill.read_text(encoding="utf-8").splitlines(), start=1):
+            m = _RETIRED_ONTOLOGY_RE.search(line)
+            if m:
+                offenders.append(
+                    f"{skill.relative_to(ROOT)}:{lineno}: {m.group(0)!r} in {line.strip()!r}")
+    assert not offenders, (
+        "skills reference the ADR-0059-retired Concept/Entity/... ontology:\n" + "\n".join(offenders))
+
+
+def test_ingest_and_review_skills_name_the_item_taxonomy():
+    # Positive drift guard: the two skills that drive ingest/governance must name the live surface, so a
+    # future rewrite can't quietly drop it and pass the negative test above by saying nothing at all.
+    ingest = (ROOT / ".claude" / "skills" / "vault-ingest" / "SKILL.md").read_text(encoding="utf-8")
+    review = (ROOT / ".claude" / "skills" / "vault-review" / "SKILL.md").read_text(encoding="utf-8")
+    assert "item_type" in ingest and "Items" in ingest, "ingest skill omits the Items/item_type surface"
+    for action in ("merge_items", "split_item", "change_item_type", "promote_candidate_node"):
+        assert action in review, f"review skill omits the live review action {action!r}"

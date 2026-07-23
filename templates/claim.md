@@ -1,3 +1,7 @@
+<!-- Illustrative page shape ONLY: claim pages are code-rendered by
+     app/workers/wiki_render.py::render_claim_page (like every semantic page since Phase 3.5b).
+     The authoritative frontmatter is whatever that renderer emits — this is reference shape,
+     not a spec. See item.md. -->
 ---
 type: claim
 claim_id: "{{claim_id}}"

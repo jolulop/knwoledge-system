@@ -1,3 +1,7 @@
+<!-- Illustrative page shape ONLY: synthesis pages are code-rendered by
+     app/workers/wiki_render.py::render_synthesis_page (like every semantic page since Phase 3.5b).
+     The authoritative frontmatter is whatever that renderer emits (e.g. `derived_from:` claim ids,
+     `topic_node:`, `aliases:`) — this template is reference shape, not a spec. See item.md. -->
 ---
 type: synthesis
 synthesis_id: "{{synthesis_id}}"
@@ -19,8 +23,6 @@ citations:
     sheet_reference: {{sheet_reference_or_null}}
     chunk_id: "{{chunk_id_advisory}}"
     quote: "{{short_quote}}"
-concepts: []
-claims: []
 created: "{{created_at}}"
 updated: "{{updated_at}}"
 last_compiled_at: "{{last_compiled_at}}"

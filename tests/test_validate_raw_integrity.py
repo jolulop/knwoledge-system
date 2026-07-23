@@ -41,6 +41,19 @@ def test_no_manifests_passes(tmp_path):
     assert v.main([str(tmp_path)]) == 0
 
 
+def test_missing_raw_file_is_a_note_not_a_failure(tmp_path, capsys):
+    # Governance decision (ADR-0002/0024 + ADR-0061 Q4 record-only raw deletion): a catalogued raw
+    # file gone missing is NOT a validate_all hard-fail. It is surfaced as a NOTE here and governed by
+    # the `missing_raw_source` review type (Phase 7 lint/review), so a legitimately retention-deleted
+    # raw can't fail validate_all forever. This pins that intentional lint/review-only posture — flip
+    # it here (and update the docstring) only if the policy changes to validator-fatal.
+    _intake(tmp_path)
+    (tmp_path / "raw" / "inbox" / "doc.md").unlink()   # bytes gone, manifest remains
+    assert v.main([str(tmp_path)]) == 0                # missing != integrity failure (a pass)
+    out = capsys.readouterr().out
+    assert "missing from disk" in out                 # ...but it IS surfaced as a note
+
+
 import json  # noqa: E402
 
 
