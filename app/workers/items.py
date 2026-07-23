@@ -291,7 +291,10 @@ def extract_items(
 
     graph.init_db(graph_db)
     gconn = graph.connect(graph_db)
-    has_key = client.provider_available(model_ref)
+    # ADR-0063: resolve the tier's ordered chain once per run to the first available concrete
+    # model_ref (availability-only); keep the first-preference ref when none is available so the
+    # no-key/stub fingerprint stays a valid concrete ref.
+    model_ref, has_key = client.resolve_run_model(model_ref)
 
     strategy_ref = art.items_strategy_ref(input_max_chars)
     considered = nodes_written = mentions_written = 0

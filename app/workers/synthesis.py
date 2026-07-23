@@ -574,7 +574,9 @@ def generate_syntheses(
 
     graph.init_db(graph_db)
     gconn = graph.connect(graph_db)
-    has_key = client.provider_available(model_ref)
+    # ADR-0063: resolve the tier's ordered chain once per run to the first available concrete
+    # model_ref (availability-only, fixed for the run); first-preference ref when none available.
+    model_ref, has_key = client.resolve_run_model(model_ref)
 
     try:
         # 1. Apply human decisions (deterministic; runs without a key).

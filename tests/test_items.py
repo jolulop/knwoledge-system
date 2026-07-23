@@ -157,6 +157,13 @@ def test_unknown_item_type_coerced_to_sentinel(tmp_path):
         def provider_available(self, model_ref):
             return True
 
+        def resolve_run_model(self, chain):  # ADR-0063 chain contract
+            ref = chain.split(",")[0].strip()
+            return ref, self.provider_available(ref)
+
+        def chain_available(self, chain):
+            return self.resolve_run_model(chain)[1]
+
         def parse(self, messages, schema, model_ref, **kw):
             return _payload(_item("Mystery Thing", item_type="entity"))
 

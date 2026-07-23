@@ -1764,7 +1764,9 @@ def run_query_endpoint(req: QueryRequest) -> dict[str, Any]:
 
     try:
         client = _query_client()
-        if not client.provider_available(settings.query_model):
+        # ADR-0063: QUERY_MODEL is an ordered chain; resolve once to the first available concrete ref.
+        query_model, query_available = client.resolve_run_model(settings.query_model)
+        if not query_available:
             raise HTTPException(
                 status_code=503,
                 detail=("query answering requires a configured LLM; set QUERY_MODEL and the provider "
@@ -1780,7 +1782,7 @@ def run_query_endpoint(req: QueryRequest) -> dict[str, Any]:
         )
         answer = query.answer_query(
             question=q, evidence_hits=result["evidence"], client=client,
-            model_ref=settings.query_model, markdown_dir=settings.markdown_dir,
+            model_ref=query_model, markdown_dir=settings.markdown_dir,
             fallback_text=_no_source_text(),
         )
     except HTTPException:
@@ -1878,10 +1880,11 @@ class _CountingCache(ResponseCache):
         return row
 
 
-def _eval_query_fn(client: Any, cache: _CountingCache | None):
+def _eval_query_fn(client: Any, cache: _CountingCache | None, model_ref: str):
     """A per-case /query runner for the eval (ADR-0042): reuses the shared retrieval + answer building
     blocks (so it can't drift from the operator path) with an INJECTED client, save:false, default
-    retention visibility. Returns scoreable signals ONLY (ids/flags/counts) — never prose/prompt/evidence.
+    retention visibility. `model_ref` is the run-resolved concrete ref (ADR-0063 chain resolution).
+    Returns scoreable signals ONLY (ids/flags/counts) — never prose/prompt/evidence.
     When a counting cache is present, reports per-case `cache_hit` (None when the case made no LLM call,
     e.g. an abstention with no evidence)."""
     statuses = search.parse_statuses(None, graph.NODE_STATUSES, search.RETENTION_DEFAULT_STATUSES)
@@ -1894,7 +1897,7 @@ def _eval_query_fn(client: Any, cache: _CountingCache | None):
             edge_statuses=graph_read.DEFAULT_EDGE_STATUSES)
         ans = query.answer_query(
             question=case.question, evidence_hits=result["evidence"], client=client,
-            model_ref=settings.query_model, markdown_dir=settings.markdown_dir,
+            model_ref=model_ref, markdown_dir=settings.markdown_dir,
             fallback_text=_no_source_text())
         cache_hit: bool | None = None
         if cache is not None:
@@ -1966,13 +1969,15 @@ def run_eval_endpoint(req: EvalRunRequest) -> dict[str, Any]:
     # controlled 503 (no raw detail); a partial snapshot is never written.
     try:
         client, cache = _eval_client(req.fresh)  # fresh -> cacheless; else a counting cache
-        if not client.provider_available(settings.query_model):
+        # ADR-0063: QUERY_MODEL is an ordered chain; resolve once to the concrete ref actually used.
+        query_model, query_available = client.resolve_run_model(settings.query_model)
+        if not query_available:
             raise HTTPException(
                 status_code=503,
                 detail=("answer-quality eval requires a configured LLM; set QUERY_MODEL and the "
                         "provider credential (GET /evals/results stays available without one)"))
         report = eval_answers.run_eval(
-            cases, _eval_query_fn(client, cache), limit=limit, known_source_ids=known,
+            cases, _eval_query_fn(client, cache, query_model), limit=limit, known_source_ids=known,
             cache_mode=("fresh" if req.fresh else "cached"))
     except HTTPException:
         raise  # already-controlled (provider unavailable / search-vector 4xx/503) — no raw detail
@@ -1990,7 +1995,7 @@ def run_eval_endpoint(req: EvalRunRequest) -> dict[str, Any]:
         run_id, _n = f"{base}-{_n}", _n + 1
     meta = {
         "run_id": run_id, "created_at": stamp, "scoring_version": eval_answers.SCORING_VERSION,
-        "model_ref": settings.query_model, "model_provider": settings.query_model.split(":", 1)[0],
+        "model_ref": query_model, "model_provider": query_model.split(":", 1)[0],
         "graph_schema_version": graph.SCHEMA_VERSION, "vault_fingerprint": _vault_fingerprint(),
         "n_requested": requested, "n_run": report["n_run"], "n_skipped": report["n_skipped"],
     }

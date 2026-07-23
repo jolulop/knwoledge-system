@@ -373,6 +373,24 @@ def test_env_example_and_config_agree_on_enrich_max_tokens():
         ".env.example ENRICH_MAX_TOKENS drifted from the config.py default")
 
 
+def test_env_example_model_chains_have_no_inline_comments():
+    # ADR-0063: config._load_env_file strips '#' only at line START, so an inline comment after a
+    # model-chain value would be swallowed into the value (`local:x  # note` -> a bogus model_ref).
+    # Every active model config line must keep comments on their own line.
+    offenders: list[str] = []
+    chain_keys = {"ENRICH_MODEL_LIGHT", "ENRICH_MODEL_STANDARD", "ENRICH_MODEL_HEAVY", "QUERY_MODEL"}
+    for lineno, line in enumerate((ROOT / ".env.example").read_text(encoding="utf-8").splitlines(), 1):
+        s = line.strip()
+        if s.startswith("#") or "=" not in s:
+            continue
+        key, value = s.split("=", 1)
+        if key in chain_keys and "#" in value:
+            offenders.append(f".env.example:{lineno}: inline comment in {key} value: {value!r}")
+    assert not offenders, (
+        "model-chain values must not carry inline comments (the .env parser keeps them):\n"
+        + "\n".join(offenders))
+
+
 # --- ADR-0059 taxonomy drift guards -------------------------------------------------------------
 # ADR-0059 retired the Concept/Entity/Person/Organization/Project ontology for one flat knowledge-Item
 # taxonomy (`wiki/Items/`, classified by `item_type`). Active operating surfaces — the index-rebuild

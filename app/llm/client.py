@@ -49,6 +49,20 @@ def parse_model_ref(model_ref: str) -> tuple[str, str]:
     return provider, model_id
 
 
+def parse_chain(chain: str) -> list[str]:
+    """Split an ordered `provider:model_id,provider:model_id,...` model chain into validated refs.
+
+    A single value is a length-1 chain, so pre-ADR-0063 configs are unchanged. Each entry must parse;
+    a malformed entry or an empty chain raises ConfigError (fail fast), never a silent drop.
+    """
+    refs = [r.strip() for r in chain.split(",") if r.strip()]
+    if not refs:
+        raise ConfigError(f"empty model chain: {chain!r}")
+    for ref in refs:
+        parse_model_ref(ref)  # raises ConfigError on a malformed / empty-half entry
+    return refs
+
+
 class LLMClient:
     def __init__(
         self,
@@ -72,18 +86,44 @@ class LLMClient:
         return adapter
 
     def provider_available(self, model_ref: str) -> bool:
-        """True when the provider for this model_ref has the credentials/config to run."""
+        """True when the provider for this single model_ref has the credentials/config to run."""
         provider, _ = parse_model_ref(model_ref)
         return self._adapter(provider).available()
 
+    def resolve_run_model(self, chain: str) -> tuple[str, bool]:
+        """Resolve an ordered chain to `(concrete_model_ref, available)`, fixed for the run (ADR-0063).
+
+        Availability-only selection: return the first chain member whose adapter is `available()`
+        (credential present / local base URL configured) with `available=True`. When no member can
+        run, return the **first-preference** ref with `available=False` — so callers keep a valid,
+        deterministic concrete ref for fingerprints/records without ever making a call. A member that
+        cannot run is skipped, never called; quality is not a selection input.
+        """
+        refs = parse_chain(chain)
+        for ref in refs:
+            provider, _ = parse_model_ref(ref)
+            if self._adapter(provider).available():
+                return ref, True
+        return refs[0], False
+
+    def chain_available(self, chain: str) -> bool:
+        """True when at least one member of the ordered chain is available (ADR-0063)."""
+        return self.resolve_run_model(chain)[1]
+
     def validate_tiers(self, tiers: dict[str, str]) -> None:
-        """Startup check: every tier resolves to a known provider with a credential."""
-        for tier, model_ref in tiers.items():
-            provider, _ = parse_model_ref(model_ref)
-            adapter = self._adapter(provider)
-            if not adapter.available():
+        """Strict startup check (opt-in): every tier chain parses and has >=1 available member.
+
+        A malformed chain raises ConfigError (fail fast); a well-formed chain with no available member
+        also raises — the strict posture for deployments that require enrichment to run. The default
+        graceful path (ADR-0025) does NOT call this: an unavailable tier simply skips and sources stay
+        `stub`.
+        """
+        for tier, chain in tiers.items():
+            _ref, available = self.resolve_run_model(chain)  # parse_chain raises on malformed
+            if not available:
                 raise ConfigError(
-                    f"tier {tier!r} -> {model_ref}: provider {provider!r} has no credential"
+                    f"tier {tier!r} -> {chain}: no available model in the chain "
+                    f"(need a credential/base URL for at least one member)"
                 )
 
     def parse(

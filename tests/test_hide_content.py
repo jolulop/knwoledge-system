@@ -351,6 +351,13 @@ class _CiteAllClient:
     def provider_available(self, model_ref):
         return True
 
+    def resolve_run_model(self, chain):  # ADR-0063 chain contract
+        ref = chain.split(",")[0].strip()
+        return ref, self.provider_available(ref)
+
+    def chain_available(self, chain):
+        return self.resolve_run_model(chain)[1]
+
     def parse(self, messages, schema, model_ref, **kwargs):
         pack = json.loads(messages[-1]["content"].split("EVIDENCE:\n", 1)[1])
         return {"claims": [{"text": f"Grounded claim for {e['evidence_id']}.",

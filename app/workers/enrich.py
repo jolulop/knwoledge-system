@@ -76,8 +76,11 @@ def enrich_sources(
         skipped_no_key = 0
         errors: list[dict[str, str]] = []
 
-        # No credential for the configured provider -> skip; sources stay stubs (ADR-0025).
-        has_key = client.provider_available(model_ref)
+        # ADR-0063: the tier value is an ordered model chain; resolve once per run to the first
+        # available concrete model_ref (availability-only, fixed for the run). No available member
+        # -> skip, sources stay stubs (ADR-0025); keep the first-preference ref so any fingerprint/
+        # record stays a valid concrete ref.
+        model_ref, has_key = client.resolve_run_model(model_ref)
 
         for manifest in manifests:
             source_id = manifest["source_id"]

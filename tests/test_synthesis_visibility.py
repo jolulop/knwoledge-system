@@ -123,6 +123,13 @@ class _SpyClient:
     def provider_available(self, model_ref):
         return self._has_key
 
+    def resolve_run_model(self, chain):  # ADR-0063 chain contract
+        ref = chain.split(",")[0].strip()
+        return ref, self.provider_available(ref)
+
+    def chain_available(self, chain):
+        return self.resolve_run_model(chain)[1]
+
     def parse(self, *a, **k):
         self.parsed += 1
         raise AssertionError("parse() must not run for a hidden synthesis")

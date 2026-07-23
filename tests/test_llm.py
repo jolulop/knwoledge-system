@@ -12,7 +12,7 @@ if str(ROOT) not in sys.path:
 from app.llm import schema as schema_mod
 from app.llm.adapters import AdapterError
 from app.llm.cache import ResponseCache, cache_key
-from app.llm.client import ConfigError, LLMClient, ParseError, parse_model_ref
+from app.llm.client import ConfigError, LLMClient, ParseError, parse_chain, parse_model_ref
 
 SCHEMA = {
     "type": "object",
@@ -158,3 +158,59 @@ def test_provider_available_and_tier_validation():
     unknown = LLMClient({"anthropic": FakeAdapter()})
     with pytest.raises(ConfigError):
         unknown.provider_available("openai:m")
+
+
+# --- ADR-0063 model chain resolution ----------------------------------------
+
+
+def _chain_client(**available):
+    """LLMClient with one FakeAdapter per provider, availability per kwarg (provider=bool)."""
+    return LLMClient({p: FakeAdapter(available=a) for p, a in available.items()})
+
+
+def test_parse_chain_single_and_multi():
+    assert parse_chain("anthropic:m") == ["anthropic:m"]                      # length-1 = pre-0063
+    assert parse_chain("local:a, anthropic:b") == ["local:a", "anthropic:b"]  # whitespace tolerated
+
+
+def test_parse_chain_rejects_empty_and_malformed():
+    for bad in ("", " , ", "local:a,notaref", "local:a,:b"):
+        with pytest.raises(ConfigError):
+            parse_chain(bad)
+
+
+def test_resolve_run_model_picks_first_available_in_config_order():
+    both = _chain_client(local=True, anthropic=True)
+    assert both.resolve_run_model("local:x,anthropic:y") == ("local:x", True)   # local-first honored
+    assert both.resolve_run_model("anthropic:y,local:x") == ("anthropic:y", True)  # order is config order
+
+
+def test_resolve_run_model_skips_unavailable_to_next():
+    c = _chain_client(local=False, anthropic=True)
+    assert c.resolve_run_model("local:x,anthropic:y") == ("anthropic:y", True)
+
+
+def test_resolve_run_model_none_available_returns_first_pref_unavailable():
+    # No member available -> the first-preference ref with available=False, so a caller keeps a valid
+    # concrete ref for fingerprints/records without ever making a call.
+    c = _chain_client(local=False, anthropic=False)
+    assert c.resolve_run_model("local:x,anthropic:y") == ("local:x", False)
+
+
+def test_length_one_chain_is_backward_compatible():
+    assert _chain_client(anthropic=True).resolve_run_model("anthropic:m") == ("anthropic:m", True)
+    assert _chain_client(anthropic=False).resolve_run_model("anthropic:m") == ("anthropic:m", False)
+
+
+def test_chain_available():
+    assert _chain_client(local=False, anthropic=True).chain_available("local:x,anthropic:y") is True
+    assert _chain_client(local=False, anthropic=False).chain_available("local:x,anthropic:y") is False
+
+
+def test_validate_tiers_is_chain_aware():
+    ok = _chain_client(local=False, anthropic=True)
+    ok.validate_tiers({"light": "local:x,anthropic:y", "standard": "anthropic:y"})  # >=1 available
+    with pytest.raises(ConfigError):  # no member available
+        _chain_client(local=False, anthropic=False).validate_tiers({"standard": "local:x,anthropic:y"})
+    with pytest.raises(ConfigError):  # malformed chain fails fast
+        _chain_client(anthropic=True).validate_tiers({"light": "anthropic:m,garbage"})

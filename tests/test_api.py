@@ -603,6 +603,13 @@ class _FakeQueryClient:
     def provider_available(self, model_ref):
         return self._available
 
+    def resolve_run_model(self, chain):  # ADR-0063 chain contract
+        ref = chain.split(",")[0].strip()
+        return ref, self.provider_available(ref)
+
+    def chain_available(self, chain):
+        return self.resolve_run_model(chain)[1]
+
     def parse(self, messages, schema, model_ref, **kwargs):
         if self._raises is not None:
             raise self._raises
