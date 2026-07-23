@@ -362,6 +362,27 @@ def test_rejected_is_refileable_on_evidence_change(tmp_path):
     assert sum(1 for i in pend if i["type"] == "propose_synthesis") == 1
 
 
+def test_rejected_synthesis_honored_across_availability_flip(tmp_path):
+    # ADR-0063 B3: a synthesis rejected while produced by a still-in-chain model must NOT re-nag when the
+    # run later resolves to a DIFFERENT (also in-chain) model. The rejected-review lookup keys on the
+    # RECORDED model's fingerprint when the artifact is chain-fresh, not the newly-resolved model's.
+    jobs = _build(tmp_path)
+    cache = ResponseCache(tmp_path / "db" / "llm_cache.sqlite")
+    synthesis.generate_syntheses(  # produced by HEAVY (single chain -> recorded model_ref = HEAVY)
+        tmp_path, client=LLMClient({"anthropic": SynthAdapter()}, cache=cache),
+        model_ref=HEAVY, jobs_db=jobs, rebuild_index=False)
+    reviews.resolve_review_item(tmp_path / "reviews", _propose_rid(tmp_path),
+                                decision="rejected", decided_by="human")
+    # Local now up; chain is local-first but HEAVY (which produced the rejected evidence) is still a
+    # member -> sticky-fresh -> the rejection is honored, and the newly-resolved local model is NOT called.
+    local = SynthAdapter()
+    flip = LLMClient({"local": local, "anthropic": SynthAdapter()}, cache=cache)
+    s = synthesis.generate_syntheses(
+        tmp_path, client=flip, model_ref=f"local:qwen,{HEAVY}", jobs_db=jobs, rebuild_index=False)
+    assert s["skipped_reviewed"] == 1 and s["syntheses_written"] == 0
+    assert local.calls == 0   # no re-nag, no model call despite the resolved model changing
+
+
 # --- slug collision across topic node types --------------------------------
 
 

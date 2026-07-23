@@ -320,3 +320,23 @@ def test_enrich_re_enriches_when_recorded_model_leaves_chain(tmp_path):
     r = enrich.enrich_sources(tmp_path, client=c2, model_ref="local:x",   # anthropic:h dropped
                               jobs_db=tmp_path / "db" / "jobs.sqlite")
     assert r["enriched"] == 2 and local.calls == 2   # re-derived on the new (only) chain member
+
+
+def test_local_configured_but_unreachable_selects_local_then_errors_no_fallback(tmp_path):
+    # ADR-0063 NB3: available() = base URL CONFIGURED, not a reachability probe. A configured-but-down
+    # local server is SELECTED; its call then fails -> ParseError/skip per no-failover (decision 4/5),
+    # NOT an automatic hosted fallback.
+    from app.llm.adapters import AdapterError
+    _build(tmp_path)
+
+    class UnreachableLocal(FakeAdapter):        # available()=True (configured) but every call errors
+        def parse(self, messages, schema, model_id, *, max_tokens):
+            raise AdapterError("connection refused")
+
+    hosted = FakeAdapter()
+    client = LLMClient({"local": UnreachableLocal(), "anthropic": hosted},
+                       cache=ResponseCache(tmp_path / "db" / "llm_cache.sqlite"), max_retries=0)
+    r = enrich.enrich_sources(tmp_path, client=client, model_ref="local:x,anthropic:h",
+                              jobs_db=tmp_path / "db" / "jobs.sqlite")
+    assert r["enriched"] == 0 and r["errors"] == 2   # both sources errored on the selected local model
+    assert hosted.calls == 0                          # no hosted fallback — operator fixes + reruns

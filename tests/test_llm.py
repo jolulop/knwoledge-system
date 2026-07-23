@@ -207,6 +207,18 @@ def test_chain_available():
     assert _chain_client(local=False, anthropic=False).chain_available("local:x,anthropic:y") is False
 
 
+def test_resolve_fails_fast_on_unknown_provider_even_if_earlier_member_available():
+    # ADR-0063 decision 5: validate EVERY member's provider before selecting. `anthropic:m,bogus:x`
+    # must raise even though anthropic is available — an unknown provider anywhere is a config error.
+    c = _chain_client(anthropic=True)  # only anthropic is a known provider
+    with pytest.raises(ConfigError):
+        c.resolve_run_model("anthropic:m,bogus:x")
+    with pytest.raises(ConfigError):
+        c.chain_available("anthropic:m,bogus:x")
+    with pytest.raises(ConfigError):
+        c.validate_tiers({"standard": "anthropic:m,bogus:x"})
+
+
 def test_validate_tiers_is_chain_aware():
     ok = _chain_client(local=False, anthropic=True)
     ok.validate_tiers({"light": "local:x,anthropic:y", "standard": "anthropic:y"})  # >=1 available

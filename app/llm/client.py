@@ -100,9 +100,14 @@ class LLMClient:
         cannot run is skipped, never called; quality is not a selection input.
         """
         refs = parse_chain(chain)
-        for ref in refs:
-            provider, _ = parse_model_ref(ref)
-            if self._adapter(provider).available():
+        # Validate EVERY member's provider before selecting one (ADR-0063 decision 5): an unknown
+        # provider anywhere in the chain is a config error that must fail fast, even if an earlier
+        # member is available — else `anthropic:m,bogus:x` would silently "work" whenever Anthropic is
+        # up and `validate_tiers` would not actually validate the whole chain. `_adapter` raises
+        # ConfigError on an unknown provider.
+        candidates = [(ref, self._adapter(parse_model_ref(ref)[0])) for ref in refs]
+        for ref, adapter in candidates:
+            if adapter.available():
                 return ref, True
         return refs[0], False
 

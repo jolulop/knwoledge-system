@@ -40,9 +40,15 @@ function of its inputs.
 Each tier's config value widens from a single `model_ref` to an **ordered, comma-separated chain**
 of `model_ref`s. At the start of a run the resolver parses the chain, validates every entry, and
 selects the **first candidate whose adapter is `available()`** — then **fixes that `model_ref` for
-the whole run**. Availability (credential present, local base URL reachable/configured) is the only
-input to selection; a model that is up but produces poor or invalid output is **not** a fallback
-trigger. A single-value config is a length-1 chain, so existing configs are unchanged.
+the whole run**. `available()` is a **cheap static check — credential present for hosted, base URL
+*configured* for local — NOT a reachability probe** (a per-run network probe would add latency and
+flakiness to the resolve path). This has a precise consequence worth stating: a local server that is
+*configured but unreachable* (base URL set, process down) is `available()` → **selected**, and its
+call then fails — which, per decision 4 (no failover), surfaces as a **skip/error the operator fixes
+and reruns, NOT an automatic hosted fallback**. "Fall back to hosted" happens only when local is
+*unconfigured* (base URL unset), not when it is configured-but-down. A model that is up but produces
+poor or invalid output is likewise **not** a fallback trigger. A single-value config is a length-1
+chain, so existing configs are unchanged.
 
 Rejected: per-call failure fallback (call local, auto-recall hosted on error). It makes the
 effective model per-item and nondeterministic, spends hosted budget on local hiccups, and inverts
@@ -52,9 +58,9 @@ the cost intent of local-first. See decision 4 for the failure path we chose ins
 
 The chain mechanism ships for **all** tiers, but only the default *ordering* differs by tier:
 
-| Tier | Default chain order | Rationale |
+| Tier | Default chain **ordering** | Rationale |
 |---|---|---|
-| light (`ENRICH_MODEL_LIGHT`) | `local → hosted` | Summaries/tags are mechanical, high-volume, low quality-risk — the biggest cost win, smallest blast radius. |
+| light (`ENRICH_MODEL_LIGHT`) | `local → hosted` (recipe) | Summaries/tags are mechanical, high-volume, low quality-risk — the biggest cost win, smallest blast radius. |
 | standard (`ENRICH_MODEL_STANDARD`) | `hosted → local` | Claims + the ADR-0059 15-type item extraction *mutate the semantic layer*; a merely-running local model must not silently become their producer. |
 | heavy (`ENRICH_MODEL_HEAVY`) | `hosted → local` | Synthesis/contradiction *govern* the semantic layer; same reasoning. |
 | query (`QUERY_MODEL`, decision 6) | `hosted → local` | User-facing cited answers; grounding proves citations, not prose quality. |
@@ -63,11 +69,22 @@ The chain mechanism ships for **all** tiers, but only the default *ordering* dif
 > local-first. Standard and heavy remain hosted-first because their outputs mutate or govern the
 > semantic layer; local use there is explicit operator opt-in until quality is validated.
 
-Because selection is availability-only (decision 1), a local-first default is *operationally* safe:
-with no local server configured, `available()` is false and the tier resolves straight to hosted.
-The only real risk is *quality* when a local server **is** present but weak — which is why
-tier-2/tier-3 stay hosted-first. Operators opt those tiers into local by editing the chain once
-their local model is proven on their corpus.
+**What "defaults local-first" concretely means (a default cannot name the operator's local model).**
+A shipped config default cannot hard-code a concrete `local:<id>` — the model id depends on the
+operator's inference server and catalog. So the *shipped* `ENRICH_MODEL_LIGHT` default is **hosted-only**
+(`anthropic:claude-haiku-4-5`), and tier-1's local-first is the **default ordering**, shipped as a
+**ready-to-uncomment recipe** in `.env.example` (`local:<your-model>,anthropic:claude-haiku-4-5`). Tier-1
+becomes truly local-first the moment the operator supplies a local model id **and** sets
+`ENRICH_LOCAL_BASE_URL`. This is deliberately "mechanism + documented recipe" for tier-1, not a
+behavior-changing default that would silently route an existing operator's summaries to a model they
+never named. The distinction is a documented limitation, not an oversight: there is no default value
+that is both concrete and correct for an unknown local server.
+
+Because selection is availability-only (decision 1), this recipe is *operationally* safe: with no local
+server configured, `available()` is false and the tier resolves straight to hosted. The only real risk
+is *quality* when a local server **is** present but weak — which is why tier-2/tier-3 stay hosted-first.
+Operators opt those tiers into local by editing the chain once their local model is proven on their
+corpus.
 
 ### 3. Sticky-to-chain artifact freshness (availability changes do not restale)
 
@@ -126,6 +143,14 @@ proven. It is **never** local-first by default — grounding guarantees citation
 is complete, well-prioritized, or correctly synthesized. Eval inherits the resolved query model and
 records the actual `model_ref` used, as today.
 
+**One inherited-default caveat (kept for ADR-0034 backward compatibility):** when `QUERY_MODEL` is
+unset it falls back to the configured `ENRICH_MODEL_STANDARD` chain, so an operator who opts *standard*
+into local-first (`local:x,sonnet`) without setting `QUERY_MODEL` implicitly opts query into that same
+ordering. This is intentional and pinned by test — but it means "query stays hosted-first" holds by
+default only while standard is hosted-first (the shipped default). To keep query hosted-first while
+standard is local-first, **set `QUERY_MODEL` explicitly**. We keep the inheritance rather than break
+the long-standing ADR-0034 default.
+
 ## Config contract
 
 Ordered comma-chain in the existing per-tier vars (no new schema, backward compatible):
@@ -156,9 +181,11 @@ keeps its exact fingerprint and cache entry.
 - The backfill Batch fast-path (ADR-0025) applies only when the *resolved* adapter advertises
   `supports_batch`; when a tier resolves to `local`, that tier degrades to synchronous calls
   (already the ADR-0025 contract, now reachable by default on tier-1).
-- Observability: the resolver logs which `model_ref` each tier resolved to and whether it was the
-  preferred candidate or a fallback; skipped/error counts stay visible (decision 4). The artifact
-  continues to record the exact producing `model_ref`.
+- Observability (v1): the **resolved `model_ref` is recorded** in each enrichment artifact and each
+  worker run summary, and skipped/error counts stay visible (decision 4) — enough to see, after the
+  fact, exactly which model produced a given artifact and whether a run fell through to hosted. An
+  explicit at-resolve-time log line distinguishing *preferred* from *fallback* selection is a deferred
+  nicety, not implemented in v1 (the recorded `model_ref` already carries the provenance).
 - The cost/quality trade is deliberately asymmetric: tier-1 captures the local cost win by default;
   the semantic-governing tiers stay conservative until an operator validates local quality.
 

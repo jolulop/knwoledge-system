@@ -391,6 +391,37 @@ def test_env_example_model_chains_have_no_inline_comments():
         + "\n".join(offenders))
 
 
+def test_tier1_shipped_default_is_hosted_only(monkeypatch):
+    # ADR-0063 B1: tier-1 local-first is a documented ORDERING/recipe, not a shipped default (a default
+    # can't name the operator's local model). The shipped ENRICH_MODEL_LIGHT default is hosted-only —
+    # a single ref, no local member — so an existing operator's summaries never silently route local.
+    from app.backend.config import get_settings
+    monkeypatch.delenv("ENRICH_MODEL_LIGHT", raising=False)
+    light = get_settings(ROOT).enrich_model_light
+    assert light == "anthropic:claude-haiku-4-5"
+    assert "local:" not in light and "," not in light
+
+
+def test_env_example_ships_light_hosted_only_with_local_recipe():
+    env = (ROOT / ".env.example").read_text(encoding="utf-8")
+    active = [ln for ln in env.splitlines() if ln.startswith("ENRICH_MODEL_LIGHT=")]
+    assert active == ["ENRICH_MODEL_LIGHT=anthropic:claude-haiku-4-5"]  # uncommented default hosted-only
+    assert "#   ENRICH_MODEL_LIGHT=local:" in env                        # local-first recipe, commented
+    adr = (ROOT / "docs" / "adr" / "0063-local-first-tier-fallback-routing.md").read_text(encoding="utf-8")
+    assert "ready-to-uncomment recipe" in adr                            # ADR states the recipe reality
+
+
+def test_query_model_inherits_standard_chain_when_unset(monkeypatch):
+    # ADR-0063 NB1 (ADR-0034 back-compat, pinned intentionally): QUERY_MODEL inherits the ENRICH_MODEL_
+    # STANDARD chain when unset, so opting standard into local also opts query in unless QUERY_MODEL is set.
+    from app.backend.config import get_settings
+    monkeypatch.setenv("ENRICH_MODEL_STANDARD", "local:x,anthropic:s")
+    monkeypatch.delenv("QUERY_MODEL", raising=False)
+    assert get_settings(ROOT).query_model == "local:x,anthropic:s"   # inherited
+    monkeypatch.setenv("QUERY_MODEL", "anthropic:s")
+    assert get_settings(ROOT).query_model == "anthropic:s"           # explicit override wins
+
+
 # --- ADR-0059 taxonomy drift guards -------------------------------------------------------------
 # ADR-0059 retired the Concept/Entity/Person/Organization/Project ontology for one flat knowledge-Item
 # taxonomy (`wiki/Items/`, classified by `item_type`). Active operating surfaces — the index-rebuild

@@ -621,8 +621,7 @@ def generate_syntheses(
             for t in topics:
                 tid = t["node_id"]
                 syn_id = synthesis_id(tid)
-                fp = _fingerprint(t, model_ref)
-                rid = reviews.review_id("propose_synthesis", _review_subject(tid, fp))
+                fp = _fingerprint(t, model_ref)   # resolved-model fingerprint (used if we (re)generate)
                 node = graph.get_node(gconn, syn_id)
                 status = node["status"] if node else None
                 # ADR-0049: never regenerate a `hidden`/`evidence_hidden` synthesis (page authority OR graph
@@ -635,6 +634,12 @@ def generate_syntheses(
                 # alone (heavy tier opted into a local chain) never re-nags or restales a reviewed node.
                 meta = _artifact_meta(enrichment_dir, tid)
                 fresh = art.chain_fresh(meta, chain_refs, lambda m, topic=t: _fingerprint(topic, m))
+                # The review identity keys on the CURRENT evidence's fingerprint. When chain-fresh, the
+                # current evidence is the one the RECORDED model produced, so the rejected/proposal lookup
+                # must use the recorded-model fingerprint — else an availability flip mints a new rid and
+                # re-nags a previously-rejected synthesis (the resolved model's fingerprint differs).
+                current_fp = _fingerprint(t, meta.get("model_ref")) if fresh else fp
+                rid = reviews.review_id("propose_synthesis", _review_subject(tid, current_fp))
                 rejected_current = (reviews_dir / "rejected" / f"{rid}.json").exists()
 
                 # Governance gate (Q1/Q2): never rewrite a reviewed synthesis in the normal pass.
