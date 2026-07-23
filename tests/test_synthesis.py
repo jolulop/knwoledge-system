@@ -511,3 +511,21 @@ def test_lint_synthesis_fresh_no_rot(tmp_path):
     res = lint.run_lint(tmp_path, graph_db=tmp_path / "db" / "graph.sqlite",
                         synthesis_model_ref=HEAVY, record_job=False)
     assert not any(f["check"] == "synthesis_rot" for f in res["findings"])
+
+
+def test_malformed_chain_marks_synthesis_job_failed_not_running(tmp_path):
+    # ADR-0063 review round 2: the generate_synthesis try runs deterministic work first, so resolution
+    # must be the FIRST statement inside it — a malformed chain marks the job failed + closes gconn,
+    # never orphans a "running" job or runs the deterministic block.
+    import pytest
+    from app.backend import db
+    from app.llm.client import ConfigError
+    jobs = _build(tmp_path)
+    with pytest.raises(ConfigError):
+        synthesis.generate_syntheses(tmp_path, client=_client(tmp_path, SynthAdapter()),
+                                     model_ref=f"{HEAVY},bogus:x", jobs_db=jobs, rebuild_index=False)
+    conn = db.connect(jobs)
+    st = [r["status"] for r in
+          conn.execute("SELECT status FROM jobs WHERE job_type='generate_synthesis'").fetchall()]
+    conn.close()
+    assert st and all(s == "failed" for s in st)

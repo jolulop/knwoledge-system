@@ -303,11 +303,11 @@ def detect_contradictions(
 
     graph.init_db(graph_db)
     gconn = graph.connect(graph_db)
-    # ADR-0063: resolve the tier's ordered chain once per run to the first available concrete
-    # model_ref (availability-only, fixed for the run); first-preference ref when none available.
-    model_ref, has_key = client.resolve_run_model(model_ref)
 
     try:
+        # ADR-0063: resolve the tier chain INSIDE the protected block so a malformed-chain ConfigError
+        # marks the job failed and closes connections rather than orphaning a "running" job.
+        model_ref, has_key = client.resolve_run_model(model_ref)
         affected: set[str] = set()  # claim ids whose page projection must be re-rendered
 
         # 1. Apply human decisions made since the last run (deterministic; runs without a key).

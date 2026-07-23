@@ -291,11 +291,6 @@ def extract_items(
 
     graph.init_db(graph_db)
     gconn = graph.connect(graph_db)
-    # ADR-0063: resolve the tier's ordered chain once per run to the first available concrete
-    # model_ref (availability-only); keep the first-preference ref when none is available so the
-    # no-key/stub fingerprint stays a valid concrete ref. `chain_refs` drives sticky freshness.
-    chain_refs = [c.strip() for c in model_ref.split(",") if c.strip()]
-    model_ref, has_key = client.resolve_run_model(model_ref)
 
     strategy_ref = art.items_strategy_ref(input_max_chars)
     considered = nodes_written = mentions_written = 0
@@ -365,6 +360,11 @@ def extract_items(
             now=now)
 
     try:
+        # ADR-0063: resolve the tier chain INSIDE the protected block so a malformed-chain ConfigError
+        # marks the job failed and closes connections rather than orphaning a "running" job. `chain_refs`
+        # (plain split, pre-resolution) drives sticky-to-chain freshness; resolve_run_model validates.
+        chain_refs = [c.strip() for c in model_ref.split(",") if c.strip()]
+        model_ref, has_key = client.resolve_run_model(model_ref)
         manifests, skipped_invalid = valid_manifests(manifests_dir)
         if source_ids is not None:
             wanted = set(source_ids)

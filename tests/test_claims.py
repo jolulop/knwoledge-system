@@ -390,3 +390,22 @@ def test_enrichment_artifacts_are_gitignored(tmp_path):
     result = subprocess.run(["git", "check-ignore", *rels], cwd=str(ROOT), capture_output=True, text=True)
     assert result.returncode == 0
     assert set(result.stdout.split()) == set(rels)
+
+
+def test_malformed_chain_marks_job_failed_not_orphaned_running(tmp_path):
+    # ADR-0063 review round 2: resolve_run_model raising (malformed chain — unknown provider) must mark
+    # the job FAILED and close connections, not leave it stuck "running". Resolution lives inside the
+    # protected try/finally (like enrich.py), so the except path runs.
+    import pytest
+    from app.backend import db
+    from app.llm.client import ConfigError
+    _build(tmp_path)
+    jobs_db = tmp_path / "db" / "jobs.sqlite"
+    with pytest.raises(ConfigError):
+        claims.extract_claims(tmp_path, client=_client(tmp_path, FakeAdapter()),
+                              model_ref="anthropic:m,bogus:x", jobs_db=jobs_db, rebuild_index=False)
+    conn = db.connect(jobs_db)
+    statuses = [r["status"] for r in
+                conn.execute("SELECT status FROM jobs WHERE job_type='extract_claims'").fetchall()]
+    conn.close()
+    assert statuses and all(s == "failed" for s in statuses)   # no orphaned "running" job
