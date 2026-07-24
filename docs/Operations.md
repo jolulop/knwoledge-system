@@ -8,6 +8,13 @@ but never acts on anything semantic/destructive on its own. Apply happens later,
 
 All commands run from the repo root (`/home/jolulop/code/knowledge-system`).
 
+## Model providers (hosted + local)
+
+The LLM passes (enrichment, claims/items, synthesis, `POST /query`) route through per-tier **model
+chains** resolved to the first available provider, with hosted fallback (ADR-0063). To run any tier on
+a **local** OpenAI-compatible model (Ollama / vLLM / LM Studio) instead of a hosted one, see
+`docs/Local Models.md` — set `ENRICH_LOCAL_BASE_URL` and add a `local:<model>` entry to the tier chain.
+
 ## Starting the app
 
 The **only supported launch** is the blessed entrypoint, which binds Uvicorn to `APP_HOST` through the

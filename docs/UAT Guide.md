@@ -7,6 +7,7 @@ detail — the canonical references are:
 - `docs/Operations.md` — starting the app, maintenance passes, and the executor-backed apply types.
 - `docs/Architecture Overview v0.1.md` — architecture and design principles.
 - `docs/Environment Setup v0.1.md` — environment; §14.1 is the embedding backend install (ADR-0053).
+- `docs/Local Models.md` — running enrichment/query on a local LLM with hosted fallback (ADR-0063).
 
 ## Safety model — disposable vault by default
 
@@ -171,7 +172,8 @@ uv run python scripts/validate_vector_index.py .
 
 ## 6. Enrich (LLM-backed, billable)
 
-Needs the configured provider key, normally `ANTHROPIC_API_KEY`.
+Needs the configured provider key, normally `ANTHROPIC_API_KEY`. To run these passes on a **local
+model** (free/private) with hosted fallback instead, see `docs/Local Models.md`.
 
 ```bash
 uv run python scripts/enrich.py
