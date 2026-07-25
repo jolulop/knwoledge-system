@@ -1,6 +1,6 @@
 # REANCHOR — session status
 
-_Last updated: 2026-07-22. **Reanchor command:** "read REANCHOR.md and reanchor". Read this
+_Last updated: 2026-07-25. **Reanchor command:** "read REANCHOR.md and reanchor". Read this
 first after an app restart, then `wiki/index.md` if working in the vault._
 
 > [!warning] This is a periodically-refreshed snapshot and can lag the live state. The authoritative
@@ -12,13 +12,14 @@ first after an app restart, then `wiki/index.md` if working in the vault._
 
 Local-first **LLM Wiki** knowledge-system. Immutable `raw/` → derived `normalized/` →
 generated `wiki/` (gitignored, regenerable) → `db/` SQLite (graph, jobs, llm_cache) →
-`reviews/`, `policies/`. ADR-driven (`docs/adr/0001–0062`). See `CLAUDE.md` for the
+`reviews/`, `policies/`. ADR-driven (`docs/adr/0001–0063`). See `CLAUDE.md` for the
 critical rules and `CONTEXT.md` for the glossary.
 
 ## Where we are
 
-- **Branch:** `main` — pushed tip at refresh time: `a16596e`, **in sync with origin, nothing
-  unpushed, tree clean**. Run `git log --oneline origin/main..HEAD` for the live unpushed set.
+- **Branch:** `main` — pushed tip: `d0b3f8f` (W3 / ADR-0063 complete). **One unpushed commit:**
+  `250b4ae` (`docs/Local Models.md`, docs-only, ahead 1); tree clean. Run
+  `git log --oneline origin/main..HEAD` for the live unpushed set.
   The per-slice rhythm: grill (design-lock, docs-only) → implement (on "implement now") → test →
   external review (user pastes) → analyze+recommend+**wait** → fix → commit (user says so) → push.
 - **PHASES 1–7 COMPLETE + pushed** (intake · extract/normalize · deterministic wiki · LLM semantic
@@ -126,12 +127,41 @@ critical rules and `CONTEXT.md` for the glossary.
   a hidden filter; `keyword_index.schema_usable()` gates `/search` so a stale v1 index **degrades**
   (keyword+nav unavailable + reindex note) instead of a 500; honest boost notes; malformed Item
   pages (missing `item_type`) get the sentinel in the nav index so a facet excludes them.
-- **Tests/lint green:** `1311 passed, 2 skipped` (opt-in `gpu`/`model` marks), ruff clean, all 11
-  validators pass. Newest test files: `tests/test_prompt_encoding.py` (ADR-0061: per-builder
-  breakout, escape ordering, title sanitize, ID-shape reject, escaped-quote grounding, version
-  pins), `tests/test_item_type_faceting.py` (ADR-0062: active-only bridge, tie-break +
-  anti-hidden-filter boost, nav-index column + v1→v2 gate, disabled/unavailable notes, malformed-
-  item exclusion), plus faceting cases in `golden_retrieval.yaml` + `test_api`/`test_policy`.
+- **Post-ADR-0059 drift-reconciliation (2026-07-23, `b74bd37`, pushed):** the active agent/
+  automation surfaces still spoke the retired ontology. Fixed: `.claude/hooks/rebuild_index.sh` now
+  watches `wiki/Items/` (dropped the 5 retired dirs); `.gitignore` now ignores `wiki/Items/*.md`
+  (it never did — the next ingest would have committed item pages, breaking ADR-0014); the 4
+  `.claude/skills/*` rewritten to Items/`item_type` + real review actions
+  (`promote_candidate_node`/`merge_items`/`split_item`/`change_item_type`); `templates/{synthesis,
+  claim}.md` marked code-rendered/illustrative (dropped retired `concepts:`); AGENTS/CLAUDE "use
+  templates" scoped (semantic pages are code-rendered — only Source follows a template). Decision:
+  a missing catalogued raw file stays **lint/review-only** (the `missing_raw_source` review type),
+  **not** a `validate_all` hard-fail. +5 drift-guard tests.
+- **ADR-0063 — W3 local-model-first / tier fallback routing (2026-07-23, complete + pushed):**
+  design-lock `122b6c7` + slice 1 `5d3e42a` + slice 2 `beb2103` + review round 1 `17ba269` +
+  review round 2 `d0b3f8f`. Each LLM tier (`ENRICH_MODEL_LIGHT/STANDARD/HEAVY`, `QUERY_MODEL`) is
+  now an **ordered `provider:model_id` chain** resolved **once per run to the first available
+  member** (availability-only — `local` is available when `ENRICH_LOCAL_BASE_URL` is set, a static
+  check, **not** a reachability probe), fixed for the run; a single value is a length-1 chain.
+  **Tier-1 defaults local-first** as a documented `.env.example` recipe (a shipped default can't
+  name the operator's local model, so the shipped default stays hosted-only); standard/heavy/query
+  default **hosted-first** (they govern the semantic layer — explicit opt-in). **Sticky-to-chain
+  freshness:** an artifact stays fresh while its recorded `model_ref` is still a chain member + its
+  own-model fingerprint matches — an availability flip alone never restales (producer skips +
+  `summary_rot`/`synthesis_rot` lint both chain-aware via `enrichment_artifact.chain_fresh`).
+  **No intra-chain failover** — any failure (incl. a configured-but-**unreachable** local server)
+  skips/errors, never a silent hosted fallback. `LLMClient.resolve_run_model` validates **every**
+  member's provider (fail-fast on unknown even if an earlier is available) and lives **inside** each
+  worker's try/finally so a malformed chain marks the job failed, not orphaned "running". **No
+  `*_PROMPT_VERSION` bumps** (routing/config only). Operator guide: **`docs/Local Models.md`**
+  (`250b4ae`, docs-only, the one unpushed commit). Extends ADR-0025 + ADR-0027.
+- **Tests/lint green:** `1337 passed, 2 skipped` (opt-in `gpu`/`model` marks), ruff clean, all 11
+  validators pass. Newest test files: `tests/test_prompt_encoding.py` (ADR-0061), `tests/
+  test_item_type_faceting.py` (ADR-0062); ADR-0063 coverage spread across `tests/test_llm.py`
+  (chain parse/resolve/fail-fast/validate_tiers), `test_enrich.py` (sticky flip + unreachable
+  local), `test_lint.py`/`test_synthesis.py` (chain-aware rot, rejected-across-flip, malformed-chain
+  job-failed), `test_operational_refs.py` (tier-1 default hosted-only, `.env` recipe, QUERY_MODEL
+  inheritance) + the drift guards.
 
 ## Viewing the vault (Obsidian)
 
@@ -163,6 +193,8 @@ critical rules and `CONTEXT.md` for the glossary.
 | **ADR-0060 W2 wiki display aliases (Obsidian readability)** | **Complete + pushed** (`ef5a0fa` design-lock · `1f7d04e` impl); validators 10→11, live e2e verified |
 | **ADR-0061 untrusted-source prompt encoding** | **Complete + pushed** (`e751631` design-lock · `b6f55ad` impl · `64d39f7` doc reconciliation) |
 | **ADR-0062 item_type retrieval faceting** | **Complete + pushed** (`3cfb398` design-lock · `1b89241` impl · `a16596e` review round 1); nav-index `INDEX_VERSION` 1→2 |
+| **Post-0059 drift-reconciliation** (skills/hooks/.gitignore/templates → Items taxonomy) | **Complete + pushed** (`b74bd37`) |
+| **ADR-0063 W3 local-model-first / tier fallback routing** | **Complete + pushed** (`122b6c7` design-lock · `5d3e42a`+`beb2103` slices · `17ba269`+`d0b3f8f` review rounds 1–2); `docs/Local Models.md` `250b4ae` **unpushed** |
 
 ## Next step
 
@@ -175,12 +207,17 @@ critical rules and `CONTEXT.md` for the glossary.
   `validate_all`; `reindex_vector` for the vector channel. Watch: `topic_starved` /
   `unclassified_items` counters, sentinel volume, priority-order classification quality,
   per-source flow retype items. Old F5 (concept starvation misrouting) **dissolved by design**.
-- **Next queue (user picks, each starts with a `grill-phase`):** W3 local-model-first pass +
-  commercial escalation, F4 reference-chunk down-ranking (eval-gated per ADR-0038), HF
-  weight-download/offline policy (own knob, **not** `EMBEDDING_ALLOW_CLOUD`), dead-surface
-  cleanup (illustrative templates incl. `templates/item.md` note, empty `app/frontend/`, compose
-  `qdrant`; align CLAUDE/AGENTS "use templates" wording). **W2 (ADR-0060) and item_type faceting
-  (ADR-0062) are DONE** — dropped from the queue.
+- **To run enrichment/query on a LOCAL model** (Ollama/vLLM/LM Studio): see `docs/Local Models.md`
+  — set `ENRICH_LOCAL_BASE_URL` + add `local:<model>` to a tier chain (start with
+  `ENRICH_MODEL_LIGHT`). No-cost resolve-check snippet in that doc.
+- **Next queue (user picks, each starts with a `grill-phase`):** F4 reference-chunk down-ranking
+  (eval-gated per ADR-0038), HF weight-download/offline policy (own knob, **not**
+  `EMBEDDING_ALLOW_CLOUD`), dead-surface cleanup (illustrative templates incl. `templates/item.md`
+  note, empty `app/frontend/`, compose `qdrant`). Plus **3 filed follow-ups** (non-blocking):
+  lifecycle/status parity tests (retention/manifests/graph/validators), a missing-keyword-index
+  user-facing-notes test, and the real-corpus item_type retrieval eval (ADR-0062 deferral).
+  **W1 (0057/0058), W2 (0060), item_type faceting (0062), and W3 (0063) are DONE** — dropped from
+  the queue.
 - **ADR-0062 deferred:** **item-seeded retrieval** ("answer within this item class" — facet selects
   items → their sources scope evidence as a real filter) is a future retrieval mode, revisited only
   if the advisory boost proves insufficient; a real-corpus faceted relevance eval case.
@@ -195,8 +232,9 @@ critical rules and `CONTEXT.md` for the glossary.
 **Operate it** (`docs/Operations.md`): `POST /jobs/lint|stale-check|reindex` (key-free,
 detect-and-propose); review at `/ui/reviews` (flat) or `/ui/reviews/sources` (per-source); apply via
 `POST /reviews/apply` (dry-run first); reconcile stale items via `scripts/reconcile_reviews.py`.
-**LLM producers** (need `ANTHROPIC_API_KEY`): `scripts/extract_claims.py` → `extract_items.py` →
-`promote.py` → `detect_contradictions.py` → `generate_synthesis.py`. Validate:
+**LLM producers** (need a provider for the tier chain — `ANTHROPIC_API_KEY`, or a local model via
+`ENRICH_LOCAL_BASE_URL`, see `docs/Local Models.md`): `scripts/enrich.py` → `extract_claims.py` →
+`extract_items.py` → `promote.py` → `detect_contradictions.py` → `generate_synthesis.py`. Validate:
 `scripts/validate_all.py`.
 
 ## Standing rules (do not violate)
@@ -239,8 +277,13 @@ XML-tagged blocks entity-escape `&<>`, JSON payloads `json.dumps`, IDs asserted 
 claims quote `html.unescape`d at grounding; extends 0026, generalizes 0034 B1 + 0056 R3)**,
 **0062 (item_type retrieval faceting: precise filter on nav/graph, bounded advisory boost on
 evidence chunks via the active-only source→item bridge, `item_type_boost` hard-capped, nav-index
-`INDEX_VERSION` 1→2 + runtime `schema_usable` gate; fulfills the 0059 faceting deferral)** —
-full glossary entries in `CONTEXT.md` (historical superseded entries carry supersession notes).
+`INDEX_VERSION` 1→2 + runtime `schema_usable` gate; fulfills the 0059 faceting deferral)**,
+**0063 (local-model-first / tier fallback routing: each tier + `QUERY_MODEL` an ordered
+`provider:model_id` chain resolved once per run to the first available member, availability-only;
+tier-1 local-first recipe, standard/heavy/query hosted-first; sticky-to-chain artifact freshness;
+no intra-chain failover; resolve inside the worker try; extends 0025 + 0027; operator guide
+`docs/Local Models.md`)** — full glossary entries in `CONTEXT.md` (historical superseded entries
+carry supersession notes).
 
 **Path safety:** `app/backend/paths.py` (`safe_under` containment, `safe_child` basename-only) is the
 shared guard at every untrusted-id→path site (manifests, enrichment/claims/items artifacts, graph node
