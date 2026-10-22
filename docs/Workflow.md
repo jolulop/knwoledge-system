@@ -150,15 +150,20 @@ uv run python scripts/generate_wiki.py
 uv run python scripts/reindex_keyword.py && uv run python scripts/rebuild_index.py
 
 # enrich (LLM, billable) — fills semantics + files review items
+uv run python scripts/enrich.py
 uv run python scripts/extract_claims.py
 uv run python scripts/extract_items.py
 uv run python scripts/promote.py
 uv run python scripts/detect_contradictions.py
 uv run python scripts/generate_synthesis.py
+# producers rebuild wiki/index.md but NOT the keyword index — refresh so new pages reach /search
+uv run python scripts/reindex_keyword.py && uv run python scripts/rebuild_index.py
+uv run python scripts/validate_all.py
 
 # serve + review
 uv run python -m app.backend   # blessed entrypoint (loopback-guarded; see docs/Operations.md) → http://127.0.0.1:18000/ui/reviews
-# decide items in the UI, then hit Apply
+# decide items in the UI, then hit Apply (it refreshes index + keyword itself when it changed
+# anything; re-run reindex_keyword.py only if it warns keyword_reindex_failed), then validate_all
 
 # browse the vault
 obsidian --no-sandbox &     # open the  wiki/  folder as a vault

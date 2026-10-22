@@ -2,6 +2,13 @@
 
 ## Cross-Source Synthesis and Contradiction Detection
 
+**Status:** Complete as historical plan; terminology superseded by ADR-0059 where it says
+concept/entity (updated 2026-09-08).
+
+> **Current implementation note:** contradiction detection and synthesis shipped. Eligible topics
+> are now active knowledge items (`node_type: item`) with sufficient grounded claim evidence from
+> independent sources, not old concept/entity nodes.
+
 Phase 3.5c is the last and highest-risk enrichment slice (ADR-0028): tier-3 reasoning that
 spans multiple sources/claims and proposes **contradictions** and **syntheses** as
 human-reviewed items. It is built entirely on the proven 3.5b graph — it adds **no new graph
@@ -17,7 +24,7 @@ slice is implemented in turn.
 
 ## 1. Objective
 
-On top of the 3.5b graph (grounded claims, candidate concepts/entities, promotion,
+On top of the 3.5b graph (grounded claims, candidate semantic nodes, promotion,
 backlinks), surface **where independent sources disagree** (contradiction edges) and
 **what they collectively say** about a recurring concept (synthesis pages) — without
 weakening any Phase 3/3.5a/3.5b invariant (deterministic backbone, untrusted-input boundary,
@@ -31,7 +38,7 @@ In scope:
 - Contradiction detection: graph-blocked candidate pairs → tier-3 verdict → `proposed`
   `contradicts` edges → `resolve_contradiction` reviews with a three-outcome vocabulary.
 - The thin `supersede` resolution executor (`supersedes` edge + `deprecated_candidate`).
-- Cross-source synthesis: per active concept/entity (≥2 independent sources) → grounded
+- Cross-source synthesis: per active knowledge item (≥2 independent sources) → grounded
   synthesis pages, born `candidate`, review-gated for promotion via a new `propose_synthesis`
   review type.
 
@@ -47,7 +54,7 @@ local-model deployment (only the adapter seam is fixed, ADR-0025).
 |---|-------|-----------|--------|
 | 1 | **Contradiction detection** (graph-neighborhood blocking; sorted-pair `contradicts` assertions; `resolve_contradiction` three-outcome reviews; `acknowledge`/`reject` activation; Claim-page projection) | 3.5b graph, ADR-0018/0030/0031 | **DONE** (`app/workers/contradictions.py`, `scripts/detect_contradictions.py`; deterministic `candidate_pairs` blocking; sorted-pair `proposed` `contradicts` edges; per-pair cache-replayed verdicts with **full anchors + shared node ids embedded in the prompt** for a faithful fingerprint; confidence clamped to [0,1]; `apply_resolved_contradictions` acknowledge/reject **+ Claim-page backlink re-projection** via `render_claim_page`/`validate_projection`; **endpoint-gone supersession** enforced in the **claim lifecycle** (shared public `recompose_claim` + `graph.supersede_contradictions_for_claim` — `extract_claims` stays valid on its own; detect keeps it as a backstop) vs provenance-survival; two-sided-evidence guard before any verdict; `rebuild_index` contract (rebuild iff pages re-projected); stale supersession + `reviews.withdraw_review_item` with per-event audit; independence rule moved to `manifests.independent_sources`; `validate_graph` canonical-ordering check) |
 | 1b | **`supersede` resolution executor** (`supersedes` edge + loser `deprecated_candidate` via `deprecate_wiki_page` audit path) | 1 | **DONE** (`_execute_supersede` in `contradictions.apply_resolved_contradictions`; reviewer names `winner`; `recompose_claim(deprecate=True)` keeps loser evidence + backlink, flips status; audited; idempotent; endpoint validity made **evidence-based** via `graph.claims_with_active_evidence` so the deprecated loser's `contradicts` edge stays active) |
-| 2 | **Cross-source synthesis** (per active concept/entity; grounded synthesis pages; `propose_synthesis` review type; review-only promotion) | 1, ADR-0031 | **DONE** (`app/workers/synthesis.py`, `scripts/generate_synthesis.py`; `eligible_topics` = active concept/entity with ≥2 active claims from ≥2 independent sources; tier-3 prose grounded on claim nodes via `active` `derived_from` edges + `related_to` topic edge; born `candidate` under `wiki/Synthesis/`; new `propose_synthesis` review type, review-only promotion (no recurrence); `apply_resolved_syntheses` approve→active / reject→`deprecated_candidate`; per-topic artifact fingerprint idempotency; retraction when a topic drops below threshold; confidence clamped; `validate_projection` synthesis evidence + status-mirror checks) |
+| 2 | **Cross-source synthesis** (per active knowledge item; grounded synthesis pages; `propose_synthesis` review type; review-only promotion) | 1, ADR-0031/0059 | **DONE** (`app/workers/synthesis.py`, `scripts/generate_synthesis.py`; `eligible_topics` = active item with ≥2 active claims from ≥2 independent sources; tier-3 prose grounded on claim nodes via `active` `derived_from` edges + `related_to` topic edge; born `candidate` under `wiki/Synthesis/`; new `propose_synthesis` review type, review-only promotion (no recurrence); `apply_resolved_syntheses` approve→active / reject→`deprecated_candidate`; per-topic artifact fingerprint idempotency; retraction when a topic drops below threshold; confidence clamped; `validate_projection` synthesis evidence + status-mirror checks) |
 
 Rationale for ordering: 3.5c-1 reuses existing schema and review vocab and is the contained
 surface on which the tier-3 pairing/cost question is first exercised; 3.5c-2 reuses 3.5c-1's

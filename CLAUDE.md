@@ -16,7 +16,7 @@ Build and maintain a structured knowledge base that stores immutable raw sources
 6. **Keep bidirectional backlinks synchronized.**
 7. **Do not return full written notes after ingest. Return counts, flags, and review items.**
 8. **Persist state to disk/database; do not rely on chat context for long operations.**
-9. **Human approval is mandatory for deletion, contradiction resolution, entity merging, and deprecation.**
+9. **Human approval is mandatory for deletion, contradiction resolution, knowledge-item merging/splitting, and deprecation.**
 10. **Prefer small, deterministic scripts for structural enforcement.**
 
 ## Grill-with-docs usage rule
@@ -46,7 +46,7 @@ When a grilling session completes, stop and summarize:
 
 ```text
 raw/          immutable original sources and manifests
-normalized/   extracted Markdown, chunks, tables, OCR/captions, logs
+normalized/   extracted Markdown, chunks, tables, enrichment artifacts, logs
 wiki/         generated source/item/claim/synthesis/query pages (ADR-0059 taxonomy)
 reviews/      pending and resolved human review decisions
 indexes/      keyword, vector, and graph indexes
@@ -93,6 +93,7 @@ Review items are required for:
 - Contradiction resolution
 - Item merge or split
 - Duplicate resolution
+- Item type changes
 - Low-confidence relationship changes
 
 ### Lint/Maintenance

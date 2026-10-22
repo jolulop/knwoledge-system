@@ -2,6 +2,14 @@
 
 ## Semantic Nodes and Grounding — Claims, Concepts, Entities, Promotion, Graph
 
+**Status:** Complete as historical plan; superseded in terminology by ADR-0059 (updated 2026-09-08).
+
+> **Current implementation note:** the claim/grounding/graph/promotion architecture shipped, but the
+> old Concepts/Entities/People/Organizations/Projects taxonomy was replaced by ADR-0059. Current
+> semantic extraction writes knowledge items (`app/workers/items.py`, `scripts/extract_items.py`)
+> into one flat `wiki/Items/` family with stable `itm_` ids and governed `item_type` metadata.
+> Read old concept/entity language below as historical design trail.
+
 Phase 3.5b is the largest enrichment slice (ADR-0028). On top of the 3.5a per-source
 summary/tags seam it adds the semantic layer: grounded **claims**, candidate **concepts**
 and **entities**, the **≥2-source promotion** lifecycle, and the **bidirectional backlink
@@ -46,7 +54,7 @@ retrieval/answering (Phase 4/5); autonomous scheduling (Phase 7).
 | 1 | **Citation grounding gate + structured-citation validator** | ADR-0019/0020/0026 | **DONE** (`app/workers/citations.py`, `scripts/validate_citations.py`) |
 | 2 | **SQLite graph store + validator** (`db/graph.sqlite`, per-assertion edges, active-edge projection primitives, `validate_graph`) | ADR-0029/0030 | **store + validator DONE** (`app/backend/graph.py`, `scripts/validate_graph.py`); page-level backlink rendering wires in with producers (3/4) |
 | 3 | **LLM claim-extraction pass** (tier-2; gated by slice 1; Claim pages; compose into Source pages) | 1, 2, ADR-0021/0022 | **3a DONE** (`app/workers/claims.py`: extract→ground→Claim pages **rendered from the graph**; active `derived_from` edges; re-extraction **supersedes** stale edges + recomposes/**tombstones** orphan pages; CLI rebuilds index + runs validators); **3b DONE** (§5b — `graph.claims_for_source`; worker resolves labels + passes data to the pure `render_source_page`; Source `Claims` section projects active `derived_from` links, byte-stable; CLI refreshes via `generate_wiki`) |
-| 4 | **Candidate concepts & entities** (pages, ids, slugs, aliases; edges into the graph) | 2, ADR-0017/0021 | **DONE** (`app/workers/concepts.py`: typed nodes w/ entity_type enum + per-type ids/routing; `active` `mentions` edges, optional anchor, no verbatim grounding; deterministic stub pages rendered from the graph; Source-page Concepts/Entities projection; supersede + tombstone on re-extraction; CLI + validators). |
+| 4 | **Candidate semantic nodes** (pages, ids, slugs, aliases; edges into the graph) | 2, ADR-0017/0021, superseded by ADR-0059 | **DONE in current form as knowledge items** (`app/workers/items.py`: one `items[]` extraction pass; `itm_` ids; governed `item_type`; active `mentions` edges; Source-page Items projection; stale retraction/reconciliation; CLI + validators). |
 | 5 | **Promotion lifecycle** (≥2 independent sources; review-gated early promotion) | 2, 4, ADR-0018 | **DONE** (`app/workers/promote.py` + `scripts/promote.py`: deterministic candidate→active on ≥2 mutually-independent sources; independence from manifest provenance — comparable-key-differs / none-equal; conservative until provenance populated; auto-approves the `promote_candidate_node` item → approved + audit_log, idempotent; page status authority preserved across re-extraction). `manifests.set_provenance`. |
 
 Rationale for ordering: slice 1 (deterministic, done) is the grounding foundation. The

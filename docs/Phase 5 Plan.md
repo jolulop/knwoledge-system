@@ -6,6 +6,11 @@
 **Predecessors:** Phase 4 (Search & Graph) complete — `GET /search` returns RRF chunk evidence +
 graph + navigation, all key-free. Phase 5 is the **first LLM-in-the-loop** surface.
 
+> **Current implementation note (updated 2026-09-08):** ADR-0042 adds the real-vault answer-quality
+> eval endpoints (`POST /evals/run`, `GET /evals/results`). ADR-0062 adds optional `item_type`
+> facets to `/query`; the facet is a hard filter for native item navigation/graph surfaces and an
+> advisory bounded boost for source-chunk evidence.
+
 > [!summary]
 > Phase 5 adds `POST /query`: retrieve Phase 4 evidence → build an evidence pack (stable IDs +
 > authoritative anchors) → an LLM (`LLMClient.parse`, ADR-0025) returns ordered **claims referencing
@@ -151,8 +156,8 @@ fixture, `load_yaml` cases, `parametrize`, predicate interpreter, coverage test)
   `"No source found in vault."` fallback; **no degradation note** (`notes == []`, pinning the silent
   keyword-only degradation). Plus a
   category-coverage test (mirrors 4e-3's `covers_all`).
-- **No LLM-judge in CI.** Real-model answer quality is **deferred** to a manual / env-gated smoke run
-  (replayable via the response cache) — **not scaffolded in 5-4**.
+- **No LLM-judge in CI.** Real-model answer quality is covered by the opt-in `/evals/run` workflow
+  from ADR-0042 (cost-gated, loopback-only, deterministic scoring against a local corpus), not by CI.
 
 ---
 

@@ -1,6 +1,6 @@
 # Phase 4 Plan — Search and Graph (deterministic hybrid retrieval)
 
-**Status:** In progress (design-locked 2026-06-17 via grill gate). **Slices 4a + 4b + 4c + 4d
+**Status:** Complete (historical implementation plan; updated 2026-09-08). **Slices 4a + 4b + 4c + 4d
 implemented** — 4a: keyword evidence + wiki navigation index; 4b: graph read API; 4c: deterministic
 router + `GET /search` (keyword/navigation/graph groups, safe FTS builder, retention filters,
 `retrieval.yaml` loader + caps); 4d: LanceDB vector channel (embedding seam + index + `mode=vector`,
@@ -57,13 +57,15 @@ synthesis eligibility. Navigation surfaces candidates; evidence does not cite th
   v1).
 - **Store:** `indexes/keyword/keyword.sqlite` (separate table/schema from evidence).
 - **Hit object:** `path`, `page_type`, `node_id`/`source_id`/`query_id`, `title`, `summary`,
-  `status`, `review_status`, aliases/tags, `answer_eligible` (false unless `active` and
-  node-type-allowed).
+  `status`, `review_status`, aliases/tags, `item_type` for Item pages, `answer_eligible`
+  (false unless `active` and node-type-allowed).
 
 ### 2.3 Vector index (4d)
 - **Source:** the same per-source chunks as 2.1.
 - **Store:** `indexes/vector/` (LanceDB). Local GPU embeddings by default; embedding-provider seam
-  with cloud opt-in gated + security docs.
+  with cloud opt-in gated + security docs. ADR-0053 later swaps the recommended GPU provider behind
+  the same seam to in-process FlagEmbedding/BGE-M3; `local_http` remains the light code default and
+  CPU fallback.
 - **Row metadata:** citation fields (as 2.1) + the staleness key. **Refined by ADR-0033:**
   `embedding_model_ref` *is* the embedding identity (operator-pinned) — there is **no separate
   "model version/hash" field**. Index-level key = `embedding_model_ref`, `embedding_code_version`,
@@ -121,7 +123,8 @@ synthesis eligibility. Navigation surfaces candidates; evidence does not cite th
 - **Fusion (4e):** RRF over keyword + vector evidence only → single ranked `evidence[]`; dedup by
   chunk row key; `retrieval_path` + per-channel ranks/scores on merged hits. Graph and navigation
   stay separate groups. Deterministic tie-break by `source_id`+`ordinal`. Weighted fusion and graph
-  boosts deferred.
+  boosts remain deferred; ADR-0062 adds the bounded `item_type` evidence boost as a separate
+  opt-in post-fusion re-rank.
 - **`retrieval.yaml` additions (caps):** `max_evidence_hits`, `max_navigation_hits`,
   `max_graph_nodes`, `max_graph_edges`, per-channel pre-fusion limits.
 

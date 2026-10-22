@@ -1,7 +1,7 @@
 # Phase 4d Plan — Vector retrieval (local-embedding semantic channel)
 
 **Status:** ✅ **Implemented** (design-locked 2026-06-18; slices 4d-1/2/3 complete). RRF fusion +
-`mode=auto` blend remain Phase 4e.
+`mode=auto` blend are now implemented in Phase 4e.
 **Governing ADR:** [ADR-0033](adr/0033-phase-4d-vector-retrieval.md). Read it first — this plan is
 the operational breakdown of its decisions.
 **Embedding backend update:** ADR-0033 decision 1 (HTTP-only embedder) is **superseded for GPU by
@@ -10,7 +10,7 @@ FlagEmbedding + PyTorch CUDA (BAAI/bge-m3, `EMBEDDING_PROVIDER=flagembedding_bge
 staleness key, and explicit-reindex mechanics here are unchanged (the embedder is swapped behind the same
 `Embedder` seam).
 **Predecessors:** 4a (keyword + navigation index), 4b (graph read API), 4c (router + `GET /search`).
-Phase 4d adds the vector channel; **4e** adds RRF fusion + the retrieval eval harness.
+Phase 4d adds the vector channel; **4e** added RRF fusion + the retrieval eval harness.
 
 > [!summary]
 > Phase 4d adds the semantic retrieval channel behind a small `Embedder` seam — a **LanceDB** index over
@@ -27,11 +27,15 @@ Phase 4d adds the vector channel; **4e** adds RRF fusion + the retrieval eval ha
 
 ## 1. Scope
 
-**In scope:** the `EmbeddingClient` HTTP adapter seam (local default, cloud opt-in); the LanceDB
+**Historical 4d scope:** the `EmbeddingClient` HTTP adapter seam (local default, cloud opt-in); the LanceDB
 vector index over `normalized/chunks/<source_id>.jsonl`; the staleness key + incremental/`--force`
 rebuild; `scripts/reindex_vector.py` (replacing the 4a-retired scaffold); the `mode=vector` channel
 in `GET /search` (explicit-only, standalone); vector-staleness reporting in the validators; the
 `vector` optional-dependency group; security docs for the cloud opt-in.
+
+**Current embedding note:** ADR-0053 preserves the seam but makes the recommended GPU `.env`
+`EMBEDDING_PROVIDER=flagembedding_bge_m3`; the code default remains unconfigured `local_http` so
+light installs and tests do not import Torch.
 
 **Out of scope → Phase 4e:** RRF fusion of keyword + vector, `mode=auto` including vector, and the
 `evals/golden_retrieval.yaml` harness. **Out of scope → Phase 5:** any LLM/answer synthesis.
@@ -117,7 +121,9 @@ embedding-runtime-free (a deterministic fake embedder stands in).
 - Incremental by default (chunk-fingerprint diff vs the per-row staleness); `--force` full rebuild.
 - **Never wired into the per-file change hook** (`.claude/hooks/reindex_changed_file.sh` keeps doing
   the cheap keyword reindex only). Run deliberately after ingest batches / before retrieval evals.
-- Requires the embedding server; absent/unreachable → clear non-zero exit with a remediation message
+- Requires a configured embedder; for `local_http` that means a running embedding server, while
+  `flagembedding_bge_m3` runs in-process after the local Torch/FlagEmbedding overlay is installed.
+  Absent/unreachable/unloadable embedder -> clear non-zero exit with a remediation message
   (does not corrupt or partially write the index).
 
 ---

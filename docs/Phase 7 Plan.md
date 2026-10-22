@@ -1,7 +1,8 @@
 # Phase 7 Plan — Autonomous Maintenance
 
 **Status:** ✅ **Complete** — slices 7-1 (`/jobs/lint`), 7-2 (stale/retention + `archive_source`),
-and 7-3 (`/jobs/reindex` + cache-purge candidate detection + cron/no-daemon docs) are implemented.
+and 7-3 (`/jobs/reindex` + cache-purge candidate detection + cron/no-daemon docs) are implemented;
+post-Phase-7 extensions through ADR-0063 are documented here where relevant (updated 2026-09-08).
 **Governing ADR:** [ADR-0036](adr/0036-phase-7-autonomous-maintenance.md). Read it first.
 **Predecessors:** Phases 1–6 complete + pushed. Phase 7 builds the maintenance surface over the existing
 ingest/enrich/retrieve/review machinery; it adds no new runtime and no second authority.
@@ -11,8 +12,8 @@ ingest/enrich/retrieve/review machinery; it adds no new runtime and no second au
 > `/jobs/stale-check` — that **detect health problems and propose** governance review items, acting
 > autonomously only on safe non-destructive ops. **No scheduler/daemon** (OS cron). The one new executor is
 > reversible **`archive_source`** (status transition only); **raw bytes are never moved, rewritten, or
-> deleted**; `delete_raw_file`/merge/split/cache-purge stay record-only. *(A runtime eval job is deferred —
-> the golden set is a fake CI fixture; real-vault eval is future work.)*
+> deleted**; `delete_raw_file`/cache-purge stay record-only. Later ADRs added executor-backed item
+> merge/split/type-change, visibility, duplicate annotation, dry-run apply, and a real-vault answer eval.
 
 ---
 
@@ -22,11 +23,14 @@ ingest/enrich/retrieve/review machinery; it adds no new runtime and no second au
 detection) · the stale/retention **producer** + reversible **`archive_source` executor** in
 `/reviews/apply` · `docs/Operations.md` (OS-**cron recipe** + manual eval smoke) + a **no-daemon contract
 test**. Rename `archive_raw_file → archive_source`; add `missing_raw_source` + `purge_response_cache`.
-**Eval job deferred** (the golden set is a fake-adapter CI fixture; real-vault eval is future work).
+**Historical note:** the original Phase-7 eval job was deferred, but ADR-0042 later shipped the
+real-vault answer-quality eval as `/evals/run` + `/evals/results`.
 
-**Out / deferred:** any scheduler/daemon; graph-curator duplicate/merge/split detection + their executors;
-`delete_raw_file` / `hide_content` / `mark_semantic_duplicate` / cache-purge **executors** (record-only or
-manual); physical raw archival / `include_raw` backup; auth/CSRF / non-loopback bind (Phase 8).
+**Out / deferred in the original Phase-7 slice:** any scheduler/daemon; graph-curator duplicate/merge/split
+detection; `delete_raw_file` and cache-purge executors (record-only/manual); physical raw archival;
+auth/CSRF / non-loopback bind (Phase 8). Later ADRs added `hide_content`, `mark_semantic_duplicate`,
+and item merge/split/type-change executors, while raw deletion and cache purge remain non-executed by
+`POST /reviews/apply`.
 
 **Invariants:** detect-and-propose (semantic/destructive → review item, never autonomous action);
 maintenance acts autonomously only on safe deterministic non-destructive ops; **retention executors may
@@ -84,11 +88,10 @@ A job-recorded health pass that **completes and reports**, even when health fail
 - **`/jobs/reindex`** — job-recorded; runs **`rebuild_index.py` + `reindex_keyword.py` only** (cheap,
   deterministic, key-free). **No `vector` parameter** — the vector index stays the explicit
   `reindex_vector.py` (ADR-0033), so maintenance never triggers an embedding-server side effect.
-- **Eval job — deferred (over-scoped).** `golden_questions.yaml` is a fake-adapter CI fixture, so it can't
-  run as a real-vault eval; the regression stays gated by the local structural **pytest suites**
-  (`test_query_evals`, `test_retrieval_evals`) — run by the working rhythm, no in-repo CI runner —
-  with a **manual opt-in real-model smoke recipe in `docs/Operations.md`**. A
-  real-vault eval corpus is future work.
+- **Eval job — shipped later in ADR-0042.** `golden_questions.yaml` is a fake-adapter CI fixture, so it
+  stays a structural regression gate. Real-vault answer quality now uses `/evals/run` over the
+  operator-maintained `evals/golden_answers.local.yaml` corpus, with explicit cost confirmation and
+  deterministic scoring; see `docs/Operations.md`.
 - **Cache-purge candidates** — **one aggregate, record-only `purge_response_cache`** review item (stable
   subject `{"scope": "response_cache"}`), folded into **`/jobs/stale-check`**. Filed when
   `db/llm_cache.sqlite` exceeds `cache_ttl_days`/`cache_max_mb`. **No executor, never in `_APPLY_TYPES`**
@@ -116,8 +119,8 @@ A job-recorded health pass that **completes and reports**, even when health fail
   pass, not an aborted run).
 - Idempotency: producers over the existing large pending queue file no duplicates on rerun.
 - Cache-retention: expired/oversize cache → review-gated purge candidate; **no automatic purge**.
-- Eval job: deferred by ADR-0036 decision 14; the fake-adapter **pytest evals** remain the local
-  regression gate (no in-repo CI runner ships).
+- Eval job: ADR-0042 provides `/evals/run` for real-vault answer quality; the fake-adapter **pytest
+  evals** remain the local regression gate (no in-repo CI runner ships).
 - **No-daemon contract test:** importing/serving the API starts no scheduler/background thread.
 - Lint LLM-free where possible (the semantic checks reuse the graph, not new LLM calls); any LLM-touching
   check is fake-adapter-gated like prior phases.
@@ -127,9 +130,9 @@ A job-recorded health pass that **completes and reports**, even when health fail
 ## 6. Sub-slices (each committable + validated)
 | Slice | Deliverable |
 |---|---|
-| **7-1** ✅ | `/jobs/lint`: structural validators as a job report + semantic checks (orphan / <2-source concept, uncited claim, **missing-raw** with path confinement + `invalid_raw_path`) → report + governance review items (`deprecate_wiki_page`, `missing_raw_source`); 3-state health (healthy/degraded/failing); filed-vs-existing item counts; `wiki/log.md` append. Tests (12+). *(summary-rot / stale-claim drift deferred to a later heuristics slice.)* |
+| **7-1** ✅ | `/jobs/lint`: structural validators as a job report + semantic checks (orphan / <2-source item, uncited claim, **missing-raw** with path confinement + `invalid_raw_path`) → report + governance review items (`deprecate_wiki_page`, `missing_raw_source`); 3-state health (healthy/degraded/failing); filed-vs-existing item counts; `wiki/log.md` append. Tests (12+). Later ADR-0037 added summary/claim/synthesis rot heuristics and `display_alias_rot`. |
 | **7-2** ✅ | `manifest["status"]` authority (set_status, Source render, validate_wiki check) + `/jobs/stale-check` producer (`archive_source` + ephemeral `delete_raw_file` record-only candidates; detect-always) + reversible **`apply_archive_sources` executor** in `/reviews/apply` (manifest→page→graph mirror, scope-guarded, schema-safe, keyword reindex, no raw move) + `archive_raw_file→archive_source` rename. Tests (14+). *(duplicate detection deferred.)* |
-| **7-3** ✅ | `/jobs/reindex` (index+keyword only, no vector) + cache-purge candidate detection folded into `/jobs/stale-check` (aggregate record-only `purge_response_cache`, live stats, missing/corrupt-safe) + `docs/Operations.md` (cron recipe + manual eval smoke + raw-backup note) + **no-daemon contract test**. Eval job deferred (golden set is a fake fixture). Tests. |
+| **7-3** ✅ | `/jobs/reindex` (index+keyword only, no vector) + cache-purge candidate detection folded into `/jobs/stale-check` (aggregate record-only `purge_response_cache`, live stats, missing/corrupt-safe) + `docs/Operations.md` (cron recipe + manual eval smoke + raw-backup note) + **no-daemon contract test**. ADR-0042 later added the real-vault answer eval. Tests. |
 
 ---
 
@@ -139,7 +142,8 @@ A job-recorded health pass that **completes and reports**, even when health fail
   may report failing health while still completing**.
 - Retention is actionable: approved `archive_source` deterministically flips status on manifest + Source
   page + graph node and excludes the source from default retrieval, **without touching raw bytes**;
-  `delete_raw_file` and identity/merge types stay record-only; cache purge stays candidate-only.
+  `delete_raw_file` and cache purge stay candidate-only/manual; item identity changes are executor-backed
+  by later ADRs and remain human-gated.
 - No scheduler/daemon ships (cron recipe documented; contract test green); the graph authority model is
   unchanged; raw remains immutable.
 - Full suite + ruff + validators green. → Phase 8 (the API-worker / multi-surface runtime).
@@ -177,7 +181,7 @@ fingerprint):
 - **`synthesis_unverifiable`** (low → `degraded`): active synthesis but artifact missing/unreadable.
   **Evidence-gone** (topic no longer reconstructs) is *not* a lint finding — the producer's deprecation
   flow owns it.
-- **Concept / Entity rot — dropped by design** (not deferred): deterministic graph projections, no LLM
+- **Knowledge-item rot — dropped by design** (not deferred): deterministic graph projections, no LLM
   artifact; consistency already enforced by `validate_projection`. Revisit only if those pages gain
   LLM-authored prose; any gap is fixed in the validator, not in lint.
 - Deliverables on implement: `_check_synthesis_rot` in `app/workers/lint.py` (+ `summary_model_ref`-style

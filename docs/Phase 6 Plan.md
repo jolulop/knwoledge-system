@@ -6,6 +6,12 @@
 **Predecessors:** Phases 1–5 complete. The Phase 3.5 workers already file review items under
 `reviews/pending/` (ADR-0018); Phase 6 surfaces + actions them.
 
+> **Current implementation note (updated 2026-09-08):** post-Phase-6 ADRs added queue-wide
+> dry-run apply (ADR-0040), reopen for unapplied decisions (ADR-0045), visibility executors across
+> sources/items/claims/synthesis (ADR-0043-0049), item duplicate annotation (ADR-0041), item-era
+> merge/split/type-change executors (ADR-0050/0052/0059), per-source review (ADR-0058), and
+> human-added candidates.
+
 > [!summary]
 > Phase 6 adds the Human Review UI: server-rendered HTML on the existing FastAPI app over a
 > deterministic JSON read model. The decision **ledger is type-complete** (list + approve/reject/defer
@@ -23,10 +29,10 @@
 executor-backed) + a tightly-scoped `apply_approved_deprecations`; server-rendered HTML
 (`/ui/reviews`, `/ui/reviews/{id}`, apply view); fixture-based key-free tests.
 
-**Out / deferred:** SPA / rich client; live filesystem/wiki **diff/dry-run** preview; apply for
-`change_entity_subtype` and the raw-touching types (`delete_raw_file`/`archive_raw_file`/`hide_content`);
-CSRF token + any auth (loopback-only assumption); a CLI review tool (thin, later, over the same
-JSON/service).
+**Out / deferred in the original Phase-6 slice:** SPA / rich client; CSRF token + any auth
+(loopback-only assumption); a CLI review tool (thin, later, over the same JSON/service). The
+dry-run preview, `archive_source`, `hide_content`, and item-era semantic executors listed above
+have since shipped.
 
 **Invariants:** HTML is never authority (calls the same review-service primitives as JSON); decide and
 apply stay decoupled; apply is deterministic + key-free + idempotent + never touches `raw/`; no
@@ -103,8 +109,9 @@ destructive action without a recorded decision; the surface inherits the loopbac
   deprecations:{applied,normalized,skipped[]}, pages_changed, unapplied:[{type,count,reason}]}}`.
 - **`apply_approved_deprecations`** (new; A5): only items with `type==deprecate_wiki_page`,
   `proposal.to_status==deprecated_candidate`, `subject.page` under an in-scope subdir, no raw
-  delete/archive/hide. **In scope:** `Claims/`, `Concepts/`, `Entities/`, `People/`, `Organizations/`,
-  `Projects/`; **out of scope:** `Synthesis/` (→ `skipped[{reason: handled_by_synthesis_executor}]`),
+  delete/archive/hide. **Current scope:** `Claims/` and `Items/`; the older concept/entity-family
+  directories are historical after ADR-0059. **Out of scope:** `Synthesis/` (→
+  `skipped[{reason: handled_by_synthesis_executor}]`),
   `Sources/`, `Queries/`, `Tags/`, raw. **The graph node is authoritative for the page path (A7):** the
   canonical page (`NODE_DIR[node_type]/<slug>.md`) is derived from the node and `subject.page` must equal
   it — a malformed/traversal/absolute path is `skipped[invalid_page_path]` before any read, a wrong target

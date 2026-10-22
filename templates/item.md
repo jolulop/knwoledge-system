@@ -1,7 +1,7 @@
 <!-- Illustrative page shape ONLY: item pages are code-rendered by
      app/workers/wiki_render.py::render_item_page (like every semantic page since Phase 3.5b).
-     Whether semantic pages become formally code-rendered — and what the CLAUDE/AGENTS
-     "use templates" rule then means — is the queued dead-surface/template cleanup slice. -->
+     The authoritative frontmatter/body is whatever that renderer emits; this is reference
+     shape for humans, not a hand-authoring spec. -->
 ---
 type: item
 item_id: "{{item_id}}"

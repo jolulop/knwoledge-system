@@ -56,10 +56,12 @@ Configuration in the clone:
 
 ### 1.1 GPU embedding stack — install the torch overlay in the clone
 
-The default embedding backend (ADR-0053) is **in-process** (`EMBEDDING_PROVIDER=flagembedding_bge_m3`)
-— there is no embedding server to run. But the GPU stack is an **out-of-lock overlay**: the `uv sync`
-above deliberately does not install it, so the clone cannot embed until you install it into the
-clone's venv (canonical commands and rationale: `docs/Environment Setup v0.1.md` §14.1):
+The recommended GPU embedding backend (ADR-0053) is **in-process**
+(`EMBEDDING_PROVIDER=flagembedding_bge_m3`) — there is no embedding server to run. The code default
+remains unconfigured `local_http`, so this UAT `.env` explicitly selects the GPU path. The GPU stack
+is an **out-of-lock overlay**: the `uv sync` above deliberately does not install it, so the clone
+cannot embed until you install it into the clone's venv (canonical commands and rationale:
+`docs/Environment Setup v0.1.md` §14.1):
 
 ```bash
 cd /tmp/ks-uat
@@ -161,7 +163,8 @@ sed -n '1,120p' wiki/index.md
 
 ## 5. Optional vector index
 
-Only when your `EMBEDDING_*` environment is set (in-process default needs no server; see §1.1–1.2).
+Only when your `EMBEDDING_*` environment is set (the recommended in-process GPU configuration needs
+no server; see §1.1-1.2).
 
 ```bash
 env | grep -o '^EMBEDDING_[A-Z0-9_]*' | sort
@@ -397,7 +400,7 @@ nothing, and applies nothing.
 - Source pages appear under `wiki/Sources/` with frontmatter and a summary callout.
 - `wiki/index.md` rebuilds and links to generated pages.
 - Keyword search returns expected evidence.
-- Vector search works when configured (in-process backend by default — no embedding server).
+- Vector search works when configured (recommended in-process backend — no embedding server).
 - Query answers cite source chunks or abstain.
 - Review items are decision-only until apply; the dry-run shows the intended scope before apply.
 - Applying approved reviews updates only the governed surfaces and validators still pass.

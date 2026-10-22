@@ -1,16 +1,44 @@
 # Build Specification v0.1
 ## Local-First Agentic Information Management System Using the LLM Wiki Pattern
 
-**Status:** Draft v0.1  
-**Primary user:** Individual user building a personal research and business knowledge base  
-**Target environment:** Windows 11 + WSL2 Ubuntu + NVIDIA RTX 5090 24 GB GPU + 64 GB RAM + 1 TB storage  
-**Repository root:** `~/code/knowledge-system`  
-**Primary interfaces:** Browser app, optional Obsidian, optional mobile PWA  
-**Primary development assistant:** Claude Code  
-**Codex compatibility:** Required through `AGENTS.md`  
+**Status:** Historical v0.1 build contract with current implementation overlays (updated 2026-09-08)
+**Primary user:** Individual user building a personal research and business knowledge base
+**Target environment:** Windows 11 + WSL2 Ubuntu + NVIDIA RTX 5090 24 GB GPU + 64 GB RAM + 1 TB storage
+**Repository root:** `~/code/knowledge-system`
+**Primary interfaces:** Browser app, optional Obsidian, optional mobile PWA
+**Primary development assistant:** Claude Code
+**Codex compatibility:** Required through `AGENTS.md`
 **Core pattern:** LLM Wiki + structured filing-cabinet layer + hybrid search + human review
 
 ---
+
+## Current Implementation Snapshot
+
+Phases 1-7 are complete. The current system is a loopback-only FastAPI app plus deterministic
+scripts over local disk state: immutable `raw/` intake, normalized extraction, generated `wiki/`,
+SQLite graph/jobs/cache databases, keyword/vector indexes, review ledger, cited query answering,
+maintenance jobs, backups, and eval surfaces.
+
+The original filing-cabinet taxonomy below is preserved as design history. The current ontology is
+ADR-0059: one structural **knowledge item** family (`node_type: item`, stable `itm_` id) with a
+governed `item_type` selected from the 15-value taxonomy in `app/backend/taxonomy.py`. The old
+Concept/Entity/Person/Organization/Project page families exist only in historical docs/backups.
+
+Current high-level workflow:
+
+```text
+raw/inbox -> scan_inbox -> extract_sources -> generate_wiki
+          -> reindex_keyword + rebuild_index
+          -> enrich/extract_claims/extract_items/promote/detect_contradictions/generate_synthesis
+          -> reindex_keyword + rebuild_index + validate_all
+          -> review decide + dry-run/apply (apply refreshes index + keyword itself) + validate_all
+          -> search/query/maintenance/evals
+```
+
+The semantic producers rebuild `wiki/index.md` when they change pages but do **not** refresh the
+keyword/navigation index, so the second `reindex_keyword` is required before new Item/Claim/Synthesis
+pages appear in `/search`. Review apply refreshes both itself when it changed anything (it warns
+`keyword_reindex_failed` if the keyword refresh fails — re-run `reindex_keyword` then).
 
 ## 1. Executive Summary
 
@@ -18,20 +46,23 @@ This project builds a local-first information management system that ingests doc
 
 The system is not merely an Obsidian vault and not merely a RAG pipeline. It combines:
 
-1. **Immutable raw source repository**  
+1. **Immutable raw source repository**
    Stores original files and transcripts as the source of truth.
 
-2. **Structured LLM Wiki / filing-cabinet layer**  
-   Generates durable Markdown pages for sources, concepts, entities, claims, projects, people, organizations, tags, queries, and syntheses.
+2. **Structured LLM Wiki / filing-cabinet layer**
+   Generates durable Markdown pages for sources, knowledge items, claims, queries, and syntheses.
+   *Current vs planned:* LLM-generated **tags** exist today as Source-page frontmatter and search
+   terms; standalone generated **Tag pages** (`wiki/Tags/`) were part of the original plan and are
+   **not implemented or scheduled**.
 
-3. **Hybrid retrieval layer**  
+3. **Hybrid retrieval layer**
    Provides keyword search, vector search, graph traversal, and summary-first wiki navigation.
 
-4. **Agentic maintenance loop**  
+4. **Agentic maintenance loop**
    Runs autonomous ingest, lint, stale-content review, contradiction detection, duplicate detection, citation verification, and index refresh.
 
-5. **Human-in-the-loop review**  
-   Requires approval for deletion, contradiction resolution, entity merging, and deprecation decisions.
+5. **Human-in-the-loop review**
+   Requires approval for deletion, contradiction resolution, knowledge-item merge/split, and deprecation decisions.
 
 The first version is designed for a single primary user, with a clean path toward a multi-user or team system later.
 
@@ -142,7 +173,8 @@ Every generated factual claim must cite raw evidence where possible.
 
 ### 3.3 The System Should Compile Knowledge, Not Rediscover It Every Time
 
-New sources should update existing source pages, concept pages, entity pages, claim pages, and synthesis pages. Knowledge should compound over time.
+New sources should update existing source pages, knowledge-item pages, claim pages, and synthesis pages.
+Knowledge should compound over time.
 
 ### 3.4 Summary-First Navigation Is Mandatory
 
@@ -158,9 +190,14 @@ Required pattern:
 
 ### 3.5 Bidirectional Links Are Part of the Data Model
 
-If a source mentions a concept, the source page must link to the concept and the concept page must link back to the source.
+If a source mentions a knowledge item, the source page must link to the item and the item page must link back to the source.
 
-This applies to sources, concepts, entities, claims, projects, people, organizations, and synthesis pages.
+This applies to sources, knowledge items, claims, and synthesis pages — backlinks are derived from
+the graph (ADR-0029).
+
+*Current vs planned:* **Tag pages** (and therefore tag backlinks) are an original planned feature, not
+implemented or scheduled. Saved **Query pages** (`wiki/Queries/`) link *out* to their cited sources,
+but cited pages do **not** link back to saved queries — query backlinks are not current behavior.
 
 ### 3.6 Hybrid Retrieval Is Required from v0.1
 
@@ -176,7 +213,8 @@ The system must support:
 
 ### 3.7 Human Judgment Is Required for Destructive or Semantic Decisions
 
-The system may suggest deletion, deprecation, contradiction resolution, and entity merging, but it must not execute those decisions without human approval.
+The system may suggest deletion, deprecation, contradiction resolution, and knowledge-item merge/split,
+but it must not execute those decisions without human approval.
 
 ---
 
@@ -259,13 +297,9 @@ knowledge-system/
 │  ├─ index.md
 │  ├─ log.md
 │  ├─ Sources/
-│  ├─ Concepts/
 │  ├─ Claims/
-│  ├─ Entities/
-│  ├─ People/
-│  ├─ Organizations/
-│  ├─ Projects/
-│  ├─ Tags/
+│  ├─ Items/
+│  ├─ Tags/          (planned only — skeleton dir; no producer writes Tag pages)
 │  ├─ Synthesis/
 │  └─ Queries/
 ├─ reviews/
@@ -278,8 +312,9 @@ knowledge-system/
 │  ├─ vector/
 │  └─ graph/
 ├─ db/                          # ADR-0032 §7 supersedes the line below: the keyword index
-│  ├─ metadata.sqlite           #   moved to indexes/keyword/; db/ now holds jobs.sqlite,
-│  └─ jobs.sqlite               #   graph.sqlite, llm_cache.sqlite (metadata.sqlite retired).
+│  ├─ jobs.sqlite
+│  ├─ graph.sqlite
+│  └─ llm_cache.sqlite
 ├─ app/
 │  ├─ backend/
 │  ├─ frontend/
@@ -317,9 +352,11 @@ knowledge-system/
 Note: this is the original v0.1 node-type *target*; per the §15 convention the implementation
 annotation is recorded here rather than rewriting the table. All ten types are allowed in the graph
 schema (`app/backend/graph.py` `NODE_TYPES`), but **`query` and `tag` are wiki/navigation surfaces
-only** — no producer upserts them as graph nodes; `wiki/Queries/` and `wiki/Tags/` pages exist
-without graph presence by design (`app/backend/eligibility.py`: source/query/tag pages are
-navigation aids, not answer-eligible semantic nodes).
+only** — no producer upserts them as graph nodes; saved `wiki/Queries/` pages exist without graph
+presence by design, and `wiki/Tags/` is a planned-only directory that no producer writes (Tag pages
+are an original planned feature, not implemented or scheduled; tags live on Source pages).
+`app/backend/eligibility.py` treats source/query/tag pages as navigation aids, not answer-eligible
+semantic nodes.
 
 Second annotation (2026-07-08, revised 2026-07-09, **ADR-0059**, design-locked): the
 `entity`/`concept`/`project`/`person`/`organization` rows are superseded by the single structural
@@ -358,6 +395,13 @@ Note: implementation annotations (original v0.1 target kept as historical intent
 ---
 
 ## 7. Document Ingestion Pipeline
+
+> [!note] Historical v0.1 pipeline — not current instructions
+> This diagram is the original design target and still names the retired Concept/Entity/Person/
+> Organization/Project page families. The **current** flow is the *Current Implementation Snapshot*
+> at the top of this document (ADR-0059 knowledge items, separate `extract_claims` / `extract_items` /
+> `promote` passes, explicit `reindex_keyword` after semantic generation). Operator steps live in
+> `docs/Workflow.md` and `docs/Operations.md`.
 
 ```text
 New file detected
@@ -401,8 +445,8 @@ Create review items when confidence is low or changes are semantic/destructive
 |---|---|
 | Keyword search | Exact names, acronyms, file names, dates, quotes. |
 | Semantic search | Conceptual similarity and fuzzy topic retrieval. |
-| Graph traversal | Related sources, concepts, people, organizations, projects, claims. |
-| Wiki navigation | `index.md`, summary callouts, backlinks, source/concept pages. |
+| Graph traversal | Related sources, knowledge items, claims, and synthesis nodes. |
+| Wiki navigation | `index.md`, summary callouts, backlinks, Source/Item/Claim/Synthesis/Query pages. |
 | Hybrid answer synthesis | LLM-generated answer with citations from retrieved evidence. |
 
 ### 8.2 Query Routing
@@ -436,7 +480,7 @@ Create review items when confidence is low or changes are semantic/destructive
 |---|---:|---|
 | Watcher agent | Continuous or polling | Detect new files and create ingestion jobs. |
 | Extraction agent | Daily / queued | Convert files to normalized text/assets/chunks. |
-| Wiki compiler agent | Daily | Create/update source, concept, entity, claim, and synthesis pages. |
+| Wiki compiler agent | Manual/API job | Create/update Source pages and render Item/Claim/Synthesis/Query pages from graph/artifacts. |
 | Citation verifier | During ingest/query | Validate that generated claims cite real sources. |
 | Graph curator | Daily/weekly | Suggest links, duplicates, merges, splits, and review items. |
 | Lint agent | Weekly | Detect broken links, orphan nodes, stale stubs, missing metadata, uncited claims. |
@@ -458,9 +502,14 @@ No long-running ingest operation may depend on chat context as the only record o
 
 Agents may propose and write content, but deterministic scripts must enforce structural rules.
 
+The hooks below are Claude Code agent-edit hooks (`.claude/hooks/*.sh`, registered via
+`.claude/settings.example.json`): they fire when an agent edits a file, not during pipeline script
+runs — pipeline operators run `reindex_keyword` / `rebuild_index` / `validate_all` explicitly (see the
+snapshot at the top). The validators run together via `scripts/validate_all.py`.
+
 | Hook | Trigger | Action |
 |---|---|---|
-| Rebuild index | Source/Concept/Entity/Claim/Synthesis page changed | Rebuild `wiki/index.md`. |
+| Rebuild index | Source/Item/Claim/Tag/Synthesis/Query page changed | Rebuild `wiki/index.md`. |
 | Validate frontmatter | Any wiki page changed | Ensure required fields exist. |
 | Validate wikilinks | Any wiki page changed | Ensure wikilinks resolve to existing pages or create review item. |
 | Validate citations | Any generated claim or answer | Ensure cited source exists. |
@@ -478,10 +527,10 @@ The system must create review items for:
 | Archive raw file | Yes. |
 | Deprecate wiki page | Yes. |
 | Resolve contradiction | Yes. |
-| Merge entities | Yes. |
-| Split entity or concept | Yes. |
+| Merge knowledge items | Yes. |
+| Split knowledge item | Yes. |
 | Mark source as duplicate | Yes, except exact SHA duplicate. |
-| Promote claim to concept | Optional if concept appears in two or more sources; otherwise yes. |
+| Promote candidate knowledge item | Automatic only after the deterministic independent-source gate; otherwise yes. |
 | Hide low-quality content | Yes. |
 
 ---
@@ -503,9 +552,13 @@ deleted
 ### 12.2 Default Policy
 
 - Raw files are never automatically deleted.
-- Documents older than 3 years become `archive_candidate`.
-- Superseded documents become `deprecated_candidate`.
-- Low-value ephemeral inbox items may become `delete_candidate` after a configurable period.
+- Documents older than 3 years are **proposed** for archiving: the stale-check job files an
+  `archive_source` review item; the source becomes `archive_candidate` only after a human approves it
+  and review apply runs (ADR-0036).
+- Superseded content is **proposed** for deprecation: an approved `resolve_contradiction` supersede
+  marks the losing claim `deprecated_candidate` at apply time.
+- Low-value ephemeral inbox items past a configurable period get a `delete_raw_file` review item
+  (record-only — deletion is never executed by the system).
 - Physical deletion requires human approval.
 - Derived wiki pages may be regenerated or hidden after approval.
 - Contradictory claims must remain visible until reviewed.
@@ -535,7 +588,7 @@ deleted
 | Metadata DB | SQLite |
 | Job DB | SQLite |
 | Keyword search | SQLite FTS5 first; upgrade later if needed |
-| Vector store | LanceDB or ChromaDB |
+| Vector store | LanceDB |
 | Graph store | SQLite graph tables first |
 | Frontend | Browser app; React or server-rendered UI |
 | Development assistant | Claude Code |
@@ -546,26 +599,43 @@ deleted
 
 ## 15. API Requirements
 
-Initial API endpoints:
+Implemented API endpoints:
 
 ```text
 GET    /health
 GET    /sources
 GET    /sources/{source_id}
-POST   /sources/upload
-POST   /sources/rescan
+GET    /sources/{source_id}/chunks
+GET    /sources/{source_id}/normalized
 GET    /wiki/pages
-GET    /wiki/pages/{page_id}
-POST   /wiki/pages/{page_id}/validate
+GET    /wiki/pages/{source_id}
+GET    /wiki/index
+GET    /raw/{source_id}
 GET    /search
 POST   /query
 GET    /graph/node/{node_id}
 GET    /graph/neighborhood/{node_id}
 GET    /reviews
+GET    /reviews/{review_id}
 POST   /reviews/{review_id}/approve
 POST   /reviews/{review_id}/reject
 POST   /reviews/{review_id}/defer
-POST   /jobs/ingest
+POST   /reviews/{review_id}/reopen
+POST   /reviews/apply
+POST   /reviews/apply/dry-run
+GET    /ui/reviews
+GET    /ui/reviews/apply
+POST   /ui/reviews/apply
+GET    /ui/reviews/sources
+GET    /ui/reviews/sources/{source_id}
+POST   /ui/reviews/sources/{source_id}/decide
+POST   /ui/reviews/sources/{source_id}/add
+GET    /ui/reviews/{review_id}
+POST   /ui/reviews/{review_id}/decide
+POST   /ui/reviews/{review_id}/reopen
+POST   /jobs/intake-scan
+POST   /jobs/extract
+POST   /jobs/generate-wiki
 POST   /jobs/lint
 POST   /jobs/reindex
 POST   /jobs/stale-check
@@ -575,13 +645,12 @@ GET    /evals/results
 POST   /evals/run
 ```
 
-Note: this is the original v0.1 API *target*; the phase ADRs supersede it where the implementation
-diverged (the spec is kept as historical intent, not rewritten):
-- **Ingest surface** — `POST /sources/upload`, `POST /sources/rescan`, and `POST /jobs/ingest` were
-  superseded by the file-drop intake model: drop into `raw/inbox/` then `POST /jobs/intake-scan` →
-  `/jobs/extract` → `/jobs/generate-wiki` (ADR-0002/0009/0011). No HTTP upload endpoint exists (uploads
-  would cross the loopback-only, no-auth boundary — ADR-0009).
-- **Eval surface** — `POST /evals/run` + `GET /evals/results` are **implemented** (ADR-0042, the
+Historical note: `POST /sources/upload`, `POST /sources/rescan`, and `POST /jobs/ingest` were
+superseded by the file-drop intake model: drop into `raw/inbox/` then `POST /jobs/intake-scan` ->
+`/jobs/extract` -> `/jobs/generate-wiki` (ADR-0002/0009/0011). No HTTP upload endpoint exists
+(uploads would cross the loopback-only, no-auth boundary — ADR-0009).
+
+Eval surface note: `POST /evals/run` + `GET /evals/results` are **implemented** (ADR-0042, the
   deterministic real-vault answer-quality eval that closed the ADR-0036 decision-14 deferral):
   key-required, loopback-only, cost-gated (`confirm_cost`/`dry_run`/hard-cap), read-only over vault SoT,
   scoring the `POST /query` cited answers against a curated **gitignored** local corpus
@@ -606,7 +675,7 @@ v0.1 is successful when:
 - Semantic search works.
 - Graph neighborhood browsing works.
 - Review UI supports approval/rejection/defer.
-- Deletion and entity merges cannot happen without approval.
+- Deletion and knowledge-item merges/splits cannot happen without approval.
 - Weekly lint produces actionable reports.
 - Monthly stale check identifies archive candidates.
 - **Superseded/deferred** (the phase ADRs diverged from this v0.1 target — kept as historical intent):
@@ -633,10 +702,10 @@ prompt-injection surface is introduced.
 | Phase 1 | File Intake and Raw Repository. | Complete |
 | Phase 2 | Extraction and Normalization. | Complete |
 | Phase 3 | Filing-Cabinet Wiki Layer — deterministic Source-page backbone. | Complete |
-| Phase 3.5 | LLM semantic layer: enriched summaries, tags, concepts, entities, claims, synthesis, and bidirectional backlinks. Sub-phased 3.5a/3.5b/3.5c (ADR-0028). | **Complete** — 3.5a (per-source LLM summary + tags), 3.5b (grounding gate, graph store, claim/concept-entity extraction, promotion lifecycle), 3.5c (contradiction detection + supersede executor + cross-source synthesis). |
+| Phase 3.5 | LLM semantic layer: enriched summaries, tags, knowledge items, claims, synthesis, and bidirectional backlinks. Sub-phased 3.5a/3.5b/3.5c (ADR-0028), then revised by ADR-0059. | **Complete** — 3.5a (per-source LLM summary + tags), 3.5b (grounding gate, graph store, claim/item extraction, promotion lifecycle), 3.5c (contradiction detection + supersede executor + cross-source synthesis). |
 | Phase 4 | Search and Graph. | **Complete** — 4a keyword/nav index, 4b graph read API, 4c router + GET /search, 4d LanceDB vector channel, 4e RRF hybrid fusion + retrieval evals (ADR-0032/0033). |
 | Phase 5 | Query and Cited Answering. | **Complete** — 5-1 answer-synthesis core, 5-2 POST /query, 5-3 saved Queries pages, 5-4 golden-question eval harness (ADR-0034). |
-| Phase 6 | Human Review UI. | **Complete** (ADR-0035): server-rendered HTML over a deterministic JSON review read model; type-complete record-only decision ledger; deterministic `POST /reviews/apply` (synthesis/promotion/contradiction + scoped deprecation/archive); loopback-only; key-free tests. Extended by the **apply dry-run preview** (ADR-0040), the first non-rekeying **governance executor** `mark_semantic_duplicate` (ADR-0041), the **visibility family** (hide/unhide across sources, semantic pages, claims, synthesis — ADR-0043–0049) and the **identity-surgery family** (merge / subtype-rekey / split — ADR-0050–0052); see `docs/Operations.md` for the authoritative current executor set. |
+| Phase 6 | Human Review UI. | **Complete** (ADR-0035): server-rendered HTML over a deterministic JSON review read model; type-complete record-only decision ledger; deterministic `POST /reviews/apply` (synthesis/promotion/contradiction + scoped deprecation/archive); loopback-only; key-free tests. Extended by the **apply dry-run preview** (ADR-0040), the first non-rekeying **governance executor** `mark_semantic_duplicate` (ADR-0041), the **visibility family** (hide/unhide across sources, semantic pages, claims, synthesis — ADR-0043–0049), and the item-era **identity-surgery family** (`merge_items`, `split_item`, `change_item_type` — ADR-0050/0052/0059; ADR-0051 retired); see `docs/Operations.md` for the authoritative current executor set. |
 | Phase 7 | Autonomous Maintenance. | **Complete** — per ADR-0036: `/jobs/lint`, `/jobs/reindex`, `/jobs/stale-check`, reversible `archive_source`, cache-purge candidate detection, cron/no-daemon operations docs; lint quality heuristics (ADR-0037); backup/restore durability (ADR-0039). The real-vault answer-quality eval `/evals/run` shipped in **ADR-0042** (the decision-14 deferral is closed). |
 | Phase 8 | Mobile and Hardening (auth / CSRF / API-worker). | **Deferred** — no concrete non-loopback exposure requirement exists; the app is loopback-only (ADR-0009). Picked up only when an exposure path is on the table. |
 
@@ -655,7 +724,7 @@ Known completed setup items:
 - VS Code connected to WSL.
 - Claude Code panel working.
 
-Before Phase 1, commit the clean scaffold state.
+For a new clone or reset, commit only after the environment setup and validators pass.
 
 ---
 

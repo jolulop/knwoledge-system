@@ -1,8 +1,8 @@
 # Environment Setup v0.1
 ## Windows 11 + WSL2 + VS Code + Claude Code
 
-**Status:** Working setup document  
-**Repository root:** `~/code/knowledge-system`  
+**Status:** Current setup document (updated 2026-09-08)
+**Repository root:** `~/code/knowledge-system`
 **Current machine path:** `/home/jolulop/code/knowledge-system`
 
 ---
@@ -16,7 +16,7 @@ The development environment must support:
 - Claude Code and Codex-compatible repository workflows.
 - VS Code connected to WSL.
 - Docker Desktop with WSL2 integration.
-- Future GPU-enabled local AI tooling.
+- Optional GPU-enabled vector retrieval and local AI tooling.
 
 The environment uses Windows for the graphical tools and WSL2 Ubuntu for the runtime.
 
@@ -202,7 +202,26 @@ The `.env` file lives at:
 ~/code/knowledge-system/.env
 ```
 
-Recommended development values:
+Start from the committed example:
+
+```bash
+cp .env.example .env
+chmod 600 .env
+```
+
+> [!warning] The copied `.env` selects the GPU embedder
+> `.env.example` is tuned for the target GPU workstation: it sets
+> `EMBEDDING_PROVIDER=flagembedding_bge_m3` + `EMBEDDING_DEVICE=cuda`, and the API **loads that provider
+> at startup and aborts if it can't** (ADR-0053). Complete the separate Torch + FlagEmbedding install in
+> §14.1 and pass `scripts/check_embedding.py` **before** starting the API with the copied file.
+>
+> **Lightweight (Torch-free) setup:** in your `.env`, set `EMBEDDING_PROVIDER=local_http` and leave
+> `EMBEDDING_BASE_URL` empty. No embedder is configured, startup skips the warmup, and search runs
+> keyword-only (vector simply stays off — not reported as a degradation). To add vector later on CPU,
+> point `EMBEDDING_BASE_URL` + `EMBEDDING_MODEL_REF` at a local `/embeddings` server (option **B** in
+> `.env.example`).
+
+Minimal key-free development values:
 
 ```env
 KNOWLEDGE_SYSTEM_HOME=/home/jolulop/code/knowledge-system
@@ -214,13 +233,10 @@ APP_HOST=127.0.0.1
 APP_PORT=18000
 ```
 
-API keys may remain empty during development if Claude Code is authenticated through user login.
-
-Protect the file:
-
-```bash
-chmod 600 .env
-```
+API keys may remain empty for deterministic ingest, extraction, wiki rendering, review, lint, and
+search. LLM producers and `POST /query` need either a hosted key for the selected tier or a local
+model configured with `ENRICH_LOCAL_BASE_URL` and a `local:<model>` chain member; see
+`docs/Local Models.md`.
 
 `.env` must not be committed to Git.
 
@@ -338,7 +354,8 @@ Verify GPU visibility from WSL:
 nvidia-smi
 ```
 
-The GPU is not required for Phase 1, but it will be useful later for:
+The GPU is not required for deterministic ingest/review/lint/test workflows. It is used by the
+recommended vector-embedding setup and remains optional for local model experiments:
 
 - Local embeddings.
 - OCR/image models.
@@ -347,11 +364,12 @@ The GPU is not required for Phase 1, but it will be useful later for:
 
 ### 14.1 Embedding backend — BGE-M3 on CUDA (ADR-0053)
 
-The default GPU embedding backend is **in-process FlagEmbedding + PyTorch CUDA** running **BAAI/bge-m3**
-(`EMBEDDING_PROVIDER=flagembedding_bge_m3`). We moved off the TEI/Candle HTTP embedder because **TEI/Candle
-falls back to CPU on the RTX 5090** even though its container sees the GPU via `nvidia-smi`; PyTorch +
-FlagEmbedding runs BGE-M3 on CUDA in-process. The old TEI (`local_http`) seam remains supported as an
-**optional CPU fallback only** (ADR-0033), never the default.
+The recommended GPU embedding backend is **in-process FlagEmbedding + PyTorch CUDA** running
+**BAAI/bge-m3** (`EMBEDDING_PROVIDER=flagembedding_bge_m3`). The code default remains `local_http`
+when no `.env` selects a provider, so light installs stay Torch-free. We moved the target GPU setup
+off the TEI/Candle HTTP embedder because **TEI/Candle falls back to CPU on the RTX 5090** even though
+its container sees the GPU via `nvidia-smi`; PyTorch + FlagEmbedding runs BGE-M3 on CUDA in-process.
+The old TEI (`local_http`) seam remains supported as an **optional CPU fallback** (ADR-0033).
 
 **Install (uv, Python 3.12).** `torch` must come from the **CUDA 12.8** wheel index — a plain PyPI resolve
 pulls a CPU/other-CUDA build. Do **not** install `torchvision`/`torchaudio` (they caused a
@@ -417,7 +435,7 @@ after `chown`-ing it.
 
 ---
 
-## 15. Scaffold Validation Commands
+## 15. Validation Commands
 
 From the repository root:
 
@@ -425,32 +443,32 @@ From the repository root:
 cd ~/code/knowledge-system
 
 uv run python scripts/rebuild_index.py .
-uv run python scripts/validate_frontmatter.py .
-uv run python scripts/validate_wikilinks.py .
-uv run python scripts/validate_citations.py .
+uv run python scripts/validate_all.py
 ```
 
-Known successful output:
+`validate_all.py` is the current structural gate and runs the wiki, graph, citation, projection,
+index-consistency, raw-integrity, normalized-layer, and link-alias validators in one pass. On an
+empty or deterministic-only vault, a missing vector index is allowed; vector-specific coherence is
+checked when a vector index exists.
+
+Representative successful output:
 
 ```text
-rebuilt /home/jolulop/code/knowledge-system/wiki/index.md with 4 pages
-Frontmatter validation passed.
-Wikilink validation passed.
-Citation validation passed.
+All validators passed.
 ```
 
 ---
 
 ## 16. Git Checkpoint
 
-Before Phase 1 begins, commit the clean environment/scaffold state:
+For a new clone or environment reset, checkpoint only after setup and validation:
 
 ```bash
 cd ~/code/knowledge-system
 
 git status
 git add .
-git commit -m "Environment ready and scaffold validated"
+git commit -m "Environment ready and validators green"
 ```
 
 Recommended `.gitignore` items:
@@ -481,14 +499,13 @@ The environment is ready when all of these are true:
 - [x] `.venv` is created.
 - [x] `.env` exists and uses `APP_PORT=18000`.
 - [x] `rebuild_index.py` succeeds.
-- [x] Frontmatter validation passes.
-- [x] Wikilink validation passes.
-- [x] Citation validation passes.
+- [x] `validate_all.py` passes.
 - [x] VS Code opens in WSL mode.
 - [x] Claude Code panel works.
-- [ ] Docker check passes.
-- [ ] GPU check passes.
-- [ ] Git checkpoint commit exists.
+- [ ] Docker check passes, if using Docker-backed tooling.
+- [ ] GPU check passes, if using vector embeddings or local GPU models.
+- [ ] `scripts/check_embedding.py` passes, if `EMBEDDING_PROVIDER=flagembedding_bge_m3`.
+- [ ] Git checkpoint commit exists for a new clone/reset.
 
 ---
 

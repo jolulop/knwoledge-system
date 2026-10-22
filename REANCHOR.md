@@ -1,6 +1,6 @@
 # REANCHOR — session status
 
-_Last updated: 2026-07-25. **Reanchor command:** "read REANCHOR.md and reanchor". Read this
+_Last updated: 2026-09-08. **Reanchor command:** "read REANCHOR.md and reanchor". Read this
 first after an app restart, then `wiki/index.md` if working in the vault._
 
 > [!warning] This is a periodically-refreshed snapshot and can lag the live state. The authoritative
@@ -17,9 +17,11 @@ critical rules and `CONTEXT.md` for the glossary.
 
 ## Where we are
 
-- **Branch:** `main` — pushed tip: `d0b3f8f` (W3 / ADR-0063 complete). **One unpushed commit:**
-  `250b4ae` (`docs/Local Models.md`, docs-only, ahead 1); tree clean. Run
-  `git log --oneline origin/main..HEAD` for the live unpushed set.
+- **Branch:** `main` — local `HEAD` and `origin/main` both resolve to `fba145a`
+  (`docs: refresh REANCHOR post-ADR-0063 (W3 local-model-first)`). Current working tree has
+  documentation edits in progress plus pre-existing local runtime/UI state (`wiki/.obsidian/graph.json`)
+  and an untracked `knowledge-system.7z` archive; neither is part of the documentation refresh unless
+  explicitly touched. Run `git status --short` for the live working set.
   The per-slice rhythm: grill (design-lock, docs-only) → implement (on "implement now") → test →
   external review (user pastes) → analyze+recommend+**wait** → fix → commit (user says so) → push.
 - **PHASES 1–7 COMPLETE + pushed** (intake · extract/normalize · deterministic wiki · LLM semantic

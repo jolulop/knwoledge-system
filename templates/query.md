@@ -1,3 +1,6 @@
+<!-- Illustrative page shape ONLY: saved query pages are code-rendered by
+     app/workers/wiki_render.py::render_query_page. The authoritative frontmatter/body is
+     whatever that renderer emits; this is reference shape for humans, not a hand-authoring spec. -->
 ---
 type: query
 query_id: "{{query_id}}"

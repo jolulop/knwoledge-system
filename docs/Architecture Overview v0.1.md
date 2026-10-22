@@ -1,18 +1,27 @@
 # Architecture Overview v0.1
 ## Local-First Agentic Information Management System
 
-**Status:** Draft v0.1  
-**Repository root:** `~/code/knowledge-system`  
+**Status:** Current overview with historical v0.1 context (updated 2026-09-08)
+**Repository root:** `~/code/knowledge-system`
 **Primary pattern:** LLM Wiki + structured filing cabinet + hybrid retrieval
 
 ---
+
+## Current Shape
+
+The implemented system uses one semantic node family, **knowledge items**, under `wiki/Items/`
+with stable `itm_` ids and governed `item_type` metadata (ADR-0059). Historical references to
+Concepts, Entities, People, Organizations, and Projects describe the original v0.1 plan unless
+called out as superseded. The current runtime is a loopback-only FastAPI app with server-rendered
+review UI, deterministic scripts, SQLite graph/jobs/cache databases, SQLite FTS keyword index,
+LanceDB vector index, and model-chain LLM routing.
 
 ## 1. Architecture Thesis
 
 The system is built around a distinction between:
 
 1. **Raw source memory** — immutable files and transcripts.
-2. **Compiled knowledge** — generated wiki pages, summaries, concepts, claims, and syntheses.
+2. **Compiled knowledge** — generated wiki pages, summaries, knowledge items, claims, and syntheses.
 3. **Retrieval infrastructure** — keyword search, vector search, graph traversal, and summary-first navigation.
 4. **Maintenance loop** — deterministic validators, agent workflows, and human review.
 
@@ -39,7 +48,7 @@ A folder of Markdown files alone is not enough. The system becomes useful when t
                              ▼
 ┌────────────────────────────────────────────────────────────────┐
 │ Extraction + Normalization Pipeline                            │
-│ PDF/DOCX/HTML/MD/XLSX/image/screenshot/transcript handling      │
+│ PDF/DOCX/HTML/MD/CSV/XLSX today; OCR/transcription deferred     │
 └───────────────┬──────────────────────────────┬────────────────┘
                 │                              │
                 ▼                              ▼
@@ -51,15 +60,15 @@ A folder of Markdown files alone is not enough. The system becomes useful when t
                 ▼
 ┌────────────────────────────────────────────────────────────────┐
 │ Filing-Cabinet Wiki Compiler                                   │
-│ summaries, source pages, concept pages, claims, entities,       │
-│ backlinks, synthesis, review proposals                          │
+│ summaries, source pages, item pages, claims, backlinks,         │
+│ synthesis, review proposals                                     │
 └───────────────┬──────────────────────────────┬────────────────┘
                 │                              │
                 ▼                              ▼
 ┌────────────────────────────┐      ┌────────────────────────────┐
 │ Markdown Wiki               │      │ Search + Graph Indexes      │
-│ index.md, log.md, Sources,  │      │ keyword, vector, graph       │
-│ Concepts, Claims, etc.      │      │ metadata DB                  │
+│ index.md, log.md, Sources,  │      │ keyword, vector, graph DB    │
+│ Items, Claims, etc.         │      │ + jobs/cache DBs             │
 └───────────────┬────────────┘      └────────────────────────────┘
                 │
                 ▼
@@ -119,8 +128,6 @@ raw/
 ├─ inbox/        new incoming files
 ├─ permanent/    retained originals
 ├─ ephemeral/    low-value temporary captures
-├─ assets/       images and extracted assets
-├─ transcripts/  audio/video transcripts
 └─ manifests/    metadata and checksums
 ```
 
@@ -138,7 +145,7 @@ normalized/
 ├─ markdown/
 ├─ chunks/
 ├─ tables/
-├─ images/
+├─ enrichment/
 └─ extraction_logs/
 ```
 
@@ -155,12 +162,8 @@ wiki/
 ├─ index.md
 ├─ log.md
 ├─ Sources/
-├─ Concepts/
 ├─ Claims/
-├─ Entities/
-├─ People/
-├─ Organizations/
-├─ Projects/
+├─ Items/
 ├─ Tags/
 ├─ Synthesis/
 └─ Queries/
@@ -181,9 +184,10 @@ indexes/                  # ADR-0032 §7: derived & gitignored
 ├─ vector/                #   LanceDB (Phase 4d)
 └─ graph/                 #   reserved (graph authority is db/graph.sqlite)
 
-db/                       # ADR-0032 §7 supersedes metadata.sqlite below:
-├─ metadata.sqlite        #   keyword index moved to indexes/keyword/; db/ now holds
-└─ jobs.sqlite            #   jobs.sqlite, graph.sqlite, llm_cache.sqlite
+db/
+├─ jobs.sqlite
+├─ graph.sqlite
+└─ llm_cache.sqlite
 ```
 
 Purpose:
@@ -216,9 +220,9 @@ Chunking
         ↓
 Source page generated
         ↓
-Claims/entities/concepts proposed
+Claims and knowledge items proposed
         ↓
-Wiki pages updated
+Wiki pages rendered
         ↓
 Backlinks updated
         ↓
@@ -262,7 +266,7 @@ Validate citations
         ↓
 Detect orphan nodes
         ↓
-Detect weak concepts
+Detect under-supported items
         ↓
 Detect stale summaries
         ↓
@@ -282,7 +286,7 @@ The system uses multiple retrieval paths.
 | `index.md` + summary callouts | Broad discovery and “what do I know?” questions. |
 | Keyword search | Exact terms, filenames, acronyms, quotes, numbers. |
 | Vector search | Semantic similarity and fuzzy conceptual search. |
-| Graph traversal | Relationships between sources, claims, people, orgs, projects, and concepts. |
+| Graph traversal | Relationships between sources, claims, knowledge items, and syntheses. |
 | Claim graph | Contradictions, support, supersession, and evidence chains. |
 
 ---
@@ -316,7 +320,6 @@ Future scheduled work should be implemented as backend workers.
 
 Examples:
 
-- Watcher worker.
 - Extractor worker.
 - Indexer worker.
 - Lint worker.
@@ -360,13 +363,12 @@ The following require human approval:
 
 - Raw deletion.
 - Raw archiving.
-- Entity merge.
-- Entity split.
-- Concept split.
+- Knowledge-item merge.
+- Knowledge-item split.
 - Contradiction resolution.
 - Deprecation.
 - Semantic duplicate merge.
-- Low-confidence concept promotion.
+- Low-confidence knowledge-item promotion.
 
 ---
 
@@ -396,10 +398,10 @@ Default security posture:
 | Backend | FastAPI |
 | Metadata DB | SQLite |
 | Job DB | SQLite |
-| Keyword search | SQLite FTS5 or simple file index first |
-| Vector store | LanceDB or ChromaDB later |
+| Keyword search | SQLite FTS5 |
+| Vector store | LanceDB |
 | Graph | SQLite graph tables first |
-| UI | Browser app later; Obsidian optional |
+| UI | FastAPI server-rendered review UI; Obsidian optional |
 | API port | 18000 |
 | Future MCP port | 18001 |
 | Future UI port | 13000 |
@@ -412,7 +414,7 @@ Default security posture:
 |---|---|
 | Hallucinated citations | Citation verifier and answer validation. |
 | Summary rot | Lint compares summaries with page bodies. |
-| Concept promiscuity | Promote concepts only after recurrence or review. |
+| Item promiscuity | Promote knowledge items only after recurrence or review. |
 | Too much capture | Permanent vs ephemeral raw separation. |
 | Context loss in long sessions | Persist job state to DB/manifests. |
 | Broken Obsidian links | Wikilink validator. |

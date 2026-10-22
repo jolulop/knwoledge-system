@@ -1,10 +1,15 @@
 # Phase 1 Plan
 ## File Intake and Raw Repository
 
-**Status:** Planned  
-**Depends on:** Environment Setup v0.1 complete  
-**Repository root:** `~/code/knowledge-system`  
+**Status:** Complete (historical implementation plan; updated 2026-09-08)
+**Depends on:** Environment Setup v0.1 complete
+**Repository root:** `~/code/knowledge-system`
 **Goal:** Turn the scaffold into a reliable raw file intake system with manifests, deduplication, and job tracking.
+
+> **Current implementation note:** Phase 1 is implemented. Manifests remain local runtime state under
+> `raw/manifests/`, exact duplicates become additional manifest occurrences, files are not moved out of
+> `raw/inbox/` automatically, and jobs are stored in `db/jobs.sqlite`. Later phases add extraction,
+> generated wiki pages, graph/search, review UI, and maintenance.
 
 ---
 
@@ -70,7 +75,6 @@ raw/
 └─ manifests/    JSON/YAML manifests
 
 db/
-├─ metadata.sqlite
 └─ jobs.sqlite
 ```
 

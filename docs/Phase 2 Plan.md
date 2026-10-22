@@ -1,7 +1,7 @@
 # Phase 2 Plan
 ## Extraction and Normalization
 
-**Status:** Planned
+**Status:** Complete (historical implementation plan; updated 2026-09-08)
 **Depends on:** Phase 1 (File Intake and Raw Repository) complete
 **Repository root:** `~/code/knowledge-system`
 **Goal:** Turn catalogued raw sources into deterministic, content-keyed normalized
@@ -13,6 +13,10 @@ citation anchors, and record extraction state on the manifest.
 > and [ADR-0012](adr/0012-chunk-schema-and-mechanical-citation-anchors.md).** This plan
 > translates those ADRs into concrete schemas, files, thresholds, and acceptance
 > criteria. Read the ADRs first; where this plan and an ADR disagree, the ADR wins.
+
+> **Current implementation note:** Phase 2 is implemented for PDF, DOCX, HTML, Markdown, CSV, and
+> XLSX. OCR/image captioning/transcription remain deferred; unsupported files are catalogued and
+> skipped with diagnostic status rather than treated as instructions.
 
 ---
 

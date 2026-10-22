@@ -1,8 +1,9 @@
-# Knowledge System v0.1
+# Knowledge System
 
 Local-first, agent-maintained information management system based on the LLM Wiki pattern.
 
-**Status: Phases 1–7 complete** (the Build Spec's planned scope). The pipeline runs end-to-end —
+**Status as of 2026-09-08: Phases 1-7 complete** (the Build Spec's planned scope), with
+post-Phase-7 hardening through ADR-0063 implemented. The pipeline runs end-to-end:
 immutable `raw/` intake → extract/normalize → generated wiki → LLM semantic layer (knowledge items/
 claims/synthesis, grounded; ADR-0059 taxonomy) → keyword+vector+graph retrieval → cited `POST /query` → human review UI →
 autonomous detect-and-propose maintenance (lint / retention / reindex, no daemon). The API is
@@ -14,7 +15,12 @@ Implemented surface:
 - Repository layout, `CLAUDE.md` / `AGENTS.md`, wiki templates, policy files, evaluation seeds
 - Claude Code skills + deterministic hooks/validators (`scripts/validate_*.py`)
 - FastAPI backend: intake/extract/wiki jobs, `/search`, `/query`, `/reviews` + `/ui/reviews`,
-  `/jobs/{lint,reindex,stale-check}`, graph + sources endpoints
+  `/jobs/{intake-scan,extract,generate-wiki,lint,reindex,stale-check}`, graph, raw-source,
+  source, and answer-eval endpoints
+- Server-rendered review UI, including queue-wide dry-run apply, per-source review, human-added
+  candidates, and source-original viewing
+- ADR-0063 model chains for hosted/local LLM routing, plus ADR-0053 vector embeddings via
+  BGE-M3/FlagEmbedding or the `local_http` fallback
 
 ## Target runtime
 
@@ -28,45 +34,64 @@ WSL2 Ubuntu = system of record and automation runtime
 Keep the canonical repo in WSL2:
 
 ```bash
-cd ~
-unzip knowledge-system-scaffold-v0.1.zip
-cd knowledge-system-scaffold-v0.1
+cd ~/code/knowledge-system
+uv sync --all-extras
 ```
 
 ## First local checks
 
 ```bash
-python3 scripts/rebuild_index.py .
-python3 scripts/validate_frontmatter.py .
-python3 scripts/validate_wikilinks.py .
-python3 scripts/reindex_keyword.py .
-python3 scripts/validate_index_consistency.py .
+uv run python scripts/rebuild_index.py .
+uv run python scripts/validate_all.py
 ```
 
 Vector search (Phase 4d) is opt-in and refreshed explicitly — install the `vector` extra + the GPU
-embedding stack and run the reindexer deliberately (it is **not** wired into the per-file hook). The
-default embedder is **in-process FlagEmbedding + PyTorch CUDA** (BAAI/bge-m3, `EMBEDDING_PROVIDER=`
-`flagembedding_bge_m3`, ADR-0053); the TEI/`local_http` HTTP server is a CPU-fallback option. GPU stack
-setup + smoke: *docs/Environment Setup v0.1.md* §14.1.
+embedding stack and run the reindexer deliberately (it is **not** wired into the per-file hook).
+The recommended GPU configuration is **in-process FlagEmbedding + PyTorch CUDA** (BAAI/bge-m3,
+`EMBEDDING_PROVIDER=flagembedding_bge_m3`, ADR-0053); the code default remains `local_http`
+when no `.env` selects a provider, so lightweight ingest/review/test workflows stay Torch-free.
+GPU stack setup + smoke: *docs/Environment Setup v0.1.md* §14.1.
 
 ```bash
-uv pip install '.[vector]'                    # LanceDB (the GPU embedder is a separate out-of-lock install)
-python3 scripts/check_embedding.py .          # validate torch/CUDA + BGE-M3 → dense_vecs shape: (3, 1024)
-python3 scripts/reindex_vector.py . --force
-python3 scripts/validate_vector_index.py .
+uv sync --all-extras                          # includes LanceDB; GPU stack is a separate overlay
+uv run python scripts/check_embedding.py       # validate torch/CUDA + BGE-M3 -> dense_vecs shape: (3, 1024)
+uv run python scripts/reindex_vector.py . --force
+uv run python scripts/validate_vector_index.py .
 ```
 
-The scaffold ships with one sample source, item, claim, and synthesis page so the indexer and validators have something to inspect.
+The repository no longer relies on committed sample wiki pages. A fresh checkout has tracked
+directory skeletons only; generated vault state is local runtime data.
 
-## Suggested next implementation sequence
+## Day-to-day workflow
 
-1. Review and edit `CLAUDE.md` / `AGENTS.md`.
-2. Run `scripts/rebuild_index.py .`.
-3. Start with one real file in `raw/inbox/`.
-4. Implement extraction for PDF, DOCX, HTML, Markdown.
-5. Generate Source pages and normalized Markdown.
-6. Add keyword search, then vector search.
-7. Add review UI and autonomous scheduled jobs.
+```bash
+# deterministic ingest/build
+uv run python scripts/scan_inbox.py
+uv run python scripts/extract_sources.py
+uv run python scripts/generate_wiki.py
+uv run python scripts/reindex_keyword.py
+uv run python scripts/rebuild_index.py
+uv run python scripts/validate_all.py
+
+# LLM-backed semantic layer, if a hosted key or local model chain is configured
+uv run python scripts/enrich.py
+uv run python scripts/extract_claims.py
+uv run python scripts/extract_items.py
+uv run python scripts/promote.py
+uv run python scripts/detect_contradictions.py
+uv run python scripts/generate_synthesis.py
+# the semantic producers rebuild wiki/index.md but NOT the keyword index — refresh it so new
+# Item/Claim/Synthesis pages reach /search navigation, then re-validate
+uv run python scripts/reindex_keyword.py
+uv run python scripts/rebuild_index.py
+uv run python scripts/validate_all.py
+
+# serve loopback UI/API
+uv run python -m app.backend
+# decide review items at /ui/reviews, then apply. Apply refreshes wiki/index.md + the keyword index
+# itself when it changed anything; re-run reindex_keyword.py only if it warns keyword_reindex_failed
+uv run python scripts/validate_all.py
+```
 
 ## Repository principles
 
