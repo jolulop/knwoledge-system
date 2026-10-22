@@ -323,6 +323,22 @@ filtered out (`-path:Claims`) and **Sources**/**Items** are color-coded, so the 
 readable ~120-node knowledge map instead of all ~460 pages. To see a page's claims, open it and use
 **"Open local graph"** (command palette) rather than un-filtering the global view.
 
+Install Front Matter Title (by Snezhig). Your UAT Guide covers it under §11, "Readable titles". Obsidian's graph labels nodes by filename, and page files are deliberately named by id (src_…, itm_…). The plugin swaps in each page's frontmatter title: instead.
+
+1. Settings → Community plugins → turn off Restricted mode → Browse → search Front Matter Title → Install → Enable.
+2. In the plugin's settings, leave the field as title, which is the default. Turn on the Graph toggle; it's off by default, while File Explorer is on by default.
+3. Close and reopen the graph view so the labels refresh.
+
+What the labels will look like: a Source page's title: is the original filename without its extension, with hyphens and underscores turned into spaces. For example:
+- File: the-seven-operating-truths-of-ai-native-companies-june-2026.pdf
+- Graph label: the seven operating truths of ai native companies june 2026
+
+Item nodes show their item names the same way.
+
+If you want the exact filename including .pdf, it's only in relative_raw_path:, with the raw/inbox/ folder in front. You could point the plugin at that field instead, but then every node label carries the folder prefix, and Item pages (which don't have that field) fall back to their ids. Stick with title.
+
+The plugin is installed per vault and its files aren't in the repo, so you'll repeat this in each new UAT clone. That's by design.
+
 ### Readable titles (optional community plugin)
 
 Page **filenames stay id-keyed by design** (ADR-0060: `itm_…`, `clm_…`, `src_…`), so Obsidian's file

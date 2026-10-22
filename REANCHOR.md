@@ -1,6 +1,6 @@
 # REANCHOR — session status
 
-_Last updated: 2026-09-08. **Reanchor command:** "read REANCHOR.md and reanchor". Read this
+_Last updated: 2026-10-23. **Reanchor command:** "read REANCHOR.md and reanchor". Read this
 first after an app restart, then `wiki/index.md` if working in the vault._
 
 > [!warning] This is a periodically-refreshed snapshot and can lag the live state. The authoritative
@@ -17,11 +17,11 @@ critical rules and `CONTEXT.md` for the glossary.
 
 ## Where we are
 
-- **Branch:** `main` — local `HEAD` and `origin/main` both resolve to `fba145a`
-  (`docs: refresh REANCHOR post-ADR-0063 (W3 local-model-first)`). Current working tree has
-  documentation edits in progress plus pre-existing local runtime/UI state (`wiki/.obsidian/graph.json`)
-  and an untracked `knowledge-system.7z` archive; neither is part of the documentation refresh unless
-  explicitly touched. Run `git status --short` for the live working set.
+- **Branch:** `main` — pushed tip `302d067` (test-isolation fix) on top of `f129b16` (docs
+  reconciliation); this REANCHOR refresh + the user's UAT-Guide Front Matter Title note follow it.
+  The only standing local change is `wiki/.obsidian/graph.json` (Obsidian dropped its trailing
+  newline — runtime UI state, not committed). Run `git status --short` /
+  `git log --oneline origin/main..HEAD` for the live working set.
   The per-slice rhythm: grill (design-lock, docs-only) → implement (on "implement now") → test →
   external review (user pastes) → analyze+recommend+**wait** → fix → commit (user says so) → push.
 - **PHASES 1–7 COMPLETE + pushed** (intake · extract/normalize · deterministic wiki · LLM semantic
@@ -156,7 +156,37 @@ critical rules and `CONTEXT.md` for the glossary.
   member's provider (fail-fast on unknown even if an earlier is available) and lives **inside** each
   worker's try/finally so a malformed chain marks the job failed, not orphaned "running". **No
   `*_PROMPT_VERSION` bumps** (routing/config only). Operator guide: **`docs/Local Models.md`**
-  (`250b4ae`, docs-only, the one unpushed commit). Extends ADR-0025 + ADR-0027.
+  (`250b4ae`, docs-only). Extends ADR-0025 + ADR-0027. **Local-model UAT PASSED 2026-09-07**
+  (Ollama `qwen3.6:27b` on the light tier: local `model_ref` recorded, sticky-freshness skips, the
+  configured-but-unreachable no-fallback case, and recovery all behaved as designed).
+- **Docs reconciliation + external review (2026-10-22, `f129b16`, pushed):** a 24-file drift refresh
+  rewrote retired Concept/Entity/Phase-N wording to the ADR-0059 item era (README, CLAUDE/AGENTS,
+  CONTEXT, Build Spec, Architecture Overview, Environment Setup, Operations, Phase 1–7 plans,
+  docs/README, UAT Guide; comment-only `.env.example`/`policies/retrieval.yaml`/templates). Review
+  fixes folded in: documented workflows now run `reindex_keyword` + `rebuild_index` + `validate_all`
+  **after** `generate_synthesis` (producers rebuild `index.md` but not the keyword index; review apply
+  refreshes both itself, manual reindex only on `keyword_reindex_failed`); Environment Setup §8 warns
+  the copied `.env` selects the GPU embedder loaded at startup (do §14.1 first; lightweight =
+  `EMBEDDING_PROVIDER=local_http` + empty `EMBEDDING_BASE_URL`); Build Spec marks Tag pages as
+  planned-only (tags live on Source pages; no query backlinks), §12.2 retention as
+  propose→approve→apply, §7 as historical, §10 hook trigger matching the real hook.
+- **Test isolation (2026-10-22, `302d067`, pushed):** the ADR-0063 tier-default tests in
+  `test_operational_refs.py` read the operator's live `.env` (a local-first chain made one fail); they
+  now use a `tmp_path` root. (`test_eval_retrieval.py` ×4 + `test_api.py:1278` still call
+  `get_settings(ROOT/None)` — latent, untouched.)
+- **UAT round 4 (2026-10-22/23, fresh `/tmp/ks-uat` clone at `302d067`, IN PROGRESS):** 5 PDFs → 114
+  items (all promotions approved), 339 claims. **Finding — item fragmentation:** only 4 items are
+  shared across sources (agentic-ai ×3; large-language-models, cursor, mckinsey-company ×2). No
+  case-only duplicates exist (ids lowercase-normalize); the bloat is synonyms/near-synonyms +
+  peripheral items (~23/source). Causes: item identity = exact normalized name; per-source extraction
+  never sees existing item names; aliases are never used for matching (e.g. alias `agentic AI` lives
+  on a separate `ai-agents-and-multi-agent-systems`; McKinsey ↔ McKinsey & Company); and **nothing
+  files `merge_items` / `mark_semantic_duplicate`** — the executors exist but no producer, UI, or API
+  creates them. A false model alias (Theory of Mind in AI → "agent phenomenology") shows alias matches
+  must be review-gated. Also: `agentic-ai` typed `model_family_architecture` (dubious). Obsidian
+  notes: launch with `--no-sandbox --disable-gpu` (the GPU process fails under WSLg); Front Matter
+  Title 4.2.1 ships with **all** features off — enable Graph + File Explorer (+ other display-only
+  ones), keep Alias/Note Link off (they write to notes).
 - **Tests/lint green:** `1337 passed, 2 skipped` (opt-in `gpu`/`model` marks), ruff clean, all 11
   validators pass. Newest test files: `tests/test_prompt_encoding.py` (ADR-0061), `tests/
   test_item_type_faceting.py` (ADR-0062); ADR-0063 coverage spread across `tests/test_llm.py`
@@ -173,8 +203,8 @@ critical rules and `CONTEXT.md` for the glossary.
 - **Display aliases (ADR-0060):** links render human-readable labels via `[[id|label]]` and pages
   carry `title:`/`aliases:` frontmatter; page **filenames remain id-keyed**, and the file
   explorer/tabs/graph therefore show ids — that is by design, not a bug.
-- **Obsidian is installed in WSL** (apt `.deb`, WSLg). Launch `obsidian --no-sandbox &` (add
-  `--disable-gpu` if it won't start). Use the WSL Obsidian, not Windows-over-`\\wsl$`.
+- **Obsidian is installed in WSL** (apt `.deb`, WSLg). Launch `obsidian --no-sandbox --disable-gpu &`
+  (without `--disable-gpu` the Chromium GPU process fails under WSLg and no window appears). Use the WSL Obsidian, not Windows-over-`\\wsl$`.
 - `wiki/` is **regenerated by the pipeline** — Obsidian is a viewer; manual edits are overwritten.
 - The **Human Review UI** is at `/ui/reviews` (loopback only); the high-volume **per-source flow**
   at `/ui/reviews/sources` (batch decide, approve-with-amendments incl. `item_type`, human-add,
@@ -196,7 +226,9 @@ critical rules and `CONTEXT.md` for the glossary.
 | **ADR-0061 untrusted-source prompt encoding** | **Complete + pushed** (`e751631` design-lock · `b6f55ad` impl · `64d39f7` doc reconciliation) |
 | **ADR-0062 item_type retrieval faceting** | **Complete + pushed** (`3cfb398` design-lock · `1b89241` impl · `a16596e` review round 1); nav-index `INDEX_VERSION` 1→2 |
 | **Post-0059 drift-reconciliation** (skills/hooks/.gitignore/templates → Items taxonomy) | **Complete + pushed** (`b74bd37`) |
-| **ADR-0063 W3 local-model-first / tier fallback routing** | **Complete + pushed** (`122b6c7` design-lock · `5d3e42a`+`beb2103` slices · `17ba269`+`d0b3f8f` review rounds 1–2); `docs/Local Models.md` `250b4ae` **unpushed** |
+| **ADR-0063 W3 local-model-first / tier fallback routing** | **Complete + pushed** (`122b6c7` design-lock · `5d3e42a`+`beb2103` slices · `17ba269`+`d0b3f8f` review rounds 1–2 · `250b4ae` Local Models guide); local-model UAT **passed** 2026-09-07 |
+| **Docs reconciliation (item era) + review fixes · test isolation** | **Complete + pushed** (`f129b16` · `302d067`) |
+| **UAT round 4** (fresh clone, 5 PDFs) | **In progress** — item-fragmentation finding → proposed item-consolidation slice |
 
 ## Next step
 
@@ -212,7 +244,16 @@ critical rules and `CONTEXT.md` for the glossary.
 - **To run enrichment/query on a LOCAL model** (Ollama/vLLM/LM Studio): see `docs/Local Models.md`
   — set `ENRICH_LOCAL_BASE_URL` + add `local:<model>` to a tier chain (start with
   `ENRICH_MODEL_LIGHT`). No-cost resolve-check snippet in that doc.
-- **Next queue (user picks, each starts with a `grill-phase`):** F4 reference-chunk down-ranking
+- **PROPOSED NEXT SLICE — item consolidation** (from UAT round 4; user interested, awaiting the go
+  for a `grill-phase`; each part needs its own ADR since it touches ADR-0059 identity/extraction):
+  **Part A (no prompt change, fixes the existing vault):** a deterministic near-duplicate /
+  alias↔title cross-match lint that files `merge_items` / `mark_semantic_duplicate` review items, plus
+  a UI/API action to file a merge by hand. **Part B (prompt work, eval-measured on the UAT corpus):**
+  existing-item vocabulary in the extraction prompt (capped; `*_PROMPT_VERSION` bump), naming
+  normalization rules, and a salience threshold (central items only). Optional: alias-aware matching
+  at extraction → review item (never auto-merge). Rejected: fuzzier id normalization (catches ~none of
+  the observed cases, changes id semantics). Available today: stricter promotion review.
+- **Other queue (user picks, each starts with a `grill-phase`):** F4 reference-chunk down-ranking
   (eval-gated per ADR-0038), HF weight-download/offline policy (own knob, **not**
   `EMBEDDING_ALLOW_CLOUD`), dead-surface cleanup (illustrative templates incl. `templates/item.md`
   note, empty `app/frontend/`, compose `qdrant`). Plus **3 filed follow-ups** (non-blocking):
