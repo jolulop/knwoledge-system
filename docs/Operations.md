@@ -98,6 +98,25 @@ stay parked) — you still review and submit; untouched rows always stay pending
 A human-added candidate rebuilds `wiki/index.md` immediately; its **keyword** rows follow the next
 reindex pass (`/jobs/reindex` or the apply chain) like every other producer's output.
 
+**Item consolidation (ADR-0064).** `/jobs/lint` files `merge_items` proposals for **merge candidates**
+— two *active* items whose title/alias merge keys intersect (case, whitespace, punctuation, `&`/`and`
+and a last-word plural folded). Matches are starred around one survivor (most live support wins) and
+only items that directly match the survivor are filed — a transitively-linked item is proposed on a
+later run, after the first merge's alias union. Finding `merge_candidate` (low; `data.remediation:
+decide_merge`); a match with a *candidate* side is `merge_candidate_unpromoted` (not filed); a key on
+more than 5 active items (`policies/review.yaml` `merge_candidates.max_items_per_key`) is
+`merge_key_too_common` and pairs nothing. A rejection is remembered for the pair in **both**
+directions, so reject false aliases freely. To merge something lint didn't detect, use the **Merge
+items** form on `/ui/reviews`: it shows a preview (what moves, aliases after, any conflicting
+proposals to be withdrawn) and writes nothing until you **Confirm** — confirming files the merge
+pre-approved (the filing is your approval). `POST /reviews/merge` `{"survivor": …, "absorbed": …}`
+(each an `itm_` id or Items slug) is the single-step script route. A rejected merge of the pair, in
+either direction, blocks — to flip the survivor, reopen the rejection first, then file the other
+direction. Conflicting merges (same absorbed item, or a chain) are never approved together: an
+approved one blocks the filing/approval (409), pending ones are withdrawn. The merge itself still
+happens only at apply, after the dry-run. Decide merges **before** deprecations of the same item: an
+applied deprecation leaves the absorbed item non-active and the merge then skips it.
+
 ## Lint quality heuristics — remediation codes (ADR-0037, ADR-0059)
 
 `/jobs/lint` also reports **report-only** quality findings (deterministic, key-free; they never file

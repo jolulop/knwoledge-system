@@ -105,6 +105,17 @@ def render_queue(data: dict[str, Any], *, status: str) -> str:
                 f"<td>{_h(it.get('type'))}</td><td>{_h(it.get('status'))}</td>"
                 f"<td>{_h(it.get('priority'))}</td><td>{_h(it.get('created_at'))}</td></tr>")
         parts.append("<table>" + "".join(rows) + "</table>")
+    parts.append(
+        "<h2>Merge items</h2>"
+        "<p>Merge one knowledge item into another: the absorbed item becomes a tombstone "
+        "redirecting to the survivor and its edges move over — at apply, after the dry-run. Enter "
+        "an <code>itm_</code> id or an Items slug for each side. You'll see what the merge does "
+        "before confirming; confirming files it <strong>pre-approved</strong> (the filing is your "
+        "approval). A rejected merge of the pair blocks (reopen it explicitly).</p>"
+        "<form method='get' action='/ui/reviews/merge/preview'>"
+        "<p><label>Survivor: <input type='text' name='survivor' size='30' required></label> "
+        "<label>Absorbed: <input type='text' name='absorbed' size='30' required></label></p>"
+        "<button type='submit'>Preview merge</button></form>")
     return _page(f"Reviews — {status}", "".join(parts))
 
 
@@ -580,6 +591,47 @@ def render_source_decide_result(source_id: str, results: list[dict[str, Any]]) -
 
 
 # --- error -----------------------------------------------------------------
+
+
+_MERGE_OUTCOME_TEXT = {
+    "filed": "A new <code>merge_items</code> item will be filed <strong>approved</strong> by you.",
+    "approved_existing": "An existing pending proposal for this exact merge will be "
+                         "<strong>approved</strong> in place.",
+}
+
+
+def render_merge_confirm(plan: dict[str, Any], ctx: dict[str, Any]) -> str:
+    """Step 1 of the human-filed merge (ADR-0064 review round): what the merge WOULD do — nothing has
+    been written yet. Confirm POSTs the same survivor/absorbed to /ui/reviews/merge."""
+    sv, ab = ctx["survivor"], ctx["absorbed"]
+    parts = [_nav(), "<h1>Confirm merge</h1>"]
+    if plan["outcome"] == "already_approved":
+        rid = _h(plan["review_id"])
+        parts.append(f"<p>This merge is already approved: <a href='/ui/reviews/{rid}'>{rid}</a>. "
+                     "Nothing to file — it takes effect at the next apply.</p>")
+        return _page("Confirm merge", "".join(parts))
+    rows = "".join(
+        f"<tr><th>{label}</th><td>{_h(n['title'])} <code>{_h(n['slug'])}</code> "
+        f"<code>{_h(n['node_id'])}</code></td><td>{_h(len(n['sources']))} source(s)</td></tr>"
+        for label, n in (("Survivor (stays active)", sv), ("Absorbed (becomes a tombstone)", ab)))
+    parts.append(f"<table>{rows}</table>")
+    parts.append(
+        f"<p>At apply: <strong>{_h(ctx['absorbed_active_edges'])}</strong> active edge(s) on the "
+        "absorbed item re-point to the survivor; its unresolved review items are withdrawn; the "
+        "merge is <strong>forward-only</strong> (auditable, not live-reversible).</p>")
+    parts.append("<p>Survivor aliases after the merge:</p>" + _render_value(ctx["aliases_after"]))
+    parts.append(f"<p>{_MERGE_OUTCOME_TEXT[plan['outcome']]}</p>")
+    if plan["withdraw"]:
+        links = ", ".join(f"<a href='/ui/reviews/{_h(w)}'>{_h(w)}</a>" for w in plan["withdraw"])
+        parts.append(f"<p class='banner'>Conflicting pending merge proposal(s) will be withdrawn "
+                     f"(audited, <code>superseded_by_human_merge</code>): {links}</p>")
+    parts.append(
+        "<form method='post' action='/ui/reviews/merge'>"
+        f"<input type='hidden' name='survivor' value='{_h(sv['node_id'])}'>"
+        f"<input type='hidden' name='absorbed' value='{_h(ab['node_id'])}'>"
+        "<button type='submit'>Confirm and approve merge</button> "
+        "<a href='/ui/reviews'>Cancel</a></form>")
+    return _page("Confirm merge", "".join(parts))
 
 
 def render_error(status_code: int, message: str) -> str:

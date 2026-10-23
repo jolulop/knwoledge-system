@@ -16,7 +16,9 @@ Finding classes:
 - **Governance (→ review items):** a catalogued **raw file gone missing** → `missing_raw_source`
   (record-only, high severity); an **under-supported active item** (<2 distinct mentioning sources)
   → `deprecate_wiki_page` proposal. An **uncited active claim** is reported (a backstop; the claim worker
-  already tombstones evidence-less claims).
+  already tombstones evidence-less claims). A **merge candidate** (two active items whose title/alias
+  merge keys intersect) → `merge_items` proposal (ADR-0064, star around one survivor; a match with a
+  candidate side is report-only `merge_candidate_unpromoted`).
 
 Idempotent: review items key on `(type, subject={source_id|node_id})`, so re-running files no duplicates.
 """
@@ -34,8 +36,9 @@ from typing import Any
 from app.backend import db, graph, search, taxonomy
 from app.backend.manifests import get_provenance, is_source_id, iso_now, valid_manifests
 from app.backend.paths import safe_child, safe_under
+from app.backend.policy import load_yaml
 from app.llm.client import ConfigError, parse_chain
-from app.workers import citations, enrichment_artifact, labels, reviews, synthesis
+from app.workers import citations, enrichment_artifact, labels, merge_candidates, reviews, synthesis
 from app.workers.enrichment_artifact import artifact_fingerprint
 from app.workers.wiki_render import NODE_DIR, display_link_label, parse_frontmatter
 
@@ -188,6 +191,69 @@ def _check_graph(gconn, wiki_dir: Path, reviews_dir: Path, *, file_items: bool, 
         if claim["status"] == "active" and not graph.sources_for_claim(gconn, claim["node_id"]):
             findings.append({"check": "uncited_claim", "severity": "medium",
                              "subject": claim["node_id"], "detail": "active claim with no active source"})
+    return findings
+
+
+def _merge_key_budget(policy_path: Path) -> int:
+    """`merge_candidates.max_items_per_key` from policies/review.yaml (ADR-0064 review round); the
+    code default when the file/key is absent or not an integer ≥ 2."""
+    try:
+        policy = load_yaml(policy_path.read_text(encoding="utf-8")) if policy_path.exists() else {}
+    except (OSError, ValueError):
+        policy = {}
+    section = policy.get("merge_candidates") if isinstance(policy, dict) else None
+    value = section.get("max_items_per_key") if isinstance(section, dict) else None
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 2:
+        return value
+    return merge_candidates.DEFAULT_MAX_ITEMS_PER_KEY
+
+
+def _check_merge_candidates(gconn, wiki_dir: Path, reviews_dir: Path, *, policy_path: Path,
+                            file_items: bool, now: str, filed: list[str],
+                            existing: list[str]) -> list[dict[str, Any]]:
+    """Merge candidates (ADR-0064) → `merge_items` proposals; severity low (never `failing`).
+
+    New star proposals are filed; still-unresolved machine proposals are re-reported as findings and
+    counted as existing (the in-flight freeze keeps them out of the recomputation)."""
+    found = merge_candidates.find_merge_candidates(
+        gconn, wiki_dir=wiki_dir, reviews_dir=reviews_dir,
+        max_items_per_key=_merge_key_budget(policy_path))
+    findings: list[dict[str, Any]] = []
+    for prop in found["proposals"]:
+        subj = prop["subject"]
+        findings.append({
+            "check": "merge_candidate", "severity": "low", "subject": subj["absorbed_node_id"],
+            "detail": f"merge into {subj['survivor_node_id']} "
+                      f"(keys: {', '.join(prop['proposal']['matched_keys'])})",
+            "data": {**subj, "matched_keys": prop["proposal"]["matched_keys"],
+                     "remediation": "decide_merge"}})
+        if file_items:
+            _file_review(reviews_dir, review_type="merge_items", subject=subj,
+                         proposal=prop["proposal"], context=prop["context"], priority="low",
+                         now=now, filed=filed, existing=existing)
+    for item in found["pending"]:
+        subj = item["subject"]
+        findings.append({
+            "check": "merge_candidate", "severity": "low", "subject": subj.get("absorbed_node_id"),
+            "detail": f"merge into {subj.get('survivor_node_id')} (pending review)",
+            "data": {"survivor_node_id": subj.get("survivor_node_id"),
+                     "absorbed_node_id": subj.get("absorbed_node_id"),
+                     "review_id": item.get("review_id"), "remediation": "decide_merge"}})
+        if file_items and item.get("review_id"):
+            existing.append(item["review_id"])
+    for common in found["too_common"]:
+        findings.append({
+            "check": "merge_key_too_common", "severity": "low", "subject": None,
+            "detail": f"merge key {common['key']!r} is carried by {common['active_items']} active "
+                      "items — too generic to signal identity; ignored for merge proposals",
+            "data": dict(common)})
+    for match in found["unpromoted"]:
+        findings.append({
+            "check": "merge_candidate_unpromoted", "severity": "low",
+            "subject": match["node_ids"][0],
+            "detail": f"matches {match['node_ids'][1]} but a side is a candidate "
+                      f"(keys: {', '.join(match['matched_keys'])}); not filed",
+            "data": {"node_ids": match["node_ids"], "matched_keys": match["matched_keys"]}})
     return findings
 
 
@@ -574,6 +640,10 @@ def run_lint(
             try:
                 findings += _check_graph(
                     gconn, wiki_dir, reviews_dir, file_items=file_review_items, now=now,
+                    filed=filed, existing=existing)
+                findings += _check_merge_candidates(  # graph-gated (ADR-0064)
+                    gconn, wiki_dir, reviews_dir, policy_path=root / "policies" / "review.yaml",
+                    file_items=file_review_items, now=now,
                     filed=filed, existing=existing)
                 stale_findings, stale_degraded = _check_stale_claims(  # graph-gated (ADR-0037)
                     gconn, enrichment_dir, markdown_dir)

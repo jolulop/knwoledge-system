@@ -12,15 +12,16 @@ first after an app restart, then `wiki/index.md` if working in the vault._
 
 Local-first **LLM Wiki** knowledge-system. Immutable `raw/` → derived `normalized/` →
 generated `wiki/` (gitignored, regenerable) → `db/` SQLite (graph, jobs, llm_cache) →
-`reviews/`, `policies/`. ADR-driven (`docs/adr/0001–0063`). See `CLAUDE.md` for the
+`reviews/`, `policies/`. ADR-driven (`docs/adr/0001–0064`). See `CLAUDE.md` for the
 critical rules and `CONTEXT.md` for the glossary.
 
 ## Where we are
 
 - **Branch:** `main` — pushed tip `302d067` (test-isolation fix) on top of `f129b16` (docs
-  reconciliation); this REANCHOR refresh + the user's UAT-Guide Front Matter Title note follow it.
-  The only standing local change is `wiki/.obsidian/graph.json` (Obsidian dropped its trailing
-  newline — runtime UI state, not committed). Run `git status --short` /
+  reconciliation); `84e8868` (REANCHOR + UAT-Guide Front Matter Title note) is committed locally,
+  not pushed. **ADR-0064 (item consolidation Part A) is implemented + review round 1 applied but
+  UNCOMMITTED** in the working tree (see the bullet below). `wiki/.obsidian/graph.json` (Obsidian
+  dropped its trailing newline — runtime UI state) is never committed. Run `git status --short` /
   `git log --oneline origin/main..HEAD` for the live working set.
   The per-slice rhythm: grill (design-lock, docs-only) → implement (on "implement now") → test →
   external review (user pastes) → analyze+recommend+**wait** → fix → commit (user says so) → push.
@@ -187,8 +188,20 @@ critical rules and `CONTEXT.md` for the glossary.
   notes: launch with `--no-sandbox --disable-gpu` (the GPU process fails under WSLg); Front Matter
   Title 4.2.1 ships with **all** features off — enable Graph + File Explorer (+ other display-only
   ones), keep Alias/Note Link off (they write to notes).
-- **Tests/lint green:** `1337 passed, 2 skipped` (opt-in `gpu`/`model` marks), ruff clean, all 11
-  validators pass. Newest test files: `tests/test_prompt_encoding.py` (ADR-0061), `tests/
+- **ADR-0064 — item consolidation Part A (2026-10-23, implemented, uncommitted):** `/jobs/lint`
+  `merge_candidate` check (`app/workers/merge_candidates.py`) files `merge_items` for active item
+  pairs whose title/alias merge keys intersect (NFKC + case/space + punctuation + `&`/`and` +
+  last-word plural fold); star around the most-supported survivor, direct matches only; pair-keyed
+  rejection memory; in-flight freeze; key budget `policies/review.yaml`
+  `merge_candidates.max_items_per_key` (5). Human-filed merge (`app/workers/human_merge.py`):
+  `/ui/reviews` form → write-free `GET /ui/reviews/merge/preview` → Confirm `POST /ui/reviews/merge`
+  (pre-approved); `POST /reviews/merge` single-step. Pair-level rejection, merge-conflict rule
+  (shared absorbed / chain) enforced at filing + approve (409) + executor
+  (`absorbed_merged_elsewhere`). Read-only check on the UAT r4 vault: 5 proposals (3 known pairs +
+  2 shared-alias pairs).
+- **Tests/lint green:** `1387 passed, 2 skipped` (opt-in `gpu`/`model` marks; includes the
+  uncommitted ADR-0064 suites `tests/test_merge_candidates.py` + `tests/test_human_merge.py`), ruff
+  clean, all 11 validators pass. Older test files: `tests/test_prompt_encoding.py` (ADR-0061), `tests/
   test_item_type_faceting.py` (ADR-0062); ADR-0063 coverage spread across `tests/test_llm.py`
   (chain parse/resolve/fail-fast/validate_tiers), `test_enrich.py` (sticky flip + unreachable
   local), `test_lint.py`/`test_synthesis.py` (chain-aware rot, rejected-across-flip, malformed-chain
@@ -228,7 +241,8 @@ critical rules and `CONTEXT.md` for the glossary.
 | **Post-0059 drift-reconciliation** (skills/hooks/.gitignore/templates → Items taxonomy) | **Complete + pushed** (`b74bd37`) |
 | **ADR-0063 W3 local-model-first / tier fallback routing** | **Complete + pushed** (`122b6c7` design-lock · `5d3e42a`+`beb2103` slices · `17ba269`+`d0b3f8f` review rounds 1–2 · `250b4ae` Local Models guide); local-model UAT **passed** 2026-09-07 |
 | **Docs reconciliation (item era) + review fixes · test isolation** | **Complete + pushed** (`f129b16` · `302d067`) |
-| **UAT round 4** (fresh clone, 5 PDFs) | **In progress** — item-fragmentation finding → proposed item-consolidation slice |
+| **UAT round 4** (fresh clone, 5 PDFs) | **In progress** — item-fragmentation finding → item-consolidation slice |
+| **ADR-0064 item consolidation Part A** (merge-candidate lint + human-filed merge) | **Implemented + review round 1 applied, uncommitted** |
 
 ## Next step
 
@@ -244,15 +258,14 @@ critical rules and `CONTEXT.md` for the glossary.
 - **To run enrichment/query on a LOCAL model** (Ollama/vLLM/LM Studio): see `docs/Local Models.md`
   — set `ENRICH_LOCAL_BASE_URL` + add `local:<model>` to a tier chain (start with
   `ENRICH_MODEL_LIGHT`). No-cost resolve-check snippet in that doc.
-- **PROPOSED NEXT SLICE — item consolidation** (from UAT round 4; user interested, awaiting the go
-  for a `grill-phase`; each part needs its own ADR since it touches ADR-0059 identity/extraction):
-  **Part A (no prompt change, fixes the existing vault):** a deterministic near-duplicate /
-  alias↔title cross-match lint that files `merge_items` / `mark_semantic_duplicate` review items, plus
-  a UI/API action to file a merge by hand. **Part B (prompt work, eval-measured on the UAT corpus):**
-  existing-item vocabulary in the extraction prompt (capped; `*_PROMPT_VERSION` bump), naming
-  normalization rules, and a salience threshold (central items only). Optional: alias-aware matching
-  at extraction → review item (never auto-merge). Rejected: fuzzier id normalization (catches ~none of
-  the observed cases, changes id semantics). Available today: stricter promotion review.
+- **ITEM CONSOLIDATION — Part A done (ADR-0064, uncommitted); next:** commit Part A (user's call),
+  then UAT it in `/tmp/ks-uat` (`POST /jobs/lint` → reject the Theory-of-Mind pair → rerun files
+  nothing for it → Merge items form preview/confirm → apply dry-run → apply). **Part B (prompt work,
+  eval-measured on the UAT corpus, own ADR + `grill-phase`):** existing-item vocabulary in the
+  extraction prompt (capped; `*_PROMPT_VERSION` bump), naming normalization rules, a salience
+  threshold (central items only), alias-aware candidate routing at extraction → review item (never
+  auto-merge). Deferred by ADR-0064: manual `mark_semantic_duplicate` filing, token-containment /
+  embedding signals (eval-gated), merging candidates. Rejected: fuzzier id normalization.
 - **Other queue (user picks, each starts with a `grill-phase`):** F4 reference-chunk down-ranking
   (eval-gated per ADR-0038), HF weight-download/offline policy (own knob, **not**
   `EMBEDDING_ALLOW_CLOUD`), dead-surface cleanup (illustrative templates incl. `templates/item.md`
@@ -325,7 +338,10 @@ evidence chunks via the active-only source→item bridge, `item_type_boost` hard
 `provider:model_id` chain resolved once per run to the first available member, availability-only;
 tier-1 local-first recipe, standard/heavy/query hosted-first; sticky-to-chain artifact freshness;
 no intra-chain failover; resolve inside the worker try; extends 0025 + 0027; operator guide
-`docs/Local Models.md`)** — full glossary entries in `CONTEXT.md` (historical superseded entries
+`docs/Local Models.md`)**, **0064 (item consolidation Part A: `/jobs/lint` `merge_candidate` →
+`merge_items` proposals over alias/title merge keys, star + direct-match-only, pair-keyed rejection,
+key budget; human-filed pre-approved merge with a write-free preview; merge-conflict rule at filing,
+approve and executor; amends 0050's re-apply no-op)** — full glossary entries in `CONTEXT.md` (historical superseded entries
 carry supersession notes).
 
 **Path safety:** `app/backend/paths.py` (`safe_under` containment, `safe_child` basename-only) is the

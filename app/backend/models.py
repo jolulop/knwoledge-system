@@ -452,6 +452,21 @@ class ReviewReopenResponse(BaseModel):
     status: str
 
 
+class MergeFileRequest(BaseModel):
+    # POST /reviews/merge body (ADR-0064): each side is an `itm_` id or an Items slug.
+    survivor: str
+    absorbed: str
+
+
+class MergeFileResponse(BaseModel):
+    # POST /reviews/merge — a human-filed, PRE-APPROVED merge_items item (the filing is the
+    # approval). `outcome`: filed | approved_existing | already_approved. `withdrawn` lists
+    # reverse-direction pending items superseded by this filing. Apply stays explicit.
+    review_id: str
+    outcome: str
+    withdrawn: list[str] = []
+
+
 class FailedValidator(BaseModel):
     # One validate_*.py that exited non-zero during POST /reviews/apply (ADR-0035 A6). Tails only —
     # no absolute paths are surfaced (the validators print repo-relative diagnostics).

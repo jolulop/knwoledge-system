@@ -621,6 +621,7 @@ POST   /reviews/{review_id}/approve
 POST   /reviews/{review_id}/reject
 POST   /reviews/{review_id}/defer
 POST   /reviews/{review_id}/reopen
+POST   /reviews/merge
 POST   /reviews/apply
 POST   /reviews/apply/dry-run
 GET    /ui/reviews
@@ -630,6 +631,8 @@ GET    /ui/reviews/sources
 GET    /ui/reviews/sources/{source_id}
 POST   /ui/reviews/sources/{source_id}/decide
 POST   /ui/reviews/sources/{source_id}/add
+GET    /ui/reviews/merge/preview
+POST   /ui/reviews/merge
 GET    /ui/reviews/{review_id}
 POST   /ui/reviews/{review_id}/decide
 POST   /ui/reviews/{review_id}/reopen

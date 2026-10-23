@@ -30,3 +30,5 @@ priorities:
   - low
   - medium
   - high
+merge_candidates:
+  max_items_per_key: 5          # a merge key on more active items than this is too generic to signal identity (ADR-0064)

@@ -305,7 +305,10 @@ tool, and any live un-merge (only auditable in v1).
   `EFFECTED` → reopen blocked (409). Reject = ledger no-op.
 - **Validator invariant:** `validate_graph`/`validate_wiki` fail if an **active** edge has a `merged`
   endpoint, or a `merged` page's `merged_into` doesn't point to an active same-type survivor.
-- **Idempotent + non-clean:** a re-apply of a completed merge is a true no-op (no writes); an applied merge
+- **Idempotent + non-clean:** a re-apply of a completed merge is a true no-op (no writes) — *amended by
+  ADR-0064 review round 1: only when B's tombstone points at THIS survivor; a B already merged into a
+  different survivor is the typed skip `absorbed_merged_elsewhere`, and conflicting merges can no longer
+  both be approved*; an applied merge
   whose reindex failed is `validation_failed` + the `merge_discovery_reindex_not_guaranteed` warning
   (mutation still written).
 - **Dry-run:** shows the edge re-point/collapse/drop deltas + B's tombstone diff + A's re-render + the

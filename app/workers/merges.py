@@ -25,7 +25,7 @@ from typing import Any
 from app.backend import graph, taxonomy
 from app.backend.manifests import iso_now
 from app.workers import items, labels, reviews
-from app.workers.wiki_render import NODE_DIR, render_item_page
+from app.workers.wiki_render import NODE_DIR, parse_frontmatter, render_item_page
 
 # ADR-0059: one item family, one merge type. Same-structural-type by construction (both
 # nodes are `item`); the survivor KEEPS ITS OWN item_type regardless of the absorbed one —
@@ -52,6 +52,48 @@ def _approved_merges(reviews_dir: Path) -> list[dict[str, Any]]:
             continue
         if isinstance(item, dict) and item.get("type") in _MERGE_TYPES and item.get("status") == "approved":
             out.append(item)
+    return out
+
+
+def _merge_pair(item: dict[str, Any]) -> tuple[str, str] | None:
+    subj = item.get("subject") if isinstance(item, dict) else None
+    if not isinstance(subj, dict):
+        return None
+    a, b = subj.get("survivor_node_id"), subj.get("absorbed_node_id")
+    return (a, b) if _is_safe_id(a) and _is_safe_id(b) and a != b else None
+
+
+def merges_conflict(m1: tuple[str, str], m2: tuple[str, str]) -> bool:
+    """ADR-0064 review round: two merges conflict iff they share the ABSORBED node, or one's absorbed
+    node is the other's survivor (a chain). A shared survivor is compatible (a star)."""
+    (a1, b1), (a2, b2) = m1, m2
+    return b1 == b2 or b1 == a2 or a1 == b2
+
+
+def conflicting_merges(gconn, reviews_dir: Path, survivor: str, absorbed: str, *,
+                       exclude_rid: str | None = None) -> dict[str, list[dict[str, Any]]]:
+    """Other `merge_items` items conflicting with `survivor ← absorbed`, split into `unresolved`
+    (pending/deferred, in `pending/`) and `approved_unapplied` (approved, absorbed node not yet
+    `merged`). Rejected and effected merges never conflict. `exclude_rid` skips the item itself."""
+    out: dict[str, list[dict[str, Any]]] = {"unresolved": [], "approved_unapplied": []}
+    for state, key in (("pending", "unresolved"), ("approved", "approved_unapplied")):
+        d = Path(reviews_dir) / state
+        for path in sorted(d.glob("*.json")) if d.exists() else []:
+            try:
+                item = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(item, dict) or item.get("type") not in _MERGE_TYPES \
+                    or item.get("review_id") == exclude_rid:
+                continue
+            pair = _merge_pair(item)
+            if pair is None or not merges_conflict((survivor, absorbed), pair):
+                continue
+            if state == "approved":
+                nb = graph.get_node(gconn, pair[1]) if gconn is not None else None
+                if nb is not None and nb["status"] == "merged":
+                    continue                       # effected: history, not a live conflict
+            out[key].append(item)
     return out
 
 
@@ -247,7 +289,14 @@ def apply_merges(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = 
             _skip("out_of_scope")
             continue
         b_page = f"{NODE_DIR[nt]}/{nb['slug']}.md"
-        if nb["status"] == "merged":                     # idempotent: a completed merge is a true no-op
+        if nb["status"] == "merged":
+            # Idempotent: a completed merge INTO THIS survivor is a true no-op; a tombstone pointing
+            # elsewhere means a conflicting merge won — loud typed skip, never silent (ADR-0064).
+            tomb = wiki_dir / b_page
+            merged_into = parse_frontmatter(tomb.read_text(encoding="utf-8", errors="replace")) \
+                .get("merged_into") if tomb.exists() else None
+            if merged_into is not None and merged_into != a:
+                _skip("absorbed_merged_elsewhere")
             continue
         if na["status"] != "active":
             _skip("survivor_not_active")

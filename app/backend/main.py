@@ -36,6 +36,8 @@ from app.backend.models import (
     Job,
     JobsResponse,
     LintResponse,
+    MergeFileRequest,
+    MergeFileResponse,
     NormalizedResponse,
     QueryRequest,
     ReindexResponse,
@@ -63,8 +65,8 @@ from app.llm.adapters import AdapterError
 from app.llm.cache import ResponseCache
 from app.llm.client import ConfigError, ParseError, build_client
 from app.workers import (
-    claims, contradictions, deprecations, duplicates, eval_answers, extract, human_add, intake,
-    lint, merges, promote, query, retention, retypes, reviews, splits, synthesis, wiki,
+    claims, contradictions, deprecations, duplicates, eval_answers, extract, human_add,
+    human_merge, intake, lint, merges, promote, query, retention, retypes, reviews, splits, synthesis, wiki,
 )
 from app.workers import labels
 from app.workers.wiki_render import parse_frontmatter, render_query_page
@@ -516,6 +518,29 @@ def _validate_amendments(decision: str, rtype: str,
     return out or None
 
 
+def _require_no_conflicting_merge(item: dict[str, Any]) -> None:
+    """ADR-0064 review round: never let two approved merges conflict (shared absorbed node, or a
+    chain). Graph-optional: without a graph every approved merge counts as unapplied (conservative)."""
+    subj = item.get("subject") or {}
+    a, b = subj.get("survivor_node_id"), subj.get("absorbed_node_id")
+    if not isinstance(a, str) or not isinstance(b, str):
+        return
+    gconn = _open_graph_safe()
+    try:
+        conflicts = merges.conflicting_merges(gconn, settings.reviews_dir, a, b,
+                                              exclude_rid=item.get("review_id"))
+    finally:
+        if gconn is not None:
+            gconn.close()
+    if conflicts["approved_unapplied"]:
+        other = conflicts["approved_unapplied"][0]
+        raise HTTPException(
+            status_code=409,
+            detail=(f"conflicting merge already approved: {other.get('review_id')} "
+                    f"({other.get('subject')}) — apply or reopen it first (ADR-0045); two "
+                    "conflicting merges are never approved together"))
+
+
 def _record_decision(
     review_id: str, decision: str, body: ReviewDecisionRequest | None
 ) -> dict[str, Any]:
@@ -555,6 +580,8 @@ def _record_decision(
     else:
         if winner is not None:
             _require_active_claims(item)  # 409 if either Claim page is missing / not active
+        if decision == "approved" and rtype == "merge_items":
+            _require_no_conflicting_merge(item)  # 409 on an approved-unapplied conflict (ADR-0064)
         recorded = reviews.resolve_review_item(
             settings.reviews_dir, review_id, decision=decision, decided_by="human", note=note,
             winner=winner, amendments=amendments if decision == "approved" else None)
@@ -626,6 +653,49 @@ def _reopen_decision(review_id: str, reason: str) -> dict[str, Any]:
 def reopen_review(review_id: str, body: ReviewReopenRequest) -> dict[str, Any]:
     """Reopen a not-yet-applied terminal decision back to pending to be re-decided (ADR-0045)."""
     return _reopen_decision(review_id, body.reason)
+
+
+def _file_human_merge(survivor: str, absorbed: str) -> dict[str, Any]:
+    """Shared body of the JSON + form merge filing (ADR-0064). Raises HTTPException on a block:
+    400 bad ref, 404 unknown item, 409 governance/lifecycle conflict, 503 graph unavailable."""
+    gconn = _open_graph_safe()
+    if gconn is None:
+        raise HTTPException(status_code=503, detail="graph unavailable — filing a merge needs the graph")
+    try:
+        result = human_merge.file_merge(gconn, survivor=survivor, absorbed=absorbed,
+                                        reviews_dir=settings.reviews_dir)
+    finally:
+        gconn.close()
+    if result["outcome"] == "blocked":
+        raise _merge_block_error(result)
+    return result
+
+
+def _merge_block_error(result: dict[str, Any]) -> HTTPException:
+    """Map a blocked human-merge plan to its HTTP error (shared by filing + the UI preview)."""
+    reason = result["reason"]
+    if reason == "merge_previously_rejected":
+        which = "the reverse merge" if result.get("reversed") else "this merge"
+        detail = (f"{which} was rejected by {result.get('decided_by')} at "
+                  f"{result.get('decided_at')} (review {result.get('review_id')}). A rejection is a "
+                  "human governance record covering the pair — reopen it explicitly from the item "
+                  "detail (ADR-0045) if you've changed your mind; it is never silently bypassed.")
+    elif reason == "conflicting_merge_approved":
+        detail = (f"a conflicting merge is already approved (review {result.get('review_id')}: "
+                  f"{result.get('conflicting_subject')}) — apply or reopen it first (ADR-0045); "
+                  "two conflicting merges are never approved together.")
+    else:
+        detail = f"merge blocked: {reason}"
+        if result.get("side"):
+            detail += f" ({result['side']}: {result.get('ref')!r})"
+    status = 400 if reason == "invalid_ref" else 404 if reason == "unknown_item" else 409
+    return HTTPException(status_code=status, detail=detail)
+
+
+@app.post("/reviews/merge", response_model=MergeFileResponse)
+def file_merge(body: MergeFileRequest) -> dict[str, Any]:
+    """File a human merge, pre-approved (ADR-0064): the filing IS the approval; apply stays explicit."""
+    return _file_human_merge(body.survivor, body.absorbed)
 
 
 # Review types POST /reviews/apply has a deterministic executor for (ADR-0035 A4/A5). Any other
@@ -1453,6 +1523,39 @@ def ui_review_source_add(
         return HTMLResponse(
             review_html.render_error(status, f"add blocked: {reason}"), status_code=status)
     return RedirectResponse(f"/ui/reviews/sources/{source_id}", status_code=303)
+
+
+@app.get("/ui/reviews/merge/preview", response_class=HTMLResponse)
+def ui_merge_preview(survivor: str = "", absorbed: str = "") -> HTMLResponse:
+    """Human-filed merge step 1 (ADR-0064 review round): render what the merge would do — routing
+    (approve-in-place / withdrawals / block) + blast radius — WITHOUT writing anything."""
+    gconn = _open_graph_safe()
+    if gconn is None:
+        return _html_error(HTTPException(
+            status_code=503, detail="graph unavailable — filing a merge needs the graph"))
+    try:
+        plan = human_merge.plan_merge(gconn, survivor=survivor, absorbed=absorbed,
+                                      reviews_dir=settings.reviews_dir)
+        if plan["outcome"] == "blocked":
+            return _html_error(_merge_block_error(plan))
+        ctx = human_merge.preview_context(gconn, plan, wiki_dir=settings.wiki_dir)
+    finally:
+        gconn.close()
+    return HTMLResponse(review_html.render_merge_confirm(plan, ctx))
+
+
+@app.post("/ui/reviews/merge", response_model=None)
+def ui_file_merge(
+    survivor: str = Form(""), absorbed: str = Form(""),
+) -> HTMLResponse | RedirectResponse:
+    """Human-filed merge step 2 — the confirm form on /ui/reviews/merge/preview (ADR-0064): same
+    worker as POST /reviews/merge (re-planned at submit, so a stale preview can't bypass a block);
+    redirects to the filed item, whose detail shows the merge preview + reopen."""
+    try:
+        result = _file_human_merge(survivor, absorbed)
+    except HTTPException as exc:
+        return _html_error(exc)
+    return RedirectResponse(f"/ui/reviews/{result['review_id']}", status_code=303)
 
 
 @app.get("/ui/reviews/{review_id}", response_class=HTMLResponse)
