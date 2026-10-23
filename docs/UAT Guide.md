@@ -190,6 +190,20 @@ uv run python scripts/rebuild_index.py
 uv run python scripts/validate_all.py
 ```
 
+> [!note] Contradictions and synthesis report 0 on a fresh vault
+> `detect_contradictions` and `generate_synthesis` consider only **active** items, and `promote`
+> auto-promotes nothing until manifests carry provenance (ADR-0018) — so on a fresh vault they report
+> `Candidate pairs: 0` / `Eligible topics: 0`. That is expected. After the promotions are approved and
+> applied in §9, re-run them:
+>
+> ```bash
+> uv run python scripts/detect_contradictions.py
+> uv run python scripts/generate_synthesis.py
+> uv run python scripts/reindex_keyword.py
+> uv run python scripts/rebuild_index.py
+> uv run python scripts/validate_all.py
+> ```
+
 Acceptance checks:
 
 ```bash
@@ -307,6 +321,69 @@ curl -fsS "$APP/jobs?limit=20" | python3 -m json.tool
 uv run python scripts/validate_all.py
 ```
 
+### 10.1 Item consolidation — merge proposals + human-filed merge (ADR-0064)
+
+Run this **after** the §9 apply has promoted items: lint proposes merges only between *active* items
+(a pair with a candidate side is reported as `merge_candidate_unpromoted`, never filed).
+
+1. Lint and read the merge findings:
+
+   ```bash
+   curl -fsS -X POST "$APP/jobs/lint" | python3 -c '
+   import json,sys; r=json.load(sys.stdin)
+   print({k:v for k,v in r["by_check"].items() if k.startswith("merge")})
+   for f in r["findings"]:
+       if f["check"].startswith("merge"): print(f["check"], f["subject"], "-", f["detail"])'
+   ```
+
+   Expect `merge_candidate` for alias/title twins (in UAT r4: *Agentic AI* ⟵ *AI Agents and
+   Multi-agent Systems*, *McKinsey & Company* ⟵ *McKinsey*, and the false *Theory of Mind in AI* ↔
+   *Agent Phenomenology*); `merge_key_too_common` only if one alias sits on more than 5 active items.
+
+2. List the filed proposals (each `context` shows the matched keys and which title/alias matched):
+
+   ```bash
+   curl -fsS "$APP/reviews?status=pending&type=merge_items" | python3 -m json.tool
+   ```
+
+3. **Rejection memory.** Reject a false pair, re-run lint, and confirm nothing is filed again for it —
+   in either direction:
+
+   ```bash
+   curl -fsS -X POST "$APP/reviews/<review_id>/reject" \
+     -H 'content-type: application/json' -d '{"note":"UAT: false alias"}' | python3 -m json.tool
+   curl -fsS -X POST "$APP/jobs/lint" | python3 -c '
+   import json,sys; print(json.load(sys.stdin)["review_items_filed"])'
+   ```
+
+   The filed list must not contain a merge for that pair.
+
+4. Approve a real pair from the queue (`/ui/reviews/<review_id>`) **or** file one by hand: at the bottom
+   of `http://127.0.0.1:18000/ui/reviews`, **Merge items** → enter the survivor and absorbed (Items
+   slugs, e.g. `change-management` / `ai-change-management`, or `itm_` ids) → **Preview merge**.
+   - The preview writes nothing (`find reviews -name '*.json' | wc -l` is unchanged): it shows the
+     edges that move, both items' source counts, the survivor's aliases after the merge, and any conflicting
+     pending proposal that confirming would withdraw.
+   - **Confirm and approve merge** files it pre-approved and opens the item.
+   - Previewing the pair you rejected in step 3 (either direction) is **blocked** with a reopen hint.
+   - A second merge absorbing the same item, or chaining through it, is **blocked** while the first is
+     approved.
+
+5. Dry-run, then apply (§9 discipline — the dry-run must list exactly the merges you intend):
+
+   ```bash
+   curl -fsS -X POST "$APP/reviews/apply/dry-run" | python3 -m json.tool
+   curl -fsS -X POST "$APP/reviews/apply" | python3 -m json.tool
+   uv run python scripts/validate_all.py
+   ```
+
+   The absorbed page (`wiki/Items/<absorbed-slug>.md`) is now a tombstone (`status: merged`,
+   `merged_into: <survivor id>`); the survivor lists the absorbed title among its aliases and carries
+   its sources. In Obsidian the graph shows the absorbed item's sources linking to the survivor.
+
+6. Re-run lint: nothing is proposed for the absorbed item. A transitively linked item (one that only
+   matched the absorbed item) may now be proposed against the survivor, with direct evidence.
+
 ## 11. Browse
 
 Use Obsidian if available (`obsidian --no-sandbox &`) and open `/tmp/ks-uat/wiki` as the vault, or:
@@ -421,4 +498,6 @@ nothing, and applies nothing.
 - Review items are decision-only until apply; the dry-run shows the intended scope before apply.
 - Applying approved reviews updates only the governed surfaces and validators still pass.
 - Maintenance jobs complete with reports and never act autonomously on semantic/destructive decisions.
+- Merge proposals are review-only; a rejected pair is never re-proposed in either direction; a
+  human-filed merge shows a write-free preview first and takes effect only through apply.
 - Teardown removes the entire disposable vault; the live vault is untouched.
