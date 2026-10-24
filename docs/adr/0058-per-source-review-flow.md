@@ -1,6 +1,9 @@
 # ADR-0058 — Per-source review flow: sequential source lens, batch decide, approve-with-amendments, human-add
 
-- **Status:** implemented
+- **Status:** implemented. *Decision 2 ("first decision resolves globally") and the human-add
+  terminal-rejected-slot block are superseded for extraction suggestions by
+  [ADR-0066](0066-item-curation-as-tagging.md) (per-document keep/drop; accepted 2026-10-24, not
+  implemented).*
 - **Date:** 2026-07-07
 - **Drivers:** W1 grill — the user's framing requirement: candidate review processed on a
   single-source basis, sources reviewed sequentially, per-source UI showing all candidate items for

@@ -270,6 +270,9 @@ fix intact.
   quoted_person) is a **named deferral** — a source-metadata slice feeding Source pages and the
   independence gate, never item promotion/reviews.
 - The `provider_institution` escape hatch for people is **rejected**.
+- *Extended by [ADR-0066](0066-item-curation-as-tagging.md) decision 6 (2026-10-24): Enrich fills
+  `author`/`publisher`, and kept names get `wiki/Authors/` pages that are not items. People
+  are still never items.*
 
 ### 9. Rollout: clean-repository restart (destructive, backup-gated)
 
@@ -322,7 +325,8 @@ claims → promote → reindex_keyword → reindex_vector → rebuild_index → 
   the taxonomy's retrieval payoff, own slice, eval-gated per ADR-0038 discipline.
 - **`provenance.people[]` roles slice** (decision 8).
 - **Taxonomy evolution governance** — adding/renaming a type = ADR + prompt-version bump +
-  enum/validator/test updates; explicitly not a config knob.
+  enum/validator/test updates; explicitly not a config knob. *(Taken over by
+  [ADR-0065](0065-item-type-management.md), proposed/deferred 2026-10-24.)*
 - **Sentinel-volume lint threshold tuning** (ship as counter first).
 - **Cross-builder untrusted-metadata hardening** (carried from ADR-0056's out-of-scope list and
   explicitly covering the NEW items builder): `Title:` sits outside the untrusted

@@ -1,5 +1,9 @@
 # Single-source candidate nodes are allowed, promoted by recurrence or review
 
+*Superseded for knowledge-item promotion by [ADR-0066](0066-item-curation-as-tagging.md)
+(accepted 2026-10-24, not implemented): a tag is active once one document link to it is kept; the
+independent-source threshold remains a synthesis-eligibility input only.*
+
 A graph node of any **promotable type** — concept, entity, person, organization, or
 project (the entity family is subtyped per ADR-0021) — seen in only one source is neither
 forbidden nor automatically first-class. It is created as a **candidate** (status

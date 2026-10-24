@@ -1,0 +1,90 @@
+# Golden item tags — the user's own tags per document (UAT r6 corpus, supplied 2026-10-24).
+# DRAFT measurement target for item consolidation Part B (fewer, central items). Not yet read by
+# any scorer. Types are ADR-0059 item_type values; types the user marked "NA" are omitted. Tags
+# are verbatim from the user (comma lists split). The same tag under several types (BIRD, APM)
+# is kept as given; how that maps to one item_type per item is an open Part B question.
+#
+# User decisions (2026-10-24): case and singular/plural variants are the same tag; the short form
+# is preferred ("LLM", not "Large Language Model"). provider_institution here means the document's
+# AUTHOR/PUBLISHER (person or organisation) — the user wants that as a browsable, searchable tag.
+#
+# How to score (user, 2026-10-24): this list is the MUST-HAVE floor, not the ceiling. Good
+# extraction will suggest more tags than this, including good ones the user didn't think of. Score
+# recall against this list, and precision against the user's UAT approvals (approved tags = the
+# accepted set). Extra tags the user approves are NOT errors.
+#
+# Scored by ADR-0066 decision 11 (scripts/eval_item_tags.py, not yet written): provider_institution
+# entries are scored against the Enrich author/publisher suggestions, not against items.
+
+documents:
+  - title: "The seven operating truths of AI-native companies"
+    tags:
+      domain: ["AI", "business"]
+      use_case: ["business processes"]
+      provider_institution: ["McKinsey & Company"]
+
+  - title: "The health system CEO imperative: Turning AI's promise into performance"
+    tags:
+      domain: ["AI", "business", "health"]
+      provider_institution: ["McKinsey & Company"]
+
+  - title: "AI is turning every company into a software company"
+    tags:
+      domain: ["business", "software"]
+      provider_institution: ["McKinsey & Company"]
+
+  - title: "Real Patterns"
+    file_hint: "Dennett_RealPatterns"
+    tags:
+      domain: ["philosophy"]
+      data_ontology_asset: ["pattern recognition"]
+      provider_institution: ["Daniel C. Dennett"]
+
+  - title: "AGENTWORLD Brief"
+    file_hint: "Antikythera_AGENTWORLD-Brief"
+    tags:
+      domain: ["AI"]
+      ai_topic_area: ["Agentic AI"]
+      problem_risk: ["Agent risks"]
+      provider_institution: ["ANTIKYTHERA"]
+
+  - title: "Introduction to the LDM V1.2"
+    file_hint: "BIRD_Introduction_to_the_LDM_V1.2"
+    tags:
+      domain: ["financial"]
+      use_case: ["financial reporting"]
+      governance_regulation: ["BIRD", "regulation"]
+      data_ontology_asset: ["Financial ontology", "Financial taxonomy"]
+      standard_protocol_interface: ["BIRD"]
+      provider_institution: ["BIRD"]
+
+  - title: "Climbing towards NLU"
+    file_hint: "2020.acl-main.463"
+    tags:
+      domain: ["AI research"]
+      ai_topic_area: ["NLP"]
+      problem_risk: ["Capturing meaning in LLMs", "semantics"]
+      model_family_architecture: ["Transformers"]
+      provider_institution: ["University"]   # expected miss: names no extractable publisher (ADR-0066 d11)
+
+  - title: "A Disproof of Large Language Model Consciousness: The Necessity of Continual Learning for Consciousness"
+    file_hint: "2512.12802v3"
+    tags:
+      domain: ["AI research"]
+      ai_topic_area: ["AGI", "Consciousness"]
+      problem_risk: ["LLM consciousness"]
+      model_family_architecture: ["Transformers", "LLM"]
+      provider_institution: ["Erik Hoel", "Bicameral Labs"]
+
+  - title: "Agentic Business Process Management: A research manifesto"
+    file_hint: "1-s2.0-S0306437926000529-main"
+    tags:
+      domain: ["AI research", "AI methodology"]
+      ai_topic_area: ["Agentic BPM", "Autonomous agents", "Agentic AI",
+                      "Conversational actionability", "Self-modification"]
+      problem_risk: ["Framed autonomy", "Explainability"]
+      use_case: ["Business process"]
+      method_technique: ["APM"]
+      product_tool_platform: ["APM"]
+      standard_protocol_interface: ["APM"]
+      provider_institution: ["ScienceDirect"]
