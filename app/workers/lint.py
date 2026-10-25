@@ -14,11 +14,14 @@ Finding classes:
 - **Structural (report-only):** the `validate_*` suite (frontmatter, wikilinks, citations, summary
   callouts, …) — defects fixed by regeneration, not governance.
 - **Governance (→ review items):** a catalogued **raw file gone missing** → `missing_raw_source`
-  (record-only, high severity); an **under-supported active item** (<2 distinct mentioning sources)
-  → `deprecate_wiki_page` proposal. An **uncited active claim** is reported (a backstop; the claim worker
+  (record-only, high severity). An **uncited active claim** is reported (a backstop; the claim worker
   already tombstones evidence-less claims). A **merge candidate** (two active items whose title/alias
   merge keys intersect) → `merge_items` proposal (ADR-0064, star around one survivor; a match with a
   candidate side is report-only `merge_candidate_unpromoted`).
+- **Unused tags (report-only, ADR-0066 decision 9):** an `unused` item (no document keeps it) is
+  reported for the Unused tags list; no review item. The former single-source deprecation rule
+  (`under_supported_item`) is retired — a tag kept on one document is valid curation — and its
+  still-pending `deprecate_wiki_page` items are withdrawn with reason `rule_retired`.
 
 Idempotent: review items key on `(type, subject={source_id|node_id})`, so re-running files no duplicates.
 """
@@ -33,14 +36,14 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from app.backend import db, graph, search, taxonomy
+from app.backend import db, graph, taxonomy
 from app.backend.manifests import get_provenance, is_source_id, iso_now, valid_manifests
 from app.backend.paths import safe_child, safe_under
 from app.backend.policy import load_yaml
 from app.llm.client import ConfigError, parse_chain
 from app.workers import citations, enrichment_artifact, labels, merge_candidates, reviews, synthesis
 from app.workers.enrichment_artifact import artifact_fingerprint
-from app.workers.wiki_render import NODE_DIR, display_link_label, parse_frontmatter
+from app.workers.wiki_render import display_link_label, parse_frontmatter
 
 # Knowledge-item family — the promotable node type a source "mentions" (ADR-0059).
 _ITEM_FAMILY = ("item",)
@@ -161,32 +164,43 @@ def _check_missing_raw(manifests_dir: Path, root: Path, reviews_dir: Path, *, fi
     return findings
 
 
+# The proposal reason the retired `under_supported_item` rule wrote (ADR-0066 decision 9).
+_RETIRED_UNDER_SUPPORTED_REASON = re.compile(r"active with \d+ mentioning source\(s\) \(<2\)")
+
+
+def _withdraw_retired_rule_items(reviews_dir: Path, now: str) -> list[str]:
+    """Withdraw the still-pending `deprecate_wiki_page` items the retired single-source rule filed
+    (reason `rule_retired`, audited). Approved/rejected items are human records — never touched.
+    Idempotent: once withdrawn, nothing re-files them."""
+    withdrawn: list[str] = []
+    d = Path(reviews_dir) / "pending"
+    for path in sorted(d.glob("*.json")) if d.is_dir() else []:
+        try:
+            item = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(item, dict) or item.get("type") != "deprecate_wiki_page":
+            continue
+        proposal = item.get("proposal") or {}
+        if (proposal.get("reason_code") is None
+                and proposal.get("to_status") == "deprecated_candidate"
+                and _RETIRED_UNDER_SUPPORTED_REASON.fullmatch(str(proposal.get("reason") or ""))
+                and reviews.withdraw_review_item(reviews_dir, str(item.get("review_id") or path.stem),
+                                                 reason="rule_retired", now=now)):
+            withdrawn.append(str(item.get("review_id") or path.stem))
+    return withdrawn
+
+
 def _check_graph(gconn, wiki_dir: Path, reviews_dir: Path, *, file_items: bool, now: str,
                  filed: list[str], existing: list[str]) -> list[dict[str, Any]]:
-    """Under-supported active items (→ deprecate proposal) + uncited active claims (report-only)."""
+    """Unused tags (report-only, ADR-0066 decision 9) + uncited active claims (report-only)."""
     findings: list[dict[str, Any]] = []
     for node_type in _ITEM_FAMILY:
         for node in graph.nodes_of_type(gconn, node_type):
-            if node["status"] != "active":
-                continue
-            # Live support follows default retrieval visibility: archived/deleted sources still exist
-            # as evidence, but they no longer keep an item active by themselves.
-            n = graph.count_independent_sources(
-                gconn, node["node_id"], source_statuses=search.RETENTION_DEFAULT_STATUSES)
-            if n >= 2:
-                continue
-            findings.append({
-                "check": "under_supported_item", "severity": "high" if n == 0 else "medium",
-                "subject": node["node_id"], "detail": f"active {node_type} with {n} mentioning source(s)"})
-            if file_items:
-                _file_review(
-                    reviews_dir, review_type="deprecate_wiki_page",
-                    subject={"node_id": node["node_id"],
-                             "page": f"{NODE_DIR[node_type]}/{node['slug']}.md"},
-                    proposal={"to_status": "deprecated_candidate",
-                              "reason": f"active with {n} mentioning source(s) (<2)"},
-                    context={"node_type": node_type}, priority="low", now=now,
-                    filed=filed, existing=existing)
+            if node["status"] == "unused":
+                findings.append({
+                    "check": "unused_tag", "severity": "low", "subject": node["node_id"],
+                    "detail": "no document keeps this tag (see /ui/reviews/tags/unused)"})
     for claim in graph.nodes_of_type(gconn, "claim"):
         if claim["status"] == "active" and not graph.sources_for_claim(gconn, claim["node_id"]):
             findings.append({"check": "uncited_claim", "severity": "medium",
@@ -622,6 +636,7 @@ def run_lint(
         findings += _check_missing_raw(
             manifests_dir, root, reviews_dir, file_items=file_review_items, now=now,
             filed=filed, existing=existing)
+        withdrawn = _withdraw_retired_rule_items(reviews_dir, now) if file_review_items else []
 
         # summary_rot is graph-independent (artifact + normalized md only) — runs always (ADR-0037).
         rot_findings, coverage_degraded = _check_summary_rot(
@@ -676,14 +691,15 @@ def run_lint(
 
         summary = {"status": status, "validators_ok": validators_ok, "findings": len(findings),
                    "by_check": by_check, "review_items_filed": len(new_items),
-                   "review_items_existing": len(existing_items), "graph_available": graph_available}
+                   "review_items_existing": len(existing_items),
+                   "review_items_withdrawn": len(withdrawn), "graph_available": graph_available}
         if conn is not None:
             db.update_job(conn, job_id, status="succeeded", finished_at=iso_now(), metadata=summary)
 
         return {"job_id": job_id, "status": status, "validators_ok": validators_ok,
                 "validators": validators, "findings": findings, "by_check": by_check,
                 "review_items_filed": new_items, "review_items_existing": existing_items,
-                "graph_available": graph_available}
+                "review_items_withdrawn": withdrawn, "graph_available": graph_available}
     except Exception as exc:
         if conn is not None:
             db.update_job(conn, job_id, status="failed", finished_at=iso_now(), error_message=str(exc))

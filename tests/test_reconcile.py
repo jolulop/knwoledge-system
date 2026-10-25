@@ -56,6 +56,16 @@ def _extract(tmp_path, item_names):
                                jobs_db=tmp_path / "db" / "jobs.sqlite")
 
 
+def _file_legacy_promotes(tmp_path, item_names):
+    """Pre-ADR-0066 ledger state: extraction no longer files promote_candidate_node items, but
+    reconciliation still governs any that exist (legacy / flat-queue items)."""
+    for n in item_names:
+        reviews.create_review_item(
+            tmp_path / "reviews", review_type="promote_candidate_node",
+            subject={"node_id": items.node_id(n)},
+            proposal={"to_status": "active", "name": n, "item_type": "method_technique"})
+
+
 def _sid(tmp_path):
     return next(m["source_id"] for m in manifests.list_manifests(tmp_path / "raw" / "manifests")
                 if m["original_filename"] == "doc.md")
@@ -212,6 +222,7 @@ def test_dir_id_field_parity():
 def test_hook_tombstone_withdraws_promote_and_files_reason_code(tmp_path):
     _build(tmp_path)
     _extract(tmp_path, ["Old", "Keeper"])
+    _file_legacy_promotes(tmp_path, ["Old", "Keeper"])
     rid = _promote_rid("Old")
     assert _pending_path(tmp_path, rid).exists()
 
@@ -245,8 +256,8 @@ def test_hook_resurrection_withdraws_recompose_deprecate(tmp_path):
     assert not _pending_path(tmp_path, dep_rid).exists()
     audits = _withdrawn_audits(tmp_path, dep_rid)
     assert len(audits) == 1 and audits[0]["note"] == reconcile.REASON_RESURRECTED
-    # The resurrected candidate re-enters the promotion ledger.
-    assert _pending_path(tmp_path, _promote_rid("Old")).exists()
+    # ADR-0066: the resurrected candidate is a suggestion again — extraction files no promotion.
+    assert not _pending_path(tmp_path, _promote_rid("Old")).exists()
 
 
 def test_hook_leaves_foreign_reason_deprecate_on_tombstone(tmp_path):
@@ -381,6 +392,7 @@ def test_sweep_matrix_legacy_shim_and_idempotence(tmp_path):
     _extract(tmp_path, ["Old", "Keeper"])
     # The hook must NOT act on the legacy item (shim is sweep-only)...
     assert dep_path.exists()
+    _file_legacy_promotes(tmp_path, ["Old", "Keeper"])   # live pre-ADR-0066 promotes
 
     # Backlog fabrication: a stale promote for the now-tombstoned New (re-filed after the hook
     # withdrew it — a withdrawn id may legitimately re-file), one for a missing node, one for a

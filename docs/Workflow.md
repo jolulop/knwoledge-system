@@ -65,13 +65,13 @@ After this you can already browse **Source pages** in Obsidian. No review items 
 |---|---|---|---|
 | Claims | `extract_claims.py` | Sonnet | atomic **Claim** pages, each with a verbatim source quote (citation-grounded) |
 | Knowledge items | `extract_items.py` | Sonnet | **candidate** Item nodes (15-type taxonomy, ADR-0059) + `mentions` edges |
-| Promote | `promote.py` | — (deterministic) | auto-promotes a candidate to **active** on **≥2 independent sources**, else files a `promote_candidate_node` **review item** |
+| Promote | `promote.py` | — (deterministic) | activates candidates whose `promote_candidate_node` item is **approved** (flat queue). ADR-0066: extracted items are per-document **tag suggestions** — keeping one on a document's review screen makes it active immediately; nothing auto-promotes |
 | Contradictions | `detect_contradictions.py` | Opus | `resolve_contradiction` review items for conflicting claim pairs |
 | Synthesis | `generate_synthesis.py` | Opus | candidate cross-source **Synthesis** pages → `propose_synthesis` review items |
 
 > **Independence** is judged from manifest *provenance* (author/publisher/…). Manifests have none by
-> default, so **nothing auto-promotes and contradictions/synthesis stay empty** until you set
-> provenance — by design, the gate is conservative. Everything instead routes to human review.
+> default, so **contradictions/synthesis stay empty** until you set provenance — by design, the gate
+> is conservative. Tags never auto-promote (ADR-0066): you keep or drop each suggestion per document.
 
 LLM output is **cached** (`db/llm_cache.sqlite`) keyed by prompt+model+schema, so re-running a pass is
 free and byte-reproducible unless an input changes. Each pass is **fingerprint-idempotent** per source.

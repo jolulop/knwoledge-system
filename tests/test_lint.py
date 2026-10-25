@@ -1,8 +1,8 @@
 """Phase 7 slice 7-1: the /jobs/lint maintenance pass (ADR-0036).
 
 Key-free tests over app.workers.lint.run_lint + POST /jobs/lint — detect-and-propose health:
-missing-raw → high-severity finding + missing_raw_source review item; under-supported active item →
-deprecate_wiki_page proposal; idempotent reruns; job recorded; log.md appended; lint-health-as-outcome
+missing-raw → high-severity finding + missing_raw_source review item; the retired single-source rule
+(ADR-0066 decision 9: no deprecation filed, its pending items withdrawn `rule_retired`); idempotent reruns; job recorded; log.md appended; lint-health-as-outcome
 (failing is a 200 report, not an error); no path leak.
 """
 from __future__ import annotations
@@ -92,66 +92,68 @@ def test_file_review_items_false_reports_without_filing(tmp_path):
     assert _pending(tmp_path) == []
 
 
-# --- under-supported items ---------------------------------------------------
+# --- the retired single-source rule + unused tags (ADR-0066 decision 9) ------------------------
 
 
-def test_under_supported_active_item_proposes_deprecation(tmp_path):
+def test_single_source_active_item_files_no_deprecation(tmp_path):
     gdb, conn = _graph(tmp_path)
-    # active item with one mentioning source -> under-supported (<2)
+    # an active tag kept on ONE document is valid curation — the retired rule filed a deprecation
     graph.upsert_node(conn, node_id="src_0000000000000101", node_type="source", slug="src_0000000000000101", status="active")
     graph.upsert_node(conn, node_id="itm_x", node_type="item", slug="thing", status="active",
                       item_type="method_technique")
     graph.upsert_assertion(conn, src_id="src_0000000000000101", dst_id="itm_x", edge_type="mentions",
-                           asserted_by="llm", status="active")
-    conn.close()
-    res = _run(tmp_path, graph_db=gdb)
-    us = [f for f in res["findings"] if f["check"] == "under_supported_item"]
-    assert us and us[0]["subject"] == "itm_x" and us[0]["severity"] == "medium"
-    items = _pending(tmp_path, "deprecate_wiki_page")
-    assert len(items) == 1
-    subj = json.loads(items[0].read_text())["subject"]
-    assert subj == {"node_id": "itm_x", "page": "Items/thing.md"}
-
-
-def test_orphan_item_zero_sources_is_high(tmp_path):
-    gdb, conn = _graph(tmp_path)
+                           asserted_by="human", status="active")
     graph.upsert_node(conn, node_id="itm_orphan", node_type="item", slug="orphan", status="active",
                       item_type="provider_institution")
     conn.close()
     res = _run(tmp_path, graph_db=gdb)
-    us = [f for f in res["findings"] if f["check"] == "under_supported_item"]
-    assert us[0]["severity"] == "high" and res["status"] == "failing"
-
-
-def test_well_supported_item_is_not_flagged(tmp_path):
-    gdb, conn = _graph(tmp_path)
-    for s in ("src_0000000000000101", "src_0000000000000102"):
-        graph.upsert_node(conn, node_id=s, node_type="source", slug=s, status="active")
-    graph.upsert_node(conn, node_id="itm_x", node_type="item", slug="thing", status="active",
-                      item_type="method_technique")
-    for s in ("src_0000000000000101", "src_0000000000000102"):
-        graph.upsert_assertion(conn, src_id=s, dst_id="itm_x", edge_type="mentions",
-                               asserted_by="llm", status="active")
-    conn.close()
-    res = _run(tmp_path, graph_db=gdb)
     assert not any(f["check"] == "under_supported_item" for f in res["findings"])
+    assert _pending(tmp_path, "deprecate_wiki_page") == []
 
 
-def test_archived_sources_do_not_count_as_live_support(tmp_path):
+def test_unused_tag_is_a_report_only_finding(tmp_path):
     gdb, conn = _graph(tmp_path)
-    graph.upsert_node(conn, node_id="src_0000000000000101", node_type="source", slug="src_0000000000000101", status="active")
-    graph.upsert_node(conn, node_id="src_00000000000000a4", node_type="source", slug="src_00000000000000a4",
-                      status="archive_candidate")
-    graph.upsert_node(conn, node_id="itm_x", node_type="item", slug="thing", status="active",
+    graph.upsert_node(conn, node_id="itm_u", node_type="item", slug="spare", status="unused",
                       item_type="method_technique")
-    for s in ("src_0000000000000101", "src_00000000000000a4"):
-        graph.upsert_assertion(conn, src_id=s, dst_id="itm_x", edge_type="mentions",
-                               asserted_by="llm", status="active")
     conn.close()
     res = _run(tmp_path, graph_db=gdb)
-    us = [f for f in res["findings"] if f["check"] == "under_supported_item"]
-    assert us and us[0]["subject"] == "itm_x"
-    assert "1 mentioning source" in us[0]["detail"]
+    un = [f for f in res["findings"] if f["check"] == "unused_tag"]
+    assert un and un[0]["subject"] == "itm_u" and un[0]["severity"] == "low"
+    assert _pending(tmp_path) == []
+
+
+def _legacy_under_supported(tmp_path, node_id, n=1, *, reason_code=None, folder="pending"):
+    """A deprecate_wiki_page item exactly as the retired rule filed it."""
+    from app.workers import reviews
+    proposal = {"to_status": "deprecated_candidate", "reason": f"active with {n} mentioning source(s) (<2)"}
+    if reason_code:
+        proposal["reason_code"] = reason_code
+    rid = reviews.create_review_item(
+        tmp_path / "reviews", review_type="deprecate_wiki_page",
+        subject={"node_id": node_id, "page": f"Items/{node_id}.md"}, proposal=proposal,
+        context={"node_type": "item"}, priority="low")
+    if folder != "pending":
+        src = tmp_path / "reviews" / "pending" / f"{rid}.json"
+        dst = tmp_path / "reviews" / folder
+        dst.mkdir(parents=True, exist_ok=True)
+        src.rename(dst / src.name)
+    return rid
+
+
+def test_lint_withdraws_pending_items_of_the_retired_rule(tmp_path):
+    old = _legacy_under_supported(tmp_path, "itm_a", 1)
+    zero = _legacy_under_supported(tmp_path, "itm_b", 0)
+    tomb = _legacy_under_supported(tmp_path, "itm_c", 0, reason_code="no_active_mentions")  # ADR-0057
+    approved = _legacy_under_supported(tmp_path, "itm_d", 1, folder="approved")              # human record
+    res = _run(tmp_path)
+    assert sorted(res["review_items_withdrawn"]) == sorted([old, zero])
+    pending = {p.stem for p in _pending(tmp_path, "deprecate_wiki_page")}
+    assert pending == {tomb}
+    assert (tmp_path / "reviews" / "approved" / f"{approved}.json").exists()
+    audits = [json.loads(p.read_text()) for p in (tmp_path / "reviews" / "audit_log").glob("*-withdrawn-*.json")]
+    assert {a["review_id"] for a in audits} == {old, zero}
+    assert all(a.get("note") == "rule_retired" for a in audits)
+    assert _run(tmp_path)["review_items_withdrawn"] == []      # idempotent
 
 
 def test_graph_absent_skips_semantic_checks(tmp_path):

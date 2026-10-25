@@ -105,7 +105,7 @@ Check for:
 - Missing summary callouts
 - Missing citations
 - Orphan items
-- Items with fewer than two sources
+- Unused tags (no document keeps them)
 - Summary rot
 - Stale claims
 - Duplicate sources

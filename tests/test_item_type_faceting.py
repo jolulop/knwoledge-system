@@ -40,9 +40,17 @@ def _graph(tmp_path):
 def test_bridge_maps_source_to_active_item_types(tmp_path):
     gconn = _graph(tmp_path)
     graph.upsert_assertion(gconn, src_id=SRC_M, dst_id=ITM_ACT, edge_type="mentions",
-                           asserted_by="llm", status="active")
+                           asserted_by="human", status="active")       # a kept tag link
     got = graph_read.source_item_types(gconn, {SRC_M})
     assert got == {SRC_M: frozenset({"method_technique"})}
+
+
+def test_bridge_ignores_an_undecided_suggestion(tmp_path):
+    # ADR-0066 review round 2: only kept links steer ranking — an llm suggestion does not bridge.
+    gconn = _graph(tmp_path)
+    graph.upsert_assertion(gconn, src_id=SRC_M, dst_id=ITM_ACT, edge_type="mentions",
+                           asserted_by="llm", status="active")
+    assert graph_read.source_item_types(gconn, {SRC_M}) == {}
 
 
 def test_bridge_ignores_deprecated_item(tmp_path):

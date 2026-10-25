@@ -20,7 +20,8 @@ Keep the filing-cabinet/wiki/search/graph layers healthy over time.
 - Missing summary callouts.
 - Missing citations.
 - Orphan items.
-- Items with fewer than two sources.
+- Unused tags (no document keeps them; report-only — ADR-0066 retired the single-source deprecation rule).
+- Tag-ledger ↔ graph consistency (`validate_tag_links.py`; repair with `rebuild_tag_links.py --apply`).
 - Summary rot.
 - Stale claims.
 - Duplicate sources.

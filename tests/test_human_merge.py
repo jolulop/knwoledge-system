@@ -21,6 +21,7 @@ from app.backend import graph
 from app.backend import main as main_module
 from app.backend.config import get_settings
 from app.workers import human_merge, items, merges, reviews
+import tagging  # noqa: E402
 from app.workers.wiki_render import render_item_page
 
 ITEM_TYPE = "method_technique"
@@ -90,7 +91,8 @@ def test_files_pre_approved_by_slug_with_audit(tmp_path, pair):
 def test_files_by_item_id_and_applies(tmp_path, pair):
     conn, a, b = pair
     assert _file(tmp_path, conn, a, b)["outcome"] == "filed"
-    res = merges.apply_merges(conn, tmp_path / "reviews", wiki_dir=tmp_path / "wiki")
+    res = tagging.close_journals(tmp_path / "reviews", merges.apply_merges(
+        conn, tmp_path / "reviews", wiki_dir=tmp_path / "wiki"))
     assert res["applied"] == 1 and graph.get_node(conn, b)["status"] == "merged"
 
 
@@ -219,7 +221,8 @@ def test_shared_absorbed_with_approved_merge_blocks(tmp_path, trio):
     assert _ledger(tmp_path) == before
     # A shared SURVIVOR is a compatible star.
     assert _file(tmp_path, conn, a, c)["outcome"] == "filed"
-    res = merges.apply_merges(conn, tmp_path / "reviews", wiki_dir=tmp_path / "wiki")
+    res = tagging.close_journals(tmp_path / "reviews", merges.apply_merges(
+        conn, tmp_path / "reviews", wiki_dir=tmp_path / "wiki"))
     assert res["applied"] == 2 and res["skipped"] == []
 
 
@@ -265,13 +268,15 @@ def test_approve_endpoint_refuses_conflicting_merge(client, tmp_path):
 def test_executor_reports_absorbed_merged_elsewhere(tmp_path, trio):
     conn, a, b, c = trio
     _file(tmp_path, conn, a, b)
-    assert merges.apply_merges(conn, tmp_path / "reviews", wiki_dir=tmp_path / "wiki")["applied"] == 1
+    assert tagging.close_journals(tmp_path / "reviews", merges.apply_merges(
+        conn, tmp_path / "reviews", wiki_dir=tmp_path / "wiki"))["applied"] == 1
     # A conflicting approval forged straight onto disk (bypassing every guard) is a LOUD skip.
     (tmp_path / "reviews" / "approved" / "rev_forged.json").write_text(json.dumps({
         "review_id": "rev_forged", "type": "merge_items", "status": "approved",
         "subject": {"survivor_node_id": c, "absorbed_node_id": b},
         "proposal": {"to_status": "merged"}}), encoding="utf-8")
-    res = merges.apply_merges(conn, tmp_path / "reviews", wiki_dir=tmp_path / "wiki")
+    res = tagging.close_journals(tmp_path / "reviews", merges.apply_merges(
+        conn, tmp_path / "reviews", wiki_dir=tmp_path / "wiki"))
     assert res["applied"] == 0
     assert res["skipped"] == [{"review_id": "rev_forged", "reason": "absorbed_merged_elsewhere"}]
 

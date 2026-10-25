@@ -152,7 +152,9 @@ def eligible_topics(gconn, prov, *, claims_dir: Path, markdown_dir: Path) -> lis
             if node is None:
                 continue
             claim_ids: set[str] = set()
-            for s in graph.sources_for_node(gconn, nid):           # sources mentioning the topic
+            # ADR-0066 review round 2: only documents that KEEP the tag feed its synthesis — an
+            # undecided suggestion elsewhere is not evidence the user tagged.
+            for s in graph.kept_sources_for_node(gconn, nid):      # sources keeping the topic
                 for clm in graph.claims_for_source(gconn, s):      # their active claims
                     cnode = graph.get_node(gconn, clm)
                     if cnode and cnode["status"] == "active":

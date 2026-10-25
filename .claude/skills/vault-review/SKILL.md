@@ -30,7 +30,7 @@ Prepare and apply human-reviewed decisions while preserving auditability.
 - split_item
 - change_item_type
 - mark_semantic_duplicate
-- promote_candidate_node
+- promote_candidate_node (flat queue only; ADR-0066 per-document tag keep/drop replaces it for extraction suggestions)
 - propose_synthesis
 
 ## Output format

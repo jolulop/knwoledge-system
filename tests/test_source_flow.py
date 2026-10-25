@@ -1,4 +1,5 @@
-"""ADR-0058 per-source review flow: attribution, batch decide, amendments, human-add, XSS."""
+"""ADR-0058 per-source review flow, restated by ADR-0066 (per-document keep/drop tag links):
+attribution, batch decide, amendments, human-add, XSS."""
 from __future__ import annotations
 
 import json
@@ -27,7 +28,7 @@ from app.backend import main as main_module
 from app.backend.config import get_settings
 from app.llm.cache import ResponseCache
 from app.llm.client import LLMClient
-from app.workers import extract, human_add, intake, items, promote, reviews, wiki
+from app.workers import extract, human_add, intake, items, reviews, tag_links, wiki
 from app.workers.wiki_render import parse_frontmatter
 
 
@@ -85,11 +86,6 @@ def _rewrite_md(tmp_path, sid, body):
         f"# T\n\n{body}\n", encoding="utf-8")
 
 
-def _promote_rid(name):
-    return reviews.review_id("promote_candidate_node",
-                             {"node_id": items.node_id(name)})
-
-
 def _view(tmp_path, sid):
     return review_read.source_review_view(
         tmp_path / "reviews", sid, graph_db=tmp_path / "db" / "graph.sqlite",
@@ -126,7 +122,17 @@ def client(tmp_path, monkeypatch):
 # --- attribution ------------------------------------------------------------
 
 
-def test_index_and_multi_source_candidate_attribution(tmp_path):
+def _keep(tmp_path, sid, name, **amendments):
+    gconn = graph.connect(tmp_path / "db" / "graph.sqlite")
+    try:
+        return tag_links.keep(gconn, source_id=sid, node_id=items.node_id(name),
+                              wiki_dir=tmp_path / "wiki", reviews_dir=tmp_path / "reviews",
+                              amendments=amendments or None)
+    finally:
+        gconn.close()
+
+
+def test_index_and_per_document_tag_rows(tmp_path):
     _build(tmp_path, {"a.md": "alpha body", "b.md": "beta body"})
     _extract(tmp_path, RoutingAdapter({
         "alpha": {"items": [_item("Shared"), _item("Only A")]},
@@ -142,28 +148,25 @@ def test_index_and_multi_source_candidate_attribution(tmp_path):
     assert len(idx["sources"]) == 2
     by_id = {s["source_id"]: s for s in idx["sources"]}
     assert by_id[a]["counts"]["remaining"] == 2 and by_id[b]["counts"]["remaining"] == 2
-    # A multi-source candidate counts ONCE overall (3 distinct items, not 4 rows).
-    assert idx["totals"]["remaining_overall"] == 3
+    # ADR-0066: a tag link is decided PER DOCUMENT — the shared tag is two rows (4, not 3).
+    assert idx["totals"]["remaining_overall"] == 4
     assert idx["totals"]["first_remaining_source"] in (a, b)
 
-    # Shared appears on BOTH screens with the other-sources badge.
     for sid, other in ((a, "Only A"), (b, "Only B")):
         view = _view(tmp_path, sid)
-        titles = {r["title"]: r for r in view["candidates"]}
-        assert set(titles) == {"Shared", other}
-        assert titles["Shared"]["other_source_count"] == 1
-        assert titles[other]["other_source_count"] == 0
-        assert all(r["decidable"] for r in view["candidates"])
+        assert {r["title"] for r in view["suggestions"]} == {"Shared", other}
+        assert view["kept"] == [] and view["dropped"] == []
 
-    # First decision resolves globally: both screens render it read-only decided.
-    reviews.resolve_review_item(tmp_path / "reviews", _promote_rid("Shared"),
-                                decision="approved", decided_by="human",
-                                note="per-source flow: " + a)
-    for sid in (a, b):
-        row = next(r for r in _view(tmp_path, sid)["candidates"] if r["title"] == "Shared")
-        assert not row["decidable"] and row["status"] == "approved"
-        assert row["decided_by"] == "human" and a in (row["decision_note"] or "")
-    assert _index(tmp_path)["totals"]["remaining_overall"] == 2
+    # Keeping Shared on a decides ONLY a's link: b still has it as a suggestion (now active).
+    assert _keep(tmp_path, a, "Shared")["effect"] == "activated"
+    view_a, view_b = _view(tmp_path, a), _view(tmp_path, b)
+    assert [r["title"] for r in view_a["kept"]] == ["Shared"]
+    assert [r["title"] for r in view_a["suggestions"]] == ["Only A"]
+    shared_b = next(r for r in view_b["suggestions"] if r["title"] == "Shared")
+    assert shared_b["kept_elsewhere"] == 1 and shared_b["node_status"] == "active"
+    assert _index(tmp_path)["totals"]["remaining_overall"] == 3
+    wiki.generate_wiki(tmp_path, templates_dir=TEMPLATES, rebuild_index=False)   # Source projections
+    _validators_green(tmp_path)
 
 
 def test_retired_section_h_predicate(tmp_path):
@@ -210,58 +213,61 @@ def test_retired_section_h_predicate(tmp_path):
 # --- batch decide endpoint ----------------------------------------------------
 
 
-def test_batch_decide_partial_skip_and_drafts(client, tmp_path):
-    _build(tmp_path, {"a.md": "alpha body"})
-    _extract(tmp_path, RoutingAdapter({"alpha": {"items": [
-        _item("Approve Me"), _item("Reject Me"), _item("Defer Me"),
-        _item("Untouched"), _item("Predecided")]}}))
-    a = _sids(tmp_path)["a.md"]
-    rids = {n: _promote_rid(n)
-            for n in ("Approve Me", "Reject Me", "Defer Me", "Untouched", "Predecided")}
-    reviews.resolve_review_item(tmp_path / "reviews", rids["Predecided"],
-                                decision="rejected", decided_by="human")
-
+def test_batch_keep_drop_block_partial_skip(client, tmp_path):
+    _build(tmp_path, {"a.md": "alpha body", "b.md": "beta body"})
+    _extract(tmp_path, RoutingAdapter({
+        "alpha": {"items": [_item("Keep Me"), _item("Drop Me"), _item("Block Me"),
+                            _item("Untouched")]},
+        "beta": {"items": [_item("Block Me")]},
+    }))
+    sids = _sids(tmp_path)
+    a, b = sids["a.md"], sids["b.md"]
+    nid = {n: items.node_id(n) for n in ("Keep Me", "Drop Me", "Block Me", "Untouched")}
     form = {
-        f"decision_{rids['Approve Me']}": "approve",
-        f"amend_title_{rids['Approve Me']}": "Approved Name",
-        f"amend_aliases_{rids['Approve Me']}": "Alias One, Alias Two",
-        f"decision_{rids['Reject Me']}": "reject",
-        f"amend_title_{rids['Reject Me']}": "typed but discarded",  # dropped on reject, no 400
-        f"decision_{rids['Defer Me']}": "defer",
-        f"amend_description_{rids['Defer Me']}": "draft description",
-        f"decision_{rids['Untouched']}": "",                        # untouched = stays pending
-        f"decision_{rids['Predecided']}": "approve",                # flip -> per-item skip, no abort
-        "decision_rev_notavalidid!!": "approve",                    # invalid id -> per-item skip
+        f"link_{nid['Keep Me']}": "keep",
+        f"amend_title_{nid['Keep Me']}": "Kept Name",
+        f"amend_aliases_{nid['Keep Me']}": "Alias One, Alias Two",
+        f"link_{nid['Drop Me']}": "drop",
+        f"link_{nid['Block Me']}": "block",
+        f"link_{nid['Untouched']}": "",                         # untouched = records nothing
+        "link_itm_notvalid": "keep",                            # invalid id -> per-row skip
         "note": "",
     }
     resp = client.post(f"/ui/reviews/sources/{a}/decide", data=form)
     assert resp.status_code == 200
+    assert "invalid item id" in resp.text
 
-    rdir = tmp_path / "reviews"
-    approved = json.loads((rdir / "approved" / f"{rids['Approve Me']}.json").read_text())
-    assert approved["amendments"] == {"title": "Approved Name",
-                                      "aliases": ["Alias One", "Alias Two"]}
-    assert f"per-source flow: {a}" in approved["decision_note"]     # which source decided it
-    rejected = json.loads((rdir / "rejected" / f"{rids['Reject Me']}.json").read_text())
-    assert "amendments" not in rejected
-    deferred = json.loads((rdir / "pending" / f"{rids['Defer Me']}.json").read_text())
-    assert deferred["status"] == "deferred"
-    assert deferred["draft_amendments"] == {"description": "draft description"}
-    untouched = json.loads((rdir / "pending" / f"{rids['Untouched']}.json").read_text())
-    assert untouched["status"] == "pending"
-    # The flip attempt skipped with a reason but did NOT abort the batch (others recorded).
-    assert (rdir / "rejected" / f"{rids['Predecided']}.json").exists()
-    body = resp.text
-    assert "409" in body and "invalid review id" in body
-    # Draft round-trip: the screen prefills the deferred row's draft.
-    screen = client.get(f"/ui/reviews/sources/{a}").text
-    assert "draft description" in screen
+    gconn = graph.connect(tmp_path / "db" / "graph.sqlite")
+    try:
+        kept = graph.get_node(gconn, nid["Keep Me"])
+        assert kept["status"] == "active" and kept["slug"] == "kept-name"   # amended at activation
+        assert graph.get_node(gconn, nid["Drop Me"]) is None                # never kept -> deleted
+        assert graph.get_node(gconn, nid["Block Me"]) is None               # withdrawn on a AND b
+        assert graph.get_node(gconn, nid["Untouched"])["status"] == "candidate"
+    finally:
+        gconn.close()
+    fm = parse_frontmatter((tmp_path / "wiki" / "Items" / "kept-name.md").read_text(encoding="utf-8"))
+    assert fm["aliases"] == ["Alias One", "Alias Two", "Keep Me"] and fm["item_id"] == nid["Keep Me"]
+    ledger = tag_links.load_ledger(tmp_path / "reviews", a)
+    assert list(ledger["kept"]) == [nid["Keep Me"]]
+    assert [d["key"] for d in ledger["drops"]] == ["drop me"]               # only the explicit drop
+    assert tag_links.load_ledger(tmp_path / "reviews", b)["drops"] == []    # a block writes none
+    assert "Block Me" in tag_links.load_blocked(tmp_path / "policies").values()
+    assert _view(tmp_path, b)["suggestions"] == []
+    # The kept row now offers only drop; "keep" on it is a per-row skip, never an abort.
+    resp = client.post(f"/ui/reviews/sources/{a}/decide", data={f"link_{nid['Keep Me']}": "keep"})
+    assert "unknown action: keep" in resp.text
+    wiki.generate_wiki(tmp_path, templates_dir=TEMPLATES, rebuild_index=False)   # Source projections
+    _validators_green(tmp_path)
 
 
 def test_json_approve_rejects_bad_amendments(client, tmp_path):
+    # The flat-queue promote path still validates amendments (pre-ADR-0066 / hand-filed items).
     _build(tmp_path, {"a.md": "alpha body"})
     _extract(tmp_path, RoutingAdapter({"alpha": {"items": [_item("Solo")]}}))
-    rid = _promote_rid("Solo")
+    rid = reviews.create_review_item(
+        tmp_path / "reviews", review_type="promote_candidate_node",
+        subject={"node_id": items.node_id("Solo")}, proposal={"to_status": "active"})
     # Unknown field / wrong type / non-promote type all 400 before any ledger write.
     assert client.post(f"/reviews/{rid}/approve",
                        json={"amendments": {"nope": 1}}).status_code == 400
@@ -278,27 +284,23 @@ def test_json_approve_rejects_bad_amendments(client, tmp_path):
     assert approved["amendments"] == {"title": "Solo Fixed", "description": "d"}
 
 
-# --- amendments applied by the promote executor -------------------------------
+# --- amendments applied when a keep activates a candidate ---------------------
 
 
-def test_amendments_apply_frozen_id_slug_move_and_description(tmp_path):
+def test_keep_amendments_frozen_id_slug_move_and_description(tmp_path):
     _build(tmp_path, {"a.md": "alpha body"})
     _extract(tmp_path, RoutingAdapter({"alpha": {"items": [_item("Old Name")]}}))
     a = _sids(tmp_path)["a.md"]
     nid = items.node_id("Old Name")
-    reviews.resolve_review_item(
-        tmp_path / "reviews", _promote_rid("Old Name"), decision="approved",
-        decided_by="human",
-        amendments={"title": "New Name", "aliases": ["Extra"], "description": "human prose"})
-
-    summary = promote.promote_candidates(tmp_path, jobs_db=tmp_path / "db" / "jobs.sqlite",
-                                         rebuild_index=False)
-    assert summary["promoted"] == 1 and summary["amended"] == 1
-    assert summary["affected_sources"] == [a]
+    out = _keep(tmp_path, a, "Old Name", title="New Name", aliases=["Extra"],
+                description="human prose")
+    assert out["outcome"] == "kept" and out["effect"] == "activated"
+    tag_links.finish(tmp_path, out["affected_sources"], wiki_dir=tmp_path / "wiki",
+                     templates_dir=TEMPLATES)
 
     old_page = tmp_path / "wiki" / "Items" / "old-name.md"
     new_page = tmp_path / "wiki" / "Items" / "new-name.md"
-    assert new_page.exists() and not old_page.exists()             # executor owns the move
+    assert new_page.exists() and not old_page.exists()             # activation owns the move
     fm = parse_frontmatter(new_page.read_text(encoding="utf-8"))
     assert fm["item_id"] == nid                                  # frozen id, never re-hashed
     assert fm["status"] == "active"
@@ -313,27 +315,27 @@ def test_amendments_apply_frozen_id_slug_move_and_description(tmp_path):
     assert "[[Items/new-name" in src_page and "old-name" not in src_page
     _validators_green(tmp_path)
 
-    # The description survives a later re-extraction (recompose threads it through).
+    # The description AND the keep survive a later re-extraction (recompose threads them through).
     _rewrite_md(tmp_path, a, "alpha second body")
     _extract(tmp_path, RoutingAdapter({"alpha": {"items": [_item("Old Name")]}}))
     fm2 = parse_frontmatter(new_page.read_text(encoding="utf-8"))
     assert fm2["description"] == "human prose" and fm2["status"] == "active"
 
 
-def test_amended_slug_collision_skips_with_reason(tmp_path):
+def test_keep_amended_slug_collision_blocks_before_any_write(tmp_path):
     _build(tmp_path, {"a.md": "alpha body"})
     _extract(tmp_path, RoutingAdapter({"alpha": {"items": [_item("First"), _item("Second")]}}))
-    reviews.resolve_review_item(
-        tmp_path / "reviews", _promote_rid("Second"), decision="approved",
-        decided_by="human", amendments={"title": "First"})
-    summary = promote.promote_candidates(tmp_path, jobs_db=tmp_path / "db" / "jobs.sqlite",
-                                         rebuild_index=False)
-    assert {"review_id": _promote_rid("Second"),
-            "reason": "amended_slug_collision"} in summary["skipped"]
-    # Nothing moved: Second stays candidate at its own slug.
+    a = _sids(tmp_path)["a.md"]
+    out = _keep(tmp_path, a, "Second", title="First")
+    assert out["outcome"] == "blocked" and out["reason"] == "amended_slug_collision"
+    # Nothing written: Second stays a candidate suggestion at its own slug, no ledger keep.
     fm = parse_frontmatter(
         (tmp_path / "wiki" / "Items" / "second.md").read_text(encoding="utf-8"))
     assert fm["status"] == "candidate"
+    assert tag_links.load_ledger(tmp_path / "reviews", a)["kept"] == {}
+    gconn = graph.connect(tmp_path / "db" / "graph.sqlite")
+    assert graph.kept_sources_for_node(gconn, items.node_id("Second")) == []
+    gconn.close()
 
 
 # --- human-add ----------------------------------------------------------------
@@ -357,13 +359,13 @@ def test_human_add_matrix(tmp_path):
     a = _sids(tmp_path)["a.md"]
     rdir = tmp_path / "reviews"
 
-    # (1) brand-new candidate: producer writes + pre-approved promote + purpose-named audit.
+    # (1) brand-new tag: created + kept (ADR-0066: the add IS a keep -> active) + audit.
     out = _human_add(tmp_path, source_id=a, item_type="method_technique", title="Brand New",
                      aliases=["BN"], description="added by hand")
-    assert out["outcome"] == "created" and out["promote_resolution"] == "approved"
+    assert out["outcome"] == "created" and out["keep_effect"] == "activated"
     nid = out["node_id"]
     gconn = graph.connect(tmp_path / "db" / "graph.sqlite")
-    assert graph.get_node(gconn, nid)["status"] == "candidate"
+    assert graph.get_node(gconn, nid)["status"] == "active"
     edge = gconn.execute(
         "SELECT asserted_by, evidence_source_id, evidence_char_start FROM edges "
         "WHERE src_id=? AND dst_id=? AND edge_type='mentions' AND status='active'",
@@ -374,20 +376,20 @@ def test_human_add_matrix(tmp_path):
     page = tmp_path / "wiki" / "Items" / "brand-new.md"
     fm = parse_frontmatter(page.read_text(encoding="utf-8"))
     assert fm["description"] == "added by hand" and fm["aliases"] == ["BN"]
-    assert (rdir / "approved" / f"{out['review_id']}.json").exists()
+    assert nid in tag_links.load_ledger(rdir, a)["kept"]
+    assert not list((rdir / "approved").glob("*.json"))             # no promotion review at all
     audits = list((rdir / "audit_log").glob(f"{out['review_id']}-human-added-*.json"))
     assert len(audits) == 1
     entry = json.loads(audits[0].read_text(encoding="utf-8"))
     assert entry["source_id"] == a and entry["node_id"] == nid and entry["node_created"]
     assert entry["actor"] == "human" and entry["title"] == "Brand New"
 
-    # (2) existing candidate: mention + approve its pending item; no second node.
+    # (2) existing candidate suggestion: kept on this document -> active; no second node.
     out2 = _human_add(tmp_path, source_id=a, item_type="method_technique", title="Existing")
-    assert out2["outcome"] == "mention_added"
+    assert out2["outcome"] == "mention_added" and out2["keep_effect"] == "activated"
     assert out2["node_id"] == items.node_id("Existing")
-    assert (rdir / "approved" / f"{out2['review_id']}.json").exists()
 
-    # (3) type conflict: mention routed to the existing node + change_item_type filed
+    # (3) type conflict: kept on the existing node + change_item_type filed
     # (the page keeps its classification until the flip applies — nothing auto-retypes).
     out3 = _human_add(tmp_path, source_id=a, item_type="provider_institution", title="Jane Tool")
     assert out3["outcome"] == "routed_retype"
@@ -406,16 +408,16 @@ def test_human_add_matrix(tmp_path):
     assert out4["outcome"] == "blocked" and out4["reason"] == "invalid_item_type"
     assert len(list((rdir / "audit_log").glob("*-human-added-*.json"))) == before
 
-    # (5) rejected slot: a human rejection blocks the add BEFORE any write (ADR-0045 reopen path).
-    _human_add(tmp_path, source_id=a, item_type="method_technique", title="Doomed")  # created+approved
-    doomed_rid = _promote_rid("Doomed")
-    reviews.reopen_review_item(rdir, doomed_rid, reason="test")
-    reviews.resolve_review_item(rdir, doomed_rid, decision="rejected", decided_by="human",
-                                note="not wanted")
-    out5 = _human_add(tmp_path, source_id=a, item_type="method_technique", title="Doomed")
-    assert out5["outcome"] == "blocked"
-    assert out5["reason"] == "promotion_previously_rejected"
-    assert out5["decided_by"] == "human" and out5["review_id"] == doomed_rid
+    # (5) ADR-0066: a drop is per document and never blocks an explicit add — adding a tag
+    # dropped earlier keeps it again and clears the drop record.
+    gconn = graph.connect(tmp_path / "db" / "graph.sqlite")
+    tag_links.drop(gconn, source_id=a, node_id=items.node_id("Existing"),
+                   wiki_dir=tmp_path / "wiki", reviews_dir=rdir)
+    gconn.close()
+    assert tag_links.drop_filter(rdir, a)[0] == {"existing"}
+    out5 = _human_add(tmp_path, source_id=a, item_type="method_technique", title="Existing")
+    assert out5["outcome"] == "mention_added_active" and out5["keep_effect"] == "revived"
+    assert tag_links.drop_filter(rdir, a) == (set(), set())
 
     # (6) unknown source: blocked.
     assert _human_add(tmp_path, source_id="src_0000000000000000", item_type="method_technique",
@@ -425,19 +427,17 @@ def test_human_add_matrix(tmp_path):
     _validators_green(tmp_path)
 
 
-def test_human_add_already_active_mention_only(tmp_path):
+def test_human_add_already_active_tag_on_another_document(tmp_path):
     _build(tmp_path, {"a.md": "alpha body", "b.md": "beta body"})
     _extract(tmp_path, RoutingAdapter({"alpha": {"items": [_item("Hot Topic")]}}))
     sids = _sids(tmp_path)
     a, b = sids["a.md"], sids["b.md"]
-    reviews.resolve_review_item(tmp_path / "reviews", _promote_rid("Hot Topic"),
-                                decision="approved", decided_by="human")
-    promote.promote_candidates(tmp_path, jobs_db=tmp_path / "db" / "jobs.sqlite",
-                               rebuild_index=False)
+    _keep(tmp_path, a, "Hot Topic")
     out = _human_add(tmp_path, source_id=b, item_type="method_technique", title="Hot Topic")
-    assert out["outcome"] == "mention_added_active" and out["promote_resolution"] is None
+    assert out["outcome"] == "mention_added_active" and out["keep_effect"] == "kept"
     gconn = graph.connect(tmp_path / "db" / "graph.sqlite")
     assert sorted(graph.sources_for_node(gconn, out["node_id"])) == sorted([a, b])
+    assert sorted(graph.kept_sources_for_node(gconn, out["node_id"])) == sorted([a, b])
     assert graph.get_node(gconn, out["node_id"])["status"] == "active"
     gconn.close()
 
@@ -452,13 +452,9 @@ def test_human_add_endpoint(client, tmp_path):
                        follow_redirects=False)
     assert resp.status_code == 303 and resp.headers["location"].endswith(f"/sources/{a}")
     assert (tmp_path / "wiki" / "Items" / "via-form.md").exists()
-    # Rejected slot via the endpoint: 409 with the reopen pointer.
-    rid = _promote_rid("Existing")
-    reviews.resolve_review_item(tmp_path / "reviews", rid, decision="rejected",
-                                decided_by="human")
-    resp = client.post(f"/ui/reviews/sources/{a}/add",
-                       data={"title": "Existing", "item_type": "method_technique"})
-    assert resp.status_code == 409 and "reopen" in resp.text.lower()
+    assert "Via Form" in {r["title"] for r in _view(tmp_path, a)["kept"]}
+    assert client.post(f"/ui/reviews/sources/{a}/add",
+                       data={"title": "x", "item_type": "nope"}).status_code == 400
     assert client.post("/ui/reviews/sources/src_not_canonical!!/add",
                        data={"title": "x", "item_type": "method_technique"}).status_code == 404
 
@@ -466,7 +462,7 @@ def test_human_add_endpoint(client, tmp_path):
 # --- batch scope guard (review round, B1) --------------------------------------
 
 
-def test_batch_rejects_non_visible_and_global_rids(client, tmp_path):
+def test_batch_rejects_non_visible_and_global_rows(client, tmp_path):
     _build(tmp_path, {"a.md": "alpha body", "b.md": "beta body"})
     _extract(tmp_path, RoutingAdapter({
         "alpha": {"items": [_item("Mine")]},
@@ -474,29 +470,26 @@ def test_batch_rejects_non_visible_and_global_rids(client, tmp_path):
     }))
     sids = _sids(tmp_path)
     a = sids["a.md"]
-    foreign_rid = _promote_rid("Foreign")            # valid id, visible only on source b
+    foreign = items.node_id("Foreign")               # valid id, a link only on source b
     global_rid = reviews.create_review_item(         # a global type: never source-attributable
         tmp_path / "reviews", review_type="merge_items",
         subject={"survivor_node_id": "itm_1111111111111111",
                  "absorbed_node_id": "itm_2222222222222222"},
         proposal={"to_status": "merged"})
-    mine_rid = _promote_rid("Mine")
-    reviews.resolve_review_item(tmp_path / "reviews", mine_rid, decision="approved",
-                                decided_by="human")
 
     resp = client.post(f"/ui/reviews/sources/{a}/decide", data={
-        f"decision_{foreign_rid}": "approve",
+        f"link_{foreign}": "drop",
         f"decision_{global_rid}": "approve",
-        f"decision_{mine_rid}": "approve",           # decided visible row -> idempotent no-op
+        f"link_{items.node_id('Mine')}": "keep",
     })
     assert resp.status_code == 200
     assert resp.text.count("not_attributable_to_source") == 2
-    # No ledger mutation for the forged rows: both still pending, no audit entries.
-    for rid in (foreign_rid, global_rid):
-        assert (tmp_path / "reviews" / "pending" / f"{rid}.json").exists()
-        assert list((tmp_path / "reviews" / "audit_log").glob(f"{rid}-*.json")) == []
-    # The decided visible row was permitted and resolved as an idempotent no-op (not a skip).
-    assert (tmp_path / "reviews" / "approved" / f"{mine_rid}.json").exists()
+    # No mutation for the forged rows: Foreign still a suggestion on b, the merge still pending.
+    assert [r["title"] for r in _view(tmp_path, sids["b.md"])["suggestions"]] == ["Foreign"]
+    assert (tmp_path / "reviews" / "pending" / f"{global_rid}.json").exists()
+    assert list((tmp_path / "reviews" / "audit_log").glob(f"{global_rid}-*.json")) == []
+    # The visible row was decided.
+    assert [r["title"] for r in _view(tmp_path, a)["kept"]] == ["Mine"]
 
 
 # --- human-add slug collision + index freshness (review round, B2/B3) ----------
@@ -516,12 +509,11 @@ def test_human_add_slug_collision_blocks_before_any_write(tmp_path):
     out = _human_add(tmp_path, source_id=a, item_type="method_technique", title="Foo-Bar")
     assert out["outcome"] == "blocked" and out["reason"] == "slug_collision"
     assert out["existing_node_id"] == items.node_id("Foo Bar")
-    # Zero partial writes: no node, no mention, no promote item, no audit; page keeps its owner.
+    # Zero partial writes: no node, no mention, no ledger keep, no audit; page keeps its owner.
     gconn = graph.connect(tmp_path / "db" / "graph.sqlite")
     assert graph.get_node(gconn, new_id) is None
     gconn.close()
-    assert not (rdir / "pending" / f"{_promote_rid('Foo-Bar')}.json").exists()
-    assert not (rdir / "approved" / f"{_promote_rid('Foo-Bar')}.json").exists()
+    assert tag_links.load_ledger(rdir, a)["kept"] == {}
     assert len(list((rdir / "audit_log").glob("*-human-added-*.json"))) == audits_before
     fm = parse_frontmatter(
         (tmp_path / "wiki" / "Items" / "foo-bar.md").read_text(encoding="utf-8"))
@@ -567,32 +559,32 @@ def test_source_screen_escapes_untrusted_text(client, tmp_path):
 # --- UAT round: preselect link, alphabetical selects, view-original ------------
 
 
-def test_preselect_approve_checks_pending_rows_only(client, tmp_path):
+def test_preselect_keep_checks_suggestions_only(client, tmp_path):
     _build(tmp_path, {"a.md": "alpha body"})
-    _extract(tmp_path, RoutingAdapter({"alpha": {"items": [_item("Fresh"), _item("Parked")]}}))
+    _extract(tmp_path, RoutingAdapter({"alpha": {"items": [_item("Fresh"), _item("Kept")]}}))
     a = _sids(tmp_path)["a.md"]
-    parked = _promote_rid("Parked")
-    reviews.defer_review_item(tmp_path / "reviews", parked, note="later")
-    fresh = _promote_rid("Fresh")
+    _keep(tmp_path, a, "Kept")
+    fresh, kept = items.node_id("Fresh"), items.node_id("Kept")
 
     plain = client.get(f"/ui/reviews/sources/{a}").text
-    assert f"name='decision_{fresh}' value='' checked" in plain      # default = leave pending
-    assert "— leave pending" in plain
-    assert "value='approve' checked" not in plain
+    assert f"name='link_{fresh}' value='' checked" in plain         # default = leave undecided
+    assert "— leave undecided" in plain
+    assert "value='keep' checked" not in plain
     # The explicit pre-select control is a GET-form button targeting the same URL.
     assert f"<form method='get' action='/ui/reviews/sources/{a}'>" in plain
-    assert "<input type='hidden' name='preselect' value='approve'>" in plain
-    assert "<button type='submit'>Pre-select approve for all pending rows</button>" in plain
+    assert "<input type='hidden' name='preselect' value='keep'>" in plain
+    assert "<button type='submit'>Pre-select keep for all suggestions</button>" in plain
 
-    pre = client.get(f"/ui/reviews/sources/{a}?preselect=approve").text
-    assert f"name='decision_{fresh}' value='approve' checked" in pre     # pending row pre-checked
-    assert f"name='decision_{parked}' value='' checked" in pre           # deferred stays parked
-    assert "Clear pre-selection" in pre
+    for value in ("keep", "approve"):                                # approve = legacy synonym
+        pre = client.get(f"/ui/reviews/sources/{a}?preselect={value}").text
+        assert f"name='link_{fresh}' value='keep' checked" in pre    # suggestion pre-checked
+        assert f"name='link_{kept}' value='' checked" in pre         # kept row: leave kept
+        assert "Clear pre-selection" in pre
 
-    # Any other value is ignored (only "approve" is honored).
-    bogus = client.get(f"/ui/reviews/sources/{a}?preselect=reject").text
-    assert "value='approve' checked" not in bogus
-    assert "value='reject' checked" not in bogus
+    # Any other value is ignored.
+    bogus = client.get(f"/ui/reviews/sources/{a}?preselect=drop").text
+    assert "value='keep' checked" not in bogus
+    assert "value='drop' checked" not in bogus
 
 
 def test_type_selects_are_alphabetical(client, tmp_path):

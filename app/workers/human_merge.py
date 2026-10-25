@@ -99,7 +99,7 @@ def plan_merge(
     if a["status"] == "merged":
         return _blocked("survivor_already_merged", node_id=a["node_id"])
     for side, node in (("survivor", a), ("absorbed", b)):
-        if node["status"] != "active":
+        if node["status"] not in ("active", "unused"):   # ADR-0066: an unused tag stays mergeable
             return _blocked(f"{side}_not_active", node_id=node["node_id"],
                             node_status=node["status"])
 

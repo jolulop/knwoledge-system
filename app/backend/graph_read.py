@@ -382,6 +382,8 @@ def source_item_types(
     by an **active** ``mentions`` edge (mentions is ``source → item``, so the source is ``src_id``).
     Batched (one query over all candidate sources), never per chunk. A deprecated/candidate item or
     a superseded mention does not bridge — this is a ranking signal, and only live topics steer it.
+    Only **kept** links bridge (ADR-0066 review round 2: ``asserted_by = 'human'``) — an undecided
+    suggestion is not a tag the user applied.
     """
     out: dict[str, set[str]] = {}
     if not source_ids:
@@ -390,7 +392,7 @@ def source_item_types(
     rows = conn.execute(
         f"""SELECT e.src_id AS source_id, n.item_type AS item_type
             FROM edges e JOIN nodes n ON n.node_id = e.dst_id
-            WHERE e.edge_type = 'mentions' AND e.status = 'active'
+            WHERE e.edge_type = 'mentions' AND e.status = 'active' AND e.asserted_by = 'human'
               AND n.node_type = 'item' AND n.status = 'active'
               AND n.item_type IS NOT NULL
               AND e.src_id IN ({ph})""",

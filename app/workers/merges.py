@@ -34,6 +34,7 @@ _MERGE_TYPES = frozenset({"merge_items"})
 _SAFE_ID = re.compile(r"[A-Za-z0-9_]+")
 # Symmetric edges stored canonically (src_id < dst_id), per validate_graph. `supersedes` is DIRECTED.
 _CANONICAL_EDGES = frozenset({"contradicts", "duplicates"})
+_MERGEABLE_STATUSES = frozenset({"active", "unused"})   # ADR-0066: unused tags stay mergeable
 # effect-statuses that mean an approved item's effect is NOT realized -> it blocks the merge (decision 6).
 _UNAPPLIED_EFFECT = frozenset({"pending_apply", "unknown", "apply_deferred"})
 
@@ -166,6 +167,11 @@ def _plan_edge(gconn, e: dict[str, Any], b: str, a: str) -> tuple:
             return ("collapse", e)                    # full-identity active collision -> collapse
         if st in ("proposed", "superseded"):
             return ("resurrect", e, existing)         # lifecycle-inactive -> resurrect the target
+        if e["edge_type"] == "mentions":
+            # ADR-0066: a rejected tag link is a per-document drop. A KEPT link (human) moving onto
+            # it wins — the merge is the later human statement that both are the same tag; a mere
+            # suggestion (llm) moving onto a dropped link loses (the drop stands).
+            return ("resurrect", e, existing) if e["asserted_by"] == "human" else ("collapse", e)
         return ("block", "rejected_target_collision")  # a human "no" — never auto-resurrect
     return ("repoint", e, new_src, new_dst)
 
@@ -193,9 +199,10 @@ def _approved_unapplied_block(gconn, reviews_dir: Path, wiki_dir: Path, b: str, 
 
 
 def _render_survivor(gconn, *, a: str, na: dict[str, Any], nt: str, aliases: list[str], title: str,
-                     wiki_dir: Path, now: str) -> str | None:
+                     wiki_dir: Path, now: str, status: str = "active") -> str | None:
     """Re-render survivor A with the unioned aliases (page-authoritative). Returns the page path if it
-    changed, else None. The survivor keeps its OWN item_type (ADR-0059) and page-owned fields."""
+    changed, else None. The survivor keeps its OWN item_type (ADR-0059) and page-owned fields; its
+    status is `active`, or ADR-0066 `unused` when no document keeps the merged tag."""
     page = wiki_dir / NODE_DIR[nt] / f"{na['slug']}.md"
     meta = items._read_node_meta(page)
     item_type = (meta or {}).get("item_type") or na.get("item_type")
@@ -204,7 +211,7 @@ def _render_survivor(gconn, *, a: str, na: dict[str, Any], nt: str, aliases: lis
     rendered = render_item_page({
         "node_id": a, "item_type": item_type, "title": title,
         "aliases": aliases, "confidence": (meta or {}).get("confidence", "low"),
-        "source_ids": node_sources, "status": "active",
+        "source_ids": node_sources, "status": status,
         "duplicates": duplicates,
         "split_from": (meta or {}).get("split_from"),
         "split_review_id": (meta or {}).get("split_review_id"),
@@ -214,7 +221,7 @@ def _render_survivor(gconn, *, a: str, na: dict[str, Any], nt: str, aliases: lis
     if changed:
         page.parent.mkdir(parents=True, exist_ok=True)
         page.write_text(rendered, encoding="utf-8")
-    graph.upsert_node(gconn, node_id=a, node_type=nt, slug=na["slug"], status="active",
+    graph.upsert_node(gconn, node_id=a, node_type=nt, slug=na["slug"], status=status,
                       item_type=item_type, now=now)
     return f"{NODE_DIR[nt]}/{na['slug']}.md" if changed else None
 
@@ -250,166 +257,207 @@ def _write_audit(reviews_dir: Path, rid: str, record: dict[str, Any], now: str) 
 
 def apply_merges(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = None) -> dict[str, Any]:
     """Apply approved `merge_items` decisions (ADR-0050/0059). Returns
-    `{applied, skipped:[{review_id, reason}], changed_pages, graph_changed, affected_sources}`. Graph-
+    `{applied, skipped:[{review_id, reason}], changed_pages, graph_changed, affected_sources,
+    journaled}` — `journaled` are the in-flight markers the caller closes once its refreshes succeed. Graph-
     REQUIRED; the caller owns the final commit + the Source-page re-render of `affected_sources`."""
     now = now or iso_now()
     applied = 0
     skipped: list[dict[str, str]] = []
     changed_pages: list[str] = []
     affected_sources: set[str] = set()
+    journaled: list[str] = []                            # in-flight markers the caller must close
 
-    for item in _approved_merges(reviews_dir):
-        rid = str(item.get("review_id", ""))
-        subj = item.get("subject") or {}
-        proposal = item.get("proposal") or {}
-        a, b = subj.get("survivor_node_id"), subj.get("absorbed_node_id")
+    from app.workers import identity_journal, tag_links   # lazy: tag_links imports this module
+    # ADR-0066 review round 3: the whole identity operation is serialized with tag actions and
+    # extraction writes (the ledger lock), from planning to the last page.
+    with tag_links.ledger_lock(reviews_dir):
+        for item in _approved_merges(reviews_dir):
+            rid = str(item.get("review_id", ""))
+            subj = item.get("subject") or {}
+            proposal = item.get("proposal") or {}
+            a, b = subj.get("survivor_node_id"), subj.get("absorbed_node_id")
 
-        # --- subject guards (decision 5); each appends a typed reason and skips, never partial-applies ---
-        def _skip(reason: str) -> None:
-            skipped.append({"review_id": rid, "reason": reason})
+            # --- subject guards (decision 5); each appends a typed reason and skips, never partial-applies ---
+            def _skip(reason: str) -> None:
+                skipped.append({"review_id": rid, "reason": reason})
 
-        if proposal.get("to_status") != "merged":
-            _skip("unexpected_to_status")
-            continue
-        if not _is_safe_id(a) or not _is_safe_id(b):
-            _skip("invalid_subject")
-            continue
-        if a == b:
-            _skip("self_merge")
-            continue
-        na, nb = graph.get_node(gconn, a), graph.get_node(gconn, b)
-        if na is None or nb is None:
-            _skip("node_missing")
-            continue
-        nt = na["node_type"]
-        if nb["node_type"] != nt:
-            _skip("type_mismatch")
-            continue
-        if nt != "item":
-            _skip("out_of_scope")
-            continue
-        b_page = f"{NODE_DIR[nt]}/{nb['slug']}.md"
-        if nb["status"] == "merged":
-            # Idempotent: a completed merge INTO THIS survivor is a true no-op; a tombstone pointing
-            # elsewhere means a conflicting merge won — loud typed skip, never silent (ADR-0064).
+            if proposal.get("to_status") != "merged":
+                _skip("unexpected_to_status")
+                continue
+            if not _is_safe_id(a) or not _is_safe_id(b):
+                _skip("invalid_subject")
+                continue
+            if a == b:
+                _skip("self_merge")
+                continue
+            na, nb = graph.get_node(gconn, a), graph.get_node(gconn, b)
+            if na is None or nb is None:
+                _skip("node_missing")
+                continue
+            nt = na["node_type"]
+            if nb["node_type"] != nt:
+                _skip("type_mismatch")
+                continue
+            if nt != "item":
+                _skip("out_of_scope")
+                continue
+            b_page = f"{NODE_DIR[nt]}/{nb['slug']}.md"
+            # ADR-0066 review round 3: an open journal entry means THIS merge was interrupted — resume
+            # it (adopt the tombstone it may already have written) instead of treating it as done.
+            resuming = identity_journal.is_open(reviews_dir, rid)
             tomb = wiki_dir / b_page
             merged_into = parse_frontmatter(tomb.read_text(encoding="utf-8", errors="replace")) \
                 .get("merged_into") if tomb.exists() else None
-            if merged_into is not None and merged_into != a:
-                _skip("absorbed_merged_elsewhere")
-            continue
-        if na["status"] != "active":
-            _skip("survivor_not_active")
-            continue
-        if nb["status"] != "active":
-            _skip("absorbed_not_active")
-            continue
-        meta_a = items._read_node_meta(wiki_dir / f"{NODE_DIR[nt]}/{na['slug']}.md")
-        meta_b = items._read_node_meta(wiki_dir / b_page)
-        if meta_a is None or meta_b is None:
-            _skip("page_missing")
-            continue
-        # ADR-0059: both pages must carry a valid governed classification (drifted state is a
-        # typed skip, never a mid-apply raise from the graph write gate).
-        if not taxonomy.is_item_type(meta_a.get("item_type") or na.get("item_type")) or \
-           not taxonomy.is_item_type(meta_b.get("item_type") or nb.get("item_type")):
-            _skip("item_type_missing")
-            continue
+            if nb["status"] == "merged" and not (resuming and merged_into == a):
+                # Idempotent: a completed merge INTO THIS survivor is a true no-op; a tombstone pointing
+                # elsewhere means a conflicting merge won — loud typed skip, never silent (ADR-0064).
+                if merged_into is not None and merged_into != a:
+                    _skip("absorbed_merged_elsewhere")
+                continue
+            if na["status"] not in _MERGEABLE_STATUSES:       # ADR-0066: an unused tag stays mergeable
+                _skip("survivor_not_active")
+                continue
+            if nb["status"] not in _MERGEABLE_STATUSES and nb["status"] != "merged":
+                _skip("absorbed_not_active")
+                continue
+            meta_a = items._read_node_meta(wiki_dir / f"{NODE_DIR[nt]}/{na['slug']}.md")
+            meta_b = items._read_node_meta(wiki_dir / b_page)
+            if meta_a is None or meta_b is None:
+                _skip("page_missing")
+                continue
+            # ADR-0059: both pages must carry a valid governed classification (drifted state is a
+            # typed skip, never a mid-apply raise from the graph write gate).
+            if not taxonomy.is_item_type(meta_a.get("item_type") or na.get("item_type")) or \
+               not taxonomy.is_item_type(meta_b.get("item_type") or nb.get("item_type")):
+                _skip("item_type_missing")
+                continue
 
-        # --- plan the edge re-points (dry) + detect block gates (no writes) ---
-        edges = _active_edges_touching(gconn, b)
-        plan: list[tuple] = []
-        blocked = None
-        for e in edges:
-            action = _plan_edge(gconn, e, b, a)
-            if action[0] == "block":
-                blocked = action[1]
-                break
-            plan.append(action)
-        if blocked:
-            _skip(blocked)
-            continue
-        if _approved_unapplied_block(gconn, reviews_dir, wiki_dir, b, b_page, rid):
-            _skip("approved_unapplied_references_absorbed")
-            continue
+            # --- plan the edge re-points (dry) + detect block gates (no writes) ---
+            edges = _active_edges_touching(gconn, b)
+            plan: list[tuple] = []
+            blocked = None
+            for e in edges:
+                action = _plan_edge(gconn, e, b, a)
+                if action[0] == "block":
+                    blocked = action[1]
+                    break
+                plan.append(action)
+            if blocked:
+                _skip(blocked)
+                continue
+            if not resuming and _approved_unapplied_block(gconn, reviews_dir, wiki_dir, b, b_page, rid):
+                _skip("approved_unapplied_references_absorbed")
+                continue
+            if tag_links.corrupt_ledgers(reviews_dir):
+                _skip("tag_ledger_corrupt")                  # decisions must move with the merge, intact
+                continue
 
-        # --- APPLY (no more blocks; never partial after this point) ---
-        audit_edges: dict[str, list] = {"repointed": [], "collapsed": [], "resurrected": [], "self": []}
-        partners: set[str] = set()                       # same-type partner pages to re-render (duplicates)
-        item_sources: set[str] = set()                   # this merge's affected Source pages (for the audit)
-        for action in plan:
-            e = action[1]
-            # Any action that touches B's edge changes the projection on the OTHER endpoint's page — the
-            # Source page of a `mentions` edge, the same-type partner of a `duplicates` edge — so it must
-            # re-render to drop the absorbed B (whether the edge is re-pointed, collapsed, resurrected away,
-            # or self-dropped). Collected from the ORIGINAL edge regardless of the action (fixes the
-            # collapse/resurrect stale-projection gap).
-            if e["edge_type"] == "mentions":
-                src = e["src_id"]
-                if (graph.get_node(gconn, src) or {}).get("node_type") == "source":
-                    affected_sources.add(src)
-                    item_sources.add(src)
-            elif e["edge_type"] == "duplicates":
-                partner = e["src_id"] if e["dst_id"] == b else e["dst_id"]
-                if partner not in (a, b):
-                    partners.add(partner)
-            if action[0] == "repoint":
-                _, _, new_src, new_dst = action
-                graph.repoint_edge(gconn, e["edge_id"],
-                                   new_src=new_src if new_src != e["src_id"] else None,
-                                   new_dst=new_dst if new_dst != e["dst_id"] else None, now=now)
-                audit_edges["repointed"].append(e["edge_id"])
-            elif action[0] == "collapse":
-                graph.set_status(gconn, e["edge_id"], "superseded", now=now)
-                audit_edges["collapsed"].append(e["edge_id"])
-            elif action[0] == "resurrect":
-                target = action[2]
-                graph.reactivate_edge(gconn, target["edge_id"], review_id=rid, now=now)
-                if target.get("review_id"):
-                    reviews.withdraw_review_item(reviews_dir, target["review_id"],
-                                                 reason="superseded_by_merge", now=now)
-                graph.set_status(gconn, e["edge_id"], "superseded", now=now)
-                audit_edges["resurrected"].append(
-                    {"target_edge_id": target["edge_id"], "previous_status": target["status"],
-                     "previous_target_review_id": target.get("review_id"), "absorbed_edge_id": e["edge_id"]})
-            elif action[0] == "self":
-                graph.set_status(gconn, e["edge_id"], "superseded", now=now)
-                audit_edges["self"].append(e["edge_id"])
+            # --- LEDGER FIRST (ADR-0066 review round 3): journal the operation, then move B's keeps and
+            # drops to A, then touch the graph. Every step below is idempotent, so a re-run resumes. ---
+            identity_journal.begin(reviews_dir, rid, op="merge_items", nodes=[a, b], now=now)
+            ledger_sources = tag_links.move_merge_decisions(reviews_dir, survivor=a, absorbed=b)
 
-        # tombstone B, re-render survivor A (alias union), partners, withdraw B-subjects, audit.
-        absorbed_old_status = nb["status"]               # captured before the tombstone (decision 5 audit)
-        a_page = f"{NODE_DIR[nt]}/{na['slug']}.md"
-        aliases = _alias_union(meta_a["title"], meta_a["aliases"], meta_b["title"], meta_b["aliases"])
-        item_pages: list[str] = [_render_tombstone(
-            gconn, b=b, nb=nb, nt=nt, a=a, a_slug=na["slug"], b_title=meta_b["title"],
-            b_aliases=meta_b["aliases"], rid=rid, wiki_dir=wiki_dir, now=now)]
-        surv = _render_survivor(gconn, a=a, na=na, nt=nt, aliases=aliases, title=meta_a["title"],
-                                wiki_dir=wiki_dir, now=now)
-        if surv:
-            item_pages.append(surv)
-        for pid in sorted(partners):
-            pn = graph.get_node(gconn, pid)
-            if pn and pn["node_type"] == "item" and items.recompose_semantic_node_page(
-                    gconn, node_id=pid, wiki_dir=wiki_dir, status=pn["status"],
-                    review_status=(items._read_node_meta(
-                        wiki_dir / NODE_DIR[pn["node_type"]] / f"{pn['slug']}.md") or {}).get(
-                            "review_status", "none"), now=now) == "written":
-                item_pages.append(f"{NODE_DIR[pn['node_type']]}/{pn['slug']}.md")
-        changed_pages.extend(item_pages)
+            # --- APPLY (no more blocks; never partial after this point) ---
+            audit_edges: dict[str, list] = {"repointed": [], "collapsed": [], "resurrected": [], "self": []}
+            partners: set[str] = set()                       # same-type partner pages to re-render (duplicates)
+            item_sources: set[str] = set()                   # this merge's affected Source pages (for the audit)
+            for action in plan:
+                e = action[1]
+                # Any action that touches B's edge changes the projection on the OTHER endpoint's page — the
+                # Source page of a `mentions` edge, the same-type partner of a `duplicates` edge — so it must
+                # re-render to drop the absorbed B (whether the edge is re-pointed, collapsed, resurrected away,
+                # or self-dropped). Collected from the ORIGINAL edge regardless of the action (fixes the
+                # collapse/resurrect stale-projection gap).
+                if e["edge_type"] == "mentions":
+                    src = e["src_id"]
+                    if (graph.get_node(gconn, src) or {}).get("node_type") == "source":
+                        affected_sources.add(src)
+                        item_sources.add(src)
+                elif e["edge_type"] == "duplicates":
+                    partner = e["src_id"] if e["dst_id"] == b else e["dst_id"]
+                    if partner not in (a, b):
+                        partners.add(partner)
+                if action[0] == "repoint":
+                    _, _, new_src, new_dst = action
+                    graph.repoint_edge(gconn, e["edge_id"],
+                                       new_src=new_src if new_src != e["src_id"] else None,
+                                       new_dst=new_dst if new_dst != e["dst_id"] else None, now=now)
+                    audit_edges["repointed"].append(e["edge_id"])
+                elif action[0] == "collapse":
+                    graph.set_status(gconn, e["edge_id"], "superseded", now=now)
+                    audit_edges["collapsed"].append(e["edge_id"])
+                elif action[0] == "resurrect":
+                    target = action[2]
+                    graph.reactivate_edge(gconn, target["edge_id"], review_id=rid, now=now)
+                    if target.get("review_id"):
+                        reviews.withdraw_review_item(reviews_dir, target["review_id"],
+                                                     reason="superseded_by_merge", now=now)
+                    graph.set_status(gconn, e["edge_id"], "superseded", now=now)
+                    audit_edges["resurrected"].append(
+                        {"target_edge_id": target["edge_id"], "previous_status": target["status"],
+                         "previous_target_review_id": target.get("review_id"), "absorbed_edge_id": e["edge_id"]})
+                elif action[0] == "self":
+                    graph.set_status(gconn, e["edge_id"], "superseded", now=now)
+                    audit_edges["self"].append(e["edge_id"])
 
-        withdrawn = _withdraw_b_subjects(reviews_dir, b, b_page, now)
-        _write_audit(reviews_dir, rid, {
-            "survivor": {"node_id": a, "type": nt, "slug": na["slug"], "page": a_page},
-            "absorbed": {"node_id": b, "type": nt, "slug": nb["slug"], "title": meta_b["title"],
-                         "old_status": absorbed_old_status, "page": b_page},
-            "edges": audit_edges, "aliases": aliases, "withdrawn_subjects": withdrawn,
-            # affected pages re-rendered here + the Source pages run_apply re-renders (affected_sources).
-            "affected_pages": item_pages + [f"Sources/{s}.md" for s in sorted(item_sources)],
-        }, now)
-        applied += 1
+            if resuming:
+                # An interrupted run may already have re-pointed edges whose Source pages were never
+                # re-rendered: re-render every document linked to either tag.
+                linked = {r["src_id"] for r in gconn.execute(
+                    "SELECT DISTINCT e.src_id FROM edges e JOIN nodes n ON n.node_id = e.src_id "
+                    "WHERE e.dst_id IN (?, ?) AND e.edge_type = 'mentions' AND n.node_type = 'source'",
+                    (a, b))}
+                affected_sources.update(linked)
+                item_sources.update(linked)
+
+            # tombstone B, re-render survivor A (alias union), partners, withdraw B-subjects, audit.
+            absorbed_old_status = nb["status"]               # captured before the tombstone (decision 5 audit)
+            a_page = f"{NODE_DIR[nt]}/{na['slug']}.md"
+            aliases = _alias_union(meta_a["title"], meta_a["aliases"], meta_b["title"], meta_b["aliases"])
+            item_pages: list[str] = [b_page if nb["status"] == "merged" else _render_tombstone(
+                gconn, b=b, nb=nb, nt=nt, a=a, a_slug=na["slug"], b_title=meta_b["title"],
+                b_aliases=meta_b["aliases"], rid=rid, wiki_dir=wiki_dir, now=now)]
+            # ADR-0066: each document's decision wins over any suggestion now on A, whatever its evidence
+            # span (before the survivor renders). The survivor is active if it was, or if a document
+            # keeps it after the re-point (an unused survivor gaining a kept link revives).
+            rejected_by_drop = tag_links.enforce_drops(gconn, reviews_dir, node_id=a, now=now)
+            affected_sources.update(rejected_by_drop)
+            item_sources.update(rejected_by_drop)
+            a_status = ("active" if na["status"] == "active" or graph.kept_sources_for_node(gconn, a)
+                        else "unused")
+            surv = _render_survivor(gconn, a=a, na=na, nt=nt, aliases=aliases, title=meta_a["title"],
+                                    wiki_dir=wiki_dir, now=now, status=a_status)
+            if surv:
+                item_pages.append(surv)
+            for pid in sorted(partners):
+                pn = graph.get_node(gconn, pid)
+                if pn and pn["node_type"] == "item" and items.recompose_semantic_node_page(
+                        gconn, node_id=pid, wiki_dir=wiki_dir, status=pn["status"],
+                        review_status=(items._read_node_meta(
+                            wiki_dir / NODE_DIR[pn["node_type"]] / f"{pn['slug']}.md") or {}).get(
+                                "review_status", "none"), now=now) == "written":
+                    item_pages.append(f"{NODE_DIR[pn['node_type']]}/{pn['slug']}.md")
+            changed_pages.extend(item_pages)
+
+            withdrawn = _withdraw_b_subjects(reviews_dir, b, b_page, now)
+            _write_audit(reviews_dir, rid, {
+                "survivor": {"node_id": a, "type": nt, "slug": na["slug"], "page": a_page},
+                "absorbed": {"node_id": b, "type": nt, "slug": nb["slug"], "title": meta_b["title"],
+                             "old_status": absorbed_old_status, "page": b_page},
+                "edges": audit_edges, "aliases": aliases, "withdrawn_subjects": withdrawn,
+                "survivor_status": a_status, "tag_ledgers_rewritten": ledger_sources,
+                "suggestions_rejected_by_drop": rejected_by_drop, "resumed": resuming,
+                # affected pages re-rendered here + the Source pages run_apply re-renders (affected_sources).
+                "affected_pages": item_pages + [f"Sources/{s}.md" for s in sorted(item_sources)],
+            }, now)
+            # The marker stays: the apply caller removes it after the Source pages + indexes refreshed.
+            identity_journal.set_stage(reviews_dir, rid, "graph_done")
+            journaled.append(rid)
+            applied += 1
 
     return {"applied": applied, "skipped": skipped, "changed_pages": sorted(set(changed_pages)),
-            "graph_changed": applied > 0, "affected_sources": sorted(affected_sources)}
+            "graph_changed": applied > 0, "affected_sources": sorted(affected_sources),
+            "journaled": journaled}
 
 
 def _withdraw_b_subjects(reviews_dir: Path, b: str, b_page: str, now: str,

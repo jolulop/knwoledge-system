@@ -33,10 +33,11 @@ private network / sidecar behind a TLS/auth proxy) and is **not** a substitute f
 
 | Pass | Endpoint | Script-equivalent | What it does |
 |---|---|---|---|
-| **Lint** | `POST /jobs/lint` | — | Structural validators + semantic checks (orphan/under-supported item, uncited claim, **missing raw**) + quality heuristics (**summary rot**, **stale claim citations**, **topic starvation**) → health report + governance review items. |
+| **Lint** | `POST /jobs/lint` | — | Structural validators + semantic checks (**unused tag** — report-only, uncited claim, **missing raw**; the single-source `under_supported_item` deprecation is retired by ADR-0066 and its pending items are withdrawn as `rule_retired`) + quality heuristics (**summary rot**, **stale claim citations**, **topic starvation**) → health report + governance review items. |
 | **Stale / retention** | `POST /jobs/stale-check` | — | Stale sources → `archive_source` candidates; ephemeral past window → `delete_raw_file` (record-only); **LLM-cache** over TTL/size → `purge_response_cache` (record-only). Reports **live cache stats** every run. |
 | **Reindex** | `POST /jobs/reindex` | `scripts/rebuild_index.py` + `scripts/reindex_keyword.py` | Rebuild `wiki/index.md` + refresh the keyword index. **Never the vector index.** |
 | **Backup** | — | `scripts/backup.py` | Snapshot manifests, db (incl. graph), wiki, reviews, policies. |
+| **Tag-link repair** | — | `scripts/rebuild_tag_links.py [--apply]` | ADR-0066: make the graph agree with the per-document tag ledgers (the authority) — re-assert missing keeps (after a graph rebuild/restore), finish an interrupted keep (activation with the recorded amendments, or an unused tag's revival), reject links of dropped tags and human links with no keep (an interrupted drop). Dry run by default; re-renders touched pages + refreshes `wiki/index.md` and the keyword index. **Never touches** a document whose ledger is damaged (reported, never overwritten — restore it from backup) or the tags of an interrupted merge/split (`reviews/in_flight/<review_id>.json`; the next `/reviews/apply` resumes it — run that first). While such a marker exists, keep/drop/undo/human-add/block on its tags are refused (`identity_operation_in_flight`, a banner on the document screen), Delete unused skips them and extraction skips the documents linked to them (`in_flight_sources`). Apply closes the marker only after the Source pages (every affected page rendered — a per-page render failure is reported as `source_page_refresh_failed`), `wiki/index.md` and the keyword index refreshed; on a refresh failure it stays (`identity_refresh_pending`, non-clean) and the next apply finishes the job. Exits non-zero while either remains. `validate_tag_links.py` (in `validate_all`) fails while they disagree. |
 | **Review reconciliation** | — | `scripts/reconcile_reviews.py` | Withdraw extraction-stale unresolved review items (ADR-0057): pending/deferred promotes for tombstoned/missing nodes, recompose-provenance deprecations for resurrected nodes. Idempotent, audited per withdrawal; never touches approved/rejected. **Preflight fail-closed** (exits non-zero, withdraws nothing) on missing/empty/schema-mismatched graph DB or graph↔wiki status drift over the reviewed nodes. |
 | **Apply** (human-gated) | `POST /reviews/apply` | — | Deterministically apply *approved* decisions: promotion, contradiction, synthesis, deprecation, **archive** (`active→archive_candidate`), **duplicate annotation** (`mark_semantic_duplicate` → `## Duplicates`, ADR-0041), the **visibility family** — hide/unhide for sources (`hide_content`/`unhide_content`, ADR-0043/0047), semantic pages (`hide_semantic_page`/`unhide_semantic_page`, ADR-0046/0047), claims (ADR-0048) and synthesis (ADR-0049, `evidence_hidden`) — the **identity-surgery family** — `merge_items` (ADR-0050/0059) and `split_item` (ADR-0052/0059) — and the non-rekeying **`change_item_type`** classification flip (ADR-0059). |
 | **Apply preview** (dry-run) | `POST /reviews/apply/dry-run` | — | Apply-on-a-copy preview (ADR-0040): runs the same executors against a throwaway sandbox and returns the semantic mutation diff (graph/wiki/reviews/manifests) **without touching live state**. `GET /ui/reviews/apply` renders it before enabling Apply. |
@@ -87,15 +88,28 @@ KS=/home/jolulop/code/knowledge-system
 Or run the passes directly as one-shot scripts under `systemd` timers — same endpoints, same job records.
 Each pass writes a job row to `db/jobs.sqlite` and appends `wiki/log.md`, so progress survives restarts
 (state is on disk, never chat context). **Review the queue** (`/ui/reviews`) and **apply** on your own
-cadence — nothing is applied automatically. For high-volume candidate review, the **per-source flow**
-(`/ui/reviews/sources`, ADR-0058) walks the sources in ingest order — each screen batch-decides that
-source's promotes/type changes/retirements, supports approve-with-amendments (title/aliases/
-description/item_type — item_type is required to clear an unclassified-sentinel candidate) and
-human-added candidates; the flat queue stays canonical for everything cross-source. Each screen
+cadence — nothing is applied automatically. For tagging, the **per-source flow**
+(`/ui/reviews/sources`, ADR-0058/0066) walks the sources in ingest order — each screen decides that
+document's **tag links**: *keep* (immediate; a tag becomes active with its first keep, with optional
+title/aliases/description/item_type amendments — item_type is required to keep an unclassified
+suggestion), *drop* (this document only; remembered so re-extraction never re-suggests it; a tag
+nobody keeps is deleted, an active tag that loses its last keep becomes **unused** —
+`/ui/reviews/tags/unused`, bulk *Delete unused*), *never suggest* (the `policies/blocked_tags.txt`
+list, `/ui/reviews/tags/blocked`); plus that source's type changes/retirements (recorded, applied
+later) and human-added tags. The flat queue stays canonical for everything cross-source. Each screen
 links the source's original file (`/raw/<source_id>` — passive media like PDF/text/images renders inline, sandboxed + nosniff; HTML/SVG/unknown types download as attachments, since raw sources are untrusted; lifecycle status never blocks this operator view) and offers
-an explicit `?preselect=approve` link that pre-checks approve on the pending rows (deferred rows
-stay parked) — you still review and submit; untouched rows always stay pending.
-A human-added candidate rebuilds `wiki/index.md` immediately; its **keyword** rows follow the next
+an explicit `?preselect=keep` link that pre-checks keep on the suggestions — you still review and
+submit; untouched rows always record nothing. Kept tags live in the per-document ledger
+`reviews/tag_links/<source_id>.json` (backed up with `reviews/`; every update — tag actions,
+extraction's writes, whole merges and splits — is serialized by `reviews/tag_links/.lock`; a damaged
+ledger refuses decisions instead of being overwritten). Each
+immediate action refreshes the Source pages, `wiki/index.md` **and the keyword index**; a refresh
+failure is shown on the result page (run `reindex_keyword.py`). Only **kept** links feed synthesis
+and the ADR-0062 item-type ranking signal — an undecided suggestion is not a tag. After an unblock,
+the page prints the **Re-suggest** command `scripts/extract_items.py --force --cache-only <ids>`,
+which replays stored responses only (zero provider calls) and reports a cache miss per document
+instead of calling the model.
+A human-added tag rebuilds `wiki/index.md` immediately; its **keyword** rows follow the next
 reindex pass (`/jobs/reindex` or the apply chain) like every other producer's output.
 
 **Item consolidation (ADR-0064).** `/jobs/lint` files `merge_items` proposals for **merge candidates**

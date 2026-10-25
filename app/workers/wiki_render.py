@@ -551,7 +551,8 @@ def render_item_page(node: dict[str, Any], *, review_status: str | None = None,
         draft = "\n".join(fm_lines + body) + "\n"
         fingerprint = _fingerprint(_FP_LINE.sub("", draft))
         return draft.replace('input_fingerprint: ""', f'input_fingerprint: "{fingerprint}"', 1)
-    derived_review_status = "none" if status == "active" else ("none" if active_mentions else "pending")
+    derived_review_status = ("none" if status in ("active", "unused")
+                             else ("none" if active_mentions else "pending"))
     rs = _resolve_review_status(review_status, derived_review_status)
 
     fm_lines = [
@@ -577,7 +578,12 @@ def render_item_page(node: dict[str, Any], *, review_status: str | None = None,
     ]
     label = status.replace("_", " ")
     type_label = str(item_type).replace("_", " ")
-    if active_mentions:
+    if status == "unused":
+        # ADR-0066: a tag that lost its last kept link — hidden, kept for its human edits/redirects.
+        summary = f"Unused item ({type_label}) — no document keeps this tag."
+        mentioned = ([f"- {_wl(f'Sources/{s}', labels)}" for s in source_ids] if active_mentions
+                     else ["_No document keeps this tag._"])
+    elif active_mentions:
         summary = f"{label.capitalize()} item ({type_label}) mentioned by {len(source_ids)} source(s)."
         mentioned = [f"- {_wl(f'Sources/{s}', labels)}" for s in source_ids]
     else:

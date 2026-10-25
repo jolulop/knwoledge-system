@@ -44,4 +44,5 @@ statuses:
   - hidden                        # ADR-0043: governance visibility suppression (active -> hidden)
   - evidence_hidden               # ADR-0049: synthesis suppressed because a supporting claim is hidden
   - merged                        # ADR-0050: absorbed identity tombstone (merged_into a same-type survivor)
+  - unused                        # ADR-0066: tag with no kept link (hidden; bulk-deleted by a human)
   # (ADR-0051's `rekeyed` tombstone retired by ADR-0059 — retype is a metadata flip, never an id change)

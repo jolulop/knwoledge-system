@@ -1,22 +1,17 @@
 #!/usr/bin/env python3
-"""Phase 3.5b promotion lifecycle (slice 5, ADR-0018): candidate -> active by recurrence.
+"""Promotion lifecycle (ADR-0018, restated by ADR-0066): candidate -> active.
 
-A deterministic, rerunnable maintenance pass over the graph + manifests + review state (no
-LLM). A candidate knowledge item promotes to `active` once **≥2 mutually-independent**
-sources mention it (a candidate carrying the `unclassified_review_required` sentinel is
-excluded from recurrence, and its approval cannot apply without a real `item_type`
-amendment — ADR-0059 decision 5). Independence is judged from manifest provenance
-(`author/publisher/report_family/canonical_url`, ADR-0018): two sources are independent only
-if there is at least one *comparable* key (known on both) whose values differ and no
-comparable key is equal — non-comparable/unknown keys never prove independence. Manifests
-carry no provenance by default, so the gate is conservative: nothing auto-promotes until
-provenance is populated; everything else stays `candidate` with its `promote_candidate_node`
-review item pending (early promotion is a human decision).
+ADR-0066: a knowledge item (tag) becomes active when ONE document link to it is kept — the keep is
+the promotion, performed immediately by `tag_links.keep` through :func:`activate_node`. There is
+**no recurrence auto-promotion** any more: an AI suggestion never becomes active without a human
+keep, however many sources mention it. The ≥2-independent-sources threshold survives only as a
+synthesis-eligibility input.
 
-On promotion: the page frontmatter is updated to `active` (status authority, ADR-0030), the
-`nodes.status` index is mirrored, and the `promote_candidate_node` review item is approved
-(pending -> approved + audit_log). Idempotent: a rerun skips already-active nodes and writes
-no duplicate audit entries.
+This pass remains the executor for **approved `promote_candidate_node` items** still in the
+ledger (the flat queue / pre-ADR-0066 items): it activates each through the same
+:func:`activate_node` (approve-with-amendments, ADR-0058; the ADR-0059 sentinel gate). On
+promotion the page frontmatter is updated to `active` (status authority, ADR-0030) and the
+`nodes.status` index is mirrored. Idempotent: a rerun skips already-active nodes.
 """
 from __future__ import annotations
 
@@ -29,19 +24,63 @@ from pathlib import Path
 from typing import Any
 
 from app.backend import db, graph, taxonomy
-from app.backend.manifests import get_provenance, independent_sources, iso_now, valid_manifests
+from app.backend.manifests import iso_now, valid_manifests
 from app.workers import items, reviews, wiki
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter, render_item_page
 
 PROMOTABLE = ("item",)
 _TITLE_RE = re.compile(r'(?m)^title:\s*"(.*)"\s*$')
 
+AMENDMENT_FIELDS = frozenset({"title", "aliases", "description", "item_type"})
+AMEND_MAX_TITLE, AMEND_MAX_ALIAS, AMEND_MAX_ALIASES, AMEND_MAX_DESCRIPTION = 200, 120, 16, 2000
 
-def _has_independent_pair(sources: list[str], prov: dict[str, dict[str, Any]]) -> bool:
-    """Any mutually-independent pair among a node's mentioning sources (ADR-0018)."""
-    provs = [prov.get(s, {}) for s in sources]
-    return any(independent_sources(provs[i], provs[j])
-               for i in range(len(provs)) for j in range(i + 1, len(provs)))
+
+class AmendmentError(ValueError):
+    """An amendments payload violates the ADR-0058 shape/limits (the message names the field)."""
+
+
+def normalize_amendments(amendments: Any) -> dict[str, Any] | None:
+    """Normalize + validate an ADR-0058 amendments payload — the ONE check shared by the review
+    route, the per-source form, the JSON tag-link route and `tag_links.keep`.
+
+    Allowed fields exactly title/aliases/description/item_type (ADR-0059: item_type must be one of
+    the 15 production types — the sentinel is never an amendment target); a blank title is treated
+    as not-provided (a title can be corrected, never erased); a blank description explicitly clears
+    the page field. Returns the normalized payload, or None when nothing effective was provided.
+    Raises :class:`AmendmentError`."""
+    if amendments is None:
+        return None
+    if not isinstance(amendments, dict):
+        raise AmendmentError("amendments must be an object")
+    unknown = sorted(set(amendments) - AMENDMENT_FIELDS)
+    if unknown:
+        raise AmendmentError(f"unknown amendment field(s): {unknown}")
+    out: dict[str, Any] = {}
+    title = amendments.get("title")
+    if title is not None:
+        if not isinstance(title, str):
+            raise AmendmentError("amendment title must be a string")
+        title = re.sub(r"\s+", " ", title).strip()[:AMEND_MAX_TITLE]
+        if title:
+            out["title"] = title
+    aliases = amendments.get("aliases")
+    if aliases is not None:
+        if not isinstance(aliases, list) or any(not isinstance(a, str) for a in aliases):
+            raise AmendmentError("amendment aliases must be a list of strings")
+        out["aliases"] = [a.strip()[:AMEND_MAX_ALIAS] for a in aliases if a.strip()][:AMEND_MAX_ALIASES]
+    description = amendments.get("description")
+    if description is not None:
+        if not isinstance(description, str):
+            raise AmendmentError("amendment description must be a string")
+        # Canonical single-line prose (review round): whitespace collapsed at the boundary; an
+        # explicitly-blank description clears the page field.
+        out["description"] = re.sub(r"\s+", " ", description).strip()[:AMEND_MAX_DESCRIPTION]
+    item_type = amendments.get("item_type")
+    if item_type is not None:
+        if not taxonomy.is_production_item_type(item_type):
+            raise AmendmentError("amendment item_type must be one of the production taxonomy values")
+        out["item_type"] = item_type
+    return out or None
 
 
 def _read_meta(page_path: Path) -> dict[str, Any] | None:
@@ -109,6 +148,64 @@ def _rebuild_index(root: Path) -> bool:
     return subprocess.run([sys.executable, str(script), str(root)]).returncode == 0
 
 
+def activate_node(gconn, *, node: dict[str, Any], wiki_dir: Path, reviews_dir: Path,
+                  amendments: dict[str, Any] | None = None, now: str | None = None,
+                  dry_run: bool = False) -> dict[str, Any]:
+    """Flip one candidate item to `active` — the single promotion writer (ADR-0018/0066).
+
+    Applies approve-with-amendments (title/aliases/description/item_type, ADR-0058/0059): the node
+    id stays frozen; only the slug (display path) may move, and this function owns the move. The
+    ADR-0059 sentinel gate holds: without a real production `item_type` the node never activates.
+    Returns `{outcome: "activated"|"skipped", reason?, slug, amended, affected_sources}`; a skip
+    writes NOTHING. `dry_run=True` runs every gate and returns `"would_activate"` without writing
+    (the keep path's preflight, so a blocked keep never half-writes)."""
+    now = now or iso_now()
+    nid, node_type = node["node_id"], node["node_type"]
+    page_dir = Path(wiki_dir) / NODE_DIR[node_type]
+    old_page = page_dir / f"{node['slug']}.md"
+    meta = _read_meta(old_page)
+    if meta is None:
+        return {"outcome": "skipped", "reason": "page_missing"}
+    eff = _apply_amendments(meta, amendments)
+    if not taxonomy.is_production_item_type(eff.get("item_type")):
+        return {"outcome": "skipped", "reason": "missing_required_item_type"}
+    slug = items._slug(eff["title"]) if amendments else node["slug"]
+    new_page = page_dir / f"{slug}.md"
+    if slug != node["slug"] and new_page.exists():
+        # Another page already owns the amended slug — scope-guard skip, no writes.
+        return {"outcome": "skipped", "reason": "amended_slug_collision"}
+    if dry_run:
+        return {"outcome": "would_activate", "slug": slug, "amended": bool(amendments),
+                "affected_sources": []}
+    sources = graph.sources_for_node(gconn, nid)
+    duplicates = graph.active_duplicates(gconn, nid)
+    new_page.write_text(
+        render_item_page({
+            "node_id": nid, "item_type": eff["item_type"], "title": eff["title"],
+            "aliases": eff["aliases"], "confidence": "low",
+            "source_ids": sources, "status": "active",
+            "duplicates": duplicates,
+            "split_from": meta.get("split_from"),        # ADR-0052: preserve spin-off lineage
+            "split_review_id": meta.get("split_review_id"),
+            "description": eff["description"],           # ADR-0058: page-owned description
+        }, labels=items._link_labels(wiki_dir, sources, duplicates)),
+        encoding="utf-8")
+    graph.upsert_node(gconn, node_id=nid, node_type=node_type, slug=slug, status="active",
+                      item_type=eff["item_type"], now=now)
+    affected: list[str] = []
+    if slug != node["slug"]:
+        old_page.unlink(missing_ok=True)
+        # Inbound links hold the old slug: mentioning Source pages re-render via the caller fan-out
+        # (affected_sources); duplicate partners re-render here, AFTER the slug mirror update their
+        # ## Duplicates projection reads.
+        affected = list(sources)
+        for dup in graph.active_duplicates(gconn, nid):
+            items._recompose_node(gconn, node_id=dup["node_id"], wiki_dir=wiki_dir,
+                                  reviews_dir=reviews_dir, now=now)
+    return {"outcome": "activated", "slug": slug, "amended": bool(amendments),
+            "affected_sources": affected}
+
+
 def promote_candidates(
     root: Path,
     *,
@@ -138,8 +235,7 @@ def promote_candidates(
 
     try:
         _valid, _skipped_invalid = valid_manifests(manifests_dir)
-        prov = {m["source_id"]: get_provenance(m) for m in _valid}
-        considered = promoted_recurrence = promoted_review = amended = 0
+        considered = promoted_review = amended = 0
         skipped: list[dict[str, str]] = []
         affected_sources: set[str] = set()
         if graph_db.exists():
@@ -156,78 +252,23 @@ def promote_candidates(
                     considered += 1
                     nid = node["node_id"]
                     rid = reviews.review_id("promote_candidate_node", {"node_id": nid})
-                    pre_approved = (reviews_dir / "approved" / f"{rid}.json").exists()
-                    sources = graph.sources_for_node(gconn, nid)
-                    independent = _has_independent_pair(sources, prov)
-                    if not (pre_approved or independent):
-                        continue  # stays candidate; its promote_candidate_node item stays pending
-                    page_dir = wiki_dir / NODE_DIR[node["node_type"]]
-                    old_page = page_dir / f"{node['slug']}.md"
-                    meta = _read_meta(old_page)
-                    if meta is None:
-                        continue
+                    if not (reviews_dir / "approved" / f"{rid}.json").exists():
+                        continue  # stays candidate (ADR-0066: only a keep or an approval promotes)
                     # ADR-0058 approve-with-amendments: the human's title/aliases/description ride the
-                    # approved item; the executor applies them at flip-to-active. The node id stays
-                    # frozen — only the slug (display path) may move, and this executor owns the move.
-                    amendments = _read_amendments(reviews_dir, rid) if pre_approved else None
-                    eff = _apply_amendments(meta, amendments)
-                    # ADR-0059 sentinel gate: an unclassified candidate never promotes — the
-                    # recurrence path silently leaves it candidate, and an approved item without
-                    # a real item_type amendment is a typed scope-skip (never a partial apply).
-                    if not taxonomy.is_production_item_type(eff.get("item_type")):
-                        if pre_approved:
-                            skipped.append({"review_id": rid,
-                                            "reason": "missing_required_item_type"})
+                    # approved item; the executor applies them at flip-to-active.
+                    out = activate_node(gconn, node=node, wiki_dir=wiki_dir, reviews_dir=reviews_dir,
+                                        amendments=_read_amendments(reviews_dir, rid), now=now)
+                    if out["outcome"] == "skipped":
+                        if out["reason"] != "page_missing":
+                            skipped.append({"review_id": rid, "reason": out["reason"]})
                         continue
-                    slug = items._slug(eff["title"]) if amendments else node["slug"]
-                    new_page = page_dir / f"{slug}.md"
-                    if slug != node["slug"] and new_page.exists():
-                        # Another page already owns the amended slug — scope-guard skip, no writes.
-                        skipped.append({"review_id": rid, "reason": "amended_slug_collision"})
-                        continue
-                    duplicates = graph.active_duplicates(gconn, nid)
-                    new_page.write_text(
-                        render_item_page({
-                            "node_id": nid, "item_type": eff["item_type"], "title": eff["title"],
-                            "aliases": eff["aliases"], "confidence": "low",
-                            "source_ids": sources, "status": "active",
-                            "duplicates": duplicates,
-                            "split_from": meta.get("split_from"),        # ADR-0052: preserve spin-off lineage
-                            "split_review_id": meta.get("split_review_id"),
-                            "description": eff["description"],           # ADR-0058: page-owned description
-                        }, labels=items._link_labels(wiki_dir, sources, duplicates)),
-                        encoding="utf-8")
-                    if amendments:
-                        amended += 1
-                    graph.upsert_node(gconn, node_id=nid, node_type=node["node_type"],
-                                      slug=slug, status="active", item_type=eff["item_type"], now=now)
-                    if slug != node["slug"]:
-                        old_page.unlink(missing_ok=True)
-                        # Inbound links hold the old slug: mentioning Source pages re-render via the
-                        # caller fan-out (affected_sources); duplicate partners re-render here, AFTER
-                        # the slug mirror update their ## Duplicates projection reads.
-                        affected_sources.update(sources)
-                        for dup in graph.active_duplicates(gconn, nid):
-                            items._recompose_node(gconn, node_id=dup["node_id"], wiki_dir=wiki_dir,
-                                                  reviews_dir=reviews_dir, now=now)
-                    if pre_approved:
-                        promoted_review += 1  # human-approved early promotion; loop already closed
-                    else:
-                        # Recurrence: close the loop deterministically — ensure an item exists
-                        # (legacy/missing), then approve it (pending -> approved + audit_log).
-                        reviews.create_review_item(
-                            reviews_dir, review_type="promote_candidate_node",
-                            subject={"node_id": nid},
-                            proposal={"to_status": "active", "item_type": eff["item_type"]},
-                            now=now)
-                        reviews.resolve_review_item(
-                            reviews_dir, rid, decision="approved", decided_by="recurrence",
-                            note="promoted on >=2 independent sources", now=now)
-                        promoted_recurrence += 1
+                    amended += bool(out["amended"])
+                    affected_sources.update(out["affected_sources"])
+                    promoted_review += 1  # human-approved promotion; the ledger loop already closed
             finally:
                 gconn.close()
 
-        promoted = promoted_recurrence + promoted_review
+        promoted = promoted_review
         # ADR-0058: an amended slug moved a page — re-render the mentioning Source pages so their
         # [[Dir/slug]] links follow (the executor owns the whole move; validators stay green even
         # on a standalone scripts/promote.py run). Only sources with an existing Source page.
@@ -239,7 +280,7 @@ def promote_candidates(
         index_rebuilt = _rebuild_index(root) if (rebuild_index and promoted) else False
         summary = {
             "job_id": job_id, "candidates_considered": considered, "promoted": promoted,
-            "promoted_by_recurrence": promoted_recurrence, "promoted_by_review": promoted_review,
+            "promoted_by_review": promoted_review,
             "amended": amended, "skipped": skipped,
             "affected_sources": sorted(affected_sources),
             "manifests_skipped_invalid": len(_skipped_invalid),

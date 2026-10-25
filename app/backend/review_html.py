@@ -64,6 +64,8 @@ def _nav() -> str:
             "<a href='/ui/reviews/sources'>Sources</a>"
             "<a href='/ui/reviews?status=approved'>Approved</a>"
             "<a href='/ui/reviews/apply'>Apply…</a>"
+            "<a href='/ui/reviews/tags/unused'>Unused tags</a>"
+            "<a href='/ui/reviews/tags/blocked'>Blocked tags</a>"
             "</nav>")
 
 
@@ -369,28 +371,27 @@ def render_apply_result(result: dict[str, Any]) -> str:
 
 def _counts_cell(counts: dict[str, Any]) -> str:
     return _h(" / ".join(f"{k}:{counts.get(k, 0)}"
-                         for k in ("remaining", "approved", "rejected", "deferred",
-                                   "added", "amended")))
+                         for k in ("remaining", "kept", "dropped", "deferred", "added")))
 
 
 def render_sources_index(data: dict[str, Any]) -> str:
     """The entry page: every reviewable source in manifest ingest order with counts; sources with
-    zero remaining items render greyed-out as done. 'Start review' jumps to the first source with
-    remaining items; every row stays clickable (a lens, not a locked wizard)."""
+    zero remaining rows render greyed-out as done. 'Start review' jumps to the first source with
+    remaining rows; every row stays clickable (a lens, not a locked wizard)."""
     totals = data.get("totals") or {}
     parts = [_nav(), "<h1>Review by source</h1>",
              f"<p>{_h(totals.get('sources', 0))} sources · "
-             f"{_h(totals.get('remaining_overall', 0))} items remaining overall. "
-             "The <a href='/ui/reviews'>flat queue</a> remains canonical; this flow covers "
-             "extraction-caused items only.</p>"]
+             f"{_h(totals.get('remaining_overall', 0))} rows remaining overall "
+             "(tag suggestions + type changes + retirements). The "
+             "<a href='/ui/reviews'>flat queue</a> remains canonical for everything else.</p>"]
     first = totals.get("first_remaining_source")
     if first:
         parts.append(f"<p><a href='/ui/reviews/sources/{_h(first)}'>"
-                     "<strong>Start review</strong></a> (first source with remaining items)</p>")
+                     "<strong>Start review</strong></a> (first source with remaining rows)</p>")
     else:
-        parts.append("<p><em>No source-attributable items remaining.</em></p>")
+        parts.append("<p><em>Nothing remaining to decide by source.</em></p>")
     rows = ["<tr><th>#</th><th>source</th><th>file</th><th>ingested</th>"
-            "<th>remaining / approved / rejected / deferred / added / amended</th></tr>"]
+            "<th>remaining / kept / dropped / deferred / added</th></tr>"]
     for i, s in enumerate(data.get("sources") or [], start=1):
         sid = _h(s.get("source_id"))
         remaining = (s.get("counts") or {}).get("remaining", 0)
@@ -410,11 +411,10 @@ def render_sources_index(data: dict[str, Any]) -> str:
 
 
 def _decision_radios(rid: str, *, preselect: str | None = None) -> str:
-    """Per-row decision radios. The explicit no-decision option is load-bearing in this
-    JS-free UI: a radio group cannot be DEselected once clicked, so it is the only way to
-    take back a misclick before submit (and unlike defer it records NOTHING — the row just
-    stays pending). `preselect="approve"` (the explicit ?preselect=approve button) checks
-    approve instead; the human still reviews and submits."""
+    """Per-row decision radios for review items (type changes, retirements). The explicit
+    no-decision option is load-bearing in this JS-free UI: a radio group cannot be DEselected once
+    clicked, so it is the only way to take back a misclick before submit (and unlike defer it
+    records NOTHING — the row just stays pending)."""
     rid = _h(rid)
     default = "approve" if preselect == "approve" else ""
     return ("".join(
@@ -424,27 +424,34 @@ def _decision_radios(rid: str, *, preselect: str | None = None) -> str:
                          ("reject", "reject"), ("defer", "defer"))))
 
 
+def _link_radios(nid: str, *, kept: bool, preselect: str | None = None) -> str:
+    """ADR-0066 per-link radios: a suggestion is kept, dropped (this document only) or blocked
+    ("never suggest", vault-wide); a kept link can be dropped. "— leave" records nothing."""
+    nid = _h(nid)
+    options = ((("", "— leave kept"), ("drop", "drop from this document")) if kept else
+               (("", "— leave undecided"), ("keep", "keep"), ("drop", "drop"),
+                ("block", "never suggest")))
+    default = "keep" if (preselect == "keep" and not kept) else ""
+    return "".join(
+        f"<label><input type='radio' name='link_{nid}' value='{v}'"
+        f"{' checked' if v == default else ''}> {label}</label> " for v, label in options)
+
+
 def _amend_inputs(row: dict[str, Any]) -> str:
-    """Inline amendment fields (ADR-0058 title/aliases/description + ADR-0059 item_type),
-    prefilled from a preserved draft when the reviewer deferred with typed amendments. The
-    item_type select is REQUIRED to clear an unclassified sentinel (approval blocks without
-    it); for a classified candidate it is an optional reclassification-at-promotion."""
-    rid = _h(row.get("review_id"))
-    draft = row.get("draft_amendments") or {}
-    title = _h(draft.get("title") or "")
-    aliases = _h(", ".join(draft.get("aliases") or []))
-    description = _h(draft.get("description") or "")
-    drafted_type = draft.get("item_type") or ""
+    """Inline amendment fields for a keep that activates a CANDIDATE (ADR-0058 title/aliases/
+    description + ADR-0059 item_type). The item_type select is REQUIRED to keep an unclassified
+    suggestion (the keep blocks without it); otherwise it is an optional reclassification."""
+    nid = _h(row.get("node_id"))
     options = ["<option value=''>keep type</option>"] + [
-        f"<option value='{t}'{' selected' if t == drafted_type else ''}>{t}</option>"
-        for t in sorted(taxonomy.ITEM_TYPES)]
-    return (f"<input type='text' name='amend_title_{rid}' value='{title}' size='18' "
-            "placeholder='amended title'> "
-            f"<input type='text' name='amend_aliases_{rid}' value='{aliases}' size='18' "
+        f"<option value='{t}'>{t}</option>" for t in sorted(taxonomy.ITEM_TYPES)
+        if t != taxonomy.UNCLASSIFIED]
+    required = " <strong>type required to keep</strong>" if row.get("needs_type") else ""
+    return (f"<input type='text' name='amend_title_{nid}' size='18' placeholder='amended title'> "
+            f"<input type='text' name='amend_aliases_{nid}' size='18' "
             "placeholder='aliases, comma-sep'> "
-            f"<input type='text' name='amend_description_{rid}' value='{description}' size='24' "
+            f"<input type='text' name='amend_description_{nid}' size='24' "
             "placeholder='description'> "
-            f"<select name='amend_item_type_{rid}'>" + "".join(options) + "</select>")
+            f"<select name='amend_item_type_{nid}'>" + "".join(options) + "</select>" + required)
 
 
 def _decided_cell(row: dict[str, Any]) -> str:
@@ -458,8 +465,9 @@ def _decided_cell(row: dict[str, Any]) -> str:
 
 
 def render_source_screen(data: dict[str, Any]) -> str:
-    """One source's screen: candidates + type changes + retired section in ONE batch form
-    (untouched rows stay pending), plus the human-add form. Decided rows render read-only."""
+    """One source's screen (ADR-0066): tag suggestions to keep/drop/never-suggest, kept tags (drop to
+    remove), type changes and retirements in ONE batch form (untouched rows record nothing), then
+    the dropped-earlier list (undo) and the add-a-tag form."""
     sid = _h(data.get("source_id"))
     totals = data.get("totals") or {}
     counts = data.get("counts") or {}
@@ -469,28 +477,57 @@ def render_source_screen(data: dict[str, Any]) -> str:
         f"<h1>Source {sid}</h1>",
         f"<p>{_h(data.get('filename'))} — <a href='/raw/{sid}'>view original</a> — source "
         f"{_h(data.get('position'))} of "
-        f"{_h(totals.get('sources'))} · {_h(totals.get('remaining_overall'))} items remaining "
+        f"{_h(totals.get('sources'))} · {_h(totals.get('remaining_overall'))} rows remaining "
         f"overall · this source: {_counts_cell(counts)}</p>",
         "<p><a href='/ui/reviews/sources'>Source index</a>"
         + (f" · <a href='/ui/reviews/sources/{_h(data['next_source'])}'>Next source</a>"
            if data.get("next_source") else "") + "</p>",
-        "<p>Decisions are recorded only; effects are applied later via "
-        "<a href='/ui/reviews/apply'>Apply</a>. Untouched rows stay pending. Amendments "
-        "(promote items only) are frozen on approve and preserved as a draft on defer.</p>",
-        # Explicit pre-select (UAT round): a deliberate two-click bulk approve — one click of
-        # intent (this button re-renders with approve checked on every PENDING row; deferred
-        # rows were parked on purpose and stay unchecked), one click of commit (submit).
-        (f"<p><strong>Approve pre-selected on all pending rows</strong> — review, adjust, "
-         f"then submit. <a href='/ui/reviews/sources/{sid}'>Clear pre-selection</a></p>"
-         if preselect == "approve" else
+        (f"<p class='banner'><strong>This document's tag ledger is damaged</strong> "
+         f"(<code>reviews/tag_links/{sid}.json</code>: {_h(data['ledger_error'])}). Tag decisions "
+         "are refused until it is restored from backup, so no earlier keep or drop is lost.</p>"
+         if data.get("ledger_error") else ""),
+        (f"<p class='banner'><strong>A merge/split touching this document is unfinished</strong> "
+         f"(<code>{_h(data['in_flight_review_id'])}</code>). Tag decisions on its tags are refused until "
+         "you run <a href='/ui/reviews/apply'>Apply</a> again, which finishes it.</p>"
+         if data.get("in_flight_review_id") else ""),
+        "<p>Tag decisions take effect immediately and apply to <strong>this document only</strong>: "
+        "<em>keep</em> tags it (a tag becomes active with its first keep), <em>drop</em> removes the "
+        "link here and is remembered for re-extraction, <em>never suggest</em> blocks the name "
+        "everywhere (kept links stay). Type changes and retirements are recorded and applied later "
+        "via <a href='/ui/reviews/apply'>Apply</a>. Untouched rows record nothing.</p>",
+        (f"<p><strong>Keep pre-selected on all suggestions</strong> — review, adjust, then submit. "
+         f"<a href='/ui/reviews/sources/{sid}'>Clear pre-selection</a></p>"
+         if preselect == "keep" else
          f"<form method='get' action='/ui/reviews/sources/{sid}'>"
-         "<input type='hidden' name='preselect' value='approve'>"
-         "<button type='submit'>Pre-select approve for all pending rows</button></form>"),
+         "<input type='hidden' name='preselect' value='keep'>"
+         "<button type='submit'>Pre-select keep for all suggestions</button></form>"),
         f"<form method='post' action='/ui/reviews/sources/{sid}/decide'>",
     ]
 
-    def _section(title_txt: str, rows: list[dict[str, Any]], *, amendable: bool,
-                 columns: str) -> None:
+    def _tag_section(title_txt: str, rows: list[dict[str, Any]], *, kept: bool) -> None:
+        parts.append(f"<h2>{_h(title_txt)} ({len(rows)})</h2>")
+        if not rows:
+            parts.append("<p><em>None.</em></p>")
+            return
+        table = ["<tr><th>tag</th><th>type</th><th>aliases</th><th>status</th><th>notes</th>"
+                 "<th>decision</th></tr>"]
+        for row in rows:
+            notes = []
+            if row.get("kept_elsewhere"):
+                notes.append(f"kept on {row['kept_elsewhere']} other document(s)")
+            if row.get("node_status") == "unused":
+                notes.append("unused tag — keeping revives it")
+            cell = _link_radios(str(row.get("node_id")), kept=kept, preselect=preselect)
+            if not kept and row.get("amendable"):
+                cell += "<br>" + _amend_inputs(row)
+            table.append(
+                f"<tr><td>{_h(row.get('title'))}</td><td>{_h(row.get('item_type'))}</td>"
+                f"<td>{_h(', '.join(row.get('aliases') or []))}</td>"
+                f"<td>{_h(row.get('node_status'))}</td><td>{_h('; '.join(notes))}</td>"
+                f"<td>{cell}</td></tr>")
+        parts.append("<table>" + "".join(table) + "</table>")
+
+    def _review_section(title_txt: str, rows: list[dict[str, Any]], *, columns: str) -> None:
         parts.append(f"<h2>{_h(title_txt)} ({len(rows)})</h2>")
         if not rows:
             parts.append("<p><em>None.</em></p>")
@@ -499,60 +536,57 @@ def render_source_screen(data: dict[str, Any]) -> str:
         for row in rows:
             rid = _h(row.get("review_id"))
             info = f"<td><a href='/ui/reviews/{rid}'>{rid}</a></td>"
-            if row["kind"] == "candidate":
-                badges = []
-                if row.get("other_source_count"):
-                    badges.append(f"also mentioned by {row['other_source_count']} other source(s)")
-                if row.get("recurrence_eligible"):
-                    badges.append("recurrence-eligible (would auto-promote)")
-                info += (f"<td>{_h(row.get('title'))}</td><td>{_h(row.get('item_type'))}</td>"
-                         f"<td>{_h(', '.join(row.get('aliases') or []))}</td>"
-                         f"<td>{_h(row.get('node_status'))}</td>"
-                         f"<td>{_h('; '.join(badges))}</td>")
-            elif row["kind"] == "retype":
+            if row["kind"] == "retype":
                 info += (f"<td>{_h(row.get('name'))}</td>"
                          f"<td>{_h(row.get('from_item_type'))} → {_h(row.get('to_item_type'))}</td>")
             else:  # retired
                 info += (f"<td>{_h(row.get('title'))}</td><td>{_h(row.get('page'))}</td>"
                          f"<td>{_h(row.get('node_status'))}</td>")
             if row.get("decidable"):
-                cell = _decision_radios(
-                    str(row.get("review_id")),
-                    preselect=preselect if row.get("status") == "pending" else None)
-                if amendable:
-                    cell += "<br>" + _amend_inputs(row)
-                table.append(f"<tr>{info}<td>{cell}</td></tr>")
+                table.append(f"<tr>{info}<td>{_decision_radios(str(row.get('review_id')))}</td></tr>")
             else:
                 table.append(f"<tr style='color:#777'>{info}<td>{_decided_cell(row)}</td></tr>")
         parts.append("<table>" + "".join(table) + "</table>")
 
-    _section("Candidates mentioned by this source", data.get("candidates") or [],
-             amendable=True,
-             columns="<th>review_id</th><th>title</th><th>type</th><th>aliases</th>"
-                     "<th>status</th><th>notes</th>")
-    _section("Type changes from this source", data.get("retype_items") or [],
-             amendable=False,
-             columns="<th>review_id</th><th>name</th><th>retype</th>")
-    _section("Retired by re-extraction", data.get("retired") or [], amendable=False,
-             columns="<th>review_id</th><th>title</th><th>page</th><th>status</th>")
-    parts.append("<p><label>Note (applies to every decision this submit): "
+    _tag_section("Suggested tags", data.get("suggestions") or [], kept=False)
+    _tag_section("Kept tags", data.get("kept") or [], kept=True)
+    _review_section("Type changes from this source", data.get("retype_items") or [],
+                    columns="<th>review_id</th><th>name</th><th>retype</th>")
+    _review_section("Retired by re-extraction", data.get("retired") or [],
+                    columns="<th>review_id</th><th>title</th><th>page</th><th>status</th>")
+    parts.append("<p><label>Note (applies to every review-item decision this submit): "
                  "<input type='text' name='note' size='40'></label></p>"
                  "<button type='submit'>Record marked decisions</button></form>")
 
+    dropped = data.get("dropped") or []
+    parts.append(f"<h2>Dropped earlier ({len(dropped)})</h2>")
+    if not dropped:
+        parts.append("<p><em>None.</em></p>")
+    else:
+        rows = ["<tr><th>tag</th><th>dropped at</th><th></th></tr>"]
+        for d in dropped:
+            rows.append(
+                f"<tr><td>{_h(d.get('name'))}</td><td>{_h(d.get('at'))}</td><td>"
+                f"<form method='post' action='/ui/reviews/sources/{sid}/undrop' class='decide'>"
+                f"<input type='hidden' name='key' value='{_h(d.get('key'))}'>"
+                "<button type='submit'>Undo drop</button></form></td></tr>")
+        parts.append("<p>Re-extraction of this document will not suggest these again. Undo makes "
+                     "a tag suggestible here again (it is not kept).</p>")
+        parts.append("<table>" + "".join(rows) + "</table>")
+
     parts.append(
-        "<h2>Add a missed knowledge item</h2>"
-        "<p>Creates the candidate immediately (producer act) with an anchorless "
-        "<code>asserted_by: human</code> mention and a pre-approved promotion — apply still "
-        "promotes it. A previously rejected promotion blocks the add (reopen it explicitly).</p>"
+        "<h2>Add a tag</h2>"
+        "<p>Tags this document immediately (an anchorless <code>asserted_by: human</code> link, "
+        "kept): a new tag is created and active; an existing one is reused.</p>"
         f"<form method='post' action='/ui/reviews/sources/{sid}/add'>"
         "<p><label>Title: <input type='text' name='title' size='30' required></label> "
         "<label>Type: <select name='item_type'>"
         + "".join(f"<option value='{t}'>{t}</option>"
-                  for t in sorted(taxonomy.ITEM_TYPES))
+                  for t in sorted(taxonomy.ITEM_TYPES) if t != taxonomy.UNCLASSIFIED)
         + "</select></label></p>"
         "<p><label>Aliases (comma-sep): <input type='text' name='aliases' size='30'></label></p>"
         "<p><label>Description: <input type='text' name='description' size='50'></label></p>"
-        "<button type='submit'>Add candidate</button></form>")
+        "<button type='submit'>Add tag</button></form>")
 
     if data.get("global_remaining_by_type"):
         by_type = ", ".join(f"{_h(t)}: {_h(n)}"
@@ -562,14 +596,26 @@ def render_source_screen(data: dict[str, Any]) -> str:
     return _page(f"Source {data.get('source_id')}", "".join(parts))
 
 
-def render_source_decide_result(source_id: str, results: list[dict[str, Any]]) -> str:
-    """Per-item batch results (recorded vs skipped-with-reason; never a batch abort)."""
+def _refresh_warnings(warnings: list[str] | None) -> str:
+    """The banner for a failed post-action refresh (ADR-0066 review round 2: never swallowed)."""
+    if not warnings:
+        return ""
+    return ("<p class='banner'><strong>Pages or search index not refreshed</strong> ("
+            + _h(", ".join(warnings)) + "): the decisions are saved, but Source pages or search may "
+            "show old titles or statuses until you run <code>uv run python scripts/generate_wiki.py"
+            "</code> and <code>uv run python scripts/reindex_keyword.py</code>.</p>")
+
+
+def render_source_decide_result(source_id: str, results: list[dict[str, Any]], *,
+                                 warnings: list[str] | None = None) -> str:
+    """Per-row batch results (recorded vs skipped-with-reason; never a batch abort)."""
     sid = _h(source_id)
     recorded = sum(1 for r in results if r.get("recorded"))
     parts = [
         _nav(),
         f"<h1>Batch decisions — source {sid}</h1>",
         f"<p>{_h(recorded)} recorded, {_h(len(results) - recorded)} skipped/no-op.</p>",
+        _refresh_warnings(warnings),
         f"<p><a href='/ui/reviews/sources/{sid}'>Back to source</a> · "
         "<a href='/ui/reviews/sources'>Source index</a> · "
         "<a href='/ui/reviews/apply'>Apply…</a></p>",
@@ -577,17 +623,81 @@ def render_source_decide_result(source_id: str, results: list[dict[str, Any]]) -
     if not results:
         parts.append("<p><em>No decisions were marked.</em></p>")
     else:
-        rows = ["<tr><th>review_id</th><th>action</th><th>recorded</th>"
+        rows = ["<tr><th>row</th><th>action</th><th>recorded</th>"
                 "<th>status / skip reason</th></tr>"]
         for r in results:
-            rid = _h(r.get("review_id"))
+            if r.get("review_id"):
+                rid = _h(r.get("review_id"))
+                label = f"<a href='/ui/reviews/{rid}'>{rid}</a>"
+            else:
+                label = _h(r.get("title") or r.get("node_id"))
             outcome = _h(r.get("skip_reason") or r.get("status") or "")
             amended = " (amended)" if r.get("amended") else ""
-            rows.append(f"<tr><td><a href='/ui/reviews/{rid}'>{rid}</a></td>"
+            rows.append(f"<tr><td>{label}</td>"
                         f"<td>{_h(r.get('action'))}</td><td>{_h(r.get('recorded'))}</td>"
                         f"<td>{outcome}{_h(amended)}</td></tr>")
         parts.append("<table>" + "".join(rows) + "</table>")
     return _page(f"Batch decisions — {source_id}", "".join(parts))
+
+
+# --- tag lists (ADR-0066) ----------------------------------------------------
+
+
+def render_unused_tags(rows: list[dict[str, Any]], *, result: dict[str, Any] | None = None) -> str:
+    """The Unused tags list (tags no document keeps) with the one bulk Delete unused action."""
+    parts = [_nav(), "<h1>Unused tags</h1>",
+             "<p>Tags that lost their last kept link. They are hidden from browsing and keep their "
+             "edits; keeping one on any document revives it. <strong>Delete unused</strong> removes "
+             "every unprotected one permanently (merge-redirect targets and tags with a synthesis "
+             "page are kept).</p>"]
+    if result is not None:
+        parts.append(f"<p class='banner'>Deleted {_h(len(result.get('deleted') or []))}; "
+                     f"skipped {_h(len(result.get('skipped') or []))} protected.</p>")
+        parts.append(_refresh_warnings(result.get("warnings")))
+    if not rows:
+        parts.append("<p><em>No unused tags.</em></p>")
+        return _page("Unused tags", "".join(parts))
+    table = ["<tr><th>tag</th><th>type</th><th>protected</th></tr>"]
+    for r in rows:
+        table.append(f"<tr><td>{_h(r.get('title'))} <code>{_h(r.get('node_id'))}</code></td>"
+                     f"<td>{_h(r.get('item_type'))}</td>"
+                     f"<td>{_h(r.get('protected') or '')}</td></tr>")
+    parts.append("<table>" + "".join(table) + "</table>")
+    deletable = sum(1 for r in rows if not r.get("protected"))
+    if deletable:
+        parts.append("<form method='post' action='/ui/reviews/tags/unused/delete'>"
+                     f"<button type='submit'>Delete unused ({_h(deletable)})</button></form>")
+    return _page("Unused tags", "".join(parts))
+
+
+def render_blocked_tags(blocked: dict[str, str], *, result: dict[str, Any] | None = None) -> str:
+    """The Blocked tags list (policies/blocked_tags.txt) with per-name unblock + the Re-suggest hint."""
+    parts = [_nav(), "<h1>Blocked tags</h1>",
+             "<p>Names extraction never suggests (<code>policies/blocked_tags.txt</code>, editable by "
+             "hand). Kept links are never affected.</p>"]
+    if result is not None and result.get("outcome") == "unblocked":
+        sources = result.get("resuggest_sources") or []
+        parts.append(f"<div class='banner'>Unblocked <strong>{_h(result.get('name'))}</strong>. "
+                     "Future extractions may suggest it again.")
+        if sources:
+            parts.append(" To re-suggest it now on the documents that mentioned it (replayed from "
+                         "the response cache only — never a provider call; a document with no "
+                         "cached response is reported and left as it is), run:<br><code>uv run "
+                         "python scripts/extract_items.py --force --cache-only "
+                         + _h(" ".join(sources)) + "</code>")
+        parts.append("</div>")
+    if not blocked:
+        parts.append("<p><em>No blocked tags.</em></p>")
+        return _page("Blocked tags", "".join(parts))
+    table = ["<tr><th>name</th><th></th></tr>"]
+    for key, name in sorted(blocked.items(), key=lambda kv: kv[1].lower()):
+        table.append(
+            f"<tr><td>{_h(name)}</td><td>"
+            "<form method='post' action='/ui/reviews/tags/blocked/unblock' class='decide'>"
+            f"<input type='hidden' name='key' value='{_h(key)}'>"
+            "<button type='submit'>Unblock</button></form></td></tr>")
+    parts.append("<table>" + "".join(table) + "</table>")
+    return _page("Blocked tags", "".join(parts))
 
 
 # --- error -----------------------------------------------------------------

@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""CLI: promote candidate knowledge items to active by source recurrence (ADR-0018/0059).
+"""CLI: apply approved `promote_candidate_node` items (ADR-0018, restated by ADR-0066).
 
 Usage:
     uv run python scripts/promote.py
 
-Deterministic maintenance (no LLM, no API key): promotes a candidate to `active` once >=2
-mutually-independent sources mention it (independence from manifest provenance, ADR-0018),
-updates the page + graph, and approves the promote_candidate_node review item. Safely
-rerunnable after manual provenance edits or review decisions. Rebuilds wiki/index.md and runs
-the frontmatter/graph/projection/wikilink validators afterward.
+ADR-0066: a tag becomes active when a document KEEPS it (the per-document review screen does that
+immediately); there is no recurrence auto-promotion any more. This deterministic pass (no LLM, no
+API key) only activates candidates whose `promote_candidate_node` item is approved (flat queue /
+pre-ADR-0066 items), applying approve-with-amendments. Safely rerunnable. Rebuilds wiki/index.md
+and runs the frontmatter/graph/projection/wikilink validators afterward.
 """
 from __future__ import annotations
 

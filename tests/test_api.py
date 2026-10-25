@@ -320,7 +320,7 @@ def _build_search_corpus(tmp_path: Path) -> str:
                             page_nodes=[{"node_id": cpt, "node_type": "item", "item_type": "method_technique", "slug": "s", "status": "active"}],
                             now="t0")
         graph.upsert_assertion(conn, src_id=src, dst_id=cpt, edge_type="mentions",
-                               asserted_by="llm", status="active")
+                               asserted_by="human", status="active")   # a kept tag (ADR-0066)
     finally:
         conn.close()
     return cpt

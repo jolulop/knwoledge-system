@@ -202,8 +202,9 @@ def _check(root: Path, db_path: Path) -> list[str]:
                     continue
                 text = page.read_text(encoding="utf-8", errors="replace")
                 _check_status_mirror(errors, node_id, text, node_status)
-                # ADR-0050: a `merged` tombstone must point merged_into at an ACTIVE, SAME-TYPE, non-self
-                # survivor; it has no Mentioned-by/Duplicates projection to check.
+                # ADR-0050: a `merged` tombstone must point merged_into at an ACTIVE (or, ADR-0066, an
+                # UNUSED — a tag that lost its last kept link stays a valid redirect target), SAME-TYPE,
+                # non-self survivor; it has no Mentioned-by/Duplicates projection to check.
                 fm = parse_frontmatter(text)
                 if fm.get("status") == "merged":
                     surv = fm.get("merged_into")
@@ -213,7 +214,7 @@ def _check(root: Path, db_path: Path) -> list[str]:
                         errors.append(f"{node_id}: merged page points merged_into at itself")
                     elif surv not in node_status:
                         errors.append(f"{node_id}: merged_into {surv} is not an indexed node")
-                    elif node_status.get(surv) != "active":
+                    elif node_status.get(surv) not in ("active", "unused"):
                         errors.append(f"{node_id}: merged_into survivor {surv} is not active "
                                       f"(status {node_status.get(surv)!r})")
                     elif node_type_of.get(surv) != node_type:

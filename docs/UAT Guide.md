@@ -191,10 +191,10 @@ uv run python scripts/validate_all.py
 ```
 
 > [!note] Contradictions and synthesis report 0 on a fresh vault
-> `detect_contradictions` and `generate_synthesis` consider only **active** items, and `promote`
-> auto-promotes nothing until manifests carry provenance (ADR-0018) — so on a fresh vault they report
-> `Candidate pairs: 0` / `Eligible topics: 0`. That is expected. After the promotions are approved and
-> applied in §9, re-run them:
+> `detect_contradictions` and `generate_synthesis` consider only **active** items, and nothing
+> auto-promotes (ADR-0066: a tag becomes active when you keep it on a document) — so on a fresh vault
+> they report `Candidate pairs: 0` / `Eligible topics: 0`. That is expected. After you have tagged
+> the documents in §9.0, re-run them:
 >
 > ```bash
 > uv run python scripts/detect_contradictions.py
@@ -267,7 +267,49 @@ Acceptance checks:
   (with no key configured, a 503 with guidance is the expected behavior).
 - Citations point to real `source_id` values and character anchors.
 
-## 9. Review — scope-checked apply
+## 9. Review
+
+### 9.0 Tag each document (ADR-0066)
+
+Open the per-source flow and walk the documents with **Start review** / **Next source**:
+
+```text
+http://127.0.0.1:18000/ui/reviews/sources
+```
+
+On each document screen, decide every **Suggested tag** row:
+
+- **keep** tags this document. The first keep makes the tag active, **immediately** (no apply). On a
+  not-yet-active tag you can amend title/aliases/description/type in the same row; an unclassified
+  suggestion needs a type to be kept.
+- **drop** removes the tag from **this document only**. It is listed under **Dropped earlier** (with
+  undo) and is never suggested again for this document, even after re-extraction. Other documents
+  are unaffected. A tag no document keeps is deleted.
+- **never suggest** puts the name on `policies/blocked_tags.txt`: it is withdrawn from every
+  document's suggestions (links you kept stay). Manage it at `/ui/reviews/tags/blocked`.
+- Leaving a row untouched records nothing. **Pre-select keep for all suggestions** is a two-click
+  bulk keep: review the pre-checked rows, then submit.
+
+A **Kept tags** row can be dropped later. Dropping a tag's last keep makes it **unused**: hidden,
+edits intact, revived by keeping it anywhere. Clear them at `/ui/reviews/tags/unused` →
+**Delete unused** (merge-redirect targets are protected). Kept tags are recorded per document in
+`reviews/tag_links/<source_id>.json`.
+
+After an **Unblock**, the Blocked tags page prints a **Re-suggest** command
+(`scripts/extract_items.py --force --cache-only <source_id>…`). It replays the stored responses only —
+it never calls the model; a document whose response is not cached is listed as a cache miss and left
+as it is.
+
+Check:
+
+```bash
+ls reviews/tag_links/ && cat reviews/tag_links/*.json | head -40
+cat policies/blocked_tags.txt 2>/dev/null
+uv run python scripts/validate_tag_links.py       # ledgers and graph agree
+uv run python scripts/rebuild_tag_links.py        # dry run; add --apply to repair
+```
+
+### 9.1 Scope-checked apply
 
 `POST /reviews/apply` processes the **whole approved queue**, not one item. Even in a disposable
 vault, drill the discipline you must use on a live vault: never apply until a dry-run proves the
@@ -321,9 +363,16 @@ curl -fsS "$APP/jobs?limit=20" | python3 -m json.tool
 uv run python scripts/validate_all.py
 ```
 
+> [!note] Single-source deprecations are retired (ADR-0066 decision 9)
+> Lint no longer proposes deprecating a tag because only one document keeps it. A vault that ran the
+> old lint has those `deprecate_wiki_page` items **withdrawn automatically** on the next lint
+> (`review_items_withdrawn`, audit note `rule_retired`); approved/rejected ones are left as they are.
+> Lint now reports `unused_tag` findings instead (report-only) — clear them at
+> `/ui/reviews/tags/unused`.
+
 ### 10.1 Item consolidation — merge proposals + human-filed merge (ADR-0064)
 
-Run this **after** the §9 apply has promoted items: lint proposes merges only between *active* items
+Run this **after** you have kept tags in §9.0: lint proposes merges only between *active* items
 (a pair with a candidate side is reported as `merge_candidate_unpromoted`, never filed).
 
 1. Lint and read the merge findings:
@@ -495,6 +544,8 @@ nothing, and applies nothing.
 - Keyword search returns expected evidence.
 - Vector search works when configured (recommended in-process backend — no embedding server).
 - Query answers cite source chunks or abstain.
+- Tag keep/drop is per document and immediate; a dropped tag is never re-suggested for that document;
+  a blocked name is never suggested anywhere; kept links survive re-extraction.
 - Review items are decision-only until apply; the dry-run shows the intended scope before apply.
 - Applying approved reviews updates only the governed surfaces and validators still pass.
 - Maintenance jobs complete with reports and never act autonomously on semantic/destructive decisions.

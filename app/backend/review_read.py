@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from app.backend import graph, manifests, taxonomy
-from app.workers.reviews import PRIORITIES, REVIEW_STATUSES, review_id
+from app.workers.reviews import PRIORITIES, REVIEW_STATUSES
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter
 
 # --- effect-status vocabulary (ADR-0035 A2) --------------------------------
@@ -1214,24 +1214,12 @@ def _mentioner_sources(gconn: Any, dst: str) -> set[str]:
     return {e["src_id"] for e in graph.incoming_active(gconn, dst) if e["edge_type"] == "mentions"}
 
 
-def _promote_item_present(wiki_dir: Path | None, node_id: str) -> bool:
-    """True if a `promote_candidate_node` for `node_id` exists in ANY state (pending/approved/rejected) — i.e.
-    the promotion ledger slot is NOT missing (ADR-0052). A missing slot while B is candidate is a half-mint
-    (the split rendered B but hadn't yet filed its promote), which is a partial, not-effected state."""
-    if wiki_dir is None:
-        return False
-    reviews_dir = Path(wiki_dir).parent / "reviews"
-    rid = review_id("promote_candidate_node", {"node_id": node_id})
-    return any((reviews_dir / st / f"{rid}.json").exists() for st in ("pending", "approved", "rejected"))
-
-
 def _effect_split(item: dict[str, Any], gconn: Any, wiki_dir: Path | None) -> tuple[str, list[str]]:
     # ADR-0052: split is FORWARD-ONLY. EFFECTED only when CLEANLY applied — the spin-off B exists
     # (candidate|active), its page carries `split_from == A` + `split_review_id == rid`, each `spinoff_source`
-    # now actively mentions B and no longer A, A retains >=1 active mention, AND B's promotion is accounted for
-    # (a promote_candidate_node for B exists, or B is already active). PENDING_APPLY only when NOTHING is
-    # applied (B absent, sources still on A). Any partial — incl. a half-mint (B minted / mentions moved but
-    # the promote item not yet filed) — is UNKNOWN `partial_split_state` (reopen-safe).
+    # now actively mentions B and no longer A, AND A retains >=1 active mention (ADR-0066: B files no
+    # promotion review — a moved keep is its promotion). PENDING_APPLY only when NOTHING is applied (B absent,
+    # sources still on A). Any partial is UNKNOWN `partial_split_state` (reopen-safe).
     status = item.get("status")
     if status not in ("approved", "rejected"):
         return PENDING_APPLY, []
@@ -1254,8 +1242,7 @@ def _effect_split(item: dict[str, Any], gconn: Any, wiki_dir: Path | None) -> tu
                 and fm_b.get("split_from") == a and fm_b.get("split_review_id") == item.get("review_id"))
     b_mentioners = _mentioner_sources(gconn, b) if n_b else set()
     partition_moved = bool(srcs) and srcs <= b_mentioners and not (srcs & a_mentioners)
-    promo_ok = (n_b is not None and n_b["status"] == "active") or _promote_item_present(wiki_dir, b)
-    if b_ok and partition_moved and a_mentioners and promo_ok:
+    if b_ok and partition_moved and a_mentioners:
         return EFFECTED, []
     if n_b is None and srcs <= a_mentioners:              # nothing applied yet — reopenable
         return PENDING_APPLY, []
@@ -1377,6 +1364,7 @@ def get_review(
 
 # Concept/entity-family scope of the flow; everything else stays in the flat queue.
 _FLOW_FAMILY = frozenset({"item"})
+_LINKABLE_STATUSES = frozenset({"candidate", "active", "unused"})   # ADR-0066 tag-link rows
 # Recompose provenance gate for the "Retired by re-extraction" section (ADR-0057 decision 2:
 # the stable reason_code, plus the exact legacy prose constant for pre-ADR-0057 items).
 _FLOW_REASON_CODE = "no_active_mentions"
@@ -1448,40 +1436,66 @@ def _item_row(item: dict[str, Any], kind: str) -> dict[str, Any]:
     }
 
 
-def _independent_pair(source_ids: list[str], prov: dict[str, dict[str, Any]]) -> bool:
-    provs = [prov.get(s, {}) for s in source_ids]
-    return any(manifests.independent_sources(provs[i], provs[j])
-               for i in range(len(provs)) for j in range(i + 1, len(provs)))
+def _tag_rows(gconn: Any, sid: str, pages: dict[str, dict[str, Any]]) -> tuple[list, list]:
+    """ADR-0066: one source's tag links → (suggestion rows, kept rows). An active `human` mention is
+    a keep; an active `llm` mention without one is a suggestion; `rejected` links are drops (shown
+    from the ledger's drop records, not here)."""
+    by_node: dict[str, dict[str, Any]] = {}
+    for link in graph.source_tag_links(gconn, sid):
+        if link["status"] != "active":
+            continue
+        slot = by_node.setdefault(link["dst_id"], {"node_status": link["node_status"],
+                                                   "human": False, "llm": False})
+        slot["human" if link["asserted_by"] == "human" else "llm"] = True
+    suggestions: list[dict[str, Any]] = []
+    kept: list[dict[str, Any]] = []
+    for nid, slot in by_node.items():
+        if slot["node_status"] not in _LINKABLE_STATUSES:
+            continue
+        page = pages.get(nid) or {}
+        kept_by = graph.kept_sources_for_node(gconn, nid)
+        row = {
+            "kind": "kept" if slot["human"] else "suggestion",
+            "node_id": nid, "title": page.get("title") or nid,
+            "item_type": page.get("item_type"), "node_status": page.get("status"),
+            "aliases": page.get("aliases") or [], "description": page.get("description"),
+            "kept_elsewhere": len([s for s in kept_by if s != sid]),
+            # An unclassified suggestion can only be kept with a real type (ADR-0059 sentinel gate);
+            # amendments apply only when the keep activates a candidate (ADR-0058 approve-with-amendments).
+            "needs_type": page.get("item_type") == taxonomy.UNCLASSIFIED,
+            "amendable": page.get("status") == "candidate",
+            "decidable": True, "status": "kept" if slot["human"] else "pending",
+        }
+        (kept if slot["human"] else suggestions).append(row)
+    order = lambda r: (str(r["title"]).lower(), r["node_id"])  # noqa: E731
+    return sorted(suggestions, key=order), sorted(kept, key=order)
 
 
 def _source_flow(reviews_dir: Path, *, gconn: Any, wiki_dir: Path | None,
                  manifests_dir: Path | None) -> dict[str, Any]:
-    """Assemble the whole ADR-0058 per-source model once (index + screen slice it).
+    """Assemble the per-source model once (index + screen slice it): ADR-0058 lens, ADR-0066 rows.
 
-    Attribution: promotes via active `mentions` from the source; `change_item_type` via
-    `context.source_id`; deprecations in the retired section only when deterministic
-    (recompose provenance + zero active mentions + superseded history `H == {S}`). Decided
-    items render read-only; the flat queue stays canonical for everything unattributed.
+    Tag rows come from the source's tag links (`_tag_rows`: suggestions to keep/drop, kept links to
+    drop) plus the ledger's drop records ("dropped earlier", undoable); `change_item_type` items via
+    `context.source_id`; deprecations in the retired section only when deterministic (recompose
+    provenance + zero active mentions + superseded history `H == {S}`). Decided review items render
+    read-only; the flat queue stays canonical for everything unattributed (incl. any pre-ADR-0066
+    `promote_candidate_node` items).
     """
+    from app.workers import identity_journal, tag_links  # lazy: the worker imports the read model
     valid, _skipped = manifests.valid_manifests(manifests_dir) if manifests_dir else ([], [])
     ordered = sorted(valid, key=lambda m: (str(m.get("discovered_at") or ""), m["source_id"]))
-    prov = {m["source_id"]: manifests.get_provenance(m) for m in valid}
 
     all_items: list[dict[str, Any]] = []
     for dir_name in ("pending", "approved", "rejected"):
         items, _p, _s = _scan_dir(reviews_dir, dir_name)
         all_items.extend(items)
-    promote_by_node: dict[str, dict[str, Any]] = {}
     retype_by_source: dict[str, list[dict[str, Any]]] = {}
     flow_deprecations: list[dict[str, Any]] = []
     unresolved_unattributed: list[dict[str, Any]] = []
     for it in all_items:
         rtype = it.get("type")
-        if rtype == "promote_candidate_node":
-            nid = (it.get("subject") or {}).get("node_id")
-            if isinstance(nid, str) and nid:
-                promote_by_node[nid] = it
-        elif rtype == "change_item_type":
+        if rtype == "change_item_type":
             sid = (it.get("context") or {}).get("source_id")
             if isinstance(sid, str) and sid:
                 retype_by_source.setdefault(sid, []).append(it)
@@ -1494,42 +1508,23 @@ def _source_flow(reviews_dir: Path, *, gconn: Any, wiki_dir: Path | None,
     added_counts = _human_added_counts(reviews_dir)
     attributed_rids: set[str] = set()
     sources: list[dict[str, Any]] = []
-    node_info_cache: dict[str, dict[str, Any]] = {}
-
-    def _node_info(nid: str, node_type: str) -> dict[str, Any]:
-        if nid not in node_info_cache:
-            mention_sources = graph.sources_for_node(gconn, nid) if gconn is not None else []
-            page = pages.get(nid) or {}
-            node_info_cache[nid] = {
-                "node_id": nid, "node_type": node_type,
-                "title": page.get("title"), "node_status": page.get("status"),
-                "item_type": page.get("item_type"),
-                "aliases": page.get("aliases") or [], "description": page.get("description"),
-                "mention_sources": mention_sources,
-                "recurrence_eligible": _independent_pair(mention_sources, prov),
-            }
-        return node_info_cache[nid]
+    suggestions_overall = 0
 
     for m in ordered:
         sid = m["source_id"]
-        candidates: list[dict[str, Any]] = []
-        if gconn is not None:
-            for mention in graph.mentions_for_source(gconn, sid):
-                if mention["node_type"] not in _FLOW_FAMILY:
-                    continue
-                item = promote_by_node.get(mention["dst_id"])
-                if item is None:
-                    continue
-                info = _node_info(mention["dst_id"], mention["node_type"])
-                row = _item_row(item, "candidate") | info
-                row["other_source_count"] = max(len(info["mention_sources"]) - 1, 0)
-                candidates.append(row)
+        suggestions, kept = _tag_rows(gconn, sid, pages) if gconn is not None else ([], [])
+        try:
+            ledger_drops, ledger_error = tag_links.load_ledger(reviews_dir, sid)["drops"], None
+        except tag_links.LedgerCorrupt as exc:           # shown, never treated as "no decisions"
+            ledger_drops, ledger_error = [], exc.problem
+        dropped = [{"kind": "dropped", "key": d["key"], "name": d.get("name"),
+                    "node_id": d.get("item_id"), "at": d.get("at")} for d in ledger_drops]
         retype_rows = [_item_row(it, "retype")
-                        | {"node_id": (it.get("subject") or {}).get("node_id"),
-                           "to_item_type": (it.get("subject") or {}).get("to_item_type"),
-                           "from_item_type": (it.get("context") or {}).get("from_item_type"),
-                           "name": (it.get("context") or {}).get("name")}
-                        for it in retype_by_source.get(sid, [])]
+                       | {"node_id": (it.get("subject") or {}).get("node_id"),
+                          "to_item_type": (it.get("subject") or {}).get("to_item_type"),
+                          "from_item_type": (it.get("context") or {}).get("from_item_type"),
+                          "name": (it.get("context") or {}).get("name")}
+                       for it in retype_by_source.get(sid, [])]
         retired: list[dict[str, Any]] = []
         if gconn is not None:
             for it in flow_deprecations:
@@ -1545,26 +1540,30 @@ def _source_flow(reviews_dir: Path, *, gconn: Any, wiki_dir: Path | None,
                                | {"node_id": nid, "title": page.get("title"),
                                   "node_status": page.get("status"),
                                   "page": (it.get("subject") or {}).get("page")})
-        rows = candidates + retype_rows + retired
-        attributed_rids.update(str(r["review_id"]) for r in rows)
-        counts = Counter(r["status"] for r in rows)
-        amended = sum(1 for r in rows if r.get("amendments"))
+        review_rows = retype_rows + retired
+        attributed_rids.update(str(r["review_id"]) for r in review_rows)
+        counts = Counter(r["status"] for r in review_rows)
+        suggestions_overall += len(suggestions)
         sources.append({
             "source_id": sid,
             "filename": m.get("original_filename"),
             "discovered_at": m.get("discovered_at"),
-            "candidates": candidates, "retype_items": retype_rows, "retired": retired,
-            "counts": {"remaining": counts.get("pending", 0),
-                       "approved": counts.get("approved", 0),
-                       "rejected": counts.get("rejected", 0),
+            "suggestions": suggestions, "kept": kept, "dropped": dropped,
+            "ledger_error": ledger_error,
+            # ADR-0066 review round 4: an unfinished merge/split owning one of these tags refuses
+            # every tag action here until apply finishes it.
+            "in_flight_review_id": identity_journal.operation_for(
+                reviews_dir, [r.get("node_id") for r in suggestions + kept + dropped]),
+            "retype_items": retype_rows, "retired": retired,
+            "counts": {"remaining": len(suggestions) + counts.get("pending", 0),
+                       "kept": len(kept), "dropped": len(dropped),
                        "deferred": counts.get("deferred", 0),
-                       "added": added_counts.get(sid, 0),
-                       "amended": amended},
+                       "added": added_counts.get(sid, 0)},
         })
 
-    # Distinct unresolved attributable items (a multi-source candidate counts once overall).
+    # Distinct unresolved attributable review items (counted once overall) + every suggestion.
     remaining_rids = {str(r["review_id"])
-                      for s in sources for r in (s["candidates"] + s["retype_items"] + s["retired"])
+                      for s in sources for r in (s["retype_items"] + s["retired"])
                       if r["status"] == "pending"}
     global_by_type = Counter(str(it.get("type")) for it in unresolved_unattributed
                              if str(it.get("review_id")) not in attributed_rids)
@@ -1572,7 +1571,8 @@ def _source_flow(reviews_dir: Path, *, gconn: Any, wiki_dir: Path | None,
     return {
         "graph_available": gconn is not None,
         "sources": sources,
-        "totals": {"sources": len(sources), "remaining_overall": len(remaining_rids),
+        "totals": {"sources": len(sources),
+                   "remaining_overall": suggestions_overall + len(remaining_rids),
                    "first_remaining_source": first_remaining},
         "global_remaining_by_type": dict(sorted(global_by_type.items())),
     }
@@ -1589,7 +1589,7 @@ def source_review_index(reviews_dir: Path, *, graph_db: Path | None = None,
         if conn is not None:
             conn.close()
     for s in flow["sources"]:                      # the index is counts-only
-        for key in ("candidates", "retype_items", "retired"):
+        for key in ("suggestions", "kept", "dropped", "retype_items", "retired"):
             s.pop(key)
     return flow
 

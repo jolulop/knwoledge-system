@@ -309,17 +309,18 @@ def test_sentinel_classification_never_files_type_conflict(tmp_path):
     assert summary["unclassified_items"] == 0
 
 
-def test_candidate_promotion_review_items_are_filed(tmp_path):
+def test_extraction_files_no_promotion_review_items(tmp_path):
+    # ADR-0066: an extracted item is a SUGGESTION on its document (keep/drop on the per-document
+    # screen); the keep is the promotion, so extraction files no promote_candidate_node item.
     _build(tmp_path)
     _extract(tmp_path, FakeAdapter())
-    reviews = _pending_reviews(tmp_path)
-    promote = [r for r in reviews if r["type"] == "promote_candidate_node"]
-    assert len(promote) == 3 and all(r["status"] == "pending" for r in promote)
-    # ADR-0059: the promote proposal carries the used classification under `item_type`.
-    by_name = {r["proposal"]["name"]: r["proposal"] for r in promote}
-    assert by_name["Post-Merger Integration"] == {
-        "to_status": "active", "name": "Post-Merger Integration", "item_type": "method_technique"}
-    assert all("node_type" not in p for p in by_name.values())
+    assert not [r for r in _pending_reviews(tmp_path) if r["type"] == "promote_candidate_node"]
+    conn = graph.connect(tmp_path / "db" / "graph.sqlite")
+    try:
+        statuses = {r["status"] for r in conn.execute("SELECT status FROM nodes WHERE node_type='item'")}
+    finally:
+        conn.close()
+    assert statuses == {"candidate"}
 
 
 def test_tombstone_files_deprecation_review(tmp_path):

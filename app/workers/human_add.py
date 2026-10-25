@@ -1,30 +1,23 @@
 #!/usr/bin/env python3
-"""Human-add producer path (ADR-0058, restated over ADR-0059): a reviewer adds a knowledge
-item the extractor missed.
+"""Human-add (ADR-0058, restated by ADR-0066): a reviewer tags a document with a knowledge item the
+extractor missed.
 
-The POST is PRODUCER-side work — the same mutation class as `extract_items`, which was
-never governance-gated: it immediately upserts the candidate node, a `mentions` edge from the
-current source with `asserted_by: human` and NO evidence anchor (a documented use of the
-nullable-anchor contract — no renderer claims quote text for mentions), renders the candidate
-page, and files the `promote_candidate_node` item recorded APPROVED (`decided_by: human` —
-the add IS the approval; promotion itself stays apply-gated through the normal promote
-executor). A purpose-named `audit_log/<review_id>-human-added-<hex>.json` entry ties
-actor/source/node/item together (precedent: the `-withdrawn-`/`-merged-` entries).
+ADR-0066: the add IS a keep. The POST creates the item if it does not exist (candidate node + an
+anchorless `asserted_by: human` mention + page — a documented use of the nullable-anchor contract;
+no renderer claims quote text for mentions) and then runs `tag_links.keep`, which records the keep
+in the document's tag-decision ledger and activates the item immediately (no promotion review).
+A purpose-named `audit_log/<review_id>-human-added-<hex>.json` entry ties actor/source/node together
+(the per-source `added` counter reads it).
 
-Duplicate/identity routing (identity is name-hashed and frozen, ADR-0021/0059 — never mint a
-second node for a known name): existing candidate/tombstone -> add the mention and
-approve/reuse its promote item; already active -> mention only, no promote item; an
-`item_type` differing from the existing node's -> mention routed to the existing node + a
-`change_item_type` item (the node's page keeps its classification until the flip applies —
-nothing auto-retypes). The human must supply a REAL production type — the sentinel is
-model-only (ADR-0059 decision 5). **Terminal rejected slot:** a rejected promotion is a
-human governance record — the add is BLOCKED with the prior decision named; it is never
-silently reused, reopened as a side effect, or bypassed via a parallel subject (explicit
-ADR-0045 reopen is the path back). A create whose slug is already owned by a DIFFERENT id
-blocks (`slug_collision`) before any write. After a successful add, `wiki/index.md` is
-rebuilt (producer contract); the audit filename keys on the node's promote-slot review id
-even for a mention-only add (one deterministic key per node, whether or not an item was
-filed — `promote_resolution: null` marks the mention-only case).
+Duplicate/identity routing (identity is name-hashed and frozen, ADR-0021/0059 — never mint a second
+node for a known name): existing candidate/tombstone → kept (activated); active/unused → kept
+(revived); an `item_type` differing from the existing node's → kept on the existing node + a
+`change_item_type` item (nothing auto-retypes) — except an UNCLASSIFIED candidate, whose keep takes
+the human's type directly (the sentinel needs a real type to activate). The human must supply a REAL
+production type — the sentinel is model-only (ADR-0059 decision 5). The blocked-tag list does not
+apply: it filters machine suggestions only. A pre-ADR-0066 rejected promotion no longer blocks (a
+rejection is per document now). A create whose slug is already owned by a DIFFERENT id blocks
+(`slug_collision`) before any write. After a successful add, `wiki/index.md` is rebuilt.
 """
 from __future__ import annotations
 
@@ -35,30 +28,21 @@ from typing import Any
 
 from app.backend import graph, taxonomy
 from app.backend.manifests import iso_now
-from app.workers import items, reviews, wiki
-from app.workers.wiki_render import NODE_DIR, parse_frontmatter, render_item_page
+from app.workers import identity_journal, items, reviews, tag_links
+from app.workers.wiki_render import NODE_DIR, parse_frontmatter
 
 _MAX_DESCRIPTION = 2000
 
 # Node lifecycle states the add can work with; anything else (merged/hidden/…) blocks.
-_ADDABLE_STATUSES = frozenset({"candidate", "active", "deprecated_candidate", "stale_candidate"})
+_ADDABLE_STATUSES = frozenset({"candidate", "active", "unused", "deprecated_candidate",
+                               "stale_candidate"})
 
 
 def _blocked(reason: str, **extra: Any) -> dict[str, Any]:
     return {"outcome": "blocked", "reason": reason, **extra}
 
 
-def _rejection_record(reviews_dir: Path, rid: str) -> dict[str, Any] | None:
-    path = Path(reviews_dir) / "rejected" / f"{rid}.json"
-    if not path.exists():
-        return None
-    try:
-        item = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {"review_id": rid}
-    return item if isinstance(item, dict) else {"review_id": rid}
-
-
+@tag_links.ledger_action           # serialized with every other ledger write; damaged ledger → blocked
 def add_candidate(
     gconn,
     *,
@@ -74,11 +58,11 @@ def add_candidate(
 ) -> dict[str, Any]:
     """Perform one human-add. Returns a typed outcome dict; `blocked` outcomes write NOTHING.
 
-    Outcomes: `created` (new candidate + pre-approved promote), `mention_added` (existing
-    promotable node; item approved/reused), `mention_added_active` (active node; mention only),
-    `routed_retype` (mention to the existing node + a change_item_type item), or
-    `blocked` with a `reason` (`invalid_*`, `unknown_source`, `node_not_addable`,
-    `promotion_previously_rejected` + the prior decision fields).
+    Outcomes: `created` (new item, kept → active), `mention_added` (existing candidate/tombstone,
+    kept → active), `mention_added_active` (active/unused item, kept), `routed_retype` (kept on the
+    existing node + a change_item_type item), or `blocked` with a `reason` (`invalid_*`,
+    `unknown_source`, `node_not_addable`, `slug_collision`, `ledger_corrupt`,
+    `identity_operation_in_flight`, or a keep gate).
     """
     now = now or iso_now()
     wiki_dir, reviews_dir = Path(wiki_dir), Path(reviews_dir)
@@ -95,8 +79,12 @@ def add_candidate(
     src_node = graph.get_node(gconn, source_id)
     if src_node is None or src_node.get("node_type") != "source":
         return _blocked("unknown_source", source_id=source_id)
+    tag_links.load_ledger(reviews_dir, source_id)      # LedgerCorrupt here — before ANY write
 
     nid = items.node_id(title)
+    if (rid_busy := identity_journal.operation_for(reviews_dir, [nid])) is not None:
+        return _blocked("identity_operation_in_flight", review_id=rid_busy,
+                        hint="run /reviews/apply to finish it first")
     existing = graph.get_node(gconn, nid)
     routed_retype: tuple[str, str] | None = None
     if (existing is not None and existing.get("item_type")
@@ -113,16 +101,11 @@ def add_candidate(
         return _blocked("node_not_addable", node_id=nid, node_status=node_status)
 
     rid = reviews.review_id("promote_candidate_node", {"node_id": nid})
-    needs_promotion = node_status != "active"
-    if needs_promotion:
-        rejected = _rejection_record(reviews_dir, rid)
-        if rejected is not None:
-            # A human rejection is immutable ledger — block BEFORE any write; ADR-0045 reopen
-            # is the explicit path back.
-            return _blocked("promotion_previously_rejected", node_id=nid, review_id=rid,
-                            decided_by=rejected.get("decided_by"),
-                            decided_at=rejected.get("decided_at"),
-                            decision_note=rejected.get("decision_note"))
+    amendments: dict[str, Any] = {}
+    if (node is not None and node_status == "candidate"
+            and node.get("item_type") == taxonomy.UNCLASSIFIED):
+        amendments["item_type"] = item_type    # the sentinel takes the human's type on the keep
+        routed_retype = None
 
     # --- producer writes (mirror extract_items' _emit, asserted_by=human, anchorless) ---
     node_created = node is None
@@ -139,29 +122,21 @@ def add_candidate(
                                 existing_node_id=fm.get("item_id"))
         graph.upsert_node(gconn, node_id=nid, node_type="item", slug=slug,
                           status="candidate", item_type=used_type, now=now)
-    graph.upsert_assertion(gconn, src_id=source_id, dst_id=nid, edge_type="mentions",
-                           asserted_by="human", status="active", now=now)
-    # Re-render from graph + page authority (resurrects a tombstone; the ADR-0057 hook then
-    # withdraws its stale deprecation). The text hint seeds title/aliases/type only on a fresh page.
-    items._recompose_node(gconn, node_id=nid, wiki_dir=wiki_dir, reviews_dir=reviews_dir,
-                          now=now, text_hint={"title": title, "aliases": clean_aliases,
-                                              "item_type": used_type})
-    if node_created and description:
-        # A brand-new page may carry the human description immediately (page-owned field).
-        page_path = wiki_dir / NODE_DIR["item"] / f"{slug}.md"
-        node_sources = graph.sources_for_node(gconn, nid)
-        duplicates = graph.active_duplicates(gconn, nid)
-        page_path.write_text(render_item_page({
-            "node_id": nid, "item_type": used_type,
-            "title": title, "aliases": clean_aliases, "confidence": "low",
-            "source_ids": node_sources, "status": "candidate",
-            "duplicates": duplicates, "description": description,
-        }, labels=items._link_labels(wiki_dir, node_sources, duplicates)), encoding="utf-8")
+        if description:
+            amendments["description"] = description
+    if node_created or node_status in ("deprecated_candidate", "stale_candidate"):
+        # Create / resurrect the page from graph + page authority (a tombstone becomes a candidate;
+        # the ADR-0057 hook then withdraws its stale deprecation) so the keep can activate it.
+        graph.upsert_assertion(gconn, src_id=source_id, dst_id=nid, edge_type="mentions",
+                               asserted_by="human", status="active", now=now)
+        items._recompose_node(gconn, node_id=nid, wiki_dir=wiki_dir, reviews_dir=reviews_dir,
+                              now=now, text_hint={"title": title, "aliases": clean_aliases,
+                                                  "item_type": used_type})
 
-    # The Source page's Items section is a graph projection — re-render so the human
-    # mention shows immediately (and validate_projection stays green).
-    if (wiki_dir / "Sources" / f"{source_id}.md").exists():
-        wiki.generate_wiki(root, source_ids=[source_id], rebuild_index=False, record_job=False)
+    kept = tag_links.keep(gconn, source_id=source_id, node_id=nid, wiki_dir=wiki_dir,
+                          reviews_dir=reviews_dir, amendments=amendments or None, now=now)
+    if kept["outcome"] == "blocked":
+        return kept
 
     if routed_retype is not None:
         reviews.create_review_item(
@@ -171,17 +146,6 @@ def add_candidate(
             context={"source_id": source_id, "name": title,
                      "from_item_type": routed_retype[0]}, now=now)
 
-    promote_resolution = None
-    if needs_promotion:
-        reviews.create_review_item(
-            reviews_dir, review_type="promote_candidate_node",
-            subject={"node_id": nid},
-            proposal={"to_status": "active", "name": title, "item_type": used_type}, now=now)
-        resolved = reviews.resolve_review_item(
-            reviews_dir, rid, decision="approved", decided_by="human",
-            note=f"human-added via per-source review (source {source_id})", now=now)
-        promote_resolution = "approved" if resolved else "reused_approved"
-
     audit = reviews_dir / "audit_log"
     audit.mkdir(parents=True, exist_ok=True)
     (audit / f"{rid}-human-added-{uuid.uuid4().hex[:8]}.json").write_text(json.dumps({
@@ -189,21 +153,20 @@ def add_candidate(
         "source_id": source_id, "node_id": nid, "item_type": used_type,
         "title": title, "aliases": clean_aliases, "description": description,
         "node_created": node_created, "edge": {"src_id": source_id, "dst_id": nid},
-        "promote_resolution": promote_resolution,
+        "keep_effect": kept.get("effect"),
         "routed_retype": (
             {"from_item_type": routed_retype[0], "to_item_type": routed_retype[1]}
             if routed_retype else None),
     }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-    # Producer contract (review round, B3): a page change rebuilds wiki/index.md (same
-    # best-effort script seam every producer uses); KEYWORD freshness deliberately waits for
-    # the normal reindex pass (/jobs/reindex, the apply chain) — no producer refreshes it.
-    index_rebuilt = items._rebuild_index(Path(root))
+    # Producer contract: re-render the Source page (its Items projection) and rebuild the index.
+    refresh = tag_links.finish(Path(root), kept["affected_sources"], wiki_dir=wiki_dir)
 
     outcome = ("routed_retype" if routed_retype
                else "created" if node_created
-               else "mention_added_active" if not needs_promotion
+               else "mention_added_active" if node_status in ("active", "unused")
                else "mention_added")
     return {"outcome": outcome, "node_id": nid, "item_type": used_type, "review_id": rid,
-            "node_created": node_created, "promote_resolution": promote_resolution,
-            "index_rebuilt": index_rebuilt}
+            "node_created": node_created, "keep_effect": kept.get("effect"),
+            "index_rebuilt": refresh["index_rebuilt"],
+            "keyword_reindexed": refresh["keyword_reindexed"], "warnings": refresh["warnings"]}

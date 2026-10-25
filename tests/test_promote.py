@@ -12,13 +12,13 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
+import tagging  # noqa: E402
 import validate_projection  # noqa: E402
 
 from app.backend import db, graph, manifests
 from app.llm.cache import ResponseCache
 from app.llm.client import LLMClient
 from app.workers import extract, intake, items, promote, reviews
-from app.workers.reviews import review_id
 from app.workers.wiki_render import parse_frontmatter
 
 MODEL = "anthropic:claude-sonnet-4-6"
@@ -67,6 +67,18 @@ def _promote(tmp_path):
     return promote.promote_candidates(tmp_path, jobs_db=tmp_path / "db" / "jobs.sqlite", rebuild_index=False)
 
 
+def _approve(tmp_path, amendments=None):
+    """File + approve the item's promote_candidate_node (the flat-queue path; ADR-0066 extraction
+    no longer files one)."""
+    nid = items.node_id(NAME)
+    rid = reviews.create_review_item(tmp_path / "reviews", review_type="promote_candidate_node",
+                                     subject={"node_id": nid},
+                                     proposal={"to_status": "active", "name": NAME})
+    reviews.resolve_review_item(tmp_path / "reviews", rid, decision="approved", decided_by="human",
+                                amendments=amendments)
+    return rid
+
+
 _TWO = {"a.md": "# A\n\nAlpha body sentence.\n", "b.md": "# B\n\nBeta body sentence.\n"}
 
 
@@ -102,28 +114,21 @@ def test_non_overlapping_keys_not_independent(tmp_path):
     assert _node_status(tmp_path) == "candidate"
 
 
-def test_two_independent_sources_promote_and_resolve_review(tmp_path):
+def test_two_independent_sources_do_not_auto_promote(tmp_path):
+    # ADR-0066: no recurrence auto-promotion — an AI suggestion never becomes active without a
+    # human keep (or an approved promotion), however many independent sources mention it.
     sids = _setup(tmp_path, _TWO)
     md = tmp_path / "raw" / "manifests"
     manifests.set_provenance(md, sids["a.md"], author="Alice")
     manifests.set_provenance(md, sids["b.md"], author="Bob")  # comparable + distinct -> independent
     summary = _promote(tmp_path)
-    assert summary["promoted"] == 1 and _node_status(tmp_path) == "active"
-
-    fm = parse_frontmatter((tmp_path / "wiki" / "Items" / f"{SLUG}.md").read_text(encoding="utf-8"))
-    assert fm["status"] == "active"  # page is the status authority
-
-    rid = review_id("promote_candidate_node", {"node_id": items.node_id(NAME)})
-    assert (tmp_path / "reviews" / "approved" / f"{rid}.json").exists()
-    assert not (tmp_path / "reviews" / "pending" / f"{rid}.json").exists()
-    assert list((tmp_path / "reviews" / "audit_log").glob("*.json"))
+    assert summary["promoted"] == 0 and _node_status(tmp_path) == "candidate"
+    assert not list((tmp_path / "reviews" / "approved").glob("*.json"))
 
 
 def test_promotion_is_idempotent(tmp_path):
-    sids = _setup(tmp_path, _TWO)
-    md = tmp_path / "raw" / "manifests"
-    manifests.set_provenance(md, sids["a.md"], author="Alice")
-    manifests.set_provenance(md, sids["b.md"], author="Bob")
+    _setup(tmp_path, _TWO)
+    _approve(tmp_path)
     assert _promote(tmp_path)["promoted"] == 1
     audit_after_first = list((tmp_path / "reviews" / "audit_log").glob("*.json"))
 
@@ -154,25 +159,11 @@ def test_canonicalization_blocks_false_promotion(tmp_path):
     assert _node_status(tmp_path) == "candidate"
 
 
-def test_recurrence_closes_loop_even_if_pending_item_missing(tmp_path):
-    sids = _setup(tmp_path, _TWO)
-    md = tmp_path / "raw" / "manifests"
-    manifests.set_provenance(md, sids["a.md"], author="Alice")
-    manifests.set_provenance(md, sids["b.md"], author="Bob")
-    rid = review_id("promote_candidate_node", {"node_id": items.node_id(NAME)})
-    (tmp_path / "reviews" / "pending" / f"{rid}.json").unlink()  # pending item went missing
-
-    assert _promote(tmp_path)["promoted"] == 1 and _node_status(tmp_path) == "active"
-    assert (tmp_path / "reviews" / "approved" / f"{rid}.json").exists()  # loop still closed
-    assert list((tmp_path / "reviews" / "audit_log").glob("*.json"))
-
-
 def test_approved_review_promotes_single_source(tmp_path):
     # Human early promotion (ADR-0018): a single-source candidate whose review item is
     # already approved promotes, with no recurrence.
     _setup(tmp_path, {"a.md": "# A\n\nAlpha body.\n"})  # one source, no provenance
-    rid = review_id("promote_candidate_node", {"node_id": items.node_id(NAME)})
-    reviews.resolve_review_item(tmp_path / "reviews", rid, decision="approved", decided_by="human")
+    _approve(tmp_path)
 
     summary = _promote(tmp_path)
     assert summary["promoted"] == 1 and summary["promoted_by_review"] == 1
@@ -190,8 +181,8 @@ def test_clearing_provenance_blocks_promotion(tmp_path):
 
 
 def test_promote_job_failed_on_exception(tmp_path, monkeypatch):
-    sids = _setup(tmp_path, _TWO)
-    manifests.set_provenance(tmp_path / "raw" / "manifests", sids["a.md"], author="Alice")
+    _setup(tmp_path, _TWO)
+    _approve(tmp_path)
 
     def boom(*a, **k):
         raise RuntimeError("graph blew up")
@@ -220,11 +211,8 @@ def test_status_mirror_validator_catches_drift(tmp_path):
 
 
 def test_promoted_status_survives_reextraction(tmp_path):
-    sids = _setup(tmp_path, _TWO)
-    md = tmp_path / "raw" / "manifests"
-    manifests.set_provenance(md, sids["a.md"], author="Alice")
-    manifests.set_provenance(md, sids["b.md"], author="Bob")
-    _promote(tmp_path)
+    _setup(tmp_path, _TWO)
+    assert tagging.keep_all(tmp_path, source_ids=None) == 2   # ADR-0066: the keep is the promotion
     assert _node_status(tmp_path) == "active"
     # Re-extract items (force): the promoted status must be preserved, not reset to candidate.
     client = LLMClient({"anthropic": FakeAdapter()}, cache=ResponseCache(tmp_path / "db" / "llm_cache.sqlite"))
@@ -254,8 +242,7 @@ def test_sentinel_candidate_never_auto_promotes(tmp_path):
 
 def test_approved_sentinel_without_item_type_amendment_is_scope_skipped(tmp_path):
     _setup(tmp_path, {"a.md": "# A\n\nAlpha body.\n"}, adapter=SentinelAdapter())
-    rid = review_id("promote_candidate_node", {"node_id": items.node_id(NAME)})
-    reviews.resolve_review_item(tmp_path / "reviews", rid, decision="approved", decided_by="human")
+    rid = _approve(tmp_path)
     summary = _promote(tmp_path)
     assert summary["promoted"] == 0
     assert summary["skipped"] == [{"review_id": rid, "reason": "missing_required_item_type"}]
@@ -264,9 +251,7 @@ def test_approved_sentinel_without_item_type_amendment_is_scope_skipped(tmp_path
 
 def test_approved_sentinel_with_item_type_amendment_promotes_and_flips_type(tmp_path):
     _setup(tmp_path, {"a.md": "# A\n\nAlpha body.\n"}, adapter=SentinelAdapter())
-    rid = review_id("promote_candidate_node", {"node_id": items.node_id(NAME)})
-    reviews.resolve_review_item(tmp_path / "reviews", rid, decision="approved", decided_by="human",
-                                amendments={"item_type": "use_case"})
+    _approve(tmp_path, amendments={"item_type": "use_case"})
     summary = _promote(tmp_path)
     assert summary["promoted"] == 1 and summary["promoted_by_review"] == 1
     assert _node_status(tmp_path) == "active"

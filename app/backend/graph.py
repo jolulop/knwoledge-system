@@ -40,7 +40,8 @@ NODE_STATUSES = frozenset(
      "archive_candidate", "archived", "delete_candidate", "deleted",
      "hidden",            # ADR-0043: governance visibility-suppression status (active -> hidden)
      "evidence_hidden",   # ADR-0049: synthesis auto-suppressed because a supporting claim is hidden
-     "merged"}            # ADR-0050: absorbed identity tombstone (merged_into a same-type survivor)
+     "merged",            # ADR-0050: absorbed identity tombstone (merged_into a same-type survivor)
+     "unused"}            # ADR-0066: an item (tag) that lost its last kept link; hidden, not deleted
     # ADR-0051's `rekeyed` tombstone is retired by ADR-0059: a type change is a metadata flip
     # on the type-neutral id, never an identity rekey, so the status can no longer arise.
 )
@@ -415,6 +416,40 @@ def sources_for_node(conn: sqlite3.Connection, node_id: str) -> list[str]:
             (node_id,),
         )
     ]
+
+
+def kept_sources_for_node(conn: sqlite3.Connection, node_id: str) -> list[str]:
+    """Sources that KEEP a tag (ADR-0066): active human-asserted `mentions` (the ledger's graph mirror).
+    Extraction supersedes only `llm` mentions, so a keep survives re-extraction."""
+    return [
+        r["src_id"] for r in conn.execute(
+            "SELECT DISTINCT src_id FROM edges WHERE dst_id = ? AND edge_type = 'mentions' "
+            "AND asserted_by = 'human' AND status = 'active' ORDER BY src_id",
+            (node_id,),
+        )
+    ]
+
+
+def source_tag_links(conn: sqlite3.Connection, source_id: str) -> list[dict[str, Any]]:
+    """Every `mentions` edge from a source to an item, in ANY status (the ADR-0066 per-document
+    screen: active `llm` = suggestion, active `human` = kept, `rejected` = dropped)."""
+    return _rows(conn.execute(
+        "SELECT e.edge_id, e.dst_id, e.asserted_by, e.status, n.status AS node_status, n.slug "
+        "FROM edges e JOIN nodes n ON n.node_id = e.dst_id "
+        "WHERE e.src_id = ? AND e.edge_type = 'mentions' AND n.node_type = 'item' "
+        "ORDER BY n.slug, e.dst_id, e.asserted_by, e.edge_id",
+        (source_id,),
+    ))
+
+
+def delete_node(conn: sqlite3.Connection, node_id: str) -> int:
+    """Hard-delete a node and EVERY edge touching it, in any status (ADR-0066: a tag nobody keeps is
+    deleted). Returns the number of edges removed. Callers own the page deletion + audit; this is the
+    graph half only and is never used for sources/claims."""
+    cur = conn.execute("DELETE FROM edges WHERE src_id = ? OR dst_id = ?", (node_id, node_id))
+    conn.execute("DELETE FROM nodes WHERE node_id = ?", (node_id,))
+    conn.commit()
+    return int(cur.rowcount)
 
 
 def superseded_mention_sources(conn: sqlite3.Connection, node_id: str) -> list[str]:

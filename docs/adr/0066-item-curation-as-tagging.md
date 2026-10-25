@@ -1,6 +1,9 @@
 # ADR-0066 — Item curation as tagging: per-document keep/drop, tags exist through use
 
-- **Status:** accepted — design-locked by grill-phase 2026-10-24, **not implemented**. Item
+- **Status:** accepted — design-locked by grill-phase 2026-10-24. **Part 1 implemented
+  2026-10-25** (decisions 1–5 plus the decision 4 merge/split rules; see "Implementation — part 1"
+  at the end), hardened by **review rounds 2–5** (2026-10-25); round 2 also brought
+  **decision 9** forward. Decisions 6–8, 10 and 11 are not implemented. Item
   consolidation Part B ("Slice A" of the post-UAT-r6 plan); follows ADR-0064 (Part A). **Review
   round 1 applied 2026-10-24** (see the section at the end): durable keep ledger, merge/split and
   unused-status rules, ambiguous-match path, sentinel gate, confirmed-vs-suggested metadata, the
@@ -424,3 +427,158 @@ accepted the recommendations for the rest ("apply all").
 - Author filenames resist traversal and collisions; Authors pages, backlinks and the index rebuild
   deterministically.
 - Scorer fixtures cover undecided rows, duplicate golden entries and expected misses.
+
+## Implementation — part 1 (2026-10-25)
+
+Decisions 1–5 and the decision 4 identity-operation rules.
+
+**Code:**
+- `app/workers/tag_links.py` (new): the per-document ledger, keep/drop/undo-drop, deletion,
+  the Unused tags list and **Delete unused**, block/unblock, and the merge/split ledger fixups.
+- `graph.py`: the `unused` status, `kept_sources_for_node`, `source_tag_links`, `delete_node`.
+- `promote.activate_node`: the single promotion writer, shared by keep and the approved-item
+  executor.
+- Extraction filters (`items.extract_items`), the human-add rewrite, merge/split changes, the
+  per-source read model and screen, and the new routes.
+
+**Routes:** `POST /ui/reviews/sources/{id}/decide` (`link_<node_id>` = keep/drop/block),
+`POST /reviews/sources/{id}/links` (JSON), `POST /ui/reviews/sources/{id}/undrop`,
+`/ui/reviews/tags/unused` (+ `/delete`), `/ui/reviews/tags/blocked` (+ `/unblock`).
+
+**Tests:** `tests/test_tag_links.py` (new); the source-flow, promote, items, reconcile, merge, split
+and synthesis tests are updated to the new model.
+
+Implementation choices not spelled out above:
+- **Keep, drop and block take effect immediately**, like the ADR-0058 human-add, with no apply
+  step. They change only the document's own links. Deletion happens only as a consequence of
+  human drops or the explicit **Delete unused**. Each action writes an audit entry
+  (`tag-kept`, `tag-dropped`, `tag-deleted`, `tag-blocked`, `tag-unblocked`, `tag-drop-undone`).
+  Type changes and retirements on the same screen are still recorded and applied later.
+- **Ledger file:** `reviews/tag_links/<source_id>.json` holds `{kept: {node_id: {at, by}},
+  drops: [{key, keys, name, item_id, at}]}`. `scripts/rebuild_tag_links.py` restores the graph
+  mirror from it (review round 2).
+- **Blocked list:** `policies/blocked_tags.txt`, one name per line with `#` comments, chosen so it
+  is hand-editable and comment-preserving. **Re-suggest** is the printed command
+  `scripts/extract_items.py --force --cache-only <source_id>…` (review round 2: cache-only, zero
+  provider calls), because the API has no items-extraction job.
+- **Suggestion counts:** a tag shared by two documents is two rows, because the decisions are
+  per document.
+- **Legacy compatibility:**
+  - An item activated before ADR-0066 (no human mention in any status) is not demoted to `unused`
+    by a recompute.
+  - The flat-queue `promote_candidate_node` executor still works for approved items.
+  - A never-kept candidate that re-extraction stops suggesting keeps the ADR-0057 tombstone plus
+    `deprecate_wiki_page` behaviour (the "Retired by re-extraction" section).
+- **Merge:** a rejected `mentions` collision no longer blocks a merge. A kept (human) link
+  resurrects the dropped one (keep wins); a suggestion moving onto a dropped link is collapsed
+  (the drop stands).
+- **Split:** B's promotion accounting (`spinoff_promote_slot_taken`, "promotion accounted for") is
+  retired.
+- **Not in part 1:**
+  - The Source page Items section still lists suggestions as well as kept tags (visibility is
+    Slice B).
+  - ~~Lint's `under_supported_item` still runs until part 4~~ — retired in review round 2
+    (decision 9 brought forward).
+
+## Review round 2 (2026-10-25)
+
+An external code review of the part 1 implementation, backed by in-memory probes: six blocking
+issues, four non-blocking. The user accepted every recommendation ("apply all"), including bringing
+decision 9 forward.
+
+| # | Issue | Resolution |
+|---|---|---|
+| B1 | A damaged ledger loaded as empty and could be overwritten; unlocked read-modify-write lost a concurrent keep | `LedgerCorrupt` on any unparseable or mis-shaped ledger; every action returns `ledger_corrupt` without writing, extraction skips the document with an error, merge/split skip `tag_ledger_corrupt`, the screen shows a banner. All ledger and blocked-list updates run under `tag_links.ledger_lock` (process lock + `flock` on `reviews/tag_links/.lock`). Every action writes the ledger before its graph mirror |
+| B2 | A merge restored a dropped suggestion when evidence spans differed (and, the mirror case, kept the survivor's own suggestion where the absorbed tag was dropped) | `on_merge` now applies per-document precedence independently of anchors: on a document that dropped the survivor (directly or via the moved drop record) and does not keep it, every `llm` link to the survivor is rejected, before the survivor renders |
+| B3 | Renaming a tag defeated drop persistence | A drop record stores the tag id plus every name it answered to (`keys`: title + aliases); extraction filters a name whose key matches or whose derived id is a dropped id (`tag_links.drop_filter`) |
+| B4 | Immediate actions left the keyword index stale | `finish` also runs the incremental `keyword_index.reindex` and returns `{index_rebuilt, keyword_reindexed, warnings}`; the decide, undo, Delete unused, JSON and human-add paths surface a failure (banner / `warnings`) |
+| B5 | Re-suggest could call the provider; documents extracted while blocked were not found | `LLMClient.parse(cache_only=True)` raises `CacheMiss` before any adapter call; `extract_items(cache_only=True)` / `--cache-only` replays under the artifact's recorded chain member, needs no key, and reports `cache_miss_sources` (left untouched). The items artifact gains `filtered: [{name, key, reason}]`, which `suggesting_sources` reads |
+| B6 | Undecided suggestions fed synthesis | Synthesis eligibility uses `kept_sources_for_node`, and the ADR-0062 item-type ranking bridge (`graph_read.source_item_types`) counts only `asserted_by = 'human'` links; no fallback for never-kept legacy actives (decision 10 restarts clean) |
+| N1 | No recovery path | `tag_links.repair` + `scripts/rebuild_tag_links.py` (dry run, `--apply`); `tag_links.consistency_errors` + `scripts/validate_tag_links.py` (the 12th validator) |
+| N2 | Amendment validation regressed | `promote.normalize_amendments` is the one rule set: the review route, the JSON tag-link route (400), the per-source form and `tag_links.keep` (`invalid_amendments`) |
+| N3 | Single-source lint rule still ran | Decision 9 implemented: `under_supported_item` removed; lint reports `unused_tag` (low, report-only) and withdraws still-pending items the old rule filed (audit note `rule_retired`); CLAUDE.md and the maintenance skill updated |
+| N4 | Trailing blank line | Fixed |
+
+Choices made while implementing:
+- **Lock granularity:** one lock for all ledgers, not one per document. It serializes the rare
+  cross-document operations (merge, repair, block) with per-document actions without nesting
+  locks; a single-user vault sees no contention. Re-entrant per thread.
+- **Repair direction:** the ledger is the authority, so a human link with no keep is rejected, not
+  added to the ledger. A keep naming a gone or merged tag is reported (`invalid_keeps`), not
+  repaired.
+- **Contradiction blocking unchanged:** `item_ids_for_source` (contradiction candidate blocking)
+  still reads every active link. It is a recall heuristic whose every output is human-reviewed,
+  and claims are not linked to tags.
+- `reviews/tag_links/` is git-ignored like the rest of the review ledger (it was missing in part 1).
+
+Tests (`tests/test_tag_links.py`, `test_lint.py`, `test_synthesis.py`,
+`test_item_type_faceting.py`): concurrent keeps on one document; damaged ledgers (unparseable and
+mis-shaped) refused and never overwritten, including extraction and human-add; a damaged ledger
+blocks a merge; an interrupted drop detected by the validator and repaired; merge with a dropped tag
+at a different evidence span, both directions; amend → keep → drop → re-extract under the original
+and the new name; keep/drop/delete keep the keyword index consistent; a failed refresh is shown; unblock
+finds a document extracted while blocked; cache-only replay and miss make zero provider calls;
+amendment validation through both HTTP routes; an undecided suggestion contributes no synthesis
+evidence; the retired lint rule files nothing and its pending items are withdrawn idempotently.
+
+## Review round 3 (2026-10-25)
+
+A follow-up review of round 2: three blocking gaps in recovery and serialization, confirmed by
+probes. The user accepted every recommendation ("apply all").
+
+| # | Issue | Resolution |
+|---|---|---|
+| B1 | Repair rejected the kept links of a document whose ledger was damaged (it read as "no keeps"); `{}` passed as an empty ledger | `_plan_repair` excludes damaged documents from every mutation (`skipped_damaged`). A ledger must carry `source_id`, `kept` and `drops`, and each keep an `at`; drop records without `keys` (part 1) stay valid |
+| B2 | An interrupted first keep (ledger written, candidate not activated) was `invalid_keeps`; its amendments were lost; an interrupted revival went unnoticed | A keep of a candidate records its normalized `amendments` in the ledger entry. A kept tag still `candidate` is an `interrupted_activation` (repair re-runs `promote.activate_node` with those amendments; a still-blocked gate is reported, never guessed); a kept tag still `unused` is an `interrupted_revival`. The validator reports both |
+| B3 | Extraction wrote suggestions outside the lock from decisions read before the model call; merges and splits changed graph links before their locked ledger fixups | Extraction re-reads the document's drop records and the blocked list **under the lock** after the model call and writes that document's links + artifact before releasing it (the final recompose also runs under it). `apply_merges` / `apply_splits` hold the lock for each whole operation and run **ledger first**: journal → `move_merge_decisions` / `on_split` → graph re-point → `enforce_drops` → render |
+
+**Resumable identity operations:** `app/workers/identity_journal.py` writes
+`reviews/in_flight/<review_id>.json` (`{review_id, op, nodes}`) before a merge's or split's first write
+and removes it after the last. While it exists:
+- the next apply **resumes** the operation: a merge adopts its own tombstone and finishes the tail
+  (drop enforcement, survivor render, Source-page re-render of every linked document); a split adopts
+  its spin-off slot without requiring the lineage page, moves what is still on the primary and renders;
+- repair **defers** the operation's tags (every tag, if an entry is unreadable) and the validator says
+  to run apply first, because repairing a half-done merge from the ledgers would partly undo it.
+
+Every step after the journal entry is idempotent, so a crash at any point leaves a state the next
+apply completes. `reviews/in_flight/` is git-ignored and backed up with `reviews/`.
+
+Tests (`tests/test_tag_links.py`): repair leaves a damaged document's links untouched while repairing
+the others; `{}`, missing `source_id` and a keep without `at` are rejected; an interrupted first keep
+of an unclassified suggestion is finished with the chosen type and title; an interrupted revival is
+finished; a drop and a block made during the model call win over that extraction; a merge interrupted
+at the re-point and at the survivor render is deferred by repair and resumed by apply (then a true
+no-op); a split interrupted mid-re-point is resumed; a keep issued during a merge waits for the whole
+merge.
+
+## Review round 4 (2026-10-25)
+
+A follow-up review of round 3: two blocking gaps in the in-flight handling. The user accepted every
+recommendation ("apply all").
+
+| # | Issue | Resolution |
+|---|---|---|
+| B1 | Normal actions could change the tags of an unfinished merge/split: a merge moved B's keep to A in the ledger and stopped; the screen still showed B kept; a drop of B succeeded; the resume restored the keep on A and the drop was lost | **Refuse, never reconcile** (a decision made against a half-finished screen can't be ranked against the operation's): keep, drop, undo-drop and human-add on a tag the journal lists return `identity_operation_in_flight` (with the `review_id`); block refuses when the name matches such a tag (nothing written, not even the list entry); Delete unused skips it; the JSON route answers 409; the document screen shows an "unfinished merge/split — run Apply" banner. Extraction skips a document linked (in any status) to such a tag, before the model call (no cost) and again under the lock after it (also catching an operation that started during the call), reporting `in_flight_sources` |
+| B2 | The executors removed their marker before the caller re-rendered Source pages and indexes, so a crash in between left stale projections with no marker | The executors mark the entry `graph_done` and return `journaled`; `run_apply` closes it only after the Source-page re-render, the `wiki/index.md` rebuild and the keyword reindex succeeded. On a refresh failure the marker stays (`identity_refresh_pending`, a non-clean apply) and the next apply resumes the idempotent operation — a resumed merge re-renders every document linked to either tag — and refreshes again |
+
+Trade-off accepted: while a refresh keeps failing, actions on those tags stay refused — visible, and
+cleared by the next successful apply.
+
+Tests (`tests/test_tag_links.py`): a drop through the form and the JSON route on an unfinished merge is
+refused and the ledger is unchanged, and after the resuming apply it works; human-add and block are
+refused; Delete unused skips an unfinished survivor; extraction skips the linked documents before the
+model call and re-checks under the lock when an operation starts during the call; human-add, drop and
+extraction against an unfinished split; an apply interrupted before the Source-page refresh and one
+whose keyword reindex fails both keep the marker, and the next apply finishes, re-renders and closes it.
+Executor-level tests play the caller with `tests/tagging.close_journals`.
+
+## Review round 5 (2026-10-25)
+
+| # | Issue | Resolution |
+|---|---|---|
+| B1 | `generate_wiki` reports a per-page render failure in `error_details` instead of raising; apply ignored it and closed the in-flight markers, leaving a stale Source page with no recovery marker | `run_apply` reads the result: any failed page adds `source_page_refresh_failed` (a warning for every executor), and a failed page among the merge/split affected documents keeps ALL of this apply's markers (`identity_refresh_pending`, non-clean). The same check in `tag_links.finish` adds `source_page_refresh_failed:<source_id>` to the immediate actions' warnings (form banner, JSON `warnings`) |
+
+Tests: one Source page's renderer fails inside `generate_wiki` during apply → the marker survives and
+the next apply re-renders the page and closes it; the same failure after a keep reaches the form and
+the JSON route.

@@ -20,7 +20,8 @@ import validate_wikilinks  # noqa: E402
 from app.backend import graph, manifests  # noqa: E402
 from app.llm.cache import ResponseCache  # noqa: E402
 from app.llm.client import LLMClient  # noqa: E402
-from app.workers import claims, extract, intake, items, promote, reviews, synthesis, wiki  # noqa: E402
+from app.workers import claims, extract, intake, items, reviews, synthesis, wiki  # noqa: E402
+import tagging  # noqa: E402
 
 TEMPLATES = ROOT / "templates"
 TIER2 = "anthropic:claude-sonnet-4-6"
@@ -97,9 +98,10 @@ def _sid(tmp_path, name):
     raise KeyError(name)
 
 
-def _build(tmp_path, *, second=True):
-    """Two independent sources sharing a knowledge item; claims + items extracted; item promoted
-    active (so it is an eligible synthesis topic)."""
+def _build(tmp_path, *, second=True, keep_on=None):
+    """Two independent sources sharing a knowledge item; claims + items extracted; the item kept on
+    both (ADR-0066), so it is active and an eligible synthesis topic. `keep_on` (filenames) keeps
+    it only there — the other documents keep it as an undecided suggestion."""
     jobs = tmp_path / "db" / "jobs.sqlite"
     _ingest(tmp_path, "a.md", DOC_A)
     if second:
@@ -114,7 +116,8 @@ def _build(tmp_path, *, second=True):
                           jobs_db=jobs, rebuild_index=False)
     items.extract_items(tmp_path, client=_client(tmp_path, ItemAdapter()), model_ref=TIER2,
                         jobs_db=jobs, rebuild_index=False)
-    promote.promote_candidates(tmp_path, jobs_db=jobs, rebuild_index=False)  # item -> active
+    tagging.keep_all(tmp_path, source_ids=None if keep_on is None
+                     else {_sid(tmp_path, n) for n in keep_on})  # ADR-0066: a keep makes it active
     wiki.generate_wiki(tmp_path, jobs_db=jobs, templates_dir=TEMPLATES, rebuild_index=False)
     return jobs
 
@@ -141,6 +144,21 @@ def test_single_source_item_is_not_eligible(tmp_path):
     summary = _gen(tmp_path, SynthAdapter(), jobs)
     assert summary["eligible_topics"] == 0 and summary["syntheses_written"] == 0
     assert not list((tmp_path / "wiki" / "Synthesis").glob("*.md"))
+
+
+def test_undecided_suggestion_contributes_no_synthesis_evidence(tmp_path):
+    # ADR-0066 review round 2: kept on a.md only; b.md still merely SUGGESTS the tag, so b's claims
+    # are not the tag's evidence — one kept source is not an eligible topic.
+    jobs = _build(tmp_path, keep_on=["a.md"])
+    gconn = _gconn(tmp_path)
+    try:
+        assert len(graph.sources_for_node(gconn, next(
+            r["node_id"] for r in gconn.execute("SELECT node_id FROM nodes WHERE node_type = 'item' "
+                                                "AND status = 'active'")))) == 2
+    finally:
+        gconn.close()
+    summary = _gen(tmp_path, SynthAdapter(), jobs)
+    assert summary["eligible_topics"] == 0 and summary["syntheses_written"] == 0
 
 
 # --- generation ------------------------------------------------------------
@@ -414,7 +432,7 @@ def test_synthesis_pages_are_keyed_by_node_id_not_slug(tmp_path):
 
     items.extract_items(tmp_path, client=_client(tmp_path, TwoItems()), model_ref=TIER2,
                         jobs_db=jobs, rebuild_index=False)
-    promote.promote_candidates(tmp_path, jobs_db=jobs, rebuild_index=False)
+    tagging.keep_all(tmp_path)
     wiki.generate_wiki(tmp_path, jobs_db=jobs, templates_dir=TEMPLATES, rebuild_index=False)
     _gen(tmp_path, SynthAdapter(), jobs)
 

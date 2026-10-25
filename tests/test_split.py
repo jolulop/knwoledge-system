@@ -26,6 +26,7 @@ from app.backend import graph, review_read
 from app.backend import main as main_module
 from app.backend.config import get_settings
 from app.workers import items, merges, reviews, splits, wiki
+import tagging  # noqa: E402
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter, render_item_page
 
 A = items.node_id("Washington")
@@ -93,7 +94,8 @@ def _approve_raw(tmp_path, *, subject, proposal, rid="rev_s"):
 
 
 def _apply(tmp_path, conn):
-    return splits.apply_splits(conn, tmp_path / "reviews", wiki_dir=tmp_path / "wiki")
+    return tagging.close_journals(tmp_path / "reviews", splits.apply_splits(
+        conn, tmp_path / "reviews", wiki_dir=tmp_path / "wiki"))
 
 
 def _fm(tmp_path, slug, node_type="item"):
@@ -125,9 +127,9 @@ def test_clean_split(tmp_path):
     # spin-off name auto-moved off A's aliases (it was an A alias); the other alias stays
     fm_a = _fm(tmp_path, "washington")
     assert "George Washington" not in fm_a["aliases"] and "DC" in fm_a["aliases"]
-    # B's promote review filed (enters the ledger)
+    # ADR-0066: no promotion review for B — a moved KEEP would be its promotion (none moved here)
     b_promo = reviews.review_id("promote_candidate_node", {"node_id": B})
-    assert (tmp_path / "reviews" / "pending" / f"{b_promo}.json").exists()
+    assert not (tmp_path / "reviews" / "pending" / f"{b_promo}.json").exists()
     assert res["affected_sources"] == [S3]
     audits = list((tmp_path / "reviews" / "audit_log").glob("rev_s-split-*.json"))
     assert audits and json.loads(audits[0].read_text())["moved_sources"] == [S3]
@@ -178,22 +180,48 @@ def test_idempotent_reapply_is_silent_noop(tmp_path):
     conn.close()
 
 
-def test_repair_completes_half_applied_split_missing_promote(tmp_path):
-    # A "completed-looking" half state: B node + B page lineage exist and the partition moved, but the promote
-    # item was never filed (crash before step 5). Re-apply must REPAIR (re-file promote, re-fan the source),
-    # NOT silently no-op on the lineage marker alone (ADR-0052 review round 2 — full-EFFECTED = no-op).
+def test_repair_completes_half_moved_partition(tmp_path):
+    # A "completed-looking" half state: B node + B page lineage exist, S3 moved, but S2's edge never
+    # moved (crash mid re-point). Re-apply must REPAIR (move S2, re-fan the whole partition), NOT
+    # silently no-op on the lineage marker alone (ADR-0052 review round 2 — full-EFFECTED = no-op).
     conn = _graph(tmp_path)
     _full(tmp_path, conn)
-    _approve(tmp_path, sources=[S3])
+    _approve(tmp_path, sources=[S2, S3])
     _apply(tmp_path, conn)                                         # clean first apply
-    b_promo = reviews.review_id("promote_candidate_node", {"node_id": B})
-    (tmp_path / "reviews" / "pending" / f"{b_promo}.json").unlink()   # simulate the un-filed promote half-state
+    s2_edge = next(e for e in graph.incoming_active(conn, B) if e["src_id"] == S2)
+    graph.repoint_edge(conn, s2_edge["edge_id"], new_dst=A)       # simulate the un-moved half-state
+    conn.commit()
     res = _apply(tmp_path, conn)                                   # re-apply
     assert res["applied"] == 1 and res["skipped"] == []           # repaired, NOT a silent no-op
-    assert res["affected_sources"] == [S3]                        # whole partition re-included for the fan-out
-    assert (tmp_path / "reviews" / "pending" / f"{b_promo}.json").exists()   # promote re-filed
-    assert graph.sources_for_node(conn, B) == [S3]                # graph unchanged (S3 already on B)
-    assert set(graph.sources_for_node(conn, A)) == {S1, S2}
+    assert res["affected_sources"] == [S2, S3]                    # whole partition re-included
+    assert set(graph.sources_for_node(conn, B)) == {S2, S3}
+    assert set(graph.sources_for_node(conn, A)) == {S1}
+    conn.close()
+
+
+def test_split_moves_kept_links_with_their_decision(tmp_path):
+    # ADR-0066: a moved KEPT link keeps its decision — B is active (the keep is its promotion), the
+    # ledger keep moves A -> B for that document, and A follows its own remaining keeps.
+    from app.workers import tag_links
+    conn = _graph(tmp_path)
+    _entity(tmp_path, conn, A, "Washington", aliases=["George Washington"])
+    _mention(conn, S1, A)
+    for sid in (S2, S3):
+        graph.upsert_node(conn, node_id=sid, node_type="source", slug=sid, status="active")
+        graph.upsert_assertion(conn, src_id=sid, dst_id=A, edge_type="mentions", asserted_by="human",
+                               status="active")
+        tag_links._save_ledger(tmp_path / "reviews", {
+            "source_id": sid, "kept": {A: {"at": _OLD, "by": "human"}}, "drops": []})
+    conn.commit()
+    _approve(tmp_path, sources=[S3])
+    assert _apply(tmp_path, conn)["applied"] == 1
+    assert graph.get_node(conn, B)["status"] == "active"
+    assert graph.get_node(conn, A)["status"] == "active"          # S2 still keeps A
+    assert list(tag_links.load_ledger(tmp_path / "reviews", S3)["kept"]) == [B]
+    assert list(tag_links.load_ledger(tmp_path / "reviews", S2)["kept"]) == [A]
+    b_promo = reviews.review_id("promote_candidate_node", {"node_id": B})
+    assert not any((tmp_path / "reviews" / d / f"{b_promo}.json").exists()
+                   for d in ("pending", "approved", "rejected"))
     conn.close()
 
 
@@ -342,10 +370,10 @@ def test_target_spinoff_page_exists(tmp_path):
     conn.close()
 
 
-def test_spinoff_promote_slot_taken(tmp_path):
+def test_stale_promote_record_for_spinoff_no_longer_blocks(tmp_path):
+    # ADR-0066 retired the ADR-0052 `spinoff_promote_slot_taken` gate with B's promotion review.
     conn = _graph(tmp_path)
     _full(tmp_path, conn)
-    # a stale TERMINAL promote record for computed B (approved/) blocks
     b_promo = reviews.review_id("promote_candidate_node", {"node_id": B})
     d = tmp_path / "reviews" / "approved"
     d.mkdir(parents=True, exist_ok=True)
@@ -353,7 +381,7 @@ def test_spinoff_promote_slot_taken(tmp_path):
         "review_id": b_promo, "type": "promote_candidate_node", "status": "approved",
         "subject": {"node_id": B}}), encoding="utf-8")
     _approve(tmp_path, sources=[S3])
-    assert _apply(tmp_path, conn)["skipped"] == [{"review_id": "rev_s", "reason": "spinoff_promote_slot_taken"}]
+    assert _apply(tmp_path, conn)["applied"] == 1
     conn.close()
 
 
@@ -394,19 +422,6 @@ def test_projector_pending_then_effected(tmp_path):
     conn.close()
 
 
-def test_projector_half_mint_missing_promote_is_unknown(tmp_path):
-    conn = _graph(tmp_path)
-    _full(tmp_path, conn)
-    _approve(tmp_path, sources=[S3])
-    _apply(tmp_path, conn)
-    # simulate the half-mint: B minted + mentions moved, but the promote item never filed
-    b_promo = reviews.review_id("promote_candidate_node", {"node_id": B})
-    (tmp_path / "reviews" / "pending" / f"{b_promo}.json").unlink()
-    st, warns = review_read._effect_split(_item(tmp_path), conn, tmp_path / "wiki")
-    assert st == review_read.UNKNOWN and "partial_split_state" in warns
-    conn.close()
-
-
 def test_projector_half_mint_partial_move_is_unknown(tmp_path):
     conn = _graph(tmp_path)
     _full(tmp_path, conn)
@@ -417,22 +432,6 @@ def test_projector_half_mint_partial_move_is_unknown(tmp_path):
     conn.commit()
     st, warns = review_read._effect_split(_item(tmp_path), conn, tmp_path / "wiki")
     assert st == review_read.UNKNOWN and "partial_split_state" in warns
-    conn.close()
-
-
-def test_projector_rejected_promote_is_accounted_effected(tmp_path):
-    # ADR-0052: a terminal *rejected* promote for B post-split is a deliberate human accounting ("split done,
-    # chose not to promote B") — a filled ledger slot, NOT a partial split, so _effect_split stays EFFECTED.
-    conn = _graph(tmp_path)
-    _full(tmp_path, conn)
-    _approve(tmp_path, sources=[S3])
-    _apply(tmp_path, conn)
-    b_promo = reviews.review_id("promote_candidate_node", {"node_id": B})
-    dst = tmp_path / "reviews" / "rejected" / f"{b_promo}.json"
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    (tmp_path / "reviews" / "pending" / f"{b_promo}.json").rename(dst)   # human rejects B's promote
-    st, _warns = review_read._effect_split(_item(tmp_path), conn, tmp_path / "wiki")
-    assert st == review_read.EFFECTED
     conn.close()
 
 
@@ -477,7 +476,8 @@ def test_rollback_via_merge_after_promotion(tmp_path):
         "review_id": "rev_merge", "type": "merge_items", "status": "approved",
         "subject": {"survivor_node_id": A, "absorbed_node_id": B},
         "proposal": {"to_status": "merged"}}), encoding="utf-8")
-    merges.apply_merges(conn, tmp_path / "reviews", wiki_dir=tmp_path / "wiki")
+    tagging.close_journals(tmp_path / "reviews", merges.apply_merges(
+        conn, tmp_path / "reviews", wiki_dir=tmp_path / "wiki"))
     assert graph.get_node(conn, B)["status"] == "merged"
     assert set(graph.sources_for_node(conn, A)) == {S1, S2, S3}    # S3 restored to A
     conn.close()

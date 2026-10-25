@@ -28,6 +28,7 @@ from app.backend import main as main_module
 from app.backend import review_read
 from app.backend.config import get_settings
 from app.workers import items, merges
+import tagging  # noqa: E402
 from app.workers.wiki_render import parse_frontmatter, render_item_page
 
 A = items.node_id("Alpha")
@@ -79,7 +80,8 @@ def _approve(tmp_path, *, survivor=A, absorbed=B, rtype="merge_items", rid="rev_
 
 
 def _apply(tmp_path, conn):
-    return merges.apply_merges(conn, tmp_path / "reviews", wiki_dir=tmp_path / "wiki")
+    return tagging.close_journals(tmp_path / "reviews", merges.apply_merges(
+        conn, tmp_path / "reviews", wiki_dir=tmp_path / "wiki"))
 
 
 def _fm(tmp_path, slug):
@@ -333,17 +335,60 @@ def test_approved_proposal_references_absorbed_blocks(tmp_path):
     conn.close()
 
 
-def test_rejected_target_collision_blocks_the_merge(tmp_path):
+def test_dropped_link_beats_a_moving_suggestion(tmp_path):
+    # ADR-0066: a rejected `mentions` link is a per-document drop. B's mere suggestion (llm) on the
+    # same document collides with it and LOSES — the merge applies, the drop stands, B's edge is
+    # superseded (no longer a block: a merge never blocks on a tag decision).
     conn = _graph(tmp_path)
     _item(tmp_path, conn, A, "Alpha")
     _item(tmp_path, conn, B, "Beta")
-    _mention(conn, SID, A, span=(0, 4), status="rejected")        # human "no" on Src->A
-    _mention(conn, SID, B, span=(0, 4))
+    dropped = _mention(conn, SID, A, span=(0, 4), status="rejected")   # dropped on Src for A
+    moving = _mention(conn, SID, B, span=(0, 4))
     _approve(tmp_path)
     res = _apply(tmp_path, conn)
-    assert res["applied"] == 0
-    assert res["skipped"] == [{"review_id": "rev_m", "reason": "rejected_target_collision"}]
-    assert graph.get_node(conn, B)["status"] == "active"         # no writes — B untouched
+    assert res["applied"] == 1 and res["skipped"] == []
+    statuses = {r["edge_id"]: r["status"] for r in conn.execute("SELECT edge_id, status FROM edges")}
+    assert statuses[dropped] == "rejected" and statuses[moving] == "superseded"
+    conn.close()
+
+
+def test_kept_link_beats_a_drop_and_moves_the_ledger(tmp_path):
+    # ADR-0066: the document KEPT B (human edge + ledger) and DROPPED A. After the merge the keep
+    # wins: the human link is active on A, the ledger keep moved B -> A, A's drop record is gone.
+    from app.workers import tag_links
+    conn = _graph(tmp_path)
+    _item(tmp_path, conn, A, "Alpha")
+    _item(tmp_path, conn, B, "Beta")
+    graph.upsert_node(conn, node_id=SID, node_type="source", slug=SID, status="active")
+    dropped = graph.upsert_assertion(conn, src_id=SID, dst_id=A, edge_type="mentions",
+                                     asserted_by="human", status="rejected")
+    kept = graph.upsert_assertion(conn, src_id=SID, dst_id=B, edge_type="mentions",
+                                  asserted_by="human", status="active")
+    reviews_dir = tmp_path / "reviews"
+    tag_links._save_ledger(reviews_dir, {
+        "source_id": SID, "kept": {B: {"at": "t", "by": "human"}},
+        "drops": [{"key": "alpha", "name": "Alpha", "item_id": A, "at": "t"}]})
+    _approve(tmp_path)
+    res = _apply(tmp_path, conn)
+    assert res["applied"] == 1
+    statuses = {r["edge_id"]: r["status"] for r in conn.execute("SELECT edge_id, status FROM edges")}
+    assert statuses[dropped] == "active" and statuses[kept] == "superseded"
+    assert graph.kept_sources_for_node(conn, A) == [SID]
+    ledger = tag_links.load_ledger(reviews_dir, SID)
+    assert list(ledger["kept"]) == [A] and ledger["drops"] == []
+    conn.close()
+
+
+def test_unused_survivor_revives_when_it_gains_a_kept_link(tmp_path):
+    conn = _graph(tmp_path)
+    _item(tmp_path, conn, A, "Alpha", status="unused")
+    _item(tmp_path, conn, B, "Beta")
+    graph.upsert_node(conn, node_id=SID, node_type="source", slug=SID, status="active")
+    graph.upsert_assertion(conn, src_id=SID, dst_id=B, edge_type="mentions", asserted_by="human",
+                           status="active")
+    _approve(tmp_path)
+    assert _apply(tmp_path, conn)["applied"] == 1
+    assert graph.get_node(conn, A)["status"] == "active" and _fm(tmp_path, "alpha")["status"] == "active"
     conn.close()
 
 

@@ -7,7 +7,13 @@ the governed 15-type `item_type` taxonomy (`app/backend/taxonomy.py`) plus the Q
 `unclassified_review_required` sentinel. Each becomes a node created `candidate` (ADR-0018),
 with an `active` `mentions` edge (source → node) recording provenance. Items are interpretive
 labels, **not verbatim-grounded** like claims (an optional evidence anchor is stored only
-when the name is mechanically locatable); quality comes from ≥2-source promotion.
+when the name is mechanically locatable).
+
+ADR-0066: an extracted item is a **suggestion** — a tag link the user keeps or drops on the
+document's review screen (`tag_links`); nothing here files a promotion. Names on the document's
+drop records or on the blocked-tag list (`policies/blocked_tags.txt`) are filtered BEFORE any
+write, so a dropped/blocked suggestion never comes back by re-extraction. Kept links are
+`asserted_by: human` edges, which re-extraction (superseding only `llm` mentions) never touches.
 
 Pages are deterministic stubs rendered from the graph (Mentioned-by = active incoming
 mentions) in ONE flat `wiki/Items/` directory; the page frontmatter is the durable authority
@@ -35,7 +41,7 @@ from typing import Any
 from app.backend import db, graph, taxonomy
 from app.backend.manifests import get_status, iso_now, valid_manifests
 from app.llm import prompts
-from app.llm.client import LLMClient, ParseError
+from app.llm.client import CacheMiss, LLMClient, ParseError
 from app.workers import citations, reconcile, reviews
 from app.workers import enrichment_artifact as art
 from app.workers import labels
@@ -163,11 +169,16 @@ def _recompose_node(gconn, *, node_id, wiki_dir, reviews_dir, now, text_hint=Non
         return "skipped"
 
     sources = graph.sources_for_node(gconn, node_id)
-    # Status is page-authoritative: a promotion to `active` is preserved across
-    # re-extraction; otherwise candidate while mentioned, deprecated_candidate when not.
-    if not sources:
+    # Status is page-authoritative: a promotion to `active` is preserved across re-extraction, and
+    # so is ADR-0066 `unused` (a tag that lost its last kept link; only a keep/drop changes it,
+    # `tag_links`); otherwise candidate while mentioned, deprecated_candidate when not. A kept tag
+    # always has an active `human` mention, which re-extraction never supersedes.
+    prior = (existing or {}).get("status")
+    if prior == "unused":
+        status = "unused"
+    elif not sources:
         status = "deprecated_candidate"
-    elif (existing or {}).get("status") == "active":
+    elif prior == "active":
         status = "active"
     else:
         status = "candidate"
@@ -184,7 +195,7 @@ def _recompose_node(gconn, *, node_id, wiki_dir, reviews_dir, now, text_hint=Non
     graph.upsert_node(gconn, node_id=node_id, node_type=node_type, slug=slug,
                       status=status, item_type=item_type, now=now)
     page_rel = f"{NODE_DIR[node_type]}/{slug}.md"
-    if not sources:
+    if status == "deprecated_candidate":
         reviews.create_review_item(
             reviews_dir, review_type="deprecate_wiki_page",
             subject={"node_id": node_id, "page": page_rel},
@@ -197,7 +208,7 @@ def _recompose_node(gconn, *, node_id, wiki_dir, reviews_dir, now, text_hint=Non
     reconcile.reconcile_node_items(
         reviews_dir, node_id=node_id, page=page_rel,
         node_status=status, active_source_count=len(sources), now=now)
-    return "tombstoned" if not sources else "written"
+    return "tombstoned" if status == "deprecated_candidate" else "written"
 
 
 def recompose_semantic_node_page(
@@ -262,15 +273,21 @@ def extract_items(
     enrichment_dir: Path | None = None,
     wiki_dir: Path | None = None,
     reviews_dir: Path | None = None,
+    policies_dir: Path | None = None,
     input_max_chars: int = 300000,
     rebuild_index: bool = True,
     record_job: bool = True,
+    cache_only: bool = False,
 ) -> dict[str, Any]:
     """Extract candidate knowledge items for pending (or selected) sources; return a summary.
 
     ADR-0056 (carried over): one full-document call per source up to ``input_max_chars``
     (the `full-doc-v1` strategy ref component); an above-cap document is truncated and
-    marked ``coverage: truncated`` in its artifact and the job metadata."""
+    marked ``coverage: truncated`` in its artifact and the job metadata.
+
+    ``cache_only`` (ADR-0066 Re-suggest): replay stored responses only — zero provider calls, no
+    API key needed. Each document replays under the chain member its artifact recorded; a miss
+    leaves the document untouched and is reported in ``cache_miss_sources``."""
     root = Path(root).resolve()
     manifests_dir = Path(manifests_dir) if manifests_dir else root / "raw" / "manifests"
     jobs_db = Path(jobs_db) if jobs_db else root / "db" / "jobs.sqlite"
@@ -279,6 +296,9 @@ def extract_items(
     enrichment_dir = Path(enrichment_dir) if enrichment_dir else root / "normalized" / "enrichment"
     wiki_dir = Path(wiki_dir) if wiki_dir else root / "wiki"
     reviews_dir = Path(reviews_dir) if reviews_dir else root / "reviews"
+    policies_dir = Path(policies_dir) if policies_dir else root / "policies"
+    from app.workers import tag_links                    # lazy: tag_links imports this module
+    blocked_keys = set(tag_links.load_blocked(policies_dir))
 
     now = iso_now()
     job_id = f"job_{uuid.uuid4().hex[:16]}"
@@ -293,20 +313,37 @@ def extract_items(
     gconn = graph.connect(graph_db)
 
     strategy_ref = art.items_strategy_ref(input_max_chars)
-    considered = nodes_written = mentions_written = 0
+    considered = nodes_written = mentions_written = filtered_dropped = filtered_blocked = 0
     skipped_fresh = skipped_not_extracted = skipped_empty = skipped_no_key = 0
     topic_starved_sources: list[str] = []
     unclassified_count = 0
     coverage_truncated_sources: list[str] = []
     errors: list[dict[str, str]] = []
+    cache_miss_sources: list[str] = []
+    in_flight_sources: list[dict[str, str]] = []
     texts: dict[str, dict[str, Any]] = {}
     touched: set[str] = set()
     affected: set[str] = set()
 
-    def _emit(sid, md, item_type, name, aliases, source_nodes, seen):
-        nonlocal mentions_written, unclassified_count
+    def _emit(sid, md, item_type, name, aliases, source_nodes, seen, dropped, filtered):
+        nonlocal mentions_written, unclassified_count, filtered_dropped, filtered_blocked
         name = _WS.sub(" ", str(name)).strip()[:_MAX_NAME]
         if not name:
+            return
+        # ADR-0066: a tag dropped on this document — under any name it had when dropped, or the
+        # id its extracted name derives to (a renamed tag) — or a name blocked vault-wide, is never
+        # re-suggested. Filtered names are recorded in the artifact (unblock's Re-suggest finds them).
+        key = tag_links.tag_key(name)
+        dropped_keys, dropped_ids = dropped
+        reason = ("dropped" if key in dropped_keys or node_id(name) in dropped_ids
+                  else "blocked" if key in blocked_keys else None)
+        if reason is not None:
+            if reason == "dropped":
+                filtered_dropped += 1
+            else:
+                filtered_blocked += 1
+            if not any(f["key"] == key for f in filtered):
+                filtered.append({"name": name, "key": key, "reason": reason})
             return
         clean_aliases = _clean_aliases(aliases)
 
@@ -351,13 +388,6 @@ def extract_items(
                 proposal={"to_item_type": item_type},
                 context={"source_id": sid, "name": name,
                          "from_item_type": existing["item_type"]}, now=now)
-        # The candidate's promotion is the review-gated semantic act (recurrence may
-        # auto-resolve it — except for the sentinel, promote-side gated). Idempotent per node id.
-        reviews.create_review_item(
-            reviews_dir, review_type="promote_candidate_node",
-            subject={"node_id": nid},
-            proposal={"to_status": "active", "name": name, "item_type": used_type},
-            now=now)
 
     try:
         # ADR-0063: resolve the tier chain INSIDE the protected block so a malformed-chain ConfigError
@@ -380,31 +410,49 @@ def extract_items(
             md_path = markdown_dir / f"{sid}.md"
             md = md_path.read_text(encoding="utf-8") if md_path.exists() else ""
             apath = art.items_artifact_path(enrichment_dir, sid)
-            if not force and apath.exists():
+            existing: dict[str, Any] = {}
+            if apath.exists():
                 try:
                     existing = json.loads(apath.read_text(encoding="utf-8"))
                 except (OSError, json.JSONDecodeError):
                     existing = {}
-                # ADR-0063 sticky-to-chain: fresh iff the recorded model is still a chain member and
-                # its own-model fingerprint matches — an availability flip alone never restales.
-                if art.chain_fresh(existing, chain_refs,
-                                   lambda m: art.items_fingerprint(md, m, strategy_ref)):
-                    skipped_fresh += 1
-                    continue
-            fingerprint = art.items_fingerprint(md, model_ref, strategy_ref)
+                if not isinstance(existing, dict):
+                    existing = {}
+            # ADR-0063 sticky-to-chain: fresh iff the recorded model is still a chain member and
+            # its own-model fingerprint matches — an availability flip alone never restales.
+            if not force and existing and art.chain_fresh(
+                    existing, chain_refs, lambda m: art.items_fingerprint(md, m, strategy_ref)):
+                skipped_fresh += 1
+                continue
+            # A cache-only replay asks for the response the recorded chain member produced.
+            run_ref = (existing["model_ref"] if cache_only and existing.get("model_ref") in chain_refs
+                       else model_ref)
+            fingerprint = art.items_fingerprint(md, run_ref, strategy_ref)
+            # ADR-0066: a damaged ledger skips the document BEFORE the (billable) model call —
+            # filtering against an empty drop list would resurrect drops. Re-read under the lock below.
+            try:
+                tag_links.drop_filter(reviews_dir, sid)
+            except tag_links.LedgerCorrupt as exc:
+                errors.append({"source_id": sid, "error": f"ledger_corrupt: {exc.problem}"})
+                continue
+            # ADR-0066 review round 4: a document linked to a tag an unfinished merge/split owns is
+            # skipped (re-checked under the lock below) — re-run after /reviews/apply finishes it.
+            if (busy := tag_links.source_in_flight(gconn, reviews_dir, sid)) is not None:
+                in_flight_sources.append({"source_id": sid, "review_id": busy})
+                continue
 
             # ADR-0055 rollout safety: supersede a source's prior mentions ONLY once this run can
             # produce the replacement state — after a successful parse (below), or deterministically
             # for an empty source. A no-key or failed-parse run must leave the existing topic layer
             # untouched: supersede-then-skip would recompose affected nodes with zero mentions and
             # tombstone them (the wipe hazard a prompt-version bump arms vault-wide).
-            if not has_key:
+            if not has_key and not cache_only:
                 skipped_no_key += 1
                 continue
             if not md.strip():
                 affected.update(graph.supersede_mentions_for_source(gconn, sid, now=now))
                 skipped_empty += 1
-                _write_artifact(apath, sid, fingerprint, [], model_ref, now, strategy_ref)
+                _write_artifact(apath, sid, fingerprint, [], run_ref, now, strategy_ref)
                 continue
 
             # ADR-0056: one full-document call up to the input cap; above-cap documents are
@@ -417,51 +465,74 @@ def extract_items(
             try:
                 result = client.parse(
                     prompts.build_items_messages(title, md, max_chars=input_max_chars),
-                    prompts.ITEMS_SCHEMA, model_ref,
+                    prompts.ITEMS_SCHEMA, run_ref,
                     schema_version=art.ITEMS_SCHEMA_VERSION,
                     prompt_version=art.ITEMS_PROMPT_VERSION,
                     strategy_ref=strategy_ref,
+                    cache_only=cache_only,
                 )
+            except CacheMiss:
+                cache_miss_sources.append(sid)            # typed outcome: nothing written
+                continue
             except ParseError as exc:
                 errors.append({"source_id": sid, "error": str(exc)})
                 continue
 
-            # Parse succeeded: retire the old mentions immediately before emitting replacements
-            # (supersede covers ALL active mentions for the source, so it must precede _emit).
-            affected.update(graph.supersede_mentions_for_source(gconn, sid, now=now))
+            # ADR-0066 review round 3: the model call ran OUTSIDE the ledger lock, so a drop or block
+            # made meanwhile must win — re-read both under the lock, then write this document's links
+            # and artifact before releasing it.
+            with tag_links.ledger_lock(reviews_dir):
+                try:
+                    dropped = tag_links.drop_filter(reviews_dir, sid)
+                except tag_links.LedgerCorrupt as exc:
+                    errors.append({"source_id": sid, "error": f"ledger_corrupt: {exc.problem}"})
+                    continue
+                busy = tag_links.source_in_flight(
+                    gconn, reviews_dir, sid,
+                    [node_id(str(it.get("name") or "")) for it in result["items"][:_MAX_ITEMS]])
+                if busy is not None:                          # nothing written for this document
+                    in_flight_sources.append({"source_id": sid, "review_id": busy})
+                    continue
+                blocked_keys = set(tag_links.load_blocked(policies_dir))
+                # Parse succeeded: retire the old mentions immediately before emitting replacements
+                # (supersede covers ALL active mentions for the source, so it must precede _emit).
+                affected.update(graph.supersede_mentions_for_source(gconn, sid, now=now))
 
-            graph.upsert_node(
-                gconn, node_id=sid, node_type="source", slug=sid,
-                status=get_status(manifest), now=now)
-            source_nodes: list[dict[str, Any]] = []
-            seen: set[str] = set()
-            for it in result["items"][:_MAX_ITEMS]:
-                itype = it.get("item_type", "")
-                if not taxonomy.is_item_type(itype):
-                    itype = taxonomy.UNCLASSIFIED
-                _emit(sid, md, itype, it.get("name", ""), it.get("aliases", []), source_nodes, seen)
+                graph.upsert_node(
+                    gconn, node_id=sid, node_type="source", slug=sid,
+                    status=get_status(manifest), now=now)
+                source_nodes: list[dict[str, Any]] = []
+                filtered: list[dict[str, str]] = []
+                seen: set[str] = set()
+                for it in result["items"][:_MAX_ITEMS]:
+                    itype = it.get("item_type", "")
+                    if not taxonomy.is_item_type(itype):
+                        itype = taxonomy.UNCLASSIFIED
+                    _emit(sid, md, itype, it.get("name", ""), it.get("aliases", []), source_nodes, seen,
+                          dropped, filtered)
 
-            _write_artifact(apath, sid, fingerprint, source_nodes, model_ref, now,
-                            strategy_ref, coverage)
-            nodes_written += len(source_nodes)
-            # ADR-0059: immediate operator feedback for the starvation failure signature (no
-            # thematic topic layer from a substantive source). Artifact/claim state only —
-            # never text-shape inference.
-            if art.topic_starved(source_nodes, art.stored_claim_count(enrichment_dir, sid)):
-                topic_starved_sources.append(sid)
+                _write_artifact(apath, sid, fingerprint, source_nodes, run_ref, now,
+                                strategy_ref, coverage, filtered)
+                nodes_written += len(source_nodes)
+                # ADR-0059: immediate operator feedback for the starvation failure signature (no
+                # thematic topic layer from a substantive source). Artifact/claim state only —
+                # never text-shape inference.
+                if art.topic_starved(source_nodes, art.stored_claim_count(enrichment_dir, sid)):
+                    topic_starved_sources.append(sid)
 
         pages_written = pages_tombstoned = 0
-        for nid in touched | affected:
-            outcome = _recompose_node(gconn, node_id=nid, wiki_dir=wiki_dir,
-                                      reviews_dir=reviews_dir, now=now, text_hint=texts.get(nid))
-            pages_written += outcome == "written"
-            pages_tombstoned += outcome == "tombstoned"
+        with tag_links.ledger_lock(reviews_dir):          # statuses read + written under the lock
+            for nid in touched | affected:
+                outcome = _recompose_node(gconn, node_id=nid, wiki_dir=wiki_dir,
+                                          reviews_dir=reviews_dir, now=now, text_hint=texts.get(nid))
+                pages_written += outcome == "written"
+                pages_tombstoned += outcome == "tombstoned"
 
         index_rebuilt = _rebuild_index(root) if (rebuild_index and (touched or affected)) else False
 
-        if errors:
+        if errors or cache_miss_sources or in_flight_sources:
             status = "partial"
-        elif not has_key and considered > 0:
+        elif not has_key and not cache_only and considered > 0:
             status = "skipped"
         else:
             status = "succeeded"
@@ -476,9 +547,14 @@ def extract_items(
             "topic_starved": len(topic_starved_sources),
             "topic_starved_sources": sorted(topic_starved_sources),
             "unclassified_items": unclassified_count,
+            "suggestions_filtered_dropped": filtered_dropped,
+            "suggestions_filtered_blocked": filtered_blocked,
             "coverage_truncated": len(coverage_truncated_sources),
             "coverage_truncated_sources": sorted(coverage_truncated_sources),
             "errors": len(errors), "error_details": errors,
+            "cache_only": cache_only, "cache_misses": len(cache_miss_sources),
+            "cache_miss_sources": sorted(cache_miss_sources),
+            "in_flight_sources": in_flight_sources,
             "index_rebuilt": index_rebuilt, "extracted_at": now,
         }
         if conn is not None:
@@ -495,7 +571,7 @@ def extract_items(
 
 
 def _write_artifact(apath, sid, fingerprint, source_nodes, model_ref, now,
-                    strategy_ref=None, coverage="full"):
+                    strategy_ref=None, coverage="full", filtered=None):
     apath.parent.mkdir(parents=True, exist_ok=True)
     apath.write_text(json.dumps({
         "source_id": sid, "schema_version": art.ITEMS_SCHEMA_VERSION,
@@ -506,4 +582,6 @@ def _write_artifact(apath, sid, fingerprint, source_nodes, model_ref, now,
         "coverage": coverage,
         "input_fingerprint": fingerprint, "generation_status": "enriched",
         "generated_at": now, "nodes": source_nodes,
+        # ADR-0066: names extracted but not suggested (dropped here / blocked vault-wide).
+        "filtered": filtered or [],
     }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

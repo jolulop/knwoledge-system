@@ -66,7 +66,8 @@ from app.llm.cache import ResponseCache
 from app.llm.client import ConfigError, ParseError, build_client
 from app.workers import (
     claims, contradictions, deprecations, duplicates, eval_answers, extract, human_add,
-    human_merge, intake, lint, merges, promote, query, retention, retypes, reviews, splits, synthesis, wiki,
+    human_merge, identity_journal, intake, lint, merges, promote, query, retention, retypes, reviews,
+    splits, synthesis, tag_links, wiki,
 )
 from app.workers import labels
 from app.workers.wiki_render import parse_frontmatter, render_query_page
@@ -459,22 +460,14 @@ def _require_active_claims(item: dict[str, Any]) -> None:
                 detail=f"claim {cid} is no longer active or its page is missing — cannot supersede")
 
 
-_AMENDMENT_FIELDS = frozenset({"title", "aliases", "description", "item_type"})
-_AMEND_MAX_TITLE, _AMEND_MAX_ALIAS, _AMEND_MAX_ALIASES, _AMEND_MAX_DESCRIPTION = 200, 120, 16, 2000
-
-
 def _validate_amendments(decision: str, rtype: str,
                          amendments: dict[str, Any]) -> dict[str, Any] | None:
     """Normalize + validate the ADR-0058 amendments payload; 400 on any shape violation.
 
     Valid ONLY for a promote_candidate_node on approve (frozen into the ledger) or defer
-    (preserved as a mutable draft). Allowed fields exactly title/aliases/description/item_type
-    (ADR-0059: item_type must be one of the 15 production types — the sentinel is never an
-    amendment target — and it is REQUIRED before an unclassified candidate's approval can
-    apply); a blank title is treated as not-provided (a title can be corrected, never erased);
-    a blank description explicitly clears the page field. Returns the normalized payload, or
-    None when nothing effective was provided.
-    """
+    (preserved as a mutable draft); the field rules are the shared `promote.normalize_amendments`
+    (also used by the per-source tag rows and `tag_links.keep`). An item_type is REQUIRED before an
+    unclassified candidate's approval can apply."""
     if rtype != "promote_candidate_node":
         raise HTTPException(
             status_code=400,
@@ -483,39 +476,10 @@ def _validate_amendments(decision: str, rtype: str,
         raise HTTPException(
             status_code=400,
             detail="amendments are only valid on approve (recorded) or defer (draft)")
-    unknown = sorted(set(amendments) - _AMENDMENT_FIELDS)
-    if unknown:
-        raise HTTPException(status_code=400, detail=f"unknown amendment field(s): {unknown}")
-    out: dict[str, Any] = {}
-    title = amendments.get("title")
-    if title is not None:
-        if not isinstance(title, str):
-            raise HTTPException(status_code=400, detail="amendment title must be a string")
-        title = re.sub(r"\s+", " ", title).strip()[:_AMEND_MAX_TITLE]
-        if title:
-            out["title"] = title
-    aliases = amendments.get("aliases")
-    if aliases is not None:
-        if not isinstance(aliases, list) or any(not isinstance(a, str) for a in aliases):
-            raise HTTPException(
-                status_code=400, detail="amendment aliases must be a list of strings")
-        out["aliases"] = [a.strip()[:_AMEND_MAX_ALIAS]
-                          for a in aliases if a.strip()][:_AMEND_MAX_ALIASES]
-    description = amendments.get("description")
-    if description is not None:
-        if not isinstance(description, str):
-            raise HTTPException(status_code=400, detail="amendment description must be a string")
-        # Canonical single-line prose (review round): whitespace collapsed at the boundary; an
-        # explicitly-blank description clears the page field.
-        out["description"] = re.sub(r"\s+", " ", description).strip()[:_AMEND_MAX_DESCRIPTION]
-    item_type = amendments.get("item_type")
-    if item_type is not None:
-        if not taxonomy.is_production_item_type(item_type):
-            raise HTTPException(
-                status_code=400,
-                detail="amendment item_type must be one of the production taxonomy values")
-        out["item_type"] = item_type
-    return out or None
+    try:
+        return promote.normalize_amendments(amendments)
+    except promote.AmendmentError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def _require_no_conflicting_merge(item: dict[str, Any]) -> None:
@@ -938,9 +902,13 @@ def run_apply(st: Any) -> dict[str, Any]:
     existing_sources = [sid for sid in claim_source_ids
                         if (wiki_dir / "Sources" / f"{sid}.md").exists()]
     claim_source_pages: list[str] = []
+    source_refresh_failed: set[str] = set()   # ADR-0066 review round 5: a per-page render failure
     if existing_sources and graph_available:
-        wiki.generate_wiki(root, source_ids=existing_sources, rebuild_index=False, record_job=False)
-        claim_source_pages = [f"Sources/{sid}.md" for sid in existing_sources]
+        gen = wiki.generate_wiki(root, source_ids=existing_sources, rebuild_index=False,
+                                 record_job=False)
+        source_refresh_failed = {str(e.get("source_id")) for e in gen.get("error_details") or []}
+        claim_source_pages = [f"Sources/{sid}.md" for sid in existing_sources
+                              if sid not in source_refresh_failed]
 
     # pages_changed counts every page write: contradiction re-projections, deprecations, the synthesis
     # pages apply_resolved_syntheses re-rendered, the item pages promotion rewrote, archives.
@@ -976,6 +944,8 @@ def run_apply(st: Any) -> dict[str, Any]:
                    or split_work)
 
     warnings: list[str] = []
+    if source_refresh_failed:                 # reported (generate_wiki returns it, never raises)
+        warnings.append("source_page_refresh_failed")
     index_status = _rebuild_index_status(root) if changed else "skipped"
     if index_status == "failed":  # script present but non-zero after real changes — surface it
         warnings.append("index_rebuild_failed")
@@ -988,6 +958,22 @@ def run_apply(st: Any) -> dict[str, Any]:
         except Exception:  # noqa: BLE001 - a reindex failure is a warning (except for hide, below)
             warnings.append("keyword_reindex_failed")
             reindex_failed = True
+
+    # ADR-0066 review rounds 4–5: a merge/split's in-flight marker is closed only HERE — after its Source
+    # pages (every affected page rendered; generate_wiki REPORTS a per-page failure rather than raising),
+    # wiki/index.md and the keyword index refreshed. On any refresh failure ALL of this apply's markers
+    # stay (resuming is idempotent, so over-retaining only costs a re-run): the next
+    # apply resumes the (idempotent) operation and refreshes again, and tag actions on its tags stay
+    # refused meanwhile.
+    journaled = sorted(set(merged.get("journaled", [])) | set(split_res.get("journaled", [])))
+    identity_sources = set(merged.get("affected_sources", [])) | set(split_res.get("affected_sources", []))
+    identity_refresh_pending = bool(journaled) and (
+        index_status == "failed" or reindex_failed or bool(source_refresh_failed & identity_sources))
+    if identity_refresh_pending:
+        warnings.append("identity_refresh_pending")
+    else:
+        for rid in journaled:
+            identity_journal.end(reviews_dir, rid)
 
     # ADR-0043 (stricter than archive): a `hide_content` whose retrieval/nav index did NOT refresh is
     # NOT a clean apply — the manifest/page are hidden (authority), but the hidden source may still
@@ -1065,7 +1051,8 @@ def run_apply(st: Any) -> dict[str, Any]:
     clean = (validators_ok and not hide_retrieval_stale and not semantic_hide_stale
              and not unhide_discovery_stale and not claim_hide_stale and not claim_unhide_stale
              and not synthesis_hide_stale and not synthesis_unhide_stale
-             and not synthesis_evidence_stale and not merge_stale and not rekey_stale and not split_stale)
+             and not synthesis_evidence_stale and not merge_stale and not rekey_stale and not split_stale
+             and not identity_refresh_pending)
 
     return {
         "status": "applied" if clean else "validation_failed",
@@ -1343,11 +1330,9 @@ def ui_review_sources() -> HTMLResponse:
 def ui_review_source_screen(source_id: str, preselect: str | None = None) -> HTMLResponse:
     """One source's screen: its candidates + type changes + retired section, one batch form.
 
-    `?preselect=approve` (the only honored value; anything else is ignored) re-renders the
-    SAME form with approve pre-checked on every PENDING row — the explicit two-click bulk
-    approve (UAT round): one click of intent, one click of commit. Deferred rows were parked
-    deliberately and stay unchecked; recording still runs the per-item primitives + scope
-    guard unchanged."""
+    `?preselect=keep` (or its pre-ADR-0066 synonym `approve`; anything else is ignored) re-renders
+    the SAME form with keep pre-checked on every suggestion — the explicit two-click bulk keep
+    (UAT round): one click of intent, one click of commit."""
     if not manifests.is_source_id(source_id):
         return HTMLResponse(
             review_html.render_error(404, f"unknown source: {source_id}"), status_code=404)
@@ -1359,7 +1344,8 @@ def ui_review_source_screen(source_id: str, preselect: str | None = None) -> HTM
             review_html.render_error(404, f"unknown source: {source_id}"), status_code=404)
     if not data["graph_available"]:
         return _source_flow_unavailable()
-    data["preselect"] = "approve" if preselect == "approve" else None
+    # `keep` (ADR-0066); the pre-ADR-0066 `approve` spelling is honored as its synonym.
+    data["preselect"] = "keep" if preselect in ("keep", "approve") else None
     return HTMLResponse(review_html.render_source_screen(data))
 
 
@@ -1415,18 +1401,50 @@ def get_raw_original(source_id: str) -> FileResponse:
                         content_disposition_type=disposition, headers=headers)
 
 
+_NODE_ID_RE = re.compile(r"^itm_[0-9a-f]{16}$")
+_LINK_ACTIONS = frozenset({"keep", "drop", "block"})
+
+
+def _form_amendments(form: Any, nid: str) -> dict[str, Any]:
+    amendments: dict[str, Any] = {}
+    title = str(form.get(f"amend_title_{nid}") or "").strip()
+    aliases = str(form.get(f"amend_aliases_{nid}") or "").strip()
+    description = str(form.get(f"amend_description_{nid}") or "").strip()
+    item_type = str(form.get(f"amend_item_type_{nid}") or "").strip()
+    if title:
+        amendments["title"] = title
+    if aliases:
+        amendments["aliases"] = [a.strip() for a in aliases.split(",") if a.strip()]
+    if description:
+        amendments["description"] = description
+    if item_type:
+        amendments["item_type"] = item_type
+    return amendments
+
+
+def _apply_link_action(gconn: Any, source_id: str, nid: str, action: str,
+                       amendments: dict[str, Any] | None) -> dict[str, Any]:
+    """One ADR-0066 tag-link action through the `tag_links` primitives (immediate effect)."""
+    common = {"wiki_dir": settings.wiki_dir, "reviews_dir": settings.reviews_dir}
+    if action == "keep":
+        return tag_links.keep(gconn, source_id=source_id, node_id=nid, amendments=amendments, **common)
+    if action == "drop":
+        return tag_links.drop(gconn, source_id=source_id, node_id=nid, **common)
+    page = review_read._family_page_meta(settings.wiki_dir).get(nid) or {}
+    return tag_links.block(gconn, name=str(page.get("title") or ""),
+                           policies_dir=settings.root / "policies", **common)
+
+
 @app.post("/ui/reviews/sources/{source_id}/decide", response_class=HTMLResponse)
 async def ui_review_source_decide(source_id: str, request: Request) -> HTMLResponse:
-    """Batch decide (ADR-0058): one submit loops the EXISTING single-item primitives — no new
-    ledger primitive. Untouched rows stay pending; an already-decided/invalid row skips with a
-    per-item reason (never a 409 abort of the batch); results render per item.
+    """Batch decide. ADR-0066 tag rows (`link_<node_id>` = keep/drop/block) run the `tag_links`
+    primitives immediately; review-item rows (`decision_<review_id>`: type changes, retirements)
+    loop the EXISTING single-item ledger primitives (ADR-0058). Untouched rows record nothing; an
+    invalid/blocked row skips with a per-row reason (never a 409 abort of the batch).
 
-    Scope guard (review round, B1): the source view is recomputed SERVER-side and only row ids
-    actually visible on this source's screen are decidable here — a forged form naming a
-    global/cross-source item skips with `not_attributable_to_source` before any ledger call
-    (the per-source lens can never launder a flat-queue decision). Decided visible rows stay
-    permitted so a stale-form race resolves honestly via `_record_decision` (idempotent no-op
-    or 409 skip), not a misleading attribution error."""
+    Scope guard (review round, B1): the source view is recomputed SERVER-side and only rows actually
+    visible on this source's screen are decidable here — a forged form naming another document's
+    link or a global item skips with `not_attributable_to_source` before any write."""
     if not manifests.is_source_id(source_id):
         return HTMLResponse(
             review_html.render_error(404, f"unknown source: {source_id}"), status_code=404)
@@ -1438,11 +1456,49 @@ async def ui_review_source_decide(source_id: str, request: Request) -> HTMLRespo
             review_html.render_error(404, f"unknown source: {source_id}"), status_code=404)
     if not view["graph_available"]:
         return _source_flow_unavailable()
-    visible = {str(r["review_id"])
-               for r in (view["candidates"] + view["retype_items"] + view["retired"])}
+    visible = {str(r["review_id"]) for r in (view["retype_items"] + view["retired"])}
+    links = {str(r["node_id"]): r for r in (view["suggestions"] + view["kept"])}
     form = await request.form()
     note = str(form.get("note") or "").strip() or f"per-source flow: {source_id}"
     results: list[dict[str, Any]] = []
+    warnings: list[str] = []
+
+    link_keys = sorted(k for k in form.keys() if str(k).startswith("link_"))
+    if link_keys:
+        gconn = _open_graph_safe()
+        if gconn is None:
+            return _source_flow_unavailable()
+        affected: set[str] = set()
+        try:
+            for key in link_keys:
+                nid = str(key)[len("link_"):]
+                action = str(form.get(key) or "")
+                if not action:
+                    continue  # untouched = no decision (ADR-0058 decision: no default decision)
+                row = {"node_id": nid, "action": action, "recorded": False}
+                if not _NODE_ID_RE.fullmatch(nid):
+                    results.append(row | {"skip_reason": "invalid item id"})
+                    continue
+                if nid not in links:
+                    results.append(row | {"skip_reason": "not_attributable_to_source"})
+                    continue
+                row["title"] = links[nid].get("title")
+                if action not in _LINK_ACTIONS or (
+                        links[nid]["kind"] == "kept" and action != "drop"):
+                    results.append(row | {"skip_reason": f"unknown action: {action}"})
+                    continue
+                amendments = _form_amendments(form, nid) if action == "keep" else {}
+                out = _apply_link_action(gconn, source_id, nid, action, amendments or None)
+                affected.update(out.get("affected_sources") or [])
+                if out["outcome"] == "blocked":
+                    results.append(row | {"skip_reason": out["reason"]})
+                else:
+                    results.append(row | {"recorded": True, "amended": bool(amendments),
+                                          "status": out.get("effect") or out["outcome"]})
+        finally:
+            gconn.close()
+        warnings += tag_links.finish(settings.root, affected, wiki_dir=settings.wiki_dir)["warnings"]
+
     for key in sorted(k for k in form.keys() if str(k).startswith("decision_")):
         rid = str(key)[len("decision_"):]
         action = str(form.get(key) or "")
@@ -1461,30 +1517,136 @@ async def ui_review_source_decide(source_id: str, request: Request) -> HTMLRespo
             results.append({"review_id": rid, "action": action, "recorded": False,
                             "skip_reason": f"unknown action: {action}"})
             continue
-        amendments: dict[str, Any] = {}
-        title = str(form.get(f"amend_title_{rid}") or "").strip()
-        aliases = str(form.get(f"amend_aliases_{rid}") or "").strip()
-        description = str(form.get(f"amend_description_{rid}") or "").strip()
-        item_type = str(form.get(f"amend_item_type_{rid}") or "").strip()
-        if title:
-            amendments["title"] = title
-        if aliases:
-            amendments["aliases"] = [a.strip() for a in aliases.split(",") if a.strip()]
-        if description:
-            amendments["description"] = description
-        if item_type:
-            amendments["item_type"] = item_type
-        # Amendments ride approvals (frozen) and defers (draft) only; a reject discards them.
-        send = amendments if (amendments and decision in ("approved", "deferred")) else None
         try:
-            out = _record_decision(rid, decision,
-                                   ReviewDecisionRequest(note=note, amendments=send))
+            out = _record_decision(rid, decision, ReviewDecisionRequest(note=note))
             results.append({"review_id": rid, "action": action, "recorded": out["decision_recorded"],
-                            "status": out["status"], "amended": bool(send)})
+                            "status": out["status"]})
         except HTTPException as exc:
             results.append({"review_id": rid, "action": action, "recorded": False,
                             "skip_reason": f"{exc.status_code}: {exc.detail}"})
-    return HTMLResponse(review_html.render_source_decide_result(source_id, results))
+    return HTMLResponse(review_html.render_source_decide_result(source_id, results,
+                                                                warnings=warnings))
+
+
+@app.post("/reviews/sources/{source_id}/links")
+def post_source_link(source_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """JSON twin of one tag-row decision (ADR-0066), for scripting/curl: `{node_id, action:
+    keep|drop|block, title?, aliases?, description?, item_type?}`. Same scope guard as the form:
+    the node must be a suggestion or kept link on this source's screen."""
+    if not manifests.is_source_id(source_id):
+        raise HTTPException(status_code=404, detail=f"unknown source: {source_id}")
+    nid, action = str(payload.get("node_id") or ""), str(payload.get("action") or "")
+    if not _NODE_ID_RE.fullmatch(nid):
+        raise HTTPException(status_code=400, detail="invalid item id")
+    if action not in _LINK_ACTIONS:
+        raise HTTPException(status_code=400, detail=f"unknown action: {action}")
+    view = review_read.source_review_view(
+        settings.reviews_dir, source_id, graph_db=settings.graph_db_path,
+        wiki_dir=settings.wiki_dir, manifests_dir=settings.manifests_dir)
+    if view is None:
+        raise HTTPException(status_code=404, detail=f"unknown source: {source_id}")
+    links = {str(r["node_id"]): r for r in (view["suggestions"] + view["kept"])}
+    if nid not in links:
+        raise HTTPException(status_code=409, detail="not_attributable_to_source")
+    if links[nid]["kind"] == "kept" and action != "drop":
+        raise HTTPException(status_code=409, detail="already kept (only drop applies)")
+    amendments = None
+    if action == "keep":
+        try:                                              # the shared ADR-0058 rules (400 on violation)
+            amendments = promote.normalize_amendments(
+                {k: payload[k] for k in promote.AMENDMENT_FIELDS if payload.get(k) is not None})
+        except promote.AmendmentError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    gconn = _open_graph_safe()
+    if gconn is None:
+        raise HTTPException(status_code=503, detail="graph unavailable")
+    try:
+        out = _apply_link_action(gconn, source_id, nid, action, amendments)
+    finally:
+        gconn.close()
+    if out["outcome"] == "blocked":
+        raise HTTPException(status_code=409, detail=out["reason"])
+    refresh = tag_links.finish(settings.root, out.get("affected_sources") or [],
+                               wiki_dir=settings.wiki_dir)
+    return out | refresh
+
+
+@app.post("/ui/reviews/sources/{source_id}/undrop", response_model=None)
+def ui_review_source_undrop(source_id: str, key: str = Form("")) -> HTMLResponse | RedirectResponse:
+    """Undo a drop record (ADR-0066): the tag becomes suggestible on this document again."""
+    if not manifests.is_source_id(source_id):
+        return HTMLResponse(
+            review_html.render_error(404, f"unknown source: {source_id}"), status_code=404)
+    gconn = _open_graph_safe()
+    if gconn is None:
+        return _source_flow_unavailable()
+    try:
+        out = tag_links.undo_drop(gconn, source_id=source_id, key=key.strip(),
+                                  wiki_dir=settings.wiki_dir, reviews_dir=settings.reviews_dir)
+    finally:
+        gconn.close()
+    if out["outcome"] == "blocked":
+        code = 409 if out["reason"] == "ledger_corrupt" else 404
+        return HTMLResponse(review_html.render_error(code, f"undo blocked: {out['reason']}"),
+                            status_code=code)
+    warnings = tag_links.finish(settings.root, out["affected_sources"],
+                                wiki_dir=settings.wiki_dir)["warnings"]
+    if warnings:                                          # show the refresh failure, don't hide it
+        return HTMLResponse(review_html.render_source_decide_result(
+            source_id, [{"node_id": key.strip(), "action": "undo drop", "recorded": True,
+                         "status": "undone"}], warnings=warnings))
+    return RedirectResponse(f"/ui/reviews/sources/{source_id}", status_code=303)
+
+
+@app.get("/ui/reviews/tags/unused", response_class=HTMLResponse)
+def ui_unused_tags() -> HTMLResponse:
+    """The Unused tags list (ADR-0066 decision 4)."""
+    gconn = _open_graph_safe()
+    if gconn is None:
+        return _source_flow_unavailable()
+    try:
+        rows = tag_links.unused_tags(gconn, settings.wiki_dir)
+    finally:
+        gconn.close()
+    return HTMLResponse(review_html.render_unused_tags(rows))
+
+
+@app.post("/ui/reviews/tags/unused/delete", response_class=HTMLResponse)
+def ui_delete_unused_tags() -> HTMLResponse:
+    """Bulk **Delete unused** — the explicit human deletion step (skips protected tags)."""
+    gconn = _open_graph_safe()
+    if gconn is None:
+        return _source_flow_unavailable()
+    try:
+        result = tag_links.delete_unused(gconn, wiki_dir=settings.wiki_dir,
+                                         reviews_dir=settings.reviews_dir)
+        rows = tag_links.unused_tags(gconn, settings.wiki_dir)
+    finally:
+        gconn.close()
+    result["warnings"] = tag_links.finish(settings.root, result["affected_sources"],
+                                          wiki_dir=settings.wiki_dir,
+                                          pages_changed=bool(result["deleted"]))["warnings"]
+    return HTMLResponse(review_html.render_unused_tags(rows, result=result))
+
+
+@app.get("/ui/reviews/tags/blocked", response_class=HTMLResponse)
+def ui_blocked_tags() -> HTMLResponse:
+    """The Blocked tags list (ADR-0066 decision 5)."""
+    return HTMLResponse(review_html.render_blocked_tags(
+        tag_links.load_blocked(settings.root / "policies")))
+
+
+@app.post("/ui/reviews/tags/blocked/unblock", response_class=HTMLResponse)
+def ui_unblock_tag(key: str = Form("")) -> HTMLResponse:
+    """Unblock one name; the page then shows the cache-replayed Re-suggest command."""
+    result = tag_links.unblock(key=key.strip(), policies_dir=settings.root / "policies",
+                               enrichment_dir=settings.normalized_dir / "enrichment",
+                               reviews_dir=settings.reviews_dir)
+    if result["outcome"] == "blocked":
+        return HTMLResponse(review_html.render_error(404, f"unblock failed: {result['reason']}"),
+                            status_code=404)
+    return HTMLResponse(review_html.render_blocked_tags(
+        tag_links.load_blocked(settings.root / "policies"), result=result))
 
 
 @app.post("/ui/reviews/sources/{source_id}/add", response_model=None)
@@ -1492,9 +1654,9 @@ def ui_review_source_add(
     source_id: str, title: str = Form(""), item_type: str = Form(""),
     aliases: str = Form(""), description: str = Form(""),
 ) -> HTMLResponse | RedirectResponse:
-    """Human-add (ADR-0058): a PRODUCER-side act — candidate node + anchorless human mention +
-    page + a promote item recorded approved in one operation (the add IS the approval; the
-    normal executor promotes at apply). Blocked outcomes write nothing."""
+    """Human-add (ADR-0058, restated by ADR-0066): tag this document — create the item if needed
+    (anchorless human mention + page) and keep the link, which activates it immediately. Blocked
+    outcomes write nothing."""
     if not manifests.is_source_id(source_id):
         return HTMLResponse(
             review_html.render_error(404, f"unknown source: {source_id}"), status_code=404)
@@ -1511,13 +1673,6 @@ def ui_review_source_add(
         gconn.close()
     if result["outcome"] == "blocked":
         reason = result["reason"]
-        if reason == "promotion_previously_rejected":
-            message = (f"this candidate's promotion was rejected by "
-                       f"{result.get('decided_by')} at {result.get('decided_at')} "
-                       f"(review {result.get('review_id')}). A rejection is a human governance "
-                       "record — reopen it explicitly from the item detail (ADR-0045) if you've "
-                       "changed your mind; it is never silently reused.")
-            return HTMLResponse(review_html.render_error(409, message), status_code=409)
         status = 400 if reason.startswith("invalid") else \
             404 if reason == "unknown_source" else 409
         return HTMLResponse(

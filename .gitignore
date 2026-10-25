@@ -64,6 +64,10 @@ reviews/pending/*.json
 reviews/approved/*.json
 reviews/rejected/*.json
 reviews/audit_log/*.json
+# ADR-0066 per-document tag-decision ledgers (+ their .lock / atomic-write temp files): same rule.
+reviews/tag_links/
+# ADR-0066 in-flight merge/split journal (present only while an identity operation is interrupted).
+reviews/in_flight/
 # Inbox is transient staging for scans; keep its contents out of git.
 raw/inbox/*
 !raw/inbox/.gitkeep

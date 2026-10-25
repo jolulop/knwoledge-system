@@ -38,6 +38,10 @@ class ParseError(RuntimeError):
     """The model did not return schema-valid output within the retry budget."""
 
 
+class CacheMiss(ParseError):
+    """A cache-only call found no replayable response — raised before any provider call."""
+
+
 def parse_model_ref(model_ref: str) -> tuple[str, str]:
     """Split `provider:model_id`; raise ConfigError if malformed."""
     if not model_ref or ":" not in model_ref:
@@ -140,12 +144,15 @@ class LLMClient:
         schema_version: str | None = None,
         prompt_version: str | None = None,
         strategy_ref: str | None = None,
+        cache_only: bool = False,
     ) -> dict[str, Any]:
         """Return a schema-valid object, replaying from cache when possible, or raise.
 
         `strategy_ref` (ADR-0056) is the explicit extraction-strategy component of cache
         identity — tier-2 callers pass their coverage strategy so a window-budget or
         input-cap change forces fresh calls without pretending the prompt changed.
+        `cache_only` (ADR-0066 Re-suggest) replays or raises :class:`CacheMiss` — the provider
+        is never called.
         """
         provider, model_id = parse_model_ref(model_ref)
         adapter = self._adapter(provider)
@@ -167,6 +174,8 @@ class LLMClient:
                     return cached
                 except schema_mod.SchemaError:
                     pass
+        if cache_only:
+            raise CacheMiss(f"{model_ref}: no cached response (cache-only replay)")
 
         last_error: Exception | None = None
         for _ in range(self._max_retries + 1):

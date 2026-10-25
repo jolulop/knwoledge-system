@@ -5,6 +5,9 @@ Usage:
     uv run python scripts/extract_items.py                # pending sources
     uv run python scripts/extract_items.py --force        # re-extract all
     uv run python scripts/extract_items.py <source_id>    # one source (repeatable)
+    uv run python scripts/extract_items.py --force --cache-only <source_id>…
+                                   # ADR-0066 Re-suggest: replay stored responses only — zero
+                                   # provider calls; a cache miss leaves the document untouched
 
 Precondition: run scripts/generate_wiki.py first — item pages link to Source pages
 and the Source pages project these mentions, so the Source pages must already exist.
@@ -41,6 +44,7 @@ from app.workers import items, wiki
 
 def main(argv: list[str]) -> int:
     force = "--force" in argv
+    cache_only = "--cache-only" in argv
     source_ids = [a for a in argv if not a.startswith("--")]
 
     settings = get_settings()
@@ -55,6 +59,7 @@ def main(argv: list[str]) -> int:
         jobs_db=settings.jobs_db_path,
         markdown_dir=settings.markdown_dir,
         input_max_chars=settings.enrich_items_input_max_chars,
+        cache_only=cache_only,
     )
 
     print("Knowledge-item extraction complete.")
@@ -72,6 +77,13 @@ def main(argv: list[str]) -> int:
     print(f"Coverage-truncated sources: {summary['coverage_truncated']}")  # ADR-0056 cap marker
     for sid in summary["coverage_truncated_sources"]:
         print(f"  - {sid}: document exceeds ENRICH_ITEMS_INPUT_MAX_CHARS, head-truncated")
+    if cache_only:
+        print(f"Cache misses (left untouched, no provider call): {summary['cache_misses']}")
+        for sid in summary["cache_miss_sources"]:
+            print(f"  - {sid}")
+    for row in summary["in_flight_sources"]:
+        print(f"  skipped {row['source_id']}: merge/split {row['review_id']} is unfinished — "
+              "run /reviews/apply, then re-run this")
     print(f"Errors: {summary['errors']}")
     for err in summary["error_details"]:
         print(f"  - {err['source_id']}: {err['error']}")
@@ -100,7 +112,8 @@ def main(argv: list[str]) -> int:
         validate_wikilinks.main([root]),
         validate_projection.main([root]),
     ]
-    return 0 if (not summary["errors"] and all(rc == 0 for rc in rcs)) else 1
+    return 0 if (not summary["errors"] and not summary["cache_misses"] and not summary["in_flight_sources"]
+                 and all(rc == 0 for rc in rcs)) else 1
 
 
 if __name__ == "__main__":
