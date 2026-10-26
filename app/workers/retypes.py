@@ -138,18 +138,18 @@ def apply_retypes(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None =
 
         # --- APPLY: the metadata flip — re-render the page with the new item_type (status,
         # review_status, and every page-owned field preserved), mirror the graph row, done. ---
-        node_sources = graph.sources_for_node(gconn, nid)
+        node_sources, suggested = graph.tag_projection(gconn, nid, node["status"])
         duplicates = graph.active_duplicates(gconn, nid)
         rendered = render_item_page({
             "node_id": nid, "item_type": to_type,
             "title": meta["title"], "aliases": meta["aliases"],
             "confidence": meta.get("confidence", "low"),
-            "source_ids": node_sources, "status": node["status"],
+            "source_ids": node_sources, "suggested_ids": suggested, "status": node["status"],
             "duplicates": duplicates,
             "split_from": meta.get("split_from"),
             "split_review_id": meta.get("split_review_id"),
             "description": meta.get("description"),
-        }, labels=items._link_labels(wiki_dir, node_sources, duplicates))
+        }, labels=items._link_labels(wiki_dir, node_sources + suggested, duplicates))
         page_path.write_text(rendered, encoding="utf-8")
         graph.upsert_node(gconn, node_id=nid, node_type="item", slug=node["slug"],
                           status=node["status"], item_type=to_type, now=now)

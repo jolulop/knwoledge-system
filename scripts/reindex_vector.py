@@ -75,4 +75,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from app.backend import vault_lock  # noqa: E402 - a vault writer (ADR-0039 amendment)
+    _positional = [a for a in sys.argv[1:] if not a.startswith("-")]
+    with vault_lock.shared((Path(_positional[0]).resolve() if _positional else Path.cwd()) / "db"):
+        raise SystemExit(main())

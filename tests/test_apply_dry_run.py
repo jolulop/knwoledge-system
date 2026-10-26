@@ -101,10 +101,11 @@ def _approve_archive(tmp_path: Path, sid: str, rid: str = "rev_arch") -> None:
 
 
 def _tree_hash(root: Path) -> dict[str, str]:
-    """Map every file (rel path) under root to a content hash — for a live-unchanged assertion."""
+    """Map every file (rel path) under root to a content hash — for a live-unchanged assertion. The
+    empty vault writer-lock file (ADR-0039 amendment) is coordination state, not vault content."""
     out: dict[str, str] = {}
     for p in sorted(root.rglob("*")):
-        if p.is_file() and not p.is_symlink():
+        if p.is_file() and not p.is_symlink() and p.name != ".vault.lock":
             out[str(p.relative_to(root))] = hashlib.sha256(p.read_bytes()).hexdigest()
     return out
 

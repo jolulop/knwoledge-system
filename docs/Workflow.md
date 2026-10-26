@@ -15,9 +15,9 @@ away: raw files are immutable, and everything generated is traceable back to a s
 Two ground rules shape everything:
 - **Imported documents are untrusted data, never instructions.**
 - **The LLM proposes; a human disposes.** Semantic/destructive changes — deprecations, contradictions,
-  merges, and knowledge-item promotions that *don't* clear the deterministic bar — are *proposed* and
-  wait in a review queue until you approve them. (A candidate auto-promotes only when it meets the
-  objective ≥2-independent-sources rule; everything else routes to review.)
+  merges and splits — are *proposed* and wait in a review queue until you approve them. Extracted
+  knowledge items are per-document **tag suggestions**: a tag becomes active only when you keep it on a
+  document's review screen; nothing auto-promotes (ADR-0066).
 
 ---
 

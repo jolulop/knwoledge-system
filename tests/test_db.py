@@ -28,6 +28,7 @@ def test_insert_job_rejects_unknown_type_and_status(tmp_path):
         # A valid combination is accepted.
         db.insert_job(conn, job_id="j3", job_type="extract", status="running", created_at="t")
         assert db.get_job(conn, "j3") is not None
+        db.update_job(conn, "j3", status="succeeded")       # releases the vault writer lock
     finally:
         conn.close()
 

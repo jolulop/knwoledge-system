@@ -511,6 +511,22 @@ curl -fsS "$APP/sources" | python3 -m json.tool
 Expected: duplicate bytes do not create a second source identity (one manifest, an added
 occurrence), and validators remain the structural authority after each run.
 
+Foreign-page request (ADR-0067 request-origin guard):
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Origin: http://evil.example' \
+  "$APP/ui/reviews/tags/unused/delete"
+curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: attacker.example:18000' "$APP/health"
+```
+
+Expected: `403` for both, and nothing is deleted. The UI in your browser at `http://127.0.0.1:18000`
+keeps working.
+
+Backup while a job runs (ADR-0039 amendment): run `uv run python scripts/backup.py --lock-timeout 5`
+while an `extract_items` / `enrich` run is in progress. Expected: it waits, then refuses (exit 2) and
+names the running job; once the job finishes the backup succeeds. Starting a job while a backup is
+writing makes the job wait until the archive is done.
+
 ## 13. Teardown
 
 ```bash
@@ -546,6 +562,8 @@ nothing, and applies nothing.
 - Query answers cite source chunks or abstain.
 - Tag keep/drop is per document and immediate; a dropped tag is never re-suggested for that document;
   a blocked name is never suggested anywhere; kept links survive re-extraction.
+- A Source page links only the tags that document keeps; its unkept suggestions are listed as plain
+  text under "Suggested (not reviewed)", and an item page links only the documents that keep it.
 - Review items are decision-only until apply; the dry-run shows the intended scope before apply.
 - Applying approved reviews updates only the governed surfaces and validators still pass.
 - Maintenance jobs complete with reports and never act autonomously on semantic/destructive decisions.

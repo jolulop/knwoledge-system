@@ -529,6 +529,7 @@ def test_concurrent_keeps_on_one_document_are_both_recorded(tmp_path, monkeypatc
     assert sorted(r["outcome"] for r in results) == ["kept", "kept"]
     assert sorted(tag_links.load_ledger(tmp_path / "reviews", a)["kept"]) == sorted(
         [items.node_id("One"), items.node_id("Two")])
+    tag_links.finish(tmp_path, [a], wiki_dir=tmp_path / "wiki", templates_dir=TEMPLATES)  # the caller's
     gconn = _g(tmp_path)
     try:
         assert tag_links.consistency_errors(gconn, tmp_path / "reviews") == []
@@ -869,6 +870,8 @@ def test_interrupted_first_keep_is_finished_with_the_chosen_type(tmp_path, monke
     finally:
         gconn.close()
     assert out["interrupted_activations"] == 1 and out["activation_blocked"] == []
+    tag_links.finish(tmp_path, out["affected_sources"], wiki_dir=tmp_path / "wiki",
+                     templates_dir=TEMPLATES)             # what rebuild_tag_links.py runs next
     node = _node(tmp_path, "Vague")
     assert node["status"] == "active" and node["item_type"] == "use_case"
     assert _titles(_view(tmp_path, a)["kept"]) == ["Vague Idea"]
@@ -897,10 +900,13 @@ def test_interrupted_revival_of_an_unused_tag_is_finished(tmp_path, monkeypatch)
     assert any("interrupted revival" in e for e in _consistent(tmp_path))
     gconn = _g(tmp_path)
     try:
-        assert tag_links.repair(gconn, reviews_dir=tmp_path / "reviews", wiki_dir=tmp_path / "wiki",
-                                apply=True)["interrupted_revivals"] == 1
+        out = tag_links.repair(gconn, reviews_dir=tmp_path / "reviews", wiki_dir=tmp_path / "wiki",
+                               apply=True)
     finally:
         gconn.close()
+    assert out["interrupted_revivals"] == 1
+    tag_links.finish(tmp_path, out["affected_sources"], wiki_dir=tmp_path / "wiki",
+                     templates_dir=TEMPLATES)
     assert _node(tmp_path, "Phoenix")["status"] == "active"
     assert _consistent(tmp_path) == []
 
@@ -1269,3 +1275,268 @@ def test_a_reported_source_page_failure_after_a_keep_is_shown(client, tmp_path):
                            json={"node_id": items.node_id("Two"), "action": "keep"})
         assert resp.json()["warnings"] == [f"source_page_refresh_failed:{a}"]
     assert _titles(_view(tmp_path, a)["kept"]) == ["One", "Two"]          # the decisions stand
+
+
+# --- review round 6: kept-only projections + recovery of derived state ---------------------------
+
+
+def _page(tmp_path, rel):
+    return (tmp_path / "wiki" / rel).read_text(encoding="utf-8")
+
+
+def _repair(tmp_path):
+    gconn = _g(tmp_path)
+    try:
+        out = tag_links.repair(gconn, reviews_dir=tmp_path / "reviews", wiki_dir=tmp_path / "wiki",
+                               policies_dir=tmp_path / "policies", apply=True)
+    finally:
+        gconn.close()
+    tag_links.finish(tmp_path, out["affected_sources"], wiki_dir=tmp_path / "wiki",
+                     pages_changed=True, templates_dir=TEMPLATES)     # what rebuild_tag_links.py runs
+    return out
+
+
+def _crash(*args, **kwargs):
+    raise RuntimeError("power cut")
+
+
+def test_an_unkept_suggestion_never_shows_as_a_document_tag(tmp_path):
+    _build(tmp_path, {"a.md": "alpha body", "b.md": "beta body"})
+    sids = _sids(tmp_path)
+    a, b = sids["a.md"], sids["b.md"]
+    _extract(tmp_path, {"alpha": [_item("Topic")], "beta": [_item("Topic")]})
+    _keep(tmp_path, a, "Topic")                        # Topic is now active, kept on A only
+    slug = _node(tmp_path, "Topic")["slug"]
+    page_a, page_b = _page(tmp_path, f"Sources/{a}.md"), _page(tmp_path, f"Sources/{b}.md")
+    assert f"[[Items/{slug}|" in page_a and parse_frontmatter(page_a)["items"] == [slug]
+    assert f"[[Items/{slug}" not in page_b and parse_frontmatter(page_b)["items"] == []
+    assert "### Suggested (not reviewed)" in page_b and "- Topic" in page_b
+    item = _page(tmp_path, f"Items/{slug}.md")
+    assert f"[[Sources/{a}|" in item and f"[[Sources/{b}" not in item     # backlinks: kept only
+    assert "## Suggested On" in item and "mentioned by 1 source(s)" in item
+    _validators_green(tmp_path)
+    assert _consistent(tmp_path) == []
+
+
+def test_a_legacy_tag_links_its_documents_until_its_first_keep(tmp_path):
+    from app.workers import promote
+    _build(tmp_path, {"a.md": "alpha body", "b.md": "beta body"})
+    sids = _sids(tmp_path)
+    a, b = sids["a.md"], sids["b.md"]
+    _extract(tmp_path, {"alpha": [_item("Topic")], "beta": [_item("Topic")]})
+    gconn = _g(tmp_path)
+    try:                                               # the flat-queue promotion: no keep anywhere
+        promote.activate_node(gconn, node=graph.get_node(gconn, items.node_id("Topic")),
+                              wiki_dir=tmp_path / "wiki", reviews_dir=tmp_path / "reviews")
+    finally:
+        gconn.close()
+    tag_links.finish(tmp_path, [a, b], wiki_dir=tmp_path / "wiki", templates_dir=TEMPLATES)
+    slug = _node(tmp_path, "Topic")["slug"]
+    for sid in (a, b):
+        assert f"[[Items/{slug}|" in _page(tmp_path, f"Sources/{sid}.md")
+    _validators_green(tmp_path)
+    _keep(tmp_path, a, "Topic")                        # the first keep ends the legacy projection
+    assert f"[[Items/{slug}" not in _page(tmp_path, f"Sources/{b}.md")
+    assert f"[[Sources/{b}" not in _page(tmp_path, f"Items/{slug}.md")
+    _validators_green(tmp_path)
+    assert _consistent(tmp_path) == []
+
+
+def test_an_interrupted_last_drop_is_repaired_to_unused(tmp_path, monkeypatch):
+    import validate_tag_links
+    _build(tmp_path, {"a.md": "alpha body"})
+    a = _sids(tmp_path)["a.md"]
+    _extract(tmp_path, {"alpha": [_item("Topic")]})
+    _keep(tmp_path, a, "Topic")
+    monkeypatch.setattr(tag_links, "_refresh_page", _crash)
+    gconn = _g(tmp_path)
+    with pytest.raises(RuntimeError):
+        tag_links.drop(gconn, source_id=a, node_id=items.node_id("Topic"),
+                       wiki_dir=tmp_path / "wiki", reviews_dir=tmp_path / "reviews")
+    gconn.close()
+    monkeypatch.undo()
+    assert _node(tmp_path, "Topic")["status"] == "active"           # no keep left, still active
+    errors = _consistent(tmp_path)
+    assert any("but its keeps make it unused" in e for e in errors)
+    assert any("Source page tag list is stale" in e for e in errors)
+    assert validate_tag_links.main([str(tmp_path)]) == 1
+    out = _repair(tmp_path)
+    assert out["stale_status"] == 1
+    slug = _node(tmp_path, "Topic")["slug"]
+    assert _node(tmp_path, "Topic")["status"] == "unused"
+    assert parse_frontmatter(_page(tmp_path, f"Items/{slug}.md"))["status"] == "unused"
+    assert f"[[Items/{slug}" not in _page(tmp_path, f"Sources/{a}.md")
+    _validators_green(tmp_path)
+    assert _consistent(tmp_path) == []
+
+
+def test_an_interrupted_drop_of_one_of_two_keeps_refreshes_the_pages(tmp_path, monkeypatch):
+    _build(tmp_path, {"a.md": "alpha body", "b.md": "beta body"})
+    sids = _sids(tmp_path)
+    a, b = sids["a.md"], sids["b.md"]
+    _extract(tmp_path, {"alpha": [_item("Topic")], "beta": [_item("Topic")]})
+    _keep(tmp_path, a, "Topic")
+    _keep(tmp_path, b, "Topic")
+    monkeypatch.setattr(tag_links, "_refresh_page", _crash)
+    gconn = _g(tmp_path)
+    with pytest.raises(RuntimeError):
+        tag_links.drop(gconn, source_id=a, node_id=items.node_id("Topic"),
+                       wiki_dir=tmp_path / "wiki", reviews_dir=tmp_path / "reviews")
+    gconn.close()
+    monkeypatch.undo()
+    errors = _consistent(tmp_path)
+    assert any("Mentioned By does not list exactly" in e for e in errors)
+    out = _repair(tmp_path)
+    assert out["stale_item_pages"] == 1 and out["stale_source_pages"] == 1
+    slug = _node(tmp_path, "Topic")["slug"]
+    item = _page(tmp_path, f"Items/{slug}.md")
+    assert f"[[Sources/{b}|" in item and f"[[Sources/{a}" not in item
+    _validators_green(tmp_path)
+    assert _consistent(tmp_path) == []
+
+
+def test_an_interrupted_block_is_finished_by_repair(tmp_path, monkeypatch):
+    _build(tmp_path, {"a.md": "alpha body", "b.md": "beta body"})
+    _extract(tmp_path, {"alpha": [_item("Junk"), _item("Fine")], "beta": [_item("Junk")]})
+    monkeypatch.setattr(graph, "set_status", _crash)               # stop right after the list write
+    gconn = _g(tmp_path)
+    with pytest.raises(RuntimeError):
+        tag_links.block(gconn, name="Junk", policies_dir=tmp_path / "policies",
+                        wiki_dir=tmp_path / "wiki", reviews_dir=tmp_path / "reviews")
+    gconn.close()
+    monkeypatch.undo()
+    assert "Junk" in (tmp_path / "policies" / "blocked_tags.txt").read_text(encoding="utf-8")
+    assert sum("interrupted block" in e for e in _consistent(tmp_path)) == 2
+    out = _repair(tmp_path)
+    assert out["unwithdrawn_blocks"] == 2
+    assert _node(tmp_path, "Junk") is None                          # never kept → deleted, as a block does
+    assert not (tmp_path / "wiki" / "Items" / "junk.md").exists()
+    assert _node(tmp_path, "Fine")["status"] == "candidate"         # other suggestions untouched
+    _validators_green(tmp_path)
+    assert _consistent(tmp_path) == []
+
+
+def test_an_interrupted_deletion_is_finished_by_repair(tmp_path, monkeypatch):
+    _build(tmp_path, {"a.md": "alpha body"})
+    a = _sids(tmp_path)["a.md"]
+    _extract(tmp_path, {"alpha": [_item("Gone"), _item("Stays")]})
+    monkeypatch.setattr(graph, "delete_node", _crash)              # the page is unlinked first
+    gconn = _g(tmp_path)
+    with pytest.raises(RuntimeError):
+        tag_links.drop(gconn, source_id=a, node_id=items.node_id("Gone"),
+                       wiki_dir=tmp_path / "wiki", reviews_dir=tmp_path / "reviews")
+    gconn.close()
+    monkeypatch.undo()
+    assert _node(tmp_path, "Gone") is not None and not (tmp_path / "wiki" / "Items" / "gone.md").exists()
+    assert (tmp_path / "reviews" / "tag_links" / "deleting" / f"{items.node_id('Gone')}.json").exists()
+    assert any("was started and did not finish" in e for e in _consistent(tmp_path))
+    out = _repair(tmp_path)
+    assert out["interrupted_deletions"] == 1 and out["pages_changed"] is True
+    assert tag_links.deletion_intents(tmp_path / "reviews") == {}
+    assert _node(tmp_path, "Gone") is None and _node(tmp_path, "Stays") is not None
+    _validators_green(tmp_path)
+    assert _consistent(tmp_path) == []
+
+
+def test_the_unused_tags_list_carries_the_item_type(tmp_path):
+    _build(tmp_path, {"a.md": "alpha body"})
+    a = _sids(tmp_path)["a.md"]
+    _extract(tmp_path, {"alpha": [_item("Topic", item_type="use_case")]})
+    _keep(tmp_path, a, "Topic")
+    _drop(tmp_path, a, "Topic")
+    gconn = _g(tmp_path)
+    try:
+        rows = tag_links.unused_tags(gconn, tmp_path / "wiki")
+    finally:
+        gconn.close()
+    assert [(r["title"], r["item_type"]) for r in rows] == [("Topic", "use_case")]
+
+
+# --- review round 7: deletion needs a recorded intent; tag-page-only repairs refresh the index ----
+
+
+def _unused(tmp_path, name):
+    _build(tmp_path, {"a.md": "alpha body"})
+    a = _sids(tmp_path)["a.md"]
+    _extract(tmp_path, {"alpha": [_item(name)]})
+    _keep(tmp_path, a, name)
+    _drop(tmp_path, a, name)
+    assert _node(tmp_path, name)["status"] == "unused"
+    return a
+
+
+def test_a_missing_page_is_reported_never_treated_as_a_deletion(tmp_path):
+    import rebuild_tag_links
+    _unused(tmp_path, "Lost")
+    (tmp_path / "wiki" / "Items" / "lost.md").unlink()        # corruption / incomplete restore
+    errors = _consistent(tmp_path)
+    assert any("has no page wiki/Items/lost.md" in e and "restore it from backup" in e for e in errors)
+    out = _repair(tmp_path)
+    assert out["missing_pages"] == 1 and out["interrupted_deletions"] == 0
+    assert _node(tmp_path, "Lost")["status"] == "unused"        # nothing deleted
+    assert rebuild_tag_links.main([str(tmp_path), "--apply"]) == 1   # still reported, non-zero
+
+
+def test_an_interrupted_delete_unused_resumes_from_its_record(tmp_path, monkeypatch):
+    _unused(tmp_path, "Old")
+    monkeypatch.setattr(graph, "delete_node", _crash)
+    gconn = _g(tmp_path)
+    with pytest.raises(RuntimeError):
+        tag_links.delete_unused(gconn, wiki_dir=tmp_path / "wiki", reviews_dir=tmp_path / "reviews")
+    gconn.close()
+    monkeypatch.undo()
+    assert _node(tmp_path, "Old") is not None and not (tmp_path / "wiki" / "Items" / "old.md").exists()
+    record = tag_links.deletion_intents(tmp_path / "reviews")[items.node_id("Old")]
+    assert record["reason"] == "delete_unused"
+    out = _repair(tmp_path)
+    assert out["interrupted_deletions"] == 1 and out["missing_pages"] == 0
+    assert _node(tmp_path, "Old") is None
+    _validators_green(tmp_path)
+    assert _consistent(tmp_path) == []
+
+
+def test_a_deletion_record_whose_tag_was_kept_meanwhile_deletes_nothing(tmp_path, monkeypatch):
+    _build(tmp_path, {"a.md": "alpha body", "b.md": "beta body"})
+    sids = _sids(tmp_path)
+    a, b = sids["a.md"], sids["b.md"]
+    _extract(tmp_path, {"alpha": [_item("Topic")], "beta": [_item("Topic")]})
+    _keep(tmp_path, a, "Topic")
+    _drop(tmp_path, a, "Topic")                               # unused; still suggested on B
+    monkeypatch.setattr(graph, "delete_node", _crash)
+    gconn = _g(tmp_path)
+    with pytest.raises(RuntimeError):
+        tag_links.delete_unused(gconn, wiki_dir=tmp_path / "wiki", reviews_dir=tmp_path / "reviews")
+    gconn.close()
+    monkeypatch.undo()
+    gconn = _g(tmp_path)                                      # B keeps it before anyone repairs
+    try:
+        out = tag_links.keep(gconn, source_id=b, node_id=items.node_id("Topic"),
+                             wiki_dir=tmp_path / "wiki", reviews_dir=tmp_path / "reviews")
+    finally:
+        gconn.close()
+    assert out["outcome"] == "kept"
+    assert items.node_id("Topic") in tag_links.load_ledger(tmp_path / "reviews", b)["kept"]
+    assert any("no longer applies (kept)" in e for e in _consistent(tmp_path))
+    out = _repair(tmp_path)
+    assert out["cancelled_deletions"] == 1 and out["interrupted_deletions"] == 0
+    assert _node(tmp_path, "Topic") is not None                 # kept → never deleted
+    assert tag_links.deletion_intents(tmp_path / "reviews") == {}
+
+
+def test_a_repair_of_only_an_unused_tag_page_refreshes_the_index(tmp_path, monkeypatch):
+    import rebuild_tag_links
+    _unused(tmp_path, "Quiet")
+    page = tmp_path / "wiki" / "Items" / "quiet.md"
+    page.write_text(page.read_text(encoding="utf-8").replace("status: unused", "status: active", 1),
+                    encoding="utf-8")                         # a stale page, no document involved
+    calls = []
+    real_finish = tag_links.finish
+
+    def spy(root, affected, **kw):
+        calls.append((sorted(affected), kw.get("pages_changed")))
+        return real_finish(root, affected, **kw)
+
+    monkeypatch.setattr(tag_links, "finish", spy)
+    assert rebuild_tag_links.main([str(tmp_path), "--apply"]) == 0
+    assert calls == [([], True)]                              # index + keyword refresh still ran
+    assert parse_frontmatter(page.read_text(encoding="utf-8"))["status"] == "unused"

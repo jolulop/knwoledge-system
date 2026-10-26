@@ -6,7 +6,10 @@ the graph's `asserted_by: human` `mentions` edges are their mirror. This check f
 - a ledger file exists but does not parse (restore it from backup — it is never overwritten);
 - a keep has no active human link, or names an item that is gone / no longer linkable;
 - a document still has an active link to a tag it dropped (and does not keep);
-- an active human link has no keep in the ledger (e.g. an interrupted drop).
+- an active human link has no keep in the ledger (e.g. an interrupted drop);
+- (review round 6) a tag's status disagrees with its keeps (active with none, unused with one), a
+  blocked tag is still suggested, a deletion stopped halfway (node without page), or a tag/Source
+  page no longer matches the graph (an action stopped before its refresh).
 
 `scripts/rebuild_tag_links.py` restores the graph from the ledgers. With no ledgers and no graph
 there is nothing to validate — a pass.
@@ -34,7 +37,8 @@ def _check(root: Path) -> list[str]:
     try:
         if graph.schema_version(conn) != graph.SCHEMA_VERSION:
             return []                                    # validate_graph reports the stale schema
-        return tag_links.consistency_errors(conn, reviews_dir)
+        return tag_links.consistency_errors(conn, reviews_dir, wiki_dir=root / "wiki",
+                                            policies_dir=root / "policies")
     finally:
         conn.close()
 

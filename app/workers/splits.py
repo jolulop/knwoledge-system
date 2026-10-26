@@ -277,27 +277,27 @@ def apply_splits(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = 
             a_status = tag_links.implied_status(gconn, a, n_a["status"])
             # render the spin-off B (candidate; its moved mentions; split lineage; inherited item_type)
             b_page_abs.parent.mkdir(parents=True, exist_ok=True)
-            b_sources = graph.sources_for_node(gconn, b)
+            b_sources, b_suggested = graph.tag_projection(gconn, b, b_status)
             b_dups = graph.active_duplicates(gconn, b)
             b_page_abs.write_text(render_item_page({
                 "node_id": b, "item_type": a_item_type,
                 "title": spinoff_name, "aliases": aliases_move, "confidence": meta_a.get("confidence", "low"),
-                "source_ids": b_sources, "status": b_status,
+                "source_ids": b_sources, "suggested_ids": b_suggested, "status": b_status,
                 "duplicates": b_dups, "split_from": a, "split_review_id": rid,
-            }, labels=items._link_labels(wiki_dir, b_sources, b_dups)), encoding="utf-8")
+            }, labels=items._link_labels(wiki_dir, b_sources + b_suggested, b_dups)), encoding="utf-8")
             # re-render primary A: aliases minus spinoff_aliases AND the auto-moved spin-off name; status unchanged
             drop = {items._normalize_name(x) for x in aliases_move} | {items._normalize_name(spinoff_name)}
             a_aliases_final = [x for x in meta_a["aliases"] if items._normalize_name(x) not in drop]
-            a_sources = graph.sources_for_node(gconn, a)
+            a_sources, a_suggested = graph.tag_projection(gconn, a, a_status)
             a_dups = graph.active_duplicates(gconn, a)
             (wiki_dir / a_page).write_text(render_item_page({
                 "node_id": a, "item_type": a_item_type,
                 "title": meta_a["title"], "aliases": a_aliases_final, "confidence": meta_a.get("confidence", "low"),
-                "source_ids": a_sources, "status": a_status,
+                "source_ids": a_sources, "suggested_ids": a_suggested, "status": a_status,
                 "duplicates": a_dups,
                 "split_from": meta_a.get("split_from"), "split_review_id": meta_a.get("split_review_id"),
                 "description": meta_a.get("description"),
-            }, labels=items._link_labels(wiki_dir, a_sources, a_dups)), encoding="utf-8")
+            }, labels=items._link_labels(wiki_dir, a_sources + a_suggested, a_dups)), encoding="utf-8")
             graph.upsert_node(gconn, node_id=a, node_type=a_type, slug=n_a["slug"], status=a_status,
                               item_type=a_item_type, now=now)
             graph.upsert_node(gconn, node_id=b, node_type=a_type, slug=b_slug, status=b_status,

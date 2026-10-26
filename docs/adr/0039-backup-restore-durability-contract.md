@@ -113,3 +113,33 @@ maintains, so backup/restore catches both archive corruption and pre-backup raw 
 over raw on opt-in backup/restore, more flags (`BACKUP_INCLUDE_RAW`, `--restore`, `--force`, `--dry-run`),
 and an embedded per-archive file manifest. Pruning old archives and a `normalized/` opt-in are deliberately
 deferred.
+
+## Amendment — snapshot consistency (2026-10-27)
+
+External review of ADR-0066 part 1 (review round 6, blocking issue 3): the archive copied live SQLite
+files byte by byte and the review ledgers, journals and pages one after another while producers could
+write, so an archive could hold torn database bytes or a graph that disagrees with the tag ledgers.
+
+- Every SQLite file (recognised by its header) is archived from a snapshot taken with SQLite's
+  **online backup API**; `-journal`/`-wal`/`-shm` side files and the `.lock` file are never archived.
+- **A vault-wide writer lock** (`db/.vault.lock`, `app/backend/vault_lock.py`, an `flock`).
+  Writers hold it **shared**: every producer job from before its `running` row is inserted until
+  `update_job` records a terminal status (one hook in `app/backend/db.py`, so every job-recording
+  producer is covered), every state-changing API request (the ADR-0067 middleware — review
+  decisions, tag actions, apply, merges), and the write scripts that record no job
+  (`rebuild_tag_links.py`, `reconcile_reviews.py`, `reindex_vector.py`). Backup and restore hold it
+  **exclusive** for the whole archive: they wait up to `--lock-timeout` (default 60 s) for running
+  writers, and a writer that starts meanwhile waits for them — the archive is one cut across all
+  databases and files. If writers still hold it at the timeout, backup/restore refuse (exit 2,
+  nothing written) and name any `running` job rows. A restore `--dry-run` writes nothing and takes
+  no lock.
+- The tag-ledger lock (`reviews/tag_links/.lock`, ADR-0066) is also held while archiving; lock order
+  is always vault lock → ledger lock, so the two cannot deadlock.
+- A crashed process releases its `flock`, so a stale `running` row never blocks a backup; it is
+  reported as a warning (the row's process is gone).
+- Not writers of backed-up authority, so not locked: `rebuild_index.py` (dependency-free, derived
+  `wiki/index.md`) and `reindex_keyword.py` (a derived index that is never backed up).
+
+**Follow-up (same day):** a first version only checked the jobs database for `running` rows before
+archiving; the review reproduced a job starting after the check (document extraction takes no ledger
+lock). The writer lock above replaces that check.

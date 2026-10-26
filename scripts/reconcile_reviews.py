@@ -63,4 +63,6 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1:]))
+    from app.backend import vault_lock  # noqa: E402 - a vault writer (ADR-0039 amendment)
+    with vault_lock.shared(get_settings().db_dir):
+        raise SystemExit(main(sys.argv[1:]))

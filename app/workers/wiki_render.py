@@ -205,6 +205,18 @@ def _mention_slugs(items: list[dict[str, Any]] | None) -> list[str]:
     return [it["target"].rsplit("/", 1)[-1] for it in (items or [])]
 
 
+def _suggested_block(suggested: list[dict[str, Any]] | None) -> str:
+    """ADR-0066 review round 6: the document's unkept tag suggestions, as plain text (no wikilink), so
+    they never read — or draw graph edges — as the document's tags. Empty -> "" (byte-stable)."""
+    if not suggested:
+        return ""
+    names = sorted({_delink(display_link_label(it.get("title") or it["target"].rsplit("/", 1)[-1]))
+                    for it in suggested}, key=str.lower)
+    return ("\n\n### Suggested (not reviewed)\n\n"
+            "_Suggested tags this document has not kept or dropped yet (not linked)._\n\n"
+            + "\n".join(f"- {n}" for n in names))
+
+
 def _items_block(items: list[dict[str, Any]] | None) -> str:
     """Source-page Items section: mention links grouped by `item_type` (ADR-0059).
 
@@ -243,6 +255,7 @@ def build_source_values(
     enrichment: dict[str, Any] | None = None,
     claims: list[dict[str, Any]] | None = None,
     items: list[dict[str, Any]] | None = None,
+    suggested_items: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     sid = manifest["source_id"]
     title = title_from_filename(manifest.get("original_filename", sid))
@@ -293,7 +306,7 @@ def build_source_values(
         "summary_text": summary_text,
         "tags": tags,
         "claims_block": _claims_block(claims),
-        "items_block": _items_block(items),
+        "items_block": _items_block(items) + _suggested_block(suggested_items),
         # The frontmatter array mirrors the projected body links as an **advisory** slug
         # projection — NOT relationship authority. The id-keyed graph is the source of truth
         # for mentions (ADR-0029/0030); on rename/re-slug these re-project from the graph.
@@ -513,7 +526,10 @@ def render_item_page(node: dict[str, Any], *, review_status: str | None = None,
     aliases = node.get("aliases") or []
     confidence = node.get("confidence", "low")
     source_ids = node.get("source_ids") or []
-    active_mentions = bool(source_ids)
+    # ADR-0066 review round 6: documents where the tag is only SUGGESTED (no keep) are listed apart and
+    # unlinked — never in Mentioned By — so an unkept suggestion never reads as a curated tag.
+    suggested_ids = node.get("suggested_ids") or []
+    active_mentions = bool(source_ids or suggested_ids)
     status = node.get("status") or ("candidate" if active_mentions else "deprecated_candidate")
     if status == "merged":
         # ADR-0050 merge tombstone: the absorbed id is kept at its old path (old links resolve here) with
@@ -581,11 +597,15 @@ def render_item_page(node: dict[str, Any], *, review_status: str | None = None,
     if status == "unused":
         # ADR-0066: a tag that lost its last kept link — hidden, kept for its human edits/redirects.
         summary = f"Unused item ({type_label}) — no document keeps this tag."
-        mentioned = ([f"- {_wl(f'Sources/{s}', labels)}" for s in source_ids] if active_mentions
+        mentioned = ([f"- {_wl(f'Sources/{s}', labels)}" for s in source_ids] if source_ids
                      else ["_No document keeps this tag._"])
-    elif active_mentions:
+    elif source_ids:
         summary = f"{label.capitalize()} item ({type_label}) mentioned by {len(source_ids)} source(s)."
         mentioned = [f"- {_wl(f'Sources/{s}', labels)}" for s in source_ids]
+    elif active_mentions:
+        summary = (f"{label.capitalize()} item ({type_label}) suggested on {len(suggested_ids)} "
+                   "document(s); no document keeps it yet.")
+        mentioned = ["_No document keeps this tag yet._"]
     else:
         # Callout prose tracks the resolved review_status (ADR-0035 A5); default `pending` byte-stable.
         review_note = "approved for deprecation" if rs == "approved" else "pending review"
@@ -610,6 +630,15 @@ def render_item_page(node: dict[str, Any], *, review_status: str | None = None,
         *mentioned,
         "",
     ]
+    if suggested_ids:
+        body += [
+            "## Suggested On",
+            "",
+            "_Documents where this tag is suggested but not kept (not linked)._",
+            "",
+            *(f"- {_delink(str((labels or {}).get(f'Sources/{s}') or s))}" for s in suggested_ids),
+            "",
+        ]
     # Body-only `## Duplicates` projection (ADR-0041): rendered ONLY when the node has ≥1 active
     # `duplicates` edge; omitted otherwise (no placeholder), like the Claim Contradicting-Claims section.
     # Follows the active edge regardless of either node's lifecycle status; human-navigation only.
@@ -721,6 +750,7 @@ def render_source_page(
     enrichment: dict[str, Any] | None = None,
     claims: list[dict[str, Any]] | None = None,
     items: list[dict[str, Any]] | None = None,
+    suggested_items: list[dict[str, Any]] | None = None,
 ) -> str:
     """Render a Source page, stamping its input_fingerprint.
 
@@ -733,7 +763,7 @@ def render_source_page(
     """
     values = build_source_values(
         manifest, normalized_markdown, summary_max=summary_max, summary_min=summary_min,
-        enrichment=enrichment, claims=claims, items=items,
+        enrichment=enrichment, claims=claims, items=items, suggested_items=suggested_items,
     )
     draft = render_template(template, {**values, "input_fingerprint": ""})
     fingerprint = _fingerprint(_FP_LINE.sub("", draft))

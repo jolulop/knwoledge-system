@@ -38,8 +38,14 @@ def safe_child(base: Path, name: str) -> Path | None:
     Stricter than ``safe_under`` (which allows nested segments): for a filename built directly from an
     untrusted id (`f"{id}.ext"`), the id must be a pure basename — reject any path separator, ``.``/``..``,
     or absolute path *before* constructing the path. So a tampered id can drive only an in-directory read,
-    never a nested or escaping one (ADR-0009/0037).
+    never a nested or escaping one (ADR-0009/0037). The resolved path must also stay under ``base``: an
+    in-directory symlink pointing outside it is rejected (ADR-0066 review round 6).
     """
     if not name or name in (".", "..") or "/" in name or "\\" in name or Path(name).is_absolute():
         return None
-    return (Path(base) / name).resolve()
+    resolved = (Path(base) / name).resolve()
+    try:
+        resolved.relative_to(Path(base).resolve())
+    except ValueError:
+        return None
+    return resolved

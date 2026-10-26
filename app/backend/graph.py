@@ -430,6 +430,52 @@ def kept_sources_for_node(conn: sqlite3.Connection, node_id: str) -> list[str]:
     ]
 
 
+def has_human_mentions(conn: sqlite3.Connection, node_id: str) -> bool:
+    """True if the tag was ever kept through the ADR-0066 ledger (a human mention in ANY status)."""
+    return conn.execute(
+        "SELECT 1 FROM edges WHERE dst_id = ? AND edge_type = 'mentions' AND asserted_by = 'human' "
+        "LIMIT 1", (node_id,)).fetchone() is not None
+
+
+def is_legacy_tag(conn: sqlite3.Connection, node_id: str, status: str | None) -> bool:
+    """An active item never kept through the ADR-0066 ledger (promoted before it, or by the flat-queue
+    executor): every active mention of it counts as a curated link (ADR-0066 review round 6)."""
+    return status == "active" and not has_human_mentions(conn, node_id)
+
+
+def tag_projection(conn: sqlite3.Connection, node_id: str,
+                   status: str | None) -> tuple[list[str], list[str]]:
+    """`(kept, suggested)` sources for an item page rendered at `status` (ADR-0066 review round 6):
+    the page links only the documents that keep the tag; documents where it is merely suggested
+    are listed apart, unlinked. A legacy tag (`is_legacy_tag`) has no suggestions."""
+    active = sources_for_node(conn, node_id)
+    if is_legacy_tag(conn, node_id, status):
+        return active, []
+    kept = kept_sources_for_node(conn, node_id)
+    kept_set = set(kept)
+    return kept, [s for s in active if s not in kept_set]
+
+
+def source_tag_projection(conn: sqlite3.Connection,
+                          source_id: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """`(curated, suggested)` mentions for a Source page (ADR-0066 review round 6): the tags the
+    document keeps (plus legacy tags) are its tags; the other active suggestions are listed apart,
+    unlinked, so an unkept suggestion never shows as a document tag."""
+    curated: list[dict[str, Any]] = []
+    suggested: list[dict[str, Any]] = []
+    for row in _rows(conn.execute(
+            "SELECT e.dst_id, n.node_type, n.item_type, n.slug, n.status, "
+            "MAX(e.asserted_by = 'human') AS kept FROM edges e "
+            "JOIN nodes n ON n.node_id = e.dst_id "
+            "WHERE e.src_id = ? AND e.edge_type = 'mentions' AND e.status = 'active' "
+            "GROUP BY e.dst_id ORDER BY n.node_type, n.slug, e.dst_id", (source_id,))):
+        kept = bool(row.pop("kept"))
+        is_curated = (row["node_type"] != "item" or kept
+                      or is_legacy_tag(conn, row["dst_id"], row["status"]))
+        (curated if is_curated else suggested).append(row)
+    return curated, suggested
+
+
 def source_tag_links(conn: sqlite3.Connection, source_id: str) -> list[dict[str, Any]]:
     """Every `mentions` edge from a source to an item, in ANY status (the ADR-0066 per-document
     screen: active `llm` = suggestion, active `human` = kept, `rejected` = dropped)."""
@@ -546,10 +592,10 @@ def active_node_ids_of_type(conn: sqlite3.Connection, node_type: str) -> list[st
 
 
 def nodes_of_type(conn: sqlite3.Connection, node_type: str) -> list[dict[str, Any]]:
-    """All nodes of a type with id/slug/status, any status (e.g. to enumerate syntheses for
+    """All nodes of a type with id/slug/status/item_type, any status (e.g. to enumerate syntheses for
     retraction, Phase 3.5c)."""
     return _rows(conn.execute(
-        "SELECT node_id, slug, status FROM nodes WHERE node_type = ? ORDER BY node_id",
+        "SELECT node_id, slug, status, item_type FROM nodes WHERE node_type = ? ORDER BY node_id",
         (node_type,),
     ))
 

@@ -2,7 +2,7 @@
 
 - **Status:** accepted — design-locked by grill-phase 2026-10-24. **Part 1 implemented
   2026-10-25** (decisions 1–5 plus the decision 4 merge/split rules; see "Implementation — part 1"
-  at the end), hardened by **review rounds 2–5** (2026-10-25); round 2 also brought
+  at the end), hardened by **review rounds 2–7** (2026-10-25/27); round 2 also brought
   **decision 9** forward. Decisions 6–8, 10 and 11 are not implemented. Item
   consolidation Part B ("Slice A" of the post-UAT-r6 plan); follows ADR-0064 (Part A). **Review
   round 1 applied 2026-10-24** (see the section at the end): durable keep ledger, merge/split and
@@ -493,8 +493,9 @@ Implementation choices not spelled out above:
 - **Split:** B's promotion accounting (`spinoff_promote_slot_taken`, "promotion accounted for") is
   retired.
 - **Not in part 1:**
-  - The Source page Items section still lists suggestions as well as kept tags (visibility is
-    Slice B).
+  - ~~The Source page Items section still lists suggestions as well as kept tags~~ — fixed in
+    review round 6 (kept-only projections). Hiding candidate/unused tags in Obsidian and the
+    index is still Slice B.
   - ~~Lint's `under_supported_item` still runs until part 4~~ — retired in review round 2
     (decision 9 brought forward).
 
@@ -600,3 +601,41 @@ Executor-level tests play the caller with `tests/tagging.close_journals`.
 Tests: one Source page's renderer fails inside `generate_wiki` during apply → the marker survives and
 the next apply re-renders the page and closes it; the same failure after a keep reaches the form and
 the JSON route.
+
+## Review round 6 (2026-10-26)
+
+External review of part 1 at `705d029`: four blocking issues, five non-blocking. The user approved the
+fixes and asked to take them one step at a time; this round covers blocking 1–2 and the small
+non-blocking fixes. Blocking 3 (backup snapshot consistency) and 4 (browser request protection)
+followed on 2026-10-27: the ADR-0039 snapshot-consistency amendment and ADR-0067 (request-origin
+guard).
+
+| # | Issue | Resolution |
+|---|---|---|
+| B1 | Unconfirmed suggestions appear as document tags: Source pages and item backlinks projected every active `mentions` edge, so keeping *Topic* on A made B's unkept suggestion read as B's tag and as a Topic backlink | **Kept-only projections.** `graph.tag_projection` / `graph.source_tag_projection` split curated links (kept, or every active mention of a **legacy** tag — active with no human mention in any status, activated before ADR-0066 or by the flat-queue executor) from suggestions. Item pages link only keeping documents in **Mentioned By** and list the rest under **Suggested On** as plain text; Source pages link only kept tags (frontmatter `items:` too) and list the rest under **Suggested (not reviewed)** as plain text — no wikilink, so no Obsidian graph edge either. `validate_projection` checks the same split. A legacy tag's first keep re-renders every document that suggests it. Lifecycle (candidate/deprecated) still counts all active mentions |
+| B2 | An interrupted drop could leave a tag `active` with no keeps (edge rejected, status refresh never ran); validation and repair saw nothing, because they only compared ledger and edges | **Repair covers derived state.** New categories in `tag_links.consistency_errors` / `repair` (and so `validate_tag_links.py` / `rebuild_tag_links.py`): `stale_status` (status vs the ledgers' keeps; legacy exempt), `unwithdrawn_blocks` (a blocked tag still suggested — a block stopped after the list write; repair withdraws, and deletes a never-kept candidate as the block would), `interrupted_deletions` (revised in round 7: resumed only from a recorded deletion intent), `stale_item_pages` / `stale_source_pages` (status or tag links on a page disagree with the graph — repair re-renders; the script then refreshes `index.md` and the keyword index). Tags linked from a damaged ledger and nodes of an in-flight merge/split (and their Source pages) are skipped |
+| N1 | `safe_child` returned the resolved path without a containment check, so an in-directory symlink could point outside the base | The resolved path must stay under `base` |
+| N2 | The Unused tags list showed no type: `nodes_of_type` did not select `item_type` | Selected |
+| N3 | Build Specification drift: independent-source auto-promotion, "all ten types" | §11 promotion row → keep-only (ADR-0066); §6.1 note → the six ADR-0059 node types; snapshot pipeline gains the tagging step; `docs/Workflow.md` ground rule fixed |
+| N4 | Graph budgets bound results, not traversal work (high-degree frontier expansion) | Deferred — not a problem at the current vault size; revisit with real growth |
+| N5 | Recovery complexity | Acknowledged; B2 is the first consolidation: every action's derived state (status, pages, blocked withdrawals, deletions) is now re-derivable from the ledgers |
+
+Tests: an unkept suggestion never shows as a Source-page tag or an item backlink; a legacy tag links
+its documents until its first keep; interrupted last drop → `unused` after repair; interrupted drop of
+one of two keeps → pages re-rendered; interrupted block → suggestions withdrawn and the never-kept tag
+deleted; interrupted deletion finished; the Unused tags list carries the type; `safe_child` rejects an
+escaping symlink.
+
+## Review round 7 (2026-10-27)
+
+Follow-up review of round 6: blocking 1–2 verified fixed; one new blocking issue and one gap, both
+introduced by the round 6 recovery code.
+
+| # | Issue | Resolution |
+|---|---|---|
+| B1 | Repair assumed deletion approval: an unused tag (or a never-kept candidate) whose page was missing counted as an "interrupted deletion", and repair deleted its node — without a human Delete unused, and bypassing the merge-target/synthesis protections. A missing file can mean corruption or an incomplete restore | **A durable deletion-intent record.** `delete_tag` writes `reviews/tag_links/deleting/<item_id>.json` (`{node_id, reason, slug, title, at}`) before its first change and removes it after its last; it is reached only after the human action's own checks (Delete unused, a drop of a never-kept tag, a block). Repair resumes **only** a recorded deletion, and first re-checks `deletion_blocker` (kept by any ledger, merge-redirect target, owns a synthesis, still live): if the tag is no longer deletable the record is dropped and nothing is deleted (`cancelled_deletions`); if the node is already gone only the tail runs (withdraw review items, audit). A live tag with no page and no record is **`missing_pages`**: report-only (restore from backup — the page holds the title and aliases), and the script exits non-zero. Tags linked from a damaged ledger are skipped |
+| G1 | `rebuild_tag_links.py` refreshed `index.md` and the keyword index only when Source pages were affected, so a repair touching only tag pages (an unused tag with no documents) left them stale | `repair` returns `pages_changed` (a tag page re-rendered or deleted); the script calls `finish(..., pages_changed=...)` whenever either is set |
+
+Tests: a hand-deleted page is reported and nothing is deleted; an interrupted Delete unused resumes
+from its record; a record whose tag was kept meanwhile is dropped without deleting; a repair that
+re-renders only an unused tag's page still refreshes the indexes.

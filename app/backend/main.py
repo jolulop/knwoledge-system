@@ -11,9 +11,11 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
+import anyio
 from fastapi import FastAPI, Form, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +26,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from app.backend import (
     apply_sandbox, db, embeddings, graph, graph_read, keyword_index, manifests, review_html,
-    review_read, search, taxonomy, vector_index,
+    review_read, search, taxonomy, vault_lock, vector_index,
 )
 from app.backend.config import get_settings
 from app.backend.paths import safe_under
@@ -79,8 +81,9 @@ _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost", ""}
 def assert_safe_bind(host: str, allow_insecure: bool) -> None:
     """Refuse to expose the unauthenticated API on a non-loopback interface.
 
-    The app has **no application-level authentication or CSRF** (loopback-only posture, ADR-0009;
-    auth+CSRF is Phase-8-class future work). Binding to a LAN/public interface would expose the mutating
+    The app has **no application-level authentication** (loopback-only posture, ADR-0009; auth and
+    per-form CSRF tokens are Phase-8-class future work). The ADR-0067 request-origin guard only keeps a
+    foreign page in the operator's browser from submitting forms or reading responses. Binding to a LAN/public interface would expose the mutating
     *and* browser-UI endpoints unauthenticated. Loopback is always allowed.
 
     ``KS_ALLOW_INSECURE_BIND=1`` is a narrow **internal-transport escape hatch** — for a trusted private
@@ -128,6 +131,76 @@ async def _lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Knowledge System", version=settings.app_version, lifespan=_lifespan)
+
+
+# --- Request-origin guard (ADR-0067; amends ADR-0009's CSRF deferral) ---------------------------
+# The API has no authentication and the Review UI uses plain HTML forms, so loopback binding alone
+# does not stop a foreign web page in the operator's browser from submitting a form here (a simple
+# POST needs no CORS preflight), nor a DNS-rebinding page from reading responses. Two checks, before
+# any route runs:
+# - every request's Host must be a loopback name (or one listed in KS_ALLOWED_HOSTS — the
+#   KS_ALLOW_INSECURE_BIND proxy name), which defeats DNS rebinding;
+# - a state-changing request (POST/PUT/PATCH/DELETE) carrying browser provenance must be
+#   same-origin: an Origin header must equal this server's scheme+Host ("null" is refused), and
+#   without Origin a Sec-Fetch-Site other than same-origin/none is refused. A request with neither
+#   header (curl, scripts, tests) is not a browser cross-site submission and passes.
+_UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+_LOOPBACK_NAMES = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _allowed_hostnames() -> frozenset[str]:
+    extra = os.environ.get("KS_ALLOWED_HOSTS", "")
+    return _LOOPBACK_NAMES | {h.strip().lower() for h in extra.split(",") if h.strip()}
+
+
+def _hostname(netloc: str) -> str | None:
+    try:
+        return urlsplit(f"//{netloc}").hostname
+    except ValueError:
+        return None
+
+
+def request_refusal(method: str, headers: Any, scheme: str = "http") -> str | None:
+    """Why the request-origin guard refuses a request (None = allowed). `scheme` is the request's
+    own scheme (behind a TLS proxy, the forwarded one Uvicorn reports from trusted proxy headers)."""
+    host = str(headers.get("host") or "").strip().lower()
+    if _hostname(host) not in _allowed_hostnames():
+        return "host_not_allowed"
+    if method.upper() not in _UNSAFE_METHODS:
+        return None
+    origin = headers.get("origin")
+    if origin is not None:
+        origin = origin.strip().lower()
+        try:
+            parts = urlsplit(origin) if origin != "null" else None
+            _ = parts.port if parts is not None else None    # a malformed port raises here too
+        except ValueError:
+            return "cross_origin"                           # malformed (e.g. "http://[")
+        if parts is None or parts.scheme != scheme.lower() or parts.netloc != host:
+            return "cross_origin"
+        return None
+    if headers.get("sec-fetch-site") not in (None, "same-origin", "none"):
+        return "cross_site"
+    return None
+
+
+@app.middleware("http")
+async def _request_origin_guard(request: Request, call_next):
+    why = request_refusal(request.method, request.headers, request.url.scheme)
+    if why is not None:
+        return JSONResponse(status_code=403, content={
+            "detail": f"request refused by the request-origin guard ({why}, ADR-0067): use the UI "
+                      "from http://127.0.0.1:<port>/ or call the API without browser headers"})
+    if request.method.upper() not in _UNSAFE_METHODS:
+        return await call_next(request)
+    # A state-changing request is a vault writer: it holds the vault lock shared (ADR-0039
+    # amendment), so a backup never captures it half-done; taken off the event loop, since it
+    # waits while a backup runs.
+    handle = await anyio.to_thread.run_sync(vault_lock.acquire_shared, settings.db_dir)
+    try:
+        return await call_next(request)
+    finally:
+        vault_lock.release(handle)
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -1255,8 +1328,9 @@ def run_reindex_job() -> dict[str, Any]:
 # The HTML layer is never authority: each /ui route calls the same read-model / _record_decision /
 # apply_reviews primitives the JSON API uses, then renders via review_html (every value escaped).
 # `/ui/reviews/apply` is declared before `/ui/reviews/{review_id}` so "apply" is not read as an id.
-# Mutating routes are POST-only under the loopback-only assert_safe_bind; CSRF stays deferred while
-# loopback-only — any move to a LAN/public bind or added auth MUST revisit form safety first.
+# Mutating routes are POST-only under the loopback-only assert_safe_bind, and the request-origin guard
+# (ADR-0067, above) refuses foreign-origin submissions and non-loopback Host names. Per-form CSRF
+# tokens + auth stay Phase-8 work — any move to a LAN/public bind MUST revisit form safety first.
 
 _UI_DECISIONS = {"approve": "approved", "reject": "rejected", "defer": "deferred"}
 

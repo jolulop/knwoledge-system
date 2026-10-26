@@ -23,6 +23,9 @@ from app.workers import extract, intake, items, wiki
 from app.workers.wiki_render import parse_frontmatter
 from tests import fixtures
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import tagging  # noqa: E402
+
 TEMPLATES = ROOT / "templates"
 MODEL_REF = "anthropic:claude-sonnet-4-6"
 
@@ -124,7 +127,9 @@ def test_extracts_items_routes_pages_and_writes_mentions(tmp_path):
     assert parse_frontmatter(acme.read_text(encoding="utf-8"))["item_type"] == "provider_institution"
     assert parse_frontmatter(model.read_text(encoding="utf-8"))["item_type"] == "model"
     assert "PMI" in pmi.read_text(encoding="utf-8")  # alias rendered
-    assert f"[[Sources/{sid}|" in pmi.read_text(encoding="utf-8")  # mentioned-by (aliased, ADR-0060)
+    # ADR-0066 review round 6: an unkept suggestion is listed apart, never linked as Mentioned By.
+    assert f"[[Sources/{sid}" not in pmi.read_text(encoding="utf-8")
+    assert "## Suggested On" in pmi.read_text(encoding="utf-8")
 
     # mentions edges are active provenance.
     conn = graph.connect(tmp_path / "db" / "graph.sqlite")
@@ -191,10 +196,18 @@ def test_source_page_projects_item_mentions(tmp_path):
     _build(tmp_path)
     _gen_wiki(tmp_path)
     _extract(tmp_path, FakeAdapter())
-    _gen_wiki(tmp_path)  # refresh Source page with mention links
+    _gen_wiki(tmp_path)  # refresh Source page with the suggestions
     sid = _sids(tmp_path)["doc.md"]
     text = (tmp_path / "wiki" / "Sources" / f"{sid}.md").read_text(encoding="utf-8")
+    # ADR-0066 review round 6: unkept suggestions are listed unlinked, never as the document's tags.
+    assert "[[Items/" not in text and "### Suggested (not reviewed)" in text
+    assert "- Post-Merger Integration" in text
+    tagging.keep_all(tmp_path)                       # keeping them makes them the document's tags
+    text = (tmp_path / "wiki" / "Sources" / f"{sid}.md").read_text(encoding="utf-8")
+    assert "### Suggested (not reviewed)" not in text
     assert "[[Items/post-merger-integration|" in text
+    assert f"[[Sources/{sid}|" in (tmp_path / "wiki" / "Items" / "post-merger-integration.md").read_text(
+        encoding="utf-8")                            # mentioned-by (aliased, ADR-0060)
     assert "[[Items/acme-corp|" in text
     assert "[[Items/alphafold|" in text
     assert validate_wikilinks.main([str(tmp_path)]) == 0
@@ -282,7 +295,7 @@ def test_type_conflict_keeps_existing_node_and_files_review(tmp_path):
     # No second node minted; the mention routes to the existing node whose page keeps its type.
     fm = parse_frontmatter(page.read_text(encoding="utf-8"))
     assert fm["item_type"] == "provider_institution"
-    assert "mentioned by 2 source(s)" in page.read_text(encoding="utf-8")
+    assert "suggested on 2 document(s)" in page.read_text(encoding="utf-8")
     # ADR-0059 decision 3 producer contract: subject keys on {node_id, to_item_type} so a
     # rejected retype to one type does not lock out retyping to another.
     revs = [r for r in _pending_reviews(tmp_path) if r["type"] == "change_item_type"]
@@ -358,7 +371,7 @@ def test_source_items_section_groups_by_type_in_priority_order(tmp_path):
     _build(tmp_path)
     _gen_wiki(tmp_path)
     _extract(tmp_path, FakeAdapter())
-    _gen_wiki(tmp_path)
+    tagging.keep_all(tmp_path)
     text = (tmp_path / "wiki" / "Sources" / f"{_sids(tmp_path)['doc.md']}.md").read_text(encoding="utf-8")
     section = _section(text, "Items Mentioned")
     # ONE section; the item_type groups render INSIDE it as ### headers in GROUP_ORDER
@@ -378,7 +391,10 @@ def test_source_frontmatter_items_array_mirrors_body(tmp_path):
     _gen_wiki(tmp_path)
     _extract(tmp_path, FakeAdapter())
     _gen_wiki(tmp_path)
-    text = (tmp_path / "wiki" / "Sources" / f"{_sids(tmp_path)['doc.md']}.md").read_text(encoding="utf-8")
+    page = tmp_path / "wiki" / "Sources" / f"{_sids(tmp_path)['doc.md']}.md"
+    assert parse_frontmatter(page.read_text(encoding="utf-8"))["items"] == []   # suggestions only
+    tagging.keep_all(tmp_path)
+    text = page.read_text(encoding="utf-8")
     fm = parse_frontmatter(text)
     # ONE items array (replaces the five old per-family arrays), slug-ordered.
     assert fm["items"] == ["acme-corp", "alphafold", "post-merger-integration"]
@@ -398,7 +414,7 @@ def test_projection_validator_fails_on_missing_link(tmp_path):
     _build(tmp_path)
     _gen_wiki(tmp_path)
     _extract(tmp_path, FakeAdapter())
-    _gen_wiki(tmp_path)
+    tagging.keep_all(tmp_path)
     page = tmp_path / "wiki" / "Sources" / f"{_sids(tmp_path)['doc.md']}.md"
     # Drop a projected mention link the graph still has active -> forward check fails.
     page.write_text(page.read_text(encoding="utf-8").replace("[[Items/post-merger-integration", "Items/x"),
@@ -437,11 +453,16 @@ def test_item_aggregates_mentions_across_sources(tmp_path):
     payload = _payload(_item("Shared Topic"))
     _extract(tmp_path, FakeAdapter(payload=payload), source_ids=[a])
     _extract(tmp_path, FakeAdapter(payload=payload), source_ids=[b])
-    page = (tmp_path / "wiki" / "Items" / "shared-topic.md").read_text(encoding="utf-8")
-    # One page, both sources. Bare links pinned: this fixture renders no Source pages, so no
-    # display label resolves — ADR-0060 keeps the link bare rather than inventing a label.
+    page_path = tmp_path / "wiki" / "Items" / "shared-topic.md"
+    page = page_path.read_text(encoding="utf-8")
+    # One page, both sources — as unlinked suggestions until a document keeps it (review round 6).
+    assert "suggested on 2 document(s)" in page and "[[Sources/" not in page
+    tagging.keep_all(tmp_path)
+    page = page_path.read_text(encoding="utf-8")
+    # Bare links pinned: this fixture renders no Source pages, so no display label resolves —
+    # ADR-0060 keeps the link bare rather than inventing a label.
     assert f"[[Sources/{a}]]" in page and f"[[Sources/{b}]]" in page
-    assert "mentioned by 2 source(s)" in page
+    assert "mentioned by 2 source(s)" in page and "## Suggested On" not in page
 
 
 # --- ADR-0059: items extraction contract + topic starvation ------------------

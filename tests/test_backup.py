@@ -288,3 +288,199 @@ def test_restore_rejects_zip_slip(tmp_path):
         zf.writestr("../escape.txt", "evil")
     with pytest.raises(ValueError, match="zip-slip"):
         backup.restore_backup(out, tmp_path, force=True)
+
+
+# --- snapshot consistency (ADR-0039 amendment; ADR-0066 review round 6) --------------------------
+
+
+def _jobs_db(root: Path, status: str) -> None:
+    import sqlite3
+    path = root / "db" / "jobs.sqlite"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE jobs (job_id TEXT PRIMARY KEY, job_type TEXT, status TEXT, "
+                 "started_at TEXT)")
+    conn.execute("INSERT INTO jobs VALUES ('job_1', 'extract_items', ?, '2026-10-27T00:00:00Z')",
+                 (status,))
+    conn.commit()
+    conn.close()
+
+
+def test_a_stale_running_row_only_warns(tmp_path, capsys):
+    _jobs_db(tmp_path, "running")              # its process is gone: nothing holds the vault lock
+    assert backup.main([str(tmp_path)]) == 0
+    assert "still marked running" in capsys.readouterr().out
+
+
+def test_backup_runs_when_no_job_is_running(tmp_path):
+    _jobs_db(tmp_path, "succeeded")
+    report = backup.create_backup_report(tmp_path)
+    assert report.archive.exists() and report.warning is None
+
+
+def test_backup_refuses_when_writers_outlast_the_timeout(tmp_path, capsys):
+    from app.backend import vault_lock
+    handle = vault_lock.acquire_shared(tmp_path / "db")       # a writer mid-run
+    try:
+        with pytest.raises(backup.BackupRefused, match="writers still hold the vault lock"):
+            backup.create_backup(tmp_path, lock_timeout=0.2)
+        assert not list((tmp_path / "backups").glob("*.zip"))   # nothing written
+        assert backup.main([str(tmp_path), "--lock-timeout", "0.2"]) == 2
+        assert "vault lock" in capsys.readouterr().err
+    finally:
+        vault_lock.release(handle)
+    assert backup.create_backup(tmp_path, lock_timeout=0.2).exists()
+
+
+def test_restore_waits_for_writers_but_dry_run_does_not(tmp_path, tmp_path_factory):
+    from app.backend import vault_lock
+    _seed(tmp_path)
+    out = backup.create_backup(tmp_path)
+    target = tmp_path_factory.mktemp("target")
+    handle = vault_lock.acquire_shared(target / "db")
+    try:
+        with pytest.raises(backup.BackupRefused):
+            backup.restore_backup(out, target, lock_timeout=0.2)
+        assert backup.restore_backup(out, target, dry_run=True).dry_run
+    finally:
+        vault_lock.release(handle)
+    assert not backup.restore_backup(out, target).dry_run
+
+
+def test_a_job_started_during_the_backup_waits_for_it(tmp_path, monkeypatch):
+    import threading
+    import time
+    from app.backend import db
+    _seed(tmp_path)
+    (tmp_path / "db" / "jobs.sqlite").unlink()
+    db.init_db(tmp_path / "db" / "jobs.sqlite")
+    in_archive, release, started = threading.Event(), threading.Event(), threading.Event()
+    real = backup._create_backup_report
+
+    def slow_archive(root):
+        in_archive.set()
+        release.wait(5)                        # the archive is being written
+        return real(root)
+
+    monkeypatch.setattr(backup, "_create_backup_report", slow_archive)
+
+    def producer():
+        conn = db.connect(tmp_path / "db" / "jobs.sqlite")
+        try:
+            db.insert_job(conn, job_id="job_late", job_type="extract", status="running",
+                          created_at="2026-10-27T00:00:00Z")
+            started.set()
+            db.update_job(conn, "job_late", status="succeeded")
+        finally:
+            conn.close()
+
+    b = threading.Thread(target=lambda: backup.create_backup(tmp_path))
+    b.start()
+    in_archive.wait(5)
+    p = threading.Thread(target=producer)
+    p.start()
+    time.sleep(0.3)
+    assert not started.is_set()                # the job could not start mid-archive
+    release.set()
+    b.join(5)
+    p.join(5)
+    assert started.is_set()
+
+
+def test_a_running_job_holds_off_the_backup_until_it_finishes(tmp_path):
+    from app.backend import db
+    db.init_db(tmp_path / "db" / "jobs.sqlite")
+    conn = db.connect(tmp_path / "db" / "jobs.sqlite")
+    try:
+        db.insert_job(conn, job_id="job_1", job_type="extract", status="running",
+                      created_at="2026-10-27T00:00:00Z")
+        with pytest.raises(backup.BackupRefused, match="extract job_1"):
+            backup.create_backup(tmp_path, lock_timeout=0.2)
+        db.update_job(conn, "job_1", status="succeeded")       # terminal status releases the lock
+    finally:
+        conn.close()
+    assert backup.create_backup(tmp_path, lock_timeout=0.2).exists()
+
+
+def test_a_crashed_writer_process_does_not_block_the_backup(tmp_path):
+    import subprocess
+    code = ("import os, sys; sys.path.insert(0, sys.argv[2]); from app.backend import vault_lock; "
+            "vault_lock.acquire_shared(sys.argv[1]); os._exit(1)")
+    subprocess.run([sys.executable, "-c", code, str(tmp_path / "db"), str(ROOT)], check=False)
+    assert backup.create_backup(tmp_path, lock_timeout=0.5).exists()
+
+
+def test_sqlite_is_archived_from_a_consistent_snapshot(tmp_path):
+    import sqlite3
+    path = tmp_path / "db" / "graph.sqlite"
+    path.parent.mkdir(parents=True)
+    live = sqlite3.connect(path)
+    live.execute("PRAGMA journal_mode=WAL")
+    live.execute("CREATE TABLE t (x INTEGER)")
+    live.executemany("INSERT INTO t VALUES (?)", [(i,) for i in range(500)])
+    live.commit()                              # committed, but still in graph.sqlite-wal (no checkpoint)
+    assert (tmp_path / "db" / "graph.sqlite-wal").exists()
+    try:
+        out = backup.create_backup(tmp_path)
+    finally:
+        live.close()
+    zf = zipfile.ZipFile(out)
+    names = set(zf.namelist())
+    assert "db/graph.sqlite" in names and not any(n.endswith(("-wal", "-shm")) for n in names)
+    restored = tmp_path / "restored.sqlite"
+    restored.write_bytes(zf.read("db/graph.sqlite"))
+    conn = sqlite3.connect(restored)
+    try:
+        assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert conn.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 500   # the WAL rows too
+    finally:
+        conn.close()
+
+
+def test_backup_waits_for_the_tag_ledger_lock(tmp_path):
+    import threading
+    import time
+    from app.workers import tag_links
+    _seed(tmp_path)
+    held, release, done = threading.Event(), threading.Event(), threading.Event()
+
+    def holder():
+        with tag_links.ledger_lock(tmp_path / "reviews"):
+            held.set()
+            release.wait(5)
+
+    def run_backup():
+        backup.create_backup(tmp_path)
+        done.set()
+
+    t1 = threading.Thread(target=holder)
+    t1.start()
+    held.wait(5)
+    t2 = threading.Thread(target=run_backup)
+    t2.start()
+    time.sleep(0.3)
+    assert not done.is_set()                   # a tag action / merge is mid-write: the backup waits
+    release.set()
+    t1.join(5)
+    t2.join(5)
+    assert done.is_set()
+
+
+def test_backup_round_trip_preserves_tag_decisions_and_unfinished_operations(tmp_path,
+                                                                             tmp_path_factory):
+    files = {
+        "reviews/tag_links/src_0123456789abcdef.json":
+            '{"source_id": "src_0123456789abcdef", "kept": {}, "drops": []}\n',
+        "reviews/tag_links/deleting/itm_0123456789abcdef.json": '{"node_id": "itm_0123456789abcdef"}\n',
+        "reviews/in_flight/rev_m.json": '{"review_id": "rev_m", "op": "merge", "nodes": []}\n',
+    }
+    for rel, text in files.items():
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(text, encoding="utf-8")
+    (tmp_path / "reviews" / "tag_links" / ".lock").write_text("", encoding="utf-8")
+    out = backup.create_backup(tmp_path)
+    assert "reviews/tag_links/.lock" not in zipfile.ZipFile(out).namelist()
+    target = tmp_path_factory.mktemp("restore")
+    backup.restore_backup(out, target)
+    for rel, text in files.items():
+        assert (target / rel).read_text(encoding="utf-8") == text

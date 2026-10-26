@@ -4,6 +4,9 @@ network:
   default_bind_host: 127.0.0.1
   public_exposure_allowed: false
   lan_access_requires_auth: true
+  request_origin_guard:                      # ADR-0067: browser CSRF / DNS-rebinding protection
+    allowed_hosts: loopback                  # + KS_ALLOWED_HOSTS (comma-separated)
+    state_changes_same_origin_only: true     # Origin / Sec-Fetch-Site checked on POST/PUT/PATCH/DELETE
 mobile_access:
   recommended: vpn_or_secure_tunnel
 prompt_injection:

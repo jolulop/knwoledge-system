@@ -23,3 +23,10 @@ from app.backend import embeddings
 @pytest.fixture(autouse=True)
 def _no_embedding_warmup(monkeypatch):
     monkeypatch.setattr(embeddings, "warmup_provider", lambda settings: None)
+
+
+@pytest.fixture(autouse=True)
+def _test_client_host(monkeypatch):
+    """Starlette's TestClient sends `Host: testserver`; the request-origin guard (ADR-0067) only
+    accepts loopback names plus KS_ALLOWED_HOSTS. The guard's own tests clear this."""
+    monkeypatch.setenv("KS_ALLOWED_HOSTS", "testserver")

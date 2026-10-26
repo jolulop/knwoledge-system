@@ -177,18 +177,18 @@ def activate_node(gconn, *, node: dict[str, Any], wiki_dir: Path, reviews_dir: P
     if dry_run:
         return {"outcome": "would_activate", "slug": slug, "amended": bool(amendments),
                 "affected_sources": []}
-    sources = graph.sources_for_node(gconn, nid)
+    sources, suggested = graph.tag_projection(gconn, nid, "active")
     duplicates = graph.active_duplicates(gconn, nid)
     new_page.write_text(
         render_item_page({
             "node_id": nid, "item_type": eff["item_type"], "title": eff["title"],
             "aliases": eff["aliases"], "confidence": "low",
-            "source_ids": sources, "status": "active",
+            "source_ids": sources, "suggested_ids": suggested, "status": "active",
             "duplicates": duplicates,
             "split_from": meta.get("split_from"),        # ADR-0052: preserve spin-off lineage
             "split_review_id": meta.get("split_review_id"),
             "description": eff["description"],           # ADR-0058: page-owned description
-        }, labels=items._link_labels(wiki_dir, sources, duplicates)),
+        }, labels=items._link_labels(wiki_dir, sources + suggested, duplicates)),
         encoding="utf-8")
     graph.upsert_node(gconn, node_id=nid, node_type=node_type, slug=slug, status="active",
                       item_type=eff["item_type"], now=now)
@@ -198,7 +198,7 @@ def activate_node(gconn, *, node: dict[str, Any], wiki_dir: Path, reviews_dir: P
         # Inbound links hold the old slug: mentioning Source pages re-render via the caller fan-out
         # (affected_sources); duplicate partners re-render here, AFTER the slug mirror update their
         # ## Duplicates projection reads.
-        affected = list(sources)
+        affected = list(sources) + list(suggested)   # suggestion lists show the title too
         for dup in graph.active_duplicates(gconn, nid):
             items._recompose_node(gconn, node_id=dup["node_id"], wiki_dir=wiki_dir,
                                   reviews_dir=reviews_dir, now=now)

@@ -184,14 +184,15 @@ def _recompose_node(gconn, *, node_id, wiki_dir, reviews_dir, now, text_hint=Non
         status = "candidate"
     page_dir.mkdir(parents=True, exist_ok=True)
     duplicates = graph.active_duplicates(gconn, node_id)
+    kept, suggested = graph.tag_projection(gconn, node_id, status)
     page_path.write_text(render_item_page({
         "node_id": node_id, "item_type": item_type,
-        "title": title, "aliases": aliases, "confidence": "low", "source_ids": sources,
-        "status": status, "duplicates": duplicates,
+        "title": title, "aliases": aliases, "confidence": "low", "source_ids": kept,
+        "suggested_ids": suggested, "status": status, "duplicates": duplicates,
         "split_from": (existing or {}).get("split_from"),               # ADR-0052: preserve spin-off lineage
         "split_review_id": (existing or {}).get("split_review_id"),
         "description": (existing or {}).get("description"),            # ADR-0058: preserve human description
-    }, labels=_link_labels(wiki_dir, sources, duplicates)), encoding="utf-8")
+    }, labels=_link_labels(wiki_dir, kept + suggested, duplicates)), encoding="utf-8")
     graph.upsert_node(gconn, node_id=node_id, node_type=node_type, slug=slug,
                       status=status, item_type=item_type, now=now)
     page_rel = f"{NODE_DIR[node_type]}/{slug}.md"
@@ -237,17 +238,17 @@ def recompose_semantic_node_page(
     item_type = meta.get("item_type") or node.get("item_type")
     if not taxonomy.is_item_type(item_type):
         return "page_missing"
-    sources = graph.sources_for_node(gconn, node_id)
+    kept, suggested = graph.tag_projection(gconn, node_id, status)
     duplicates = graph.active_duplicates(gconn, node_id)
     rendered = render_item_page({
         "node_id": node_id, "item_type": item_type,
         "title": meta["title"], "aliases": meta["aliases"], "confidence": meta["confidence"],
-        "source_ids": sources, "status": status,
+        "source_ids": kept, "suggested_ids": suggested, "status": status,
         "duplicates": duplicates,
         "split_from": meta.get("split_from"),                           # ADR-0052: preserve spin-off lineage
         "split_review_id": meta.get("split_review_id"),
         "description": meta.get("description"),                        # ADR-0058: preserve human description
-    }, review_status=review_status, labels=_link_labels(wiki_dir, sources, duplicates))
+    }, review_status=review_status, labels=_link_labels(wiki_dir, kept + suggested, duplicates))
     # Write only when content differs (avoid churn; ADR-0041). confidence is page-owned, preserved.
     # Returns "written" only when the page actually changed, "unchanged" otherwise (the graph node-status
     # mirror always runs, idempotently). Callers that gate on `== "written"` get an honest signal.

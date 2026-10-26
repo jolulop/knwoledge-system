@@ -30,14 +30,30 @@ Restore (ADR-0039 decision 3) is guarded in-place: it refuses to overwrite exist
 ``--force`` is given, never deletes files absent from the archive, and calls out conflicts on
 durable, non-regenerable state (``db/graph.sqlite``, ``reviews/``, ``raw/manifests/``, ``policies/``).
 A restore that skips any pre-existing file is reported as **PARTIAL**.
+
+Snapshot consistency (ADR-0039 amendment, ADR-0066 review round 6): every SQLite database is copied
+through SQLite's online **backup API** into a temporary file (never its live bytes, which a writer
+can change mid-copy; `-journal`/`-wal`/`-shm` side files are never archived), and the whole archive is
+written while holding the **vault writer lock** exclusively (`db/.vault.lock`,
+`app/backend/vault_lock.py`) plus the tag-ledger lock. Every writer holds the vault lock shared — each
+producer job while its row is `running`, every state-changing API request, and the write scripts that
+record no job — so a backup waits (up to `--lock-timeout`, default 60 s) for running writers to
+finish, a writer that starts meanwhile waits for the backup, and the archive is one consistent cut
+across databases and files. If writers are still running at the timeout the backup refuses (exit 2,
+nothing written). A crashed job releases its lock with its process, so a stale `running` row is only
+reported as a warning. Restore takes the same lock; stop the API before a restore anyway (it holds
+caches and open databases).
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
+import sqlite3
 import sys
+import tempfile
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -77,6 +93,89 @@ _INCLUDE_RAW_ENV = "BACKUP_INCLUDE_RAW"
 # Embedded per-archive integrity sidecar (ADR-0039 decision 4). Not a project file: skipped on
 # restore extraction.
 _BACKUP_MANIFEST_NAME = "BACKUP_MANIFEST.json"
+
+# SQLite files are recognised by their header and archived from an online-backup snapshot; their side
+# files (rollback journal, WAL, shared memory) are transient and never archived.
+_SQLITE_MAGIC = b"SQLite format 3\x00"
+_SQLITE_SIDE_SUFFIXES = ("-journal", "-wal", "-shm")
+
+
+class BackupRefused(RuntimeError):
+    """A backup/restore that cannot run now (writers still hold the vault lock); nothing was written."""
+
+
+def _is_sqlite(path: Path) -> bool:
+    try:
+        with path.open("rb") as fh:
+            return fh.read(16) == _SQLITE_MAGIC
+    except OSError:
+        return False
+
+
+def running_jobs(root: Path) -> list[dict[str, Any]]:
+    """Jobs the jobs database records as `running` (empty when there is no readable database)."""
+    path = Path(root) / "db" / "jobs.sqlite"
+    if not _is_sqlite(path):
+        return []
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return [{"job_id": r[0], "job_type": r[1], "started_at": r[2]} for r in conn.execute(
+            "SELECT job_id, job_type, started_at FROM jobs WHERE status = 'running' ORDER BY job_id")]
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+
+
+@contextlib.contextmanager
+def _vault_exclusive(root: Path, action: str, timeout: float):
+    """Hold the vault writer lock exclusively; refuse (nothing written) if writers outlast `timeout`."""
+    from app.backend import vault_lock
+    try:
+        with vault_lock.exclusive(Path(root) / "db", timeout=timeout):
+            yield
+    except vault_lock.VaultBusy:
+        jobs = running_jobs(root)
+        listed = (": running job row(s) " + ", ".join(f"{j['job_type']} {j['job_id']}" for j in jobs)
+                  if jobs else " (an API write or a write script)")
+        raise BackupRefused(
+            f"refusing to {action}: writers still hold the vault lock after {timeout:g}s{listed}. "
+            "Wait for them to finish, or stop the API, and retry.") from None
+
+
+def stale_running_warning(root: Path) -> str | None:
+    """Called while holding the lock exclusively: any `running` row then belongs to a dead process."""
+    jobs = running_jobs(root)
+    if not jobs:
+        return None
+    return ("WARNING: job row(s) still marked running but their process is gone (crashed): "
+            + ", ".join(f"{j['job_type']} {j['job_id']}" for j in jobs))
+
+
+def _snapshot_sqlite(src: Path, tmp_dir: Path) -> Path:
+    """A consistent copy of a live SQLite database via the online backup API."""
+    dst = tmp_dir / f"snapshot-{len(list(tmp_dir.iterdir()))}.sqlite"
+    source = sqlite3.connect(src)
+    try:
+        target = sqlite3.connect(dst)
+        try:
+            source.backup(target)
+        finally:
+            target.close()
+    finally:
+        source.close()
+    return dst
+
+
+@contextlib.contextmanager
+def _writer_exclusion(root: Path):
+    """Hold the tag-ledger lock (ADR-0066) while the archive is written: tag actions, extraction's
+    post-call writes, merges/splits and repair all take it, so their files and graph rows are
+    captured together."""
+    from app.workers import tag_links          # lazy: the restore/inspection paths don't need it
+    with tag_links.ledger_lock(Path(root) / "reviews"):
+        yield
+
 
 # Durable, non-regenerable state whose overwrite must be called out on restore (ADR-0039 decision 3):
 # reviewed graph relationships, human review decisions, the source catalog, and the policies that
@@ -130,6 +229,7 @@ class BackupReport:
     vector_index_included: bool
     llm_cache_included: bool
     raw_file_count: int = 0
+    warning: str | None = None
 
     def render(self) -> str:
         lines = [
@@ -145,6 +245,8 @@ class BackupReport:
         if not self.raw_included:
             lines.append("  WARNING: raw bytes not in this archive — restore recovers "
                          "metadata/wiki/db state but NOT the source bytes themselves.")
+        if self.warning:
+            lines.append(f"  {self.warning}")
         return "\n".join(lines)
 
 
@@ -159,18 +261,25 @@ def _resolve_archive_path(backup_dir: Path, stamp: str) -> Path:
     return out
 
 
-def create_backup(root: Path) -> Path:
+def create_backup(root: Path, *, lock_timeout: float = 60.0) -> Path:
     """Write a timestamped zip of critical state under <root>/backups and return its path.
 
     On ``BACKUP_INCLUDE_RAW`` the manifest-catalogued raw bytes are added and verified against their
     manifest sha256 before the archive is written (ADR-0039). Raises ``ValueError`` if a catalogued
     raw file is missing, escapes ``raw/``, or fails its checksum.
     """
-    return create_backup_report(root).archive
+    return create_backup_report(root, lock_timeout=lock_timeout).archive
 
 
-def create_backup_report(root: Path) -> BackupReport:
+def create_backup_report(root: Path, *, lock_timeout: float = 60.0) -> BackupReport:
     root = Path(root).resolve()
+    with _vault_exclusive(root, "back up", lock_timeout):
+        report = _create_backup_report(root)
+        report.warning = stale_running_warning(root)
+    return report
+
+
+def _create_backup_report(root: Path) -> BackupReport:
     backup_dir = root / "backups"
     backup_dir.mkdir(exist_ok=True)
     exclude_cache = bool(os.environ.get("BACKUP_EXCLUDE_LLM_CACHE"))
@@ -202,7 +311,8 @@ def create_backup_report(root: Path) -> BackupReport:
     llm_cache_included = False
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out = _resolve_archive_path(backup_dir, stamp)
-    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+    with _writer_exclusion(root), tempfile.TemporaryDirectory() as tmp, \
+            zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
         for rel in INCLUDE_FILES:
             path = root / rel
             if path.exists():
@@ -211,15 +321,21 @@ def create_backup_report(root: Path) -> BackupReport:
             folder = root / rel
             if not folder.exists():
                 continue
-            for path in folder.rglob("*"):
+            for path in sorted(folder.rglob("*")):
                 # Don't recurse the backups dir into itself.
                 if not path.is_file() or backup_dir in path.parents:
                     continue
+                if path.name.endswith(_SQLITE_SIDE_SUFFIXES) or path.name in (".lock", ".vault.lock"):
+                    continue  # transient SQLite side files / the lock files themselves
                 if path.name == _CACHE_FILENAME:
                     if exclude_cache:
                         continue  # opt-out: skip the LLM response cache
                     llm_cache_included = True
-                zf.write(path, str(path.relative_to(root)))
+                arcname = str(path.relative_to(root))
+                if _is_sqlite(path):
+                    zf.write(_snapshot_sqlite(path, Path(tmp)), arcname)
+                else:
+                    zf.write(path, arcname)
         for src, arcname, size, digest in raw_to_add:
             zf.write(src, arcname)
             raw_entries[arcname] = {"size": size, "sha256": digest, "manifest_verified": True}
@@ -292,7 +408,7 @@ class RestoreReport:
 
 
 def restore_backup(archive: Path, root: Path, *, force: bool = False,
-                   dry_run: bool = False) -> RestoreReport:
+                   dry_run: bool = False, lock_timeout: float = 60.0) -> RestoreReport:
     """Guarded in-place restore (ADR-0039 decision 3).
 
     Refuses to overwrite existing files unless ``force``; ``dry_run`` plans without writing; never
@@ -303,6 +419,13 @@ def restore_backup(archive: Path, root: Path, *, force: bool = False,
     """
     archive = Path(archive).resolve()
     root = Path(root).resolve()
+    if dry_run:                                           # writes nothing: no exclusion needed
+        return _restore_backup(archive, root, force=force, dry_run=True)
+    with _vault_exclusive(root, "restore", lock_timeout):
+        return _restore_backup(archive, root, force=force, dry_run=False)
+
+
+def _restore_backup(archive: Path, root: Path, *, force: bool, dry_run: bool) -> RestoreReport:
     report = RestoreReport(archive=archive, dry_run=dry_run)
 
     with zipfile.ZipFile(archive) as zf:
@@ -375,15 +498,20 @@ def main(argv: list[str] | None = None) -> int:
                         help="restore: overwrite existing files (default refuses)")
     parser.add_argument("--dry-run", action="store_true",
                         help="restore: list writes/skips/conflicts without touching disk")
+    parser.add_argument("--lock-timeout", type=float, default=60.0, metavar="SECONDS",
+                        help="how long to wait for running writers to finish (default 60)")
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     root = Path(args.root).resolve()
 
-    if args.restore:
-        report = restore_backup(Path(args.restore), root, force=args.force, dry_run=args.dry_run)
-        print(report.render())
-        return 0
-
-    report = create_backup_report(root)
+    try:
+        if args.restore:
+            report = restore_backup(Path(args.restore), root, force=args.force, dry_run=args.dry_run,
+                                    lock_timeout=args.lock_timeout)
+        else:
+            report = create_backup_report(root, lock_timeout=args.lock_timeout)
+    except BackupRefused as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
     print(report.render())
     return 0
 

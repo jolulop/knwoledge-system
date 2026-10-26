@@ -525,8 +525,11 @@ def test_e2e_source_fanout_and_validate_projection(tmp_path):
     conn.close()
 
     s3_page = (tmp_path / "wiki" / "Sources" / f"{S3}.md").read_text()
-    assert "[[Items/george-washington|" in s3_page             # moved Source page now links the spin-off B
-    assert "[[Items/washington|" not in s3_page                # ...and dropped the primary A
+    # ADR-0066 review round 6: the moved link is an unkept suggestion of the candidate spin-off B, so
+    # S3 lists it unlinked (no curated tag) — and no longer links the primary A.
+    assert "### Suggested (not reviewed)" in s3_page and "- George Washington" in s3_page
+    assert "[[Items/george-washington" not in s3_page
+    assert "[[Items/washington|" not in s3_page
     assert validate_projection.main([str(tmp_path)]) == 0         # graph<->wiki projection consistent
 
 

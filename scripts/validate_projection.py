@@ -128,7 +128,10 @@ def _check(root: Path, db_path: Path) -> list[str]:
             # derived_from edge stays active, so the expected projection is active NON-hidden claims.
             active_claims = {cid for cid in graph.claims_for_source(conn, sid)
                              if node_status.get(cid) != "hidden"}
-            active_mentions = {(m["node_type"], m["slug"]) for m in graph.mentions_for_source(conn, sid)}
+            # ADR-0066 review round 6: the page links only the tags the document keeps (plus legacy
+            # tags); unkept suggestions are listed unlinked, so they are not part of the projection.
+            active_mentions = {(m["node_type"], m["slug"])
+                               for m in graph.source_tag_projection(conn, sid)[0]}
 
             for cid in active_claims:
                 if f"Claims/{cid}" not in targets:
@@ -227,11 +230,13 @@ def _check(root: Path, db_path: Path) -> list[str]:
                     errors.append(f"{node_id}: page item_type {page_item_type!r} != graph "
                                   f"item_type {node_item_type.get(node_id)!r}")
                 linked = _sources_links(_targets(text))
-                active = set(graph.sources_for_node(conn, node_id))
+                # ADR-0066 review round 6: Mentioned By links the documents that KEEP the tag (all
+                # active mentions for a legacy tag); a suggestion alone is never a link.
+                active = set(graph.tag_projection(conn, node_id, node_status.get(node_id))[0])
                 for sid in active - linked:
-                    errors.append(f"{node_id}: active mention from {sid} not linked on page")
+                    errors.append(f"{node_id}: kept link from {sid} not linked on page")
                 for sid in linked - active:
-                    errors.append(f"{node_id}: linked source {sid} has no active mention edge")
+                    errors.append(f"{node_id}: linked source {sid} does not keep this tag")
 
                 # Duplicates projection (ADR-0041): the body `## Duplicates` links match active
                 # `duplicates` edges both directions. `duplicates` is SAME_TYPE, so partners share

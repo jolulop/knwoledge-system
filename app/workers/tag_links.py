@@ -41,6 +41,7 @@ import contextlib
 import functools
 import json
 import os
+import re
 import threading
 import uuid
 from collections.abc import Iterator
@@ -317,7 +318,7 @@ def implied_status(gconn, node_id: str, current: str) -> str:
         return current
     if graph.kept_sources_for_node(gconn, node_id):
         return "active"
-    if current == "active" and not _has_human_edges(gconn, node_id):
+    if graph.is_legacy_tag(gconn, node_id, current):
         return "active"
     return "unused"
 
@@ -334,13 +335,6 @@ def _refresh_page(gconn, *, node_id: str, wiki_dir: Path, reviews_dir: Path, now
                                                   status=status, review_status="none", now=now)
     return items._recompose_node(gconn, node_id=node_id, wiki_dir=wiki_dir,
                                  reviews_dir=reviews_dir, now=now)
-
-
-def _has_human_edges(gconn, node_id: str) -> bool:
-    """True if the tag was ever kept/dropped through the ADR-0066 ledger (a human mention in ANY status)."""
-    return gconn.execute(
-        "SELECT 1 FROM edges WHERE dst_id = ? AND edge_type = 'mentions' AND asserted_by = 'human' "
-        "LIMIT 1", (node_id,)).fetchone() is not None
 
 
 def _active_mention_edges(gconn, source_id: str, node_id: str) -> list[dict[str, Any]]:
@@ -406,11 +400,16 @@ def keep(gconn, *, source_id: str, node_id: str, wiki_dir: Path, reviews_dir: Pa
     keys = _node_keys(wiki_dir, node)
     ledger["drops"] = [d for d in ledger["drops"]
                        if d.get("item_id") != node_id and d["key"] not in keys]
+    # A legacy tag's active mentions all project as curated links; its first keep ends that, so
+    # every document suggesting it re-renders (its link becomes a suggestion) — review round 6.
+    was_legacy = graph.is_legacy_tag(gconn, node_id, node["status"])
     _save_ledger(reviews_dir, ledger)
     graph.upsert_assertion(gconn, src_id=source_id, dst_id=node_id, edge_type="mentions",
                            asserted_by="human", status="active", now=now)
 
     affected = {source_id}
+    if was_legacy:
+        affected.update(graph.sources_for_node(gconn, node_id))
     effect = "already_kept" if was_kept else "kept"
     if node["status"] == "candidate":
         out = promote.activate_node(gconn, node=node, wiki_dir=wiki_dir, reviews_dir=reviews_dir,
@@ -531,10 +530,62 @@ def _has_synthesis(gconn, node_id: str) -> bool:
     return graph.get_node(gconn, review_read._synthesis_id(node_id)) is not None
 
 
+DELETION_DIR = "deleting"                                 # under reviews/tag_links/
+_ITEM_ID_RE = re.compile(r"^itm_[0-9a-f]{16}$")
+
+
+def _deletion_path(reviews_dir: Path, node_id: str) -> Path:
+    if not _ITEM_ID_RE.fullmatch(str(node_id)):
+        raise ValueError("non-canonical item id")          # never build a path from a forged id
+    return Path(reviews_dir) / LEDGER_DIR / DELETION_DIR / f"{node_id}.json"
+
+
+def deletion_intents(reviews_dir: Path) -> dict[str, dict[str, Any]]:
+    """The deletion-intent records of deletions that started and did not finish (review round 7):
+    `{node_id: {node_id, reason, slug, at}}`. An unreadable record is returned with `reason: None`."""
+    d = Path(reviews_dir) / LEDGER_DIR / DELETION_DIR
+    out: dict[str, dict[str, Any]] = {}
+    for path in sorted(d.glob("*.json")) if d.is_dir() else []:
+        if not _ITEM_ID_RE.fullmatch(path.stem):
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            data = None
+        out[path.stem] = data if isinstance(data, dict) else {"node_id": path.stem, "reason": None}
+    return out
+
+
+def _end_deletion(reviews_dir: Path, node_id: str) -> None:
+    _deletion_path(reviews_dir, node_id).unlink(missing_ok=True)
+
+
+def deletion_blocker(gconn, wiki_dir: Path, reviews_dir: Path, node_id: str) -> str | None:
+    """Why a tag may NOT be deleted now (None = deletable): kept by some document, a merge-redirect
+    target, owner of a synthesis page, or still live (an active tag, a candidate with suggestions)."""
+    node = _item_node(gconn, node_id)
+    if node is None:
+        return "missing"
+    if any(node_id in lg["kept"] for lg in _readable_ledgers(reviews_dir)):
+        return "kept"
+    if node_id in merge_redirect_targets(wiki_dir):
+        return "merge_redirect_target"
+    if _has_synthesis(gconn, node_id):
+        return "has_synthesis"
+    if node["status"] == "unused" or (node["status"] == "candidate"
+                                      and not graph.sources_for_node(gconn, node_id)):
+        return None
+    return f"status_{node['status']}"
+
+
 def delete_tag(gconn, *, node_id: str, wiki_dir: Path, reviews_dir: Path, reason: str,
                now: str | None = None) -> dict[str, Any]:
     """Hard-delete a tag nobody keeps: page, node, every edge; withdraw its unresolved review items;
-    re-render `duplicates` partners; audit. The caller has checked eligibility."""
+    re-render `duplicates` partners; audit. The caller has checked eligibility.
+
+    Review round 7: a durable **deletion-intent record** (`reviews/tag_links/deleting/<id>.json`) is
+    written before the first change and removed after the last, so `repair` resumes only a deletion a
+    human action started — a page that is merely missing is reported, never treated as approval."""
     now = now or iso_now()
     wiki_dir, reviews_dir = Path(wiki_dir), Path(reviews_dir)
     node = _item_node(gconn, node_id)
@@ -546,6 +597,13 @@ def delete_tag(gconn, *, node_id: str, wiki_dir: Path, reviews_dir: Path, reason
         "SELECT DISTINCT src_id FROM edges WHERE dst_id = ? AND edge_type = 'mentions' "
         "AND status = 'active'", (node_id,))})
     meta = _node_meta(wiki_dir, node) or {}
+    intent = _deletion_path(reviews_dir, node_id)
+    intent.parent.mkdir(parents=True, exist_ok=True)
+    tmp = intent.with_suffix(f".tmp-{uuid.uuid4().hex[:8]}")
+    tmp.write_text(json.dumps({"node_id": node_id, "reason": reason, "slug": node["slug"],
+                               "title": meta.get("title"), "at": now}, indent=2) + "\n",
+                   encoding="utf-8")
+    os.replace(tmp, intent)
     (wiki_dir / page_rel).unlink(missing_ok=True)
     edges_removed = graph.delete_node(gconn, node_id)
     withdrawn = merges._withdraw_b_subjects(reviews_dir, node_id, page_rel, now, reason="tag_deleted")
@@ -556,6 +614,7 @@ def delete_tag(gconn, *, node_id: str, wiki_dir: Path, reviews_dir: Path, reason
         "node_id": node_id, "title": meta.get("title"), "item_type": node.get("item_type"),
         "status": node["status"], "reason": reason, "page": page_rel,
         "edges_removed": edges_removed, "withdrawn": withdrawn}, now)
+    _end_deletion(reviews_dir, node_id)
     return {"outcome": "deleted", "node_id": node_id, "affected_sources": mentioning}
 
 
@@ -764,16 +823,62 @@ def _readable_ledgers(reviews_dir: Path) -> list[dict[str, Any]]:
 
 
 _PLAN_KEYS = ("missing_keeps", "interrupted_activations", "interrupted_revivals", "undropped",
-              "orphan_keeps", "invalid_keeps")
+              "orphan_keeps", "invalid_keeps", "stale_status", "unwithdrawn_blocks",
+              "interrupted_deletions", "cancelled_deletions", "missing_pages", "stale_item_pages",
+              "stale_source_pages")
+# Reported, never written by repair: a human (or a restore from backup) resolves them.
+_REPORT_ONLY = frozenset({"invalid_keeps", "missing_pages"})
+_SOURCE_LINK_RE = re.compile(r"\[\[Sources/(src_[0-9a-f]{16})[|\]]")
 
 
-def _plan_repair(gconn, reviews_dir: Path) -> dict[str, Any]:
+def _page_drift(wiki_dir: Path, gconn, node: dict[str, Any]) -> str | None:
+    """Why a live tag's page disagrees with the graph (its status, or its Mentioned By links vs the
+    documents that keep it), else None. A missing/unreadable page is not drift (see deletions)."""
+    path = Path(wiki_dir) / NODE_DIR["item"] / f"{node['slug']}.md"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    status = parse_frontmatter(text).get("status")
+    if status != node["status"]:
+        return f"page status {status!r} != graph status {node['status']!r}"
+    kept = set(graph.tag_projection(gconn, node["node_id"], node["status"])[0])
+    if set(_SOURCE_LINK_RE.findall(text)) != kept:
+        return "Mentioned By does not list exactly the documents that keep it"
+    return None
+
+
+def _source_page_drift(wiki_dir: Path, gconn, sid: str) -> bool:
+    """True when a Source page's `items:` tag list differs from the tags the document keeps."""
+    path = Path(wiki_dir) / "Sources" / f"{sid}.md"
+    try:
+        listed = parse_frontmatter(path.read_text(encoding="utf-8")).get("items")
+    except OSError:
+        return False
+    curated = {m["slug"] for m in graph.source_tag_projection(gconn, sid)[0] if m["node_type"] == "item"}
+    return set(listed or []) != curated
+
+
+def _plan_repair(gconn, reviews_dir: Path, wiki_dir: Path | None = None,
+                 policies_dir: Path | None = None) -> dict[str, Any]:
     """What disagrees between the ledgers (the authority) and the graph mirror:
     `missing_keeps` (a keep with no active human link), `interrupted_activations` (a kept tag still a
     candidate — a first keep stopped before activating; resumed with the recorded amendments),
     `interrupted_revivals` (a kept tag still `unused`), `undropped` (an active link of a tag the
     document dropped and does not keep), `orphan_keeps` (an active human link with no keep — e.g. an
     interrupted drop) and `invalid_keeps` (a keep naming a gone/merged tag; not repairable).
+
+    Review round 6 — the derived state every action must leave behind: `stale_status` (an active
+    tag no ledger keeps, or an unused one a ledger keeps — e.g. a drop stopped before the status
+    refresh), `unwithdrawn_blocks` (a blocked tag still suggested — a block stopped after writing
+    the list), `stale_item_pages` / `stale_source_pages` (a page whose status or tag links disagree
+    with the graph — a refresh that never ran).
+
+    Review round 7 — deletion needs a recorded human intent, never an inference: an
+    `interrupted_deletions` entry is a deletion-intent record (`deletion_intents`) whose tag is still
+    deletable (`deletion_blocker`); `cancelled_deletions` is a record whose tag became kept/protected
+    meanwhile (repair drops the record, deletes nothing); `missing_pages` is a live tag with no page
+    and no record — report-only (restore the page from backup; it holds the title and aliases).
 
     Never touched: documents whose ledger is damaged (`skipped_damaged` — their links are left
     exactly as they are) and the nodes of an in-flight merge/split (`deferred` — run apply to
@@ -827,6 +932,10 @@ def _plan_repair(gconn, reviews_dir: Path) -> dict[str, Any]:
         if lg is None or r["dst_id"] not in lg["kept"]:
             plan["orphan_keeps"].append({"source_id": r["src_id"], "node_id": r["dst_id"],
                                          "edge_id": r["edge_id"]})
+    _plan_derived_state(gconn, plan, ledgers, damaged, deferred,
+                        Path(wiki_dir) if wiki_dir else Path(reviews_dir).parent / "wiki",
+                        Path(policies_dir) if policies_dir else Path(reviews_dir).parent / "policies",
+                        Path(reviews_dir))
     # one activation/revival per tag, however many documents keep it
     for k in ("interrupted_activations", "interrupted_revivals"):
         seen: set[str] = set()
@@ -834,11 +943,66 @@ def _plan_repair(gconn, reviews_dir: Path) -> dict[str, Any]:
     return plan
 
 
-def consistency_errors(gconn, reviews_dir: Path) -> list[str]:
+def _plan_derived_state(gconn, plan: dict[str, Any], ledgers: dict[str, Any], damaged: set[str],
+                        deferred, wiki_dir: Path, policies_dir: Path, reviews_dir: Path) -> None:
+    """Fill the review-round-6 categories (see `_plan_repair`). A tag linked from a document whose
+    ledger is damaged is skipped: its keeps are unknown, so its lifecycle cannot be derived."""
+    kept_by_ledger = {nid for lg in ledgers.values() for nid in lg["kept"]}
+    blocked = set(load_blocked(policies_dir))
+    intents = deletion_intents(reviews_dir)
+    for nid, record in sorted(intents.items()):
+        if deferred(nid) or (damaged and any(r["src_id"] in damaged for r in gconn.execute(
+                "SELECT src_id FROM edges WHERE dst_id = ? AND edge_type = 'mentions'", (nid,)))):
+            continue                                      # a damaged ledger may hold a keep of it
+        why = deletion_blocker(gconn, wiki_dir, reviews_dir, nid)
+        if why is None or why == "missing":               # still deletable / only the tail is left
+            plan["interrupted_deletions"].append({"node_id": nid, "reason": record.get("reason"),
+                                                  "slug": record.get("slug"),
+                                                  "node_missing": why == "missing"})
+        else:
+            plan["cancelled_deletions"].append({"node_id": nid, "reason": why})
+    revivals = {x["node_id"] for x in plan["interrupted_revivals"]}
+    for node in graph.nodes_of_type(gconn, "item"):
+        nid, status = node["node_id"], node["status"]
+        if status not in _LINKABLE_STATUSES or deferred(nid):
+            continue
+        if damaged and any(r["src_id"] in damaged for r in gconn.execute(
+                "SELECT src_id FROM edges WHERE dst_id = ? AND edge_type = 'mentions'", (nid,))):
+            continue
+        if status in ("active", "unused") and nid not in revivals:
+            expected = ("active" if nid in kept_by_ledger or graph.is_legacy_tag(gconn, nid, status)
+                        else "unused")
+            if expected != status:
+                plan["stale_status"].append({"node_id": nid, "status": status, "expected": expected})
+        if blocked and _node_keys(wiki_dir, node) & blocked:
+            kept_here = set(graph.kept_sources_for_node(gconn, nid))
+            for r in gconn.execute(
+                    "SELECT edge_id, src_id FROM edges WHERE dst_id = ? AND edge_type = 'mentions' "
+                    "AND asserted_by = 'llm' AND status = 'active' ORDER BY edge_id", (nid,)):
+                if r["src_id"] not in kept_here:
+                    plan["unwithdrawn_blocks"].append({"source_id": r["src_id"], "node_id": nid,
+                                                       "edge_id": r["edge_id"]})
+        page = Path(wiki_dir) / NODE_DIR["item"] / f"{node['slug']}.md"
+        if not page.exists():
+            if nid not in intents:                        # a missing page is NOT a deletion approval
+                plan["missing_pages"].append({"node_id": nid, "status": status, "slug": node["slug"]})
+            continue
+        if (why := _page_drift(wiki_dir, gconn, node)) is not None:
+            plan["stale_item_pages"].append({"node_id": nid, "reason": why})
+    for r in gconn.execute("SELECT node_id FROM nodes WHERE node_type = 'source' ORDER BY node_id"):
+        sid = r["node_id"]
+        if sid in damaged or any(deferred(m["dst_id"]) for m in graph.source_tag_links(gconn, sid)):
+            continue                                      # an in-flight merge/split re-renders it
+        if _source_page_drift(wiki_dir, gconn, sid):
+            plan["stale_source_pages"].append({"source_id": sid})
+
+
+def consistency_errors(gconn, reviews_dir: Path, *, wiki_dir: Path | None = None,
+                       policies_dir: Path | None = None) -> list[str]:
     """Reasons the tag-decision ledgers and the graph disagree (empty == consistent)."""
     errors = [f"{c['source_id']}: tag ledger is damaged ({c['problem']}) — restore it from backup; "
               "its links are left untouched" for c in corrupt_ledgers(reviews_dir)]
-    plan = _plan_repair(gconn, reviews_dir)
+    plan = _plan_repair(gconn, reviews_dir, wiki_dir, policies_dir)
     errors += [f"merge/split {rid} is in flight — run /reviews/apply to finish it before repairing"
                for rid in plan["deferred"]]
     hint = "run scripts/rebuild_tag_links.py"
@@ -854,26 +1018,47 @@ def consistency_errors(gconn, reviews_dir: Path) -> list[str]:
                f"ledger ({hint})" for x in plan["orphan_keeps"]]
     errors += [f"{x['source_id']}: kept tag {x['node_id']} is {x['node_status']}"
                for x in plan["invalid_keeps"]]
+    errors += [f"tag {x['node_id']} is {x['status']} but its keeps make it {x['expected']} — an "
+               f"interrupted keep/drop ({hint})" for x in plan["stale_status"]]
+    errors += [f"{x['source_id']}: blocked tag {x['node_id']} is still suggested (link "
+               f"{x['edge_id']}) — an interrupted block ({hint})" for x in plan["unwithdrawn_blocks"]]
+    errors += [f"tag {x['node_id']}: a deletion ({x['reason']}) was started and did not finish "
+               f"({hint})" for x in plan["interrupted_deletions"]]
+    errors += [f"tag {x['node_id']}: an unfinished deletion no longer applies ({x['reason']}) — its "
+               f"record is stale ({hint})" for x in plan["cancelled_deletions"]]
+    errors += [f"tag {x['node_id']} ({x['status']}) has no page wiki/Items/{x['slug']}.md — restore it "
+               "from backup (repair never deletes a tag because its page is missing)"
+               for x in plan["missing_pages"]]
+    errors += [f"tag {x['node_id']}: {x['reason']} ({hint})" for x in plan["stale_item_pages"]]
+    errors += [f"{x['source_id']}: Source page tag list is stale ({hint})"
+               for x in plan["stale_source_pages"]]
     return errors
 
 
-def repair(gconn, *, reviews_dir: Path, wiki_dir: Path, apply: bool = False,
-           now: str | None = None) -> dict[str, Any]:
+def repair(gconn, *, reviews_dir: Path, wiki_dir: Path, policies_dir: Path | None = None,
+           apply: bool = False, now: str | None = None) -> dict[str, Any]:
     """Make the graph agree with the ledgers (the authority): re-assert missing keeps, finish
     interrupted activations (with the recorded amendments) and revivals, reject active links of
     dropped tags, and reject human links with no keep. Damaged ledgers' documents and in-flight
     merge/split nodes are never touched. Dry run unless `apply`. Returns the plan counts,
-    `skipped_damaged`, `deferred`, `activation_blocked` and `affected_sources`."""
+    `skipped_damaged`, `deferred`, `activation_blocked`, `affected_sources` and `pages_changed`
+    (a tag page was re-rendered or deleted — the caller refreshes `index.md` + the keyword index
+    even when no Source page is affected)."""
     now = now or iso_now()
     wiki_dir, reviews_dir = Path(wiki_dir), Path(reviews_dir)
     with ledger_lock(reviews_dir):
-        plan = _plan_repair(gconn, reviews_dir)
+        plan = _plan_repair(gconn, reviews_dir, wiki_dir, policies_dir)
         summary: dict[str, Any] = {k: len(plan[k]) for k in _PLAN_KEYS}
         summary.update({"skipped_damaged": plan["skipped_damaged"], "deferred": plan["deferred"],
                         "activation_blocked": []})
-        affected = {x["source_id"] for k in _PLAN_KEYS if k != "invalid_keeps" for x in plan[k]}
+        affected = {x["source_id"] for k in _PLAN_KEYS if k not in _REPORT_ONLY for x in plan[k]
+                    if "source_id" in x}
+        for k in ("stale_status", "stale_item_pages", "interrupted_deletions"):
+            for x in plan[k]:                             # their documents' pages may list them
+                affected.update(graph.sources_for_node(gconn, x["node_id"]))
         if not apply:
-            return {"applied": False, **summary, "affected_sources": sorted(affected)}
+            return {"applied": False, **summary, "affected_sources": sorted(affected),
+                    "pages_changed": False}
         nodes: set[str] = set()
         for x in plan["missing_keeps"]:
             graph.upsert_assertion(gconn, src_id=x["source_id"], dst_id=x["node_id"],
@@ -890,14 +1075,47 @@ def repair(gconn, *, reviews_dir: Path, wiki_dir: Path, apply: bool = False,
                 summary["activation_blocked"].append({"node_id": x["node_id"],
                                                       "reason": out.get("reason")})
             affected.update(out.get("affected_sources") or [])
-        for x in plan["interrupted_revivals"]:
+        for x in plan["interrupted_revivals"] + plan["stale_status"] + plan["stale_item_pages"]:
             nodes.add(x["node_id"])
+        for x in plan["unwithdrawn_blocks"]:              # finish the block: withdraw, no drop record
+            graph.set_status(gconn, x["edge_id"], "superseded", now=now)
+            nodes.add(x["node_id"])
+        deleted_any = False
+        for x in plan["interrupted_deletions"]:           # finish the deletion the human started
+            nid = x["node_id"]
+            if not x["node_missing"]:
+                delete_tag(gconn, node_id=nid, wiki_dir=wiki_dir, reviews_dir=reviews_dir,
+                           reason=x["reason"] or "resumed_deletion", now=now)
+            else:                                         # node already gone: only the tail is left
+                page_rel = f"{NODE_DIR['item']}/{x['slug']}.md" if x.get("slug") else None
+                withdrawn = merges._withdraw_b_subjects(reviews_dir, nid, page_rel, now,
+                                                        reason="tag_deleted") if page_rel else []
+                _audit(reviews_dir, nid, "tag-deleted", {"node_id": nid, "reason": x["reason"],
+                                                         "page": page_rel, "resumed": True,
+                                                         "withdrawn": withdrawn}, now)
+                _end_deletion(reviews_dir, nid)
+            deleted_any = True
+            nodes.discard(nid)
+        for x in plan["cancelled_deletions"]:             # kept/protected meanwhile: delete nothing
+            _end_deletion(reviews_dir, x["node_id"])
+        blocked_nodes = {x["node_id"] for x in plan["unwithdrawn_blocks"]}
         for nid in sorted(nodes):
+            node = _item_node(gconn, nid)
+            if node is None:
+                continue
+            if (nid in blocked_nodes and node["status"] == "candidate"
+                    and not graph.sources_for_node(gconn, nid)):
+                delete_tag(gconn, node_id=nid, wiki_dir=wiki_dir, reviews_dir=reviews_dir,
+                           reason="blocked_never_kept", now=now)   # what the block would have done
+                deleted_any = True
+                continue
             _refresh_page(gconn, node_id=nid, wiki_dir=wiki_dir, reviews_dir=reviews_dir, now=now)
-        if any(plan[k] for k in _PLAN_KEYS if k != "invalid_keeps"):
+        pages_changed = deleted_any or bool(nodes) or bool(plan["interrupted_activations"])
+        if any(plan[k] for k in _PLAN_KEYS if k not in _REPORT_ONLY):
             _audit(reviews_dir, f"repair-{uuid.uuid4().hex[:8]}", "tag-links-repaired",
                    {**summary, "affected_sources": sorted(affected)}, now)
-    return {"applied": True, **summary, "affected_sources": sorted(affected)}
+    return {"applied": True, **summary, "affected_sources": sorted(affected),
+            "pages_changed": pages_changed}
 
 
 # --- batch finish ---------------------------------------------------------------------------------

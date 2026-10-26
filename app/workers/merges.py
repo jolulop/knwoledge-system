@@ -206,17 +206,17 @@ def _render_survivor(gconn, *, a: str, na: dict[str, Any], nt: str, aliases: lis
     page = wiki_dir / NODE_DIR[nt] / f"{na['slug']}.md"
     meta = items._read_node_meta(page)
     item_type = (meta or {}).get("item_type") or na.get("item_type")
-    node_sources = graph.sources_for_node(gconn, a)
+    node_sources, suggested = graph.tag_projection(gconn, a, status)
     duplicates = graph.active_duplicates(gconn, a)
     rendered = render_item_page({
         "node_id": a, "item_type": item_type, "title": title,
         "aliases": aliases, "confidence": (meta or {}).get("confidence", "low"),
-        "source_ids": node_sources, "status": status,
+        "source_ids": node_sources, "suggested_ids": suggested, "status": status,
         "duplicates": duplicates,
         "split_from": (meta or {}).get("split_from"),
         "split_review_id": (meta or {}).get("split_review_id"),
         "description": (meta or {}).get("description"),
-    }, labels=items._link_labels(wiki_dir, node_sources, duplicates))
+    }, labels=items._link_labels(wiki_dir, node_sources + suggested, duplicates))
     changed = (not page.exists()) or page.read_text(encoding="utf-8") != rendered
     if changed:
         page.parent.mkdir(parents=True, exist_ok=True)

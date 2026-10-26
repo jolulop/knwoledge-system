@@ -31,6 +31,7 @@ raw/inbox -> scan_inbox -> extract_sources -> generate_wiki
           -> reindex_keyword + rebuild_index
           -> enrich/extract_claims/extract_items/promote/detect_contradictions/generate_synthesis
           -> reindex_keyword + rebuild_index + validate_all
+          -> tag each document: keep / drop / never suggest its suggested tags (ADR-0066)
           -> review decide + dry-run/apply (apply refreshes index + keyword itself) + validate_all
           -> search/query/maintenance/evals
 ```
@@ -350,9 +351,10 @@ knowledge-system/
 | `synthesis` | Higher-level analysis across multiple sources. |
 
 Note: this is the original v0.1 node-type *target*; per the §15 convention the implementation
-annotation is recorded here rather than rewriting the table. All ten types are allowed in the graph
-schema (`app/backend/graph.py` `NODE_TYPES`), but **`query` and `tag` are wiki/navigation surfaces
-only** — no producer upserts them as graph nodes; saved `wiki/Queries/` pages exist without graph
+annotation is recorded here rather than rewriting the table. ADR-0059 replaced `entity`, `concept`,
+`project`, `person` and `organization` with ONE `item` family (classified by `item_type`), so the graph
+schema (`app/backend/graph.py` `NODE_TYPES`) allows six types — `source`, `item`, `claim`, `tag`,
+`query`, `synthesis` — and **`query` and `tag` are wiki/navigation surfaces only** — no producer upserts them as graph nodes; saved `wiki/Queries/` pages exist without graph
 presence by design, and `wiki/Tags/` is a planned-only directory that no producer writes (Tag pages
 are an original planned feature, not implemented or scheduled; tags live on Source pages).
 `app/backend/eligibility.py` treats source/query/tag pages as navigation aids, not answer-eligible
@@ -530,7 +532,7 @@ The system must create review items for:
 | Merge knowledge items | Yes. |
 | Split knowledge item | Yes. |
 | Mark source as duplicate | Yes, except exact SHA duplicate. |
-| Promote candidate knowledge item | Automatic only after the deterministic independent-source gate; otherwise yes. |
+| Promote candidate knowledge item | Always: a suggested tag becomes active only when a human **keeps** it on a document (ADR-0066 — per-document keep/drop; the independent-source auto-promotion gate is retired). |
 | Hide low-quality content | Yes. |
 
 ---

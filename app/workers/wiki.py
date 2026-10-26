@@ -158,6 +158,7 @@ def generate_wiki(
                 # the pure renderer.
                 claims = None
                 items = None
+                suggested_items = None
                 if gconn is not None:
                     claims = [
                         {"claim_id": cid, "title": _claim_label(claims_dir, cid)}
@@ -167,19 +168,27 @@ def generate_wiki(
                         # edge stays active in the graph for raw inspection.
                         if (graph.get_node(gconn, cid) or {}).get("status") != "hidden"
                     ]
-                    # ADR-0059: project the source's mentioned knowledge items; the renderer
-                    # groups them by item_type (sentinel under the QA bucket, never a taxonomy group).
+                    # ADR-0059: project the source's knowledge items; the renderer groups them by
+                    # item_type (sentinel under the QA bucket, never a taxonomy group). ADR-0066 review
+                    # round 6: only the tags the document keeps are its (linked) tags; unkept
+                    # suggestions are listed apart, unlinked.
+                    curated, suggested = graph.source_tag_projection(gconn, source_id)
                     items = [
                         {"target": f"Items/{m['slug']}",
                          "title": _node_title(wiki_dir, "item", m["slug"]),
                          "item_type": m.get("item_type")}
-                        for m in graph.mentions_for_source(gconn, source_id)
-                        if m["node_type"] == "item"
+                        for m in curated if m["node_type"] == "item"
+                    ]
+                    suggested_items = [
+                        {"target": f"Items/{m['slug']}",
+                         "title": _node_title(wiki_dir, "item", m["slug"])}
+                        for m in suggested
                     ]
                 candidate = wiki_render.render_source_page(
                     template, manifest, normalized_markdown,
                     summary_max=summary_max, summary_min=summary_min,
                     enrichment=enrichment, claims=claims, items=items,
+                    suggested_items=suggested_items,
                 )
             except Exception as exc:  # one page's failure must not abort the run
                 errors.append({"source_id": source_id, "error": f"{type(exc).__name__}: {exc}"})

@@ -4,13 +4,20 @@
 Per ADR-0008, ingestion job state lives in a dedicated jobs database, separate from the
 other durable databases under db/ (the LLM cache and the authoritative graph). The keyword
 index is a derived product under indexes/ (ADR-0032 §7). Dependency-free (stdlib sqlite3).
+
+A job recorded `running` holds the vault writer lock (`app/backend/vault_lock.py`, shared) from
+before its row is inserted until `update_job` records a terminal status, so a backup never runs
+while a producer writes (ADR-0039 amendment).
 """
 from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Any
+
+from app.backend import vault_lock
 
 JOB_TYPES = frozenset(
     {"intake_scan", "manifest_create", "duplicate_check", "extract", "generate_wiki",
@@ -23,6 +30,15 @@ JOB_TYPES = frozenset(
 JOB_STATUSES = frozenset(
     {"pending", "running", "succeeded", "failed", "partial", "skipped"}
 )
+_TERMINAL_STATUSES = frozenset({"succeeded", "failed", "partial", "skipped"})
+_JOB_LOCKS: dict[str, Any] = {}                           # job_id -> vault writer-lock handle
+_JOB_LOCKS_GUARD = threading.Lock()
+
+
+def _db_dir(conn: sqlite3.Connection) -> Path | None:
+    """The directory of the connection's database file (None for an in-memory database)."""
+    row = conn.execute("PRAGMA database_list").fetchone()
+    return Path(row[2]).parent if row and row[2] else None
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -79,6 +95,27 @@ def insert_job(
         raise ValueError(f"unknown job_type {job_type!r}; allowed: {sorted(JOB_TYPES)}")
     if status not in JOB_STATUSES:
         raise ValueError(f"unknown job status {status!r}; allowed: {sorted(JOB_STATUSES)}")
+    if status == "running" and (db_dir := _db_dir(conn)) is not None:
+        handle = vault_lock.acquire_shared(db_dir)        # waits while a backup/restore runs
+        with _JOB_LOCKS_GUARD:
+            vault_lock.release(_JOB_LOCKS.pop(job_id, None))
+            _JOB_LOCKS[job_id] = handle
+    try:
+        _insert_row(conn, job_id, job_type, status, source_id, input_path, output_path, created_at,
+                    started_at, finished_at, error_message, warnings, metadata)
+    except BaseException:
+        _release_job_lock(job_id)
+        raise
+
+
+def _release_job_lock(job_id: str) -> None:
+    with _JOB_LOCKS_GUARD:
+        handle = _JOB_LOCKS.pop(job_id, None)
+    vault_lock.release(handle)
+
+
+def _insert_row(conn, job_id, job_type, status, source_id, input_path, output_path, created_at,
+                started_at, finished_at, error_message, warnings, metadata) -> None:
     conn.execute(
         """INSERT INTO jobs (
             job_id, job_type, status, source_id, input_path, output_path,
@@ -115,10 +152,14 @@ def update_job(conn: sqlite3.Connection, job_id: str, **fields: Any) -> None:
             assignments.append(f"{key} = ?")
             values.append(value)
     values.append(job_id)
-    conn.execute(
-        f"UPDATE jobs SET {', '.join(assignments)} WHERE job_id = ?", values
-    )
-    conn.commit()
+    try:
+        conn.execute(
+            f"UPDATE jobs SET {', '.join(assignments)} WHERE job_id = ?", values
+        )
+        conn.commit()
+    finally:
+        if fields.get("status") in _TERMINAL_STATUSES:
+            _release_job_lock(job_id)                     # the job's writes are done
 
 
 def _row_to_job(row: sqlite3.Row) -> dict[str, Any]:

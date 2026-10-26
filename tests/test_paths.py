@@ -36,6 +36,18 @@ def test_safe_child_basename_only(tmp_path):
     assert safe_child(base, "a\\b.md") is None
 
 
+def test_safe_child_rejects_an_in_directory_symlink_that_escapes(tmp_path):
+    base = tmp_path / "base"
+    base.mkdir()
+    outside = tmp_path / "secret.md"
+    outside.write_text("x", encoding="utf-8")
+    (base / "link.md").symlink_to(outside)
+    (base / "inner.md").write_text("y", encoding="utf-8")
+    (base / "ok.md").symlink_to(base / "inner.md")
+    assert safe_child(base, "link.md") is None                       # resolves outside base
+    assert safe_child(base, "ok.md") == (base / "inner.md").resolve()  # an in-base symlink is fine
+
+
 def test_validate_graph_rejects_noncanonical_node_id(tmp_path, capsys):
     import validate_graph as vg
     gdb = tmp_path / "db" / "graph.sqlite"
