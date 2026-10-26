@@ -273,6 +273,24 @@ The items prompt today asks for 3–10 thematic plus up to ~25 named items. The 
   - The user merges it (ADR-0064 merge candidate or human-filed merge), and the merge's alias union
     (ADR-0050) records it as an alias of the survivor.
   - Later extractions of that wording resolve to the survivor automatically.
+- **Alias hygiene** (added 2026-10-26 after UAT round 7, user-approved). Aliases become matching
+  keys here and in the drop filter (decision 3), so a loose alias silently files a later document
+  under the wrong tag. In r7 the model gave *Continual Learning* the aliases "lifelong learning" and
+  "continual pretraining" (found only in bibliography titles), "mortal learning" (a related concept
+  the paper proposes) and "plastic learning" (not in the text at all). Three measures:
+  - **(a) Prompt:** an alias is another name for the *same* thing (acronym, spelling variant,
+    short/long form), used in the body text, never a related or broader/narrower term and never
+    taken only from references. Covered by the items prompt bump of decision 7.
+  - **(b) Code check after extraction:** an alias is kept only if its `merge_key` occurs in the
+    document's non-reference text (the same reference carve-out the prompt uses); dropped aliases
+    are recorded in the artifact's `filtered[]`. It catches invented aliases, not related terms
+    that do occur in the text, so (a) is still needed.
+  - **(c) Document screen:** when keeping a candidate, the aliases field is prefilled with the
+    suggested aliases and editable, so the user can delete wrong ones before they become keys.
+    Editing the aliases of an already-active tag stays deferred (ADR-0058 rename-of-active).
+  - **Unchanged:** a merge still adds the absorbed tag's title and aliases to the survivor
+    (ADR-0050 alias union) — that is how real duplicates teach resolution. (The odd aliases on
+    *Continual Learning* in r7 were partly that union, from a deliberately artificial test merge.)
 - **Rejected alternative:** injecting the vault's tag vocabulary into the prompt. It would catch
   more variants on the first pass, but every new tag would change the prompt, which breaks the
   response cache, re-bills extraction and grows the prompt with the vault.
