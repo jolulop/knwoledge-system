@@ -115,6 +115,20 @@ and the ADR-0062 item-type ranking signal — an undecided suggestion is not a t
 the page prints the **Re-suggest** command `scripts/extract_items.py --force --cache-only <ids>`,
 which replays stored responses only (zero provider calls) and reports a cache miss per document
 instead of calling the model.
+**Suggestions (ADR-0066 part 2).** Extraction suggests at most `ENRICH_ITEMS_CAP` tags per document
+(default 15; the tags it already keeps count toward it, and are never cut), with up to three broad
+*domain* tags first. The cap is applied in code only: changing it restales and re-bills nothing —
+re-cut with `scripts/extract_items.py --force --cache-only`. A suggestion whose folded name matches
+the title or an alias of exactly one active/unused tag links to that tag instead of creating a new
+one; when it matches several, the row offers **use *X*** per matching tag or **keep as new tag**
+(*use X* keeps X here, drops the suggestion and audits `tag-resolved`). An extracted alias is kept
+only when it occurs in the document's text before its reference list. On a first keep the aliases
+field is prefilled, one per line, and replaces the tag's aliases; after that extraction never adds
+aliases to the tag (only a merge does). Extraction never changes a status a human decided: a
+suggestion naming a hidden or retired (approved deprecation, archive, delete) tag is filtered and
+counted, one naming a merged tag links to its survivor. A "use X" that stopped part-way stays under
+**Unfinished choices** on the document screen until you finish or cancel it — repair only reports
+it; cancelling keeps whatever already happened (X stays kept if it was kept).
 A human-added tag rebuilds `wiki/index.md` immediately; its **keyword** rows follow the next
 reindex pass (`/jobs/reindex` or the apply chain) like every other producer's output.
 

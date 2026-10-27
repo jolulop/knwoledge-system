@@ -289,6 +289,22 @@ On each document screen, decide every **Suggested tag** row:
   document's suggestions (links you kept stay). Manage it at `/ui/reviews/tags/blocked`.
 - Leaving a row untouched records nothing. **Pre-select keep for all suggestions** is a two-click
   bulk keep: review the pre-checked rows, then submit.
+- A row noted **matches several existing tags** (ADR-0066 part 2) offers **use *X*** for each
+  matching tag (with its type and how many documents keep it) or **keep as new tag**. *Use X* keeps
+  X on this document and drops the suggestion; pre-select never picks for such a row.
+- On a first keep the **aliases** box is prefilled, one alias per line: delete the wrong ones before
+  submitting (it replaces the tag's aliases; leaving it unchanged records no edit). After that the
+  aliases are yours: re-extraction never adds one back (only a merge adds aliases).
+- If a *use X* stopped part-way (an error or a restart), the row says **unfinished**, or — when the
+  suggestion is already gone — it is listed under **Unfinished choices**. Choose *use X* / *finish*
+  again to complete it, or anything else / *cancel* to abandon it; if X was already kept by then it
+  stays kept, and the result says so (drop it there if you don't want it).
+- A tag you hid or retired (approved deprecation) is never suggested again, and stays hidden/retired;
+  a merged tag's name is suggested as its survivor.
+
+Each document gets at most 15 suggestions (`ENRICH_ITEMS_CAP`; tags it already keeps count toward
+it), broad domain tags first. `extract_items.py` prints the cut, the resolved and ambiguous counts,
+the aliases removed because they don't occur in the body text, and documents with no domain tag.
 
 A **Kept tags** row can be dropped later. Dropping a tag's last keep makes it **unused**: hidden,
 edits intact, revived by keeping it anywhere. Clear them at `/ui/reviews/tags/unused` →
@@ -564,6 +580,11 @@ nothing, and applies nothing.
   a blocked name is never suggested anywhere; kept links survive re-extraction.
 - A Source page links only the tags that document keeps; its unkept suggestions are listed as plain
   text under "Suggested (not reviewed)", and an item page links only the documents that keep it.
+- A document gets at most `ENRICH_ITEMS_CAP` suggestions with domains first; a long form or plural of
+  an existing tag's title/alias links to that tag; a name matching several tags asks (use *X* / keep
+  as new); aliases found only in the references are not kept.
+- After a tag's first keep, re-extraction leaves its aliases exactly as you confirmed them; hidden,
+  retired and merged tags keep their status through re-extraction and `rebuild_tag_links.py`.
 - Review items are decision-only until apply; the dry-run shows the intended scope before apply.
 - Applying approved reviews updates only the governed surfaces and validators still pass.
 - Maintenance jobs complete with reports and never act autonomously on semantic/destructive decisions.

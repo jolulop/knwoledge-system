@@ -45,20 +45,45 @@ _PLURAL_KEEP = ("ss", "us", "is")
 DEFAULT_MAX_ITEMS_PER_KEY = 5
 
 
+def _tokens(text: str) -> list[str]:
+    s = items._normalize_name(unicodedata.normalize("NFKC", text))
+    s = s.replace("&", " and ").replace("'", "").replace("’", "")
+    return _PUNCT.sub(" ", s).split()
+
+
+def _singular(token: str) -> str:
+    if len(token) >= 4 and token.endswith("s") and not token.endswith(_PLURAL_KEEP):
+        return token[:-1]
+    return token
+
+
 def merge_key(text: Any) -> str:
     """The ADR-0064 decision-3 fold: NFKC → `_normalize_name` → `&`→`and`, apostrophes deleted,
     hyphens/other punctuation → space → plural fold on the LAST token only (≥4 chars, not -ss/-us/-is).
     Returns "" for an empty/non-string input (an empty key never matches)."""
     if not isinstance(text, str):
         return ""
-    s = items._normalize_name(unicodedata.normalize("NFKC", text))
-    s = s.replace("&", " and ").replace("'", "").replace("’", "")
-    tokens = _PUNCT.sub(" ", s).split()
+    tokens = _tokens(text)
     if tokens:
-        last = tokens[-1]
-        if len(last) >= 4 and last.endswith("s") and not last.endswith(_PLURAL_KEEP):
-            tokens[-1] = last[:-1]
+        tokens[-1] = _singular(tokens[-1])
     return " ".join(tokens)
+
+
+def fold_text(text: Any) -> str:
+    """A running text folded for phrase search (ADR-0066 P4 alias check): the `merge_key` fold with
+    EVERY token singularised, space-padded so :func:`occurs_in` matches whole tokens only."""
+    if not isinstance(text, str):
+        return " "
+    return " " + " ".join(_singular(t) for t in _tokens(text)) + " "
+
+
+def occurs_in(phrase: Any, folded: str) -> bool:
+    """True when `phrase` occurs in a :func:`fold_text` result — case-, punctuation- and
+    plural-insensitive, on whole tokens. An empty phrase never occurs."""
+    if not isinstance(phrase, str):
+        return False
+    tokens = [_singular(t) for t in _tokens(phrase)]
+    return bool(tokens) and f" {' '.join(tokens)} " in folded
 
 
 def _item_record(wiki_dir: Path, node: dict[str, Any]) -> dict[str, Any] | None:

@@ -54,11 +54,20 @@ NODE_DIR = {
 # --- frontmatter (dependency-free, project subset) --------------------------
 
 
+_QUOTED_ITEMS = re.compile(r'^\s*"[^"]*"\s*(?:,\s*"[^"]*"\s*)*$')
+
+
 def _parse_value(raw: str) -> Any:
     raw = raw.strip()
     if raw.startswith("[") and raw.endswith("]"):
         inner = raw[1:-1].strip()
-        return [] if not inner else [i.strip().strip("\"'") for i in inner.split(",")]
+        if not inner:
+            return []
+        # The renderer double-quotes every item (`_render_tag_list`), so a comma inside one — an
+        # alias like "Bias, Variance" (ADR-0066 P5) — stays one item; unquoted lists split on commas.
+        if _QUOTED_ITEMS.match(inner):
+            return re.findall(r'"([^"]*)"', inner)
+        return [i.strip().strip("\"'") for i in inner.split(",")]
     return raw.strip("\"'")
 
 

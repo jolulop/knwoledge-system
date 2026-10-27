@@ -424,17 +424,29 @@ def _decision_radios(rid: str, *, preselect: str | None = None) -> str:
                          ("reject", "reject"), ("defer", "defer"))))
 
 
-def _link_radios(nid: str, *, kept: bool, preselect: str | None = None) -> str:
+def _link_radios(nid: str, *, kept: bool, preselect: str | None = None,
+                 ambiguous: list[dict[str, Any]] | None = None) -> str:
     """ADR-0066 per-link radios: a suggestion is kept, dropped (this document only) or blocked
-    ("never suggest", vault-wide); a kept link can be dropped. "— leave" records nothing."""
+    ("never suggest", vault-wide); a kept link can be dropped. "— leave" records nothing.
+
+    An ambiguous suggestion (its name matches several existing tags, P3) offers **use X** per
+    matching tag instead of a plain keep, plus **keep as new tag**; pre-select never picks for it."""
     nid = _h(nid)
-    options = ((("", "— leave kept"), ("drop", "drop from this document")) if kept else
-               (("", "— leave undecided"), ("keep", "keep"), ("drop", "drop"),
-                ("block", "never suggest")))
-    default = "keep" if (preselect == "keep" and not kept) else ""
+    if kept:
+        options = (("", "— leave kept"), ("drop", "drop from this document"))
+    elif ambiguous:
+        options = (("", "— leave undecided"),
+                   *((f"use:{m['node_id']}",
+                      f"use {m.get('title')} ({m.get('item_type')}, kept on {m.get('kept_count', 0)})")
+                     for m in ambiguous),
+                   ("keep", "keep as new tag"), ("drop", "drop"), ("block", "never suggest"))
+    else:
+        options = (("", "— leave undecided"), ("keep", "keep"), ("drop", "drop"),
+                   ("block", "never suggest"))
+    default = "keep" if (preselect == "keep" and not kept and not ambiguous) else ""
     return "".join(
-        f"<label><input type='radio' name='link_{nid}' value='{v}'"
-        f"{' checked' if v == default else ''}> {label}</label> " for v, label in options)
+        f"<label><input type='radio' name='link_{nid}' value='{_h(v)}'"
+        f"{' checked' if v == default else ''}> {_h(label)}</label> " for v, label in options)
 
 
 def _amend_inputs(row: dict[str, Any]) -> str:
@@ -446,9 +458,13 @@ def _amend_inputs(row: dict[str, Any]) -> str:
         f"<option value='{t}'>{t}</option>" for t in sorted(taxonomy.ITEM_TYPES)
         if t != taxonomy.UNCLASSIFIED]
     required = " <strong>type required to keep</strong>" if row.get("needs_type") else ""
+    # ADR-0066 P5: the aliases field REPLACES the tag's aliases, prefilled with the current ones,
+    # one per line (a comma-split field would split an alias that contains a comma).
+    aliases = "\n".join(str(a) for a in row.get("aliases") or [])
+    rows = max(2, min(6, len(row.get("aliases") or []) + 1))
     return (f"<input type='text' name='amend_title_{nid}' size='18' placeholder='amended title'> "
-            f"<input type='text' name='amend_aliases_{nid}' size='18' "
-            "placeholder='aliases, comma-sep'> "
+            f"<label>aliases (one per line; delete wrong ones): <textarea name='amend_aliases_{nid}' "
+            f"rows='{rows}' cols='24'>{_h(aliases)}</textarea></label> "
             f"<input type='text' name='amend_description_{nid}' size='24' "
             "placeholder='description'> "
             f"<select name='amend_item_type_{nid}'>" + "".join(options) + "</select>" + required)
@@ -517,7 +533,18 @@ def render_source_screen(data: dict[str, Any]) -> str:
                 notes.append(f"kept on {row['kept_elsewhere']} other document(s)")
             if row.get("node_status") == "unused":
                 notes.append("unused tag — keeping revives it")
-            cell = _link_radios(str(row.get("node_id")), kept=kept, preselect=preselect)
+            if row.get("ambiguous_with"):
+                notes.append("matches several existing tags — choose one, or keep as a new tag")
+            choices = list(row.get("ambiguous_with") or [])
+            if (pending := row.get("pending_use")) and pending.get("chosen"):
+                notes.append(f"unfinished: “use {pending.get('chosen_title')}” started "
+                             f"{pending.get('at')} — choose it again to finish, or another option "
+                             "to cancel it")
+                if all(m.get("node_id") != pending["chosen"] for m in choices):
+                    choices.append({"node_id": pending["chosen"], "title": pending.get("chosen_title"),
+                                    "item_type": "unfinished", "kept_count": "?"})
+            cell = _link_radios(str(row.get("node_id")), kept=kept, preselect=preselect,
+                                ambiguous=choices)
             if not kept and row.get("amendable"):
                 cell += "<br>" + _amend_inputs(row)
             table.append(
@@ -548,6 +575,23 @@ def render_source_screen(data: dict[str, Any]) -> str:
                 table.append(f"<tr style='color:#777'>{info}<td>{_decided_cell(row)}</td></tr>")
         parts.append("<table>" + "".join(table) + "</table>")
 
+    unfinished = data.get("unfinished") or []
+    if unfinished:                                        # part-2 review: interrupted "use X"
+        parts.append(f"<h2>Unfinished choices ({len(unfinished)})</h2>"
+                     "<p>A “use X” choice stopped part-way. Finish it, or cancel it — what already "
+                     "happened stays (if X was kept here, it stays kept until you drop it).</p>")
+        table = ["<tr><th>suggestion</th><th>use</th><th>started</th><th>decision</th></tr>"]
+        for u in unfinished:
+            nid = _h(u.get("node_id"))
+            options = [("", "— leave unfinished")]
+            if u.get("chosen"):
+                options.append((f"use:{u['chosen']}", f"finish: use {u.get('chosen_title')}"))
+            options.append(("cancel", "cancel"))
+            cell = "".join(f"<label><input type='radio' name='link_{nid}' value='{_h(v)}'> "
+                           f"{_h(label)}</label> " for v, label in options)
+            table.append(f"<tr><td>{_h(u.get('name'))}</td><td>{_h(u.get('chosen_title'))}</td>"
+                         f"<td>{_h(u.get('at'))}</td><td>{cell}</td></tr>")
+        parts.append("<table>" + "".join(table) + "</table>")
     _tag_section("Suggested tags", data.get("suggestions") or [], kept=False)
     _tag_section("Kept tags", data.get("kept") or [], kept=True)
     _review_section("Type changes from this source", data.get("retype_items") or [],

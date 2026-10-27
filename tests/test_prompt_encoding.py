@@ -220,7 +220,7 @@ def test_no_builder_leaks_a_raw_closing_tag():
 def test_all_five_prompt_versions_carry_the_encoding_bump():
     assert art.PROMPT_VERSION == "enrich-summary-tags-prompt-v1-enc2"
     assert art.CLAIM_PROMPT_VERSION == "enrich-claims-prompt-v3"
-    assert art.ITEMS_PROMPT_VERSION == "enrich-items-prompt-v3"
+    assert art.ITEMS_PROMPT_VERSION == "enrich-items-prompt-v4"   # + ADR-0066 part 2
     assert art.CONTRADICTION_PROMPT_VERSION == "enrich-contradiction-prompt-v1-enc2"
     assert art.SYNTHESIS_PROMPT_VERSION == "enrich-synthesis-prompt-v1-enc2"
 

@@ -38,6 +38,7 @@ def item_display(item_type: str) -> str:
     return _ITEM_DISPLAY.get(item_type, item_type.replace("_", " ").title())
 
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+QUOTED_ITEMS_RE = re.compile(r'^\s*"[^"]*"\s*(?:,\s*"[^"]*"\s*)*$')
 
 
 def parse_value(raw: str) -> Any:
@@ -46,6 +47,8 @@ def parse_value(raw: str) -> Any:
         inner = raw[1:-1].strip()
         if not inner:
             return []
+        if QUOTED_ITEMS_RE.match(inner):                   # a comma inside a quoted item stays in it
+            return re.findall(r'"([^"]*)"', inner)
         return [item.strip().strip('"\'') for item in inner.split(",")]
     return raw.strip('"\'')
 

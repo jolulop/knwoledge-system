@@ -226,7 +226,7 @@ def test_batch_keep_drop_block_partial_skip(client, tmp_path):
     form = {
         f"link_{nid['Keep Me']}": "keep",
         f"amend_title_{nid['Keep Me']}": "Kept Name",
-        f"amend_aliases_{nid['Keep Me']}": "Alias One, Alias Two",
+        f"amend_aliases_{nid['Keep Me']}": "Alias One\nAlias, Two",   # one per line (ADR-0066 P5)
         f"link_{nid['Drop Me']}": "drop",
         f"link_{nid['Block Me']}": "block",
         f"link_{nid['Untouched']}": "",                         # untouched = records nothing
@@ -247,7 +247,7 @@ def test_batch_keep_drop_block_partial_skip(client, tmp_path):
     finally:
         gconn.close()
     fm = parse_frontmatter((tmp_path / "wiki" / "Items" / "kept-name.md").read_text(encoding="utf-8"))
-    assert fm["aliases"] == ["Alias One", "Alias Two", "Keep Me"] and fm["item_id"] == nid["Keep Me"]
+    assert fm["aliases"] == ["Alias One", "Alias, Two", "Keep Me"] and fm["item_id"] == nid["Keep Me"]
     ledger = tag_links.load_ledger(tmp_path / "reviews", a)
     assert list(ledger["kept"]) == [nid["Keep Me"]]
     assert [d["key"] for d in ledger["drops"]] == ["drop me"]               # only the explicit drop

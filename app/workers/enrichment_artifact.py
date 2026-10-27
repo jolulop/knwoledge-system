@@ -37,7 +37,7 @@ CLAIM_PROMPT_VERSION = "enrich-claims-prompt-v3"
 # full-doc coverage strategy carry over. Each bump makes every prior artifact stale, so the
 # next extract_items run re-extracts opt-in — no --force machinery.
 ITEMS_SCHEMA_VERSION = "enrich-items-v2"      # v2: label renames ai_topic_area / model_family_architecture
-ITEMS_PROMPT_VERSION = "enrich-items-prompt-v3"   # v3: ADR-0061 encoding
+ITEMS_PROMPT_VERSION = "enrich-items-prompt-v4"   # v4: ADR-0066 ≤20 ranked, domains first, naming, strict aliases
 
 # ADR-0056 extraction-strategy identity. The strategy ref is the explicit coverage component
 # of tier-2 identity — composed alongside (never folded into) schema/prompt versions in both

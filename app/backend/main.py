@@ -1394,7 +1394,8 @@ def ui_review_sources() -> HTMLResponse:
     """The source index: every reviewable source in manifest ingest order with counts."""
     data = review_read.source_review_index(
         settings.reviews_dir, graph_db=settings.graph_db_path,
-        wiki_dir=settings.wiki_dir, manifests_dir=settings.manifests_dir)
+        wiki_dir=settings.wiki_dir, manifests_dir=settings.manifests_dir,
+        enrichment_dir=settings.normalized_dir / "enrichment")
     if not data["graph_available"]:
         return _source_flow_unavailable()
     return HTMLResponse(review_html.render_sources_index(data))
@@ -1412,7 +1413,8 @@ def ui_review_source_screen(source_id: str, preselect: str | None = None) -> HTM
             review_html.render_error(404, f"unknown source: {source_id}"), status_code=404)
     data = review_read.source_review_view(
         settings.reviews_dir, source_id, graph_db=settings.graph_db_path,
-        wiki_dir=settings.wiki_dir, manifests_dir=settings.manifests_dir)
+        wiki_dir=settings.wiki_dir, manifests_dir=settings.manifests_dir,
+        enrichment_dir=settings.normalized_dir / "enrichment")
     if data is None:
         return HTMLResponse(
             review_html.render_error(404, f"unknown source: {source_id}"), status_code=404)
@@ -1479,16 +1481,21 @@ _NODE_ID_RE = re.compile(r"^itm_[0-9a-f]{16}$")
 _LINK_ACTIONS = frozenset({"keep", "drop", "block"})
 
 
-def _form_amendments(form: Any, nid: str) -> dict[str, Any]:
+def _form_amendments(form: Any, nid: str, current_aliases: list[str] | None = None) -> dict[str, Any]:
+    """Keep amendments from the per-source form. The aliases textarea (ADR-0066 P5) is one alias per
+    line, prefilled with `current_aliases`: it REPLACES the list (emptying it removes them all), and
+    an unchanged field records no `aliases` amendment."""
     amendments: dict[str, Any] = {}
     title = str(form.get(f"amend_title_{nid}") or "").strip()
-    aliases = str(form.get(f"amend_aliases_{nid}") or "").strip()
     description = str(form.get(f"amend_description_{nid}") or "").strip()
     item_type = str(form.get(f"amend_item_type_{nid}") or "").strip()
     if title:
         amendments["title"] = title
-    if aliases:
-        amendments["aliases"] = [a.strip() for a in aliases.split(",") if a.strip()]
+    if f"amend_aliases_{nid}" in form:
+        aliases = [a.strip() for a in str(form.get(f"amend_aliases_{nid}") or "").splitlines()
+                   if a.strip()]
+        if aliases != [str(a).strip() for a in current_aliases or [] if str(a).strip()]:
+            amendments["aliases"] = aliases
     if description:
         amendments["description"] = description
     if item_type:
@@ -1496,17 +1503,55 @@ def _form_amendments(form: Any, nid: str) -> dict[str, Any]:
     return amendments
 
 
+def _use_choice(action: str, row: dict[str, Any]) -> str | None:
+    """`use:<itm_id>` (ADR-0066 P3) → the chosen tag id when it is one of the row's ambiguous
+    matches as recomputed server-side, or the tag of the row's unfinished "use X" (a retry), else None."""
+    chosen = action[len("use:"):] if action.startswith("use:") else ""
+    allowed = {m["node_id"] for m in row.get("ambiguous_with") or []}
+    allowed |= {(row.get("pending_use") or {}).get("chosen"), row.get("chosen")} - {None}
+    return chosen if _NODE_ID_RE.fullmatch(chosen) and chosen in allowed else None
+
+
+def _pending_rows(view: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """This document's unfinished "use X" operations by suggestion id: its row when still shown,
+    else its unfinished-list entry (part-2 review)."""
+    out = {str(r["node_id"]): r for r in view.get("suggestions") or [] if r.get("pending_use")}
+    out.update({str(u["node_id"]): u for u in view.get("unfinished") or []})
+    return out
+
+
+def _cancel_warnings(cancelled: list[dict[str, Any]]) -> list[str]:
+    return [f"The unfinished “use {c.get('chosen_title') or c.get('chosen')}” for "
+            f"“{c.get('name')}” was cancelled."
+            + (f" {c.get('chosen_title') or c.get('chosen')} stays kept on this document — drop "
+               "it there if you don't want it." if c.get("retained_keep") else "")
+            for c in cancelled]
+
+
 def _apply_link_action(gconn: Any, source_id: str, nid: str, action: str,
-                       amendments: dict[str, Any] | None) -> dict[str, Any]:
-    """One ADR-0066 tag-link action through the `tag_links` primitives (immediate effect)."""
+                       amendments: dict[str, Any] | None, chosen: str | None = None) -> dict[str, Any]:
+    """One ADR-0066 tag-link action through the `tag_links` primitives (immediate effect). Any other
+    decision on a suggestion (or its chosen tag) with an unfinished "use X" cancels that operation;
+    `cancelled` lists it, including whether its keep of X was retained."""
     common = {"wiki_dir": settings.wiki_dir, "reviews_dir": settings.reviews_dir}
+    if action == "use":
+        return tag_links.use_existing(gconn, source_id=source_id, node_id=nid, chosen=chosen or "",
+                                      **common)
+    if action == "cancel":
+        return tag_links.cancel_resolutions(gconn, source_id=source_id, node_ids=[nid],
+                                            reason="cancelled", **common)
     if action == "keep":
-        return tag_links.keep(gconn, source_id=source_id, node_id=nid, amendments=amendments, **common)
-    if action == "drop":
-        return tag_links.drop(gconn, source_id=source_id, node_id=nid, **common)
-    page = review_read._family_page_meta(settings.wiki_dir).get(nid) or {}
-    return tag_links.block(gconn, name=str(page.get("title") or ""),
-                           policies_dir=settings.root / "policies", **common)
+        out = tag_links.keep(gconn, source_id=source_id, node_id=nid, amendments=amendments, **common)
+    elif action == "drop":
+        out = tag_links.drop(gconn, source_id=source_id, node_id=nid, **common)
+    else:
+        page = review_read._family_page_meta(settings.wiki_dir).get(nid) or {}
+        out = tag_links.block(gconn, name=str(page.get("title") or ""),
+                              policies_dir=settings.root / "policies", **common)
+    if out["outcome"] != "blocked":
+        out["cancelled"] = tag_links.cancel_resolutions(
+            gconn, source_id=source_id, node_ids=[nid], reason=action, **common)["cancelled"]
+    return out
 
 
 @app.post("/ui/reviews/sources/{source_id}/decide", response_class=HTMLResponse)
@@ -1524,7 +1569,8 @@ async def ui_review_source_decide(source_id: str, request: Request) -> HTMLRespo
             review_html.render_error(404, f"unknown source: {source_id}"), status_code=404)
     view = review_read.source_review_view(
         settings.reviews_dir, source_id, graph_db=settings.graph_db_path,
-        wiki_dir=settings.wiki_dir, manifests_dir=settings.manifests_dir)
+        wiki_dir=settings.wiki_dir, manifests_dir=settings.manifests_dir,
+        enrichment_dir=settings.normalized_dir / "enrichment")
     if view is None:
         return HTMLResponse(
             review_html.render_error(404, f"unknown source: {source_id}"), status_code=404)
@@ -1532,6 +1578,7 @@ async def ui_review_source_decide(source_id: str, request: Request) -> HTMLRespo
         return _source_flow_unavailable()
     visible = {str(r["review_id"]) for r in (view["retype_items"] + view["retired"])}
     links = {str(r["node_id"]): r for r in (view["suggestions"] + view["kept"])}
+    pending = _pending_rows(view)
     form = await request.form()
     note = str(form.get("note") or "").strip() or f"per-source flow: {source_id}"
     results: list[dict[str, Any]] = []
@@ -1553,17 +1600,30 @@ async def ui_review_source_decide(source_id: str, request: Request) -> HTMLRespo
                 if not _NODE_ID_RE.fullmatch(nid):
                     results.append(row | {"skip_reason": "invalid item id"})
                     continue
-                if nid not in links:
+                target = links.get(nid) or pending.get(nid)
+                if target is None:
                     results.append(row | {"skip_reason": "not_attributable_to_source"})
                     continue
-                row["title"] = links[nid].get("title")
-                if action not in _LINK_ACTIONS or (
-                        links[nid]["kind"] == "kept" and action != "drop"):
+                row["title"] = target.get("title") or target.get("name")
+                kind = target["kind"]
+                chosen = None
+                if action.startswith("use:") and kind in ("suggestion", "unfinished"):
+                    chosen = _use_choice(action, target)
+                    if chosen is None:
+                        results.append(row | {"skip_reason": "not_an_ambiguous_match"})
+                        continue
+                    action = "use"
+                elif action == "cancel" and nid in pending:
+                    pass
+                elif action not in _LINK_ACTIONS or kind == "unfinished" or (
+                        kind == "kept" and action != "drop"):
                     results.append(row | {"skip_reason": f"unknown action: {action}"})
                     continue
-                amendments = _form_amendments(form, nid) if action == "keep" else {}
-                out = _apply_link_action(gconn, source_id, nid, action, amendments or None)
+                amendments = (_form_amendments(form, nid, target.get("aliases"))
+                              if action == "keep" else {})
+                out = _apply_link_action(gconn, source_id, nid, action, amendments or None, chosen)
                 affected.update(out.get("affected_sources") or [])
+                warnings += _cancel_warnings(out.get("cancelled") or [])
                 if out["outcome"] == "blocked":
                     results.append(row | {"skip_reason": out["reason"]})
                 else:
@@ -1605,25 +1665,39 @@ async def ui_review_source_decide(source_id: str, request: Request) -> HTMLRespo
 @app.post("/reviews/sources/{source_id}/links")
 def post_source_link(source_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     """JSON twin of one tag-row decision (ADR-0066), for scripting/curl: `{node_id, action:
-    keep|drop|block, title?, aliases?, description?, item_type?}`. Same scope guard as the form:
-    the node must be a suggestion or kept link on this source's screen."""
+    keep|drop|block|use|cancel, title?, aliases?, description?, item_type?, chosen?}`. `use` resolves
+    an ambiguous suggestion to `chosen`, one of its matching tags (P3) — or retries an unfinished one;
+    `cancel` abandons an unfinished one. Same scope guard as the form: the node must be a suggestion,
+    kept link or unfinished choice on this source's screen."""
     if not manifests.is_source_id(source_id):
         raise HTTPException(status_code=404, detail=f"unknown source: {source_id}")
     nid, action = str(payload.get("node_id") or ""), str(payload.get("action") or "")
     if not _NODE_ID_RE.fullmatch(nid):
         raise HTTPException(status_code=400, detail="invalid item id")
-    if action not in _LINK_ACTIONS:
+    if action not in _LINK_ACTIONS | {"use", "cancel"}:
         raise HTTPException(status_code=400, detail=f"unknown action: {action}")
     view = review_read.source_review_view(
         settings.reviews_dir, source_id, graph_db=settings.graph_db_path,
-        wiki_dir=settings.wiki_dir, manifests_dir=settings.manifests_dir)
+        wiki_dir=settings.wiki_dir, manifests_dir=settings.manifests_dir,
+        enrichment_dir=settings.normalized_dir / "enrichment")
     if view is None:
         raise HTTPException(status_code=404, detail=f"unknown source: {source_id}")
     links = {str(r["node_id"]): r for r in (view["suggestions"] + view["kept"])}
-    if nid not in links:
+    pending = _pending_rows(view)
+    target = links.get(nid) or pending.get(nid)
+    if target is None:
         raise HTTPException(status_code=409, detail="not_attributable_to_source")
-    if links[nid]["kind"] == "kept" and action != "drop":
+    if target["kind"] == "kept" and action != "drop":
         raise HTTPException(status_code=409, detail="already kept (only drop applies)")
+    if action == "cancel" and nid not in pending:
+        raise HTTPException(status_code=409, detail="no_unfinished_choice")
+    if target["kind"] == "unfinished" and action not in ("use", "cancel"):
+        raise HTTPException(status_code=409, detail="unfinished choice (only use or cancel applies)")
+    chosen = None
+    if action == "use":
+        chosen = _use_choice(f"use:{payload.get('chosen') or ''}", target)
+        if chosen is None:
+            raise HTTPException(status_code=409, detail="not_an_ambiguous_match")
     amendments = None
     if action == "keep":
         try:                                              # the shared ADR-0058 rules (400 on violation)
@@ -1635,7 +1709,7 @@ def post_source_link(source_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     if gconn is None:
         raise HTTPException(status_code=503, detail="graph unavailable")
     try:
-        out = _apply_link_action(gconn, source_id, nid, action, amendments)
+        out = _apply_link_action(gconn, source_id, nid, action, amendments, chosen)
     finally:
         gconn.close()
     if out["outcome"] == "blocked":

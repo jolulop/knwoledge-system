@@ -1436,10 +1436,32 @@ def _item_row(item: dict[str, Any], kind: str) -> dict[str, Any]:
     }
 
 
-def _tag_rows(gconn: Any, sid: str, pages: dict[str, dict[str, Any]]) -> tuple[list, list]:
+def _ambiguous_matches(enrichment_dir: Path | None, sid: str) -> dict[str, list[str]]:
+    """ADR-0066 P3: `{suggestion node_id: [existing tag ids]}` from the document's items artifact —
+    the suggestions whose name matched several existing tags at the last extraction."""
+    if enrichment_dir is None:
+        return {}
+    path = Path(enrichment_dir) / f"{sid}.items.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict) or data.get("source_id") != sid:
+        return {}
+    out: dict[str, list[str]] = {}
+    for node in data.get("nodes") or []:
+        if isinstance(node, dict) and isinstance(node.get("node_id"), str) \
+                and isinstance(node.get("ambiguous_with"), list):
+            out[node["node_id"]] = [m for m in node["ambiguous_with"] if isinstance(m, str)]
+    return out
+
+
+def _tag_rows(gconn: Any, sid: str, pages: dict[str, dict[str, Any]],
+              ambiguous: dict[str, list[str]] | None = None) -> tuple[list, list]:
     """ADR-0066: one source's tag links → (suggestion rows, kept rows). An active `human` mention is
     a keep; an active `llm` mention without one is a suggestion; `rejected` links are drops (shown
-    from the ledger's drop records, not here)."""
+    from the ledger's drop records, not here). A suggestion whose name matched several existing
+    tags carries `ambiguous_with` — the choices still live (active/unused), with type and keep count."""
     by_node: dict[str, dict[str, Any]] = {}
     for link in graph.source_tag_links(gconn, sid):
         if link["status"] != "active":
@@ -1466,13 +1488,20 @@ def _tag_rows(gconn: Any, sid: str, pages: dict[str, dict[str, Any]]) -> tuple[l
             "amendable": page.get("status") == "candidate",
             "decidable": True, "status": "kept" if slot["human"] else "pending",
         }
+        if not slot["human"]:
+            row["ambiguous_with"] = [
+                {"node_id": m, "title": (pages.get(m) or {}).get("title") or m,
+                 "item_type": (pages.get(m) or {}).get("item_type"),
+                 "kept_count": len(graph.kept_sources_for_node(gconn, m))}
+                for m in (ambiguous or {}).get(nid, [])
+                if m != nid and (pages.get(m) or {}).get("status") in ("active", "unused")]
         (kept if slot["human"] else suggestions).append(row)
     order = lambda r: (str(r["title"]).lower(), r["node_id"])  # noqa: E731
     return sorted(suggestions, key=order), sorted(kept, key=order)
 
 
 def _source_flow(reviews_dir: Path, *, gconn: Any, wiki_dir: Path | None,
-                 manifests_dir: Path | None) -> dict[str, Any]:
+                 manifests_dir: Path | None, enrichment_dir: Path | None = None) -> dict[str, Any]:
     """Assemble the per-source model once (index + screen slice it): ADR-0058 lens, ADR-0066 rows.
 
     Tag rows come from the source's tag links (`_tag_rows`: suggestions to keep/drop, kept links to
@@ -1512,13 +1541,27 @@ def _source_flow(reviews_dir: Path, *, gconn: Any, wiki_dir: Path | None,
 
     for m in ordered:
         sid = m["source_id"]
-        suggestions, kept = _tag_rows(gconn, sid, pages) if gconn is not None else ([], [])
+        suggestions, kept = (_tag_rows(gconn, sid, pages, _ambiguous_matches(enrichment_dir, sid))
+                             if gconn is not None else ([], []))
         try:
             ledger_drops, ledger_error = tag_links.load_ledger(reviews_dir, sid)["drops"], None
         except tag_links.LedgerCorrupt as exc:           # shown, never treated as "no decisions"
             ledger_drops, ledger_error = [], exc.problem
         dropped = [{"kind": "dropped", "key": d["key"], "name": d.get("name"),
                     "node_id": d.get("item_id"), "at": d.get("at")} for d in ledger_drops]
+        # Part-2 review: an interrupted "use X" stays visible until retried or cancelled — on its
+        # suggestion row while that is still shown, else in the unfinished list.
+        rows_by_id = {r["node_id"]: r for r in suggestions}
+        unfinished: list[dict[str, Any]] = []
+        for rec in tag_links.pending_resolutions(reviews_dir, sid):
+            pending = {"chosen": rec.get("chosen"), "at": rec.get("at"),
+                       "chosen_title": (pages.get(rec.get("chosen") or "") or {}).get("title")
+                       or rec.get("chosen_title") or rec.get("chosen")}
+            if rec["node_id"] in rows_by_id:
+                rows_by_id[rec["node_id"]]["pending_use"] = pending
+            else:
+                unfinished.append({"kind": "unfinished", "node_id": rec["node_id"],
+                                   "name": rec.get("name") or rec["node_id"]} | pending)
         retype_rows = [_item_row(it, "retype")
                        | {"node_id": (it.get("subject") or {}).get("node_id"),
                           "to_item_type": (it.get("subject") or {}).get("to_item_type"),
@@ -1549,13 +1592,13 @@ def _source_flow(reviews_dir: Path, *, gconn: Any, wiki_dir: Path | None,
             "filename": m.get("original_filename"),
             "discovered_at": m.get("discovered_at"),
             "suggestions": suggestions, "kept": kept, "dropped": dropped,
-            "ledger_error": ledger_error,
+            "unfinished": unfinished, "ledger_error": ledger_error,
             # ADR-0066 review round 4: an unfinished merge/split owning one of these tags refuses
             # every tag action here until apply finishes it.
             "in_flight_review_id": identity_journal.operation_for(
                 reviews_dir, [r.get("node_id") for r in suggestions + kept + dropped]),
             "retype_items": retype_rows, "retired": retired,
-            "counts": {"remaining": len(suggestions) + counts.get("pending", 0),
+            "counts": {"remaining": len(suggestions) + len(unfinished) + counts.get("pending", 0),
                        "kept": len(kept), "dropped": len(dropped),
                        "deferred": counts.get("deferred", 0),
                        "added": added_counts.get(sid, 0)},
@@ -1578,13 +1621,22 @@ def _source_flow(reviews_dir: Path, *, gconn: Any, wiki_dir: Path | None,
     }
 
 
+def _enrichment_dir(wiki_dir: Path | None, enrichment_dir: Path | None) -> Path | None:
+    """The items-artifact directory: explicit, else the vault layout next to `wiki/`."""
+    if enrichment_dir is not None:
+        return Path(enrichment_dir)
+    return Path(wiki_dir).parent / "normalized" / "enrichment" if wiki_dir is not None else None
+
+
 def source_review_index(reviews_dir: Path, *, graph_db: Path | None = None,
                         wiki_dir: Path | None = None,
-                        manifests_dir: Path | None = None) -> dict[str, Any]:
+                        manifests_dir: Path | None = None,
+                        enrichment_dir: Path | None = None) -> dict[str, Any]:
     """The source index (entry page): every reviewable source in manifest ingest order with counts."""
     conn = _open_graph_readonly(graph_db)
     try:
-        flow = _source_flow(reviews_dir, gconn=conn, wiki_dir=wiki_dir, manifests_dir=manifests_dir)
+        flow = _source_flow(reviews_dir, gconn=conn, wiki_dir=wiki_dir, manifests_dir=manifests_dir,
+                            enrichment_dir=_enrichment_dir(wiki_dir, enrichment_dir))
     finally:
         if conn is not None:
             conn.close()
@@ -1596,11 +1648,13 @@ def source_review_index(reviews_dir: Path, *, graph_db: Path | None = None,
 
 def source_review_view(reviews_dir: Path, source_id: str, *, graph_db: Path | None = None,
                        wiki_dir: Path | None = None,
-                       manifests_dir: Path | None = None) -> dict[str, Any] | None:
+                       manifests_dir: Path | None = None,
+                       enrichment_dir: Path | None = None) -> dict[str, Any] | None:
     """One source's screen model (rows + position + progress), or None for an unknown source."""
     conn = _open_graph_readonly(graph_db)
     try:
-        flow = _source_flow(reviews_dir, gconn=conn, wiki_dir=wiki_dir, manifests_dir=manifests_dir)
+        flow = _source_flow(reviews_dir, gconn=conn, wiki_dir=wiki_dir, manifests_dir=manifests_dir,
+                            enrichment_dir=_enrichment_dir(wiki_dir, enrichment_dir))
     finally:
         if conn is not None:
             conn.close()

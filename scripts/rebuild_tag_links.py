@@ -60,6 +60,8 @@ def main(argv: list[str]) -> int:
     print(f"  tags with a missing page (not repairable — restore from backup): {out['missing_pages']}")
     print(f"  stale tag pages re-rendered: {out['stale_item_pages']}")
     print(f"  stale Source pages re-rendered: {out['stale_source_pages']}")
+    print(f"  unfinished 'use X' choices (never resumed here — retry or cancel on the document "
+          f"screen): {out['pending_resolutions']}")
     for sid in out["skipped_damaged"]:
         print(f"  SKIPPED {sid}: damaged ledger — its links are left untouched (restore from backup)")
     for rid in out["deferred"]:

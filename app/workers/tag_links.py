@@ -22,6 +22,9 @@ review screen each suggested tag is a **tag link** (the document → item `menti
   dropped this here"). Kept links are never touched; an explicit human-add of a blocked name is
   allowed. Unblocking affects future extractions; the affected documents can be re-suggested with
   a cache-only `scripts/extract_items.py --force --cache-only <source_id>…` (zero provider calls).
+- **use X** — an ambiguous suggestion (its name matches several existing tags, ADR-0066 P3) is
+  resolved to the tag the user chose: keep X here, drop the suggestion, audit `tag-resolved`. A
+  pending record makes an interrupted one visible until the user retries or cancels it.
 
 Every operation here writes immediately (a producer-class act on the document's own links, like
 the ADR-0058 human-add) and returns `affected_sources`; the caller re-renders those Source pages and
@@ -511,6 +514,178 @@ def undo_drop(gconn, *, source_id: str, key: str, wiki_dir: Path, reviews_dir: P
     return {"outcome": "undone", "restored": restored, "affected_sources": [source_id]}
 
 
+RESOLVING_DIR = "resolving"                               # under reviews/tag_links/
+
+
+def _resolving_path(reviews_dir: Path, source_id: str, node_id: str) -> Path:
+    if not is_source_id(source_id) or not _ITEM_ID_RE.fullmatch(str(node_id)):
+        raise ValueError("non-canonical id")              # never build a path from a forged id
+    return Path(reviews_dir) / LEDGER_DIR / RESOLVING_DIR / source_id / f"{node_id}.json"
+
+
+def pending_resolutions(reviews_dir: Path, source_id: str | None = None) -> list[dict[str, Any]]:
+    """The unfinished "use X" operations (part-2 review): `[{source_id, node_id, name, chosen,
+    chosen_title, op_id, at}]`, for one document or all. An unreadable record comes back with
+    `chosen: None` (it can only be cancelled). Nothing resumes them — the document screen shows
+    them until the user retries or cancels."""
+    base = Path(reviews_dir) / LEDGER_DIR / RESOLVING_DIR
+    dirs = [base / source_id] if source_id else (sorted(base.iterdir()) if base.is_dir() else [])
+    out: list[dict[str, Any]] = []
+    for d in dirs:
+        if not d.is_dir() or not is_source_id(d.name):
+            continue
+        for path in sorted(d.glob("*.json")):
+            if not _ITEM_ID_RE.fullmatch(path.stem):
+                continue
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                data = None
+            ok = isinstance(data, dict) and _ITEM_ID_RE.fullmatch(str(data.get("chosen") or ""))
+            out.append({**(data if ok else {}), "source_id": d.name, "node_id": path.stem,
+                        **({} if ok else {"chosen": None})})
+    return out
+
+
+def _write_resolving(reviews_dir: Path, record: dict[str, Any]) -> None:
+    path = _resolving_path(reviews_dir, record["source_id"], record["node_id"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f".tmp-{uuid.uuid4().hex[:8]}")
+    tmp.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _end_resolving(reviews_dir: Path, source_id: str, node_id: str) -> None:
+    path = _resolving_path(reviews_dir, source_id, node_id)
+    path.unlink(missing_ok=True)
+    with contextlib.suppress(OSError):
+        path.parent.rmdir()                               # only when it was the document's last
+
+
+def _audited(reviews_dir: Path, subject_id: str, event: str, op_id: str) -> bool:
+    d = Path(reviews_dir) / "audit_log"
+    for path in sorted(d.glob(f"{subject_id}-{event}-*.json")) if d.is_dir() else []:
+        try:
+            if json.loads(path.read_text(encoding="utf-8")).get("op_id") == op_id:
+                return True
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+            continue
+    return False
+
+
+def _kept_here(gconn, reviews_dir: Path, source_id: str, node_id: str) -> bool:
+    return node_id in load_ledger(reviews_dir, source_id)["kept"] and any(
+        e["asserted_by"] == "human" for e in _active_mention_edges(gconn, source_id, node_id))
+
+
+@ledger_action
+def use_existing(gconn, *, source_id: str, node_id: str, chosen: str, wiki_dir: Path,
+                 reviews_dir: Path, now: str | None = None) -> dict[str, Any]:
+    """Resolve an ambiguous suggestion to the existing tag the user chose (ADR-0066 P3 "Use X").
+
+    Keeps `chosen` on this document (a ledger keep + human link, like a human-add of an existing
+    tag), then drops the suggestion — its drop record carries the suggested name, so re-extraction
+    filters it — and writes one `tag-resolved` audit entry. The keep runs first: keep removes drop
+    records matching the kept tag's names, which the suggestion's record usually shares.
+
+    Part-2 review: a **pending record** (`reviews/tag_links/resolving/<source>/<suggestion>.json`)
+    is written before the first change and removed after the last. An interrupted operation stays
+    visible on the document screen until the user retries (this call again with the same `chosen`:
+    every step that already happened is skipped, so nothing is decided or audited twice) or changes
+    the decision (:func:`cancel_resolutions`). Repair reports it and never resumes it."""
+    now = now or iso_now()
+    wiki_dir, reviews_dir = Path(wiki_dir), Path(reviews_dir)
+    if not _source_ok(gconn, source_id):
+        return _blocked("unknown_source", source_id=source_id)
+    if not _ITEM_ID_RE.fullmatch(str(node_id)) or not _ITEM_ID_RE.fullmatch(str(chosen)) \
+            or chosen == node_id:
+        return _blocked("unknown_item", node_id=node_id, chosen=chosen)
+    pending = next((r for r in pending_resolutions(reviews_dir, source_id)
+                    if r["node_id"] == node_id), None)
+    resume = pending is not None and pending.get("chosen") == chosen
+    suggestion, target = _item_node(gconn, node_id), _item_node(gconn, chosen)
+    if target is None:
+        return _blocked("unknown_item", node_id=node_id, chosen=chosen)
+    if target["status"] not in ("active", "unused"):
+        return _blocked("chosen_not_a_tag", chosen=chosen, node_status=target["status"])
+    if not resume:                                        # a new operation needs a live suggestion
+        if suggestion is None:
+            return _blocked("unknown_item", node_id=node_id, chosen=chosen)
+        if suggestion["status"] not in _LINKABLE_STATUSES:
+            return _blocked("item_not_linkable", node_id=node_id, node_status=suggestion["status"])
+    if (busy := _in_flight(reviews_dir, [node_id, chosen])) is not None:
+        return busy
+    cancelled: list[dict[str, Any]] = []
+    if resume:
+        record = pending
+    else:
+        if pending is not None:                           # a different choice replaces the old one
+            cancelled = cancel_resolutions(gconn, source_id=source_id, node_ids=[node_id],
+                                           reason="use_other", wiki_dir=wiki_dir,
+                                           reviews_dir=reviews_dir, now=now)["cancelled"]
+        record = {"source_id": source_id, "node_id": node_id,
+                  "name": (_node_meta(wiki_dir, suggestion) or {}).get("title") or suggestion["slug"],
+                  "chosen": chosen, "chosen_title": (_node_meta(wiki_dir, target) or {}).get("title"),
+                  "chosen_was_kept": _kept_here(gconn, reviews_dir, source_id, chosen),
+                  "op_id": uuid.uuid4().hex, "at": now}
+        _write_resolving(reviews_dir, record)
+    affected: set[str] = {source_id}
+    effect = "already_kept"
+    if not _kept_here(gconn, reviews_dir, source_id, chosen):
+        kept = keep(gconn, source_id=source_id, node_id=chosen, wiki_dir=wiki_dir,
+                    reviews_dir=reviews_dir, now=now)
+        if kept["outcome"] == "blocked":
+            return kept | {"pending": True}
+        effect = kept["effect"]
+        affected.update(kept["affected_sources"])
+    suggestion = _item_node(gconn, node_id)
+    dropped_here = any(d.get("item_id") == node_id
+                       for d in load_ledger(reviews_dir, source_id)["drops"])
+    suggestion_effect = "already_dropped"
+    if suggestion is not None and not dropped_here:
+        dropped = drop(gconn, source_id=source_id, node_id=node_id, wiki_dir=wiki_dir,
+                       reviews_dir=reviews_dir, now=now)
+        if dropped["outcome"] == "blocked":
+            return dropped | {"pending": True}
+        suggestion_effect = dropped["effect"]
+        affected.update(dropped["affected_sources"])
+    if not _audited(reviews_dir, chosen, "tag-resolved", record["op_id"]):
+        _audit(reviews_dir, chosen, "tag-resolved",
+               {"source_id": source_id, "suggestion": {"node_id": node_id, "name": record.get("name")},
+                "chosen": chosen, "suggestion_effect": suggestion_effect, "op_id": record["op_id"],
+                "resumed": resume}, now)
+    _end_resolving(reviews_dir, source_id, node_id)
+    return {"outcome": "resolved", "effect": effect, "node_id": node_id, "chosen": chosen,
+            "resumed": resume, "cancelled": cancelled, "affected_sources": sorted(affected)}
+
+
+@ledger_action
+def cancel_resolutions(gconn, *, source_id: str, node_ids: Any, reason: str, wiki_dir: Path,
+                       reviews_dir: Path, now: str | None = None) -> dict[str, Any]:
+    """Cancel this document's unfinished "use X" operations that involve any of `node_ids` (as the
+    suggestion or as the chosen tag) — the user decided differently. Whatever already happened
+    stays: a keep of X that ran is an ordinary kept tag, which the result names (`retained_keep`) so
+    the screen can tell the user to drop it if unwanted. Audited `tag-resolve-cancelled`."""
+    now = now or iso_now()
+    reviews_dir = Path(reviews_dir)
+    ids = {str(n) for n in node_ids}
+    cancelled: list[dict[str, Any]] = []
+    for r in pending_resolutions(reviews_dir, source_id):
+        if r["node_id"] not in ids and r.get("chosen") not in ids:
+            continue
+        chosen = r.get("chosen")
+        retained = (bool(chosen) and not r.get("chosen_was_kept")
+                    and _kept_here(gconn, reviews_dir, source_id, chosen))
+        _audit(reviews_dir, chosen or r["node_id"], "tag-resolve-cancelled",
+               {"source_id": source_id, "suggestion": {"node_id": r["node_id"], "name": r.get("name")},
+                "chosen": chosen, "op_id": r.get("op_id"), "reason": reason,
+                "retained_keep": retained}, now)
+        _end_resolving(reviews_dir, source_id, r["node_id"])
+        cancelled.append({"node_id": r["node_id"], "name": r.get("name"), "chosen": chosen,
+                          "chosen_title": r.get("chosen_title"), "retained_keep": retained})
+    return {"outcome": "cancelled", "cancelled": cancelled, "affected_sources": [source_id]}
+
+
 # --- deletion + the unused-tags list ----------------------------------------------------
 
 
@@ -739,8 +914,10 @@ def suggesting_sources(enrichment_dir: Path, key: str) -> list[str]:
         if not (is_source_id(sid) and path.name == f"{sid}.items.json"):
             continue
         names = [n.get("name") for n in data.get("nodes") or [] if isinstance(n, dict)]
-        names += [f.get("name") for f in data.get("filtered") or []
-                  if isinstance(f, dict) and f.get("reason") == "blocked"]
+        blocked_rows = [f for f in data.get("filtered") or []
+                        if isinstance(f, dict) and f.get("reason") == "blocked"]
+        # A suggestion blocked through the tag it resolved to (ADR-0066 P6) is found by that tag.
+        names += [f.get(k) for f in blocked_rows for k in ("name", "resolved_title")]
         if any(tag_key(n) == key for n in names):
             out.append(sid)
     return sorted(set(out))
@@ -822,12 +999,23 @@ def _readable_ledgers(reviews_dir: Path) -> list[dict[str, Any]]:
     return out
 
 
+def kept_anywhere(reviews_dir: Path) -> set[str] | None:
+    """Every tag some document's ledger keeps — the durable first-keep evidence (a keep is written to
+    the ledger before anything else, so an interrupted first keep counts too). None when a ledger is
+    damaged: it may hold a keep, so the caller must assume any tag could be kept. Call it under
+    :func:`ledger_lock` for an answer no keep can overtake."""
+    if corrupt_ledgers(reviews_dir):
+        return None
+    return {nid for lg in all_ledgers(reviews_dir) for nid in lg["kept"]}
+
+
 _PLAN_KEYS = ("missing_keeps", "interrupted_activations", "interrupted_revivals", "undropped",
               "orphan_keeps", "invalid_keeps", "stale_status", "unwithdrawn_blocks",
               "interrupted_deletions", "cancelled_deletions", "missing_pages", "stale_item_pages",
-              "stale_source_pages")
-# Reported, never written by repair: a human (or a restore from backup) resolves them.
-_REPORT_ONLY = frozenset({"invalid_keeps", "missing_pages"})
+              "stale_source_pages", "pending_resolutions")
+# Reported, never written by repair: a human (or a restore from backup) resolves them. An unfinished
+# "use X" is the user's to retry or cancel on the document screen — not an inconsistency.
+_REPORT_ONLY = frozenset({"invalid_keeps", "missing_pages", "pending_resolutions"})
 _SOURCE_LINK_RE = re.compile(r"\[\[Sources/(src_[0-9a-f]{16})[|\]]")
 
 
@@ -889,6 +1077,7 @@ def _plan_repair(gconn, reviews_dir: Path, wiki_dir: Path | None = None,
     plan["skipped_damaged"] = sorted(damaged)
     ops = identity_journal.open_operations(reviews_dir)
     plan["deferred"] = [o["review_id"] for o in ops]
+    plan["pending_resolutions"] = pending_resolutions(reviews_dir)
     all_deferred = any(o["nodes"] is None for o in ops)
     in_flight = {n for o in ops for n in (o["nodes"] or [])}
 
@@ -903,6 +1092,8 @@ def _plan_repair(gconn, reviews_dir: Path, wiki_dir: Path | None = None,
             if deferred(nid):
                 continue
             node = _item_node(gconn, nid)
+            if node is not None and node["status"] == "hidden":
+                continue                                  # a hide keeps its keeps (unhide restores)
             if node is None or node["status"] not in _LINKABLE_STATUSES:
                 plan["invalid_keeps"].append({"source_id": sid, "node_id": nid,
                                               "node_status": (node or {}).get("status") or "missing"})

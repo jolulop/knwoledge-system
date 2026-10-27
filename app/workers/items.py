@@ -54,6 +54,25 @@ _TITLE_RE = re.compile(r'(?m)^title:\s*"(.*)"\s*$')
 # Defensive bounds against adversarial/oversized LLM output (a source is untrusted data).
 _MAX_NAME, _MAX_ALIAS, _MAX_ALIASES, _MAX_ITEMS = 200, 120, 16, 200
 
+# ADR-0066 P1: the default per-document suggestion cap (the `ENRICH_ITEMS_CAP` setting).
+DEFAULT_SUGGESTION_CAP = 15
+_DOMAINS_FIRST = 3                                        # P2: domain suggestions moved to the front
+_RESOLVABLE = frozenset({"active", "unused"})             # P3: tags a suggestion can resolve to
+# Part-2 review: statuses a human decided. Extraction never changes them — a suggestion naming such
+# a tag is filtered (`hidden` / `retired`) or follows a merge to its survivor. A `deprecated_candidate`
+# counts only when the deprecation was approved (the automatic no-mentions tombstone may revive).
+_RETIRED = frozenset({"archive_candidate", "archived", "delete_candidate", "deleted"})
+_MAX_MERGE_HOPS = 8
+
+# ADR-0066 P4: the reference cut. The extracted text has no reliable headings, so the cut is the
+# LAST capitalised standalone marker in the second half of the text that a year or a bracketed
+# number follows within ~200 characters (skips e.g. JSTOR's lower-case "This article references").
+_REFERENCE_MARKER = re.compile(
+    r"(?<![\w-])(?:References|REFERENCES|Bibliography|BIBLIOGRAPHY|Works Cited|WORKS CITED"
+    r"|Literature Cited|LITERATURE CITED)(?![\w-])")
+_REFERENCE_ENTRY = re.compile(r"\b(?:19|20)\d\d\b|\[\d{1,4}\]")
+_REFERENCE_LOOKAHEAD = 200
+
 
 def _normalize_name(name: str) -> str:
     return _WS.sub(" ", name).strip().lower()
@@ -86,6 +105,238 @@ def _clean_aliases(aliases: Any) -> list[str]:
                 if cleaned and cleaned not in out:
                     out.append(cleaned)
     return out[:_MAX_ALIASES]
+
+
+def reference_cut(text: str) -> int | None:
+    """The character offset where the document's reference list starts (ADR-0066 P4), or None —
+    then the whole text counts as body."""
+    cut = None
+    for m in _REFERENCE_MARKER.finditer(text, len(text) // 2):
+        if _REFERENCE_ENTRY.search(text, m.end(), m.end() + _REFERENCE_LOOKAHEAD):
+            cut = m.start()
+    return cut
+
+
+def _body_aliases(aliases: list[str], folded_body: str) -> tuple[list[str], list[str]]:
+    """ADR-0066 decision 8(b): an alias is kept only if it occurs in the non-reference text; the
+    rest are returned separately for the artifact (`aliases_filtered`)."""
+    from app.workers import merge_candidates             # lazy: merge_candidates imports this module
+    kept = [a for a in aliases if merge_candidates.occurs_in(a, folded_body)]
+    return kept, [a for a in aliases if a not in kept]
+
+
+def _page_fm(wiki_dir: Path, node: dict[str, Any]) -> dict[str, Any]:
+    if not graph.is_safe_slug(node.get("slug")):
+        return {}
+    path = Path(wiki_dir) / NODE_DIR["item"] / f"{node['slug']}.md"
+    try:
+        return parse_frontmatter(path.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return {}
+
+
+def decided_status(wiki_dir: Path, node: dict[str, Any]) -> str | None:
+    """`hidden` / `merged` / `retired` when a human decided this tag's lifecycle (hide, merge,
+    approved deprecation, archive/delete), else None. The page's review_status tells an approved
+    deprecation from the automatic no-mentions tombstone."""
+    status = node.get("status")
+    if status == "hidden":
+        return "hidden"
+    if status == "merged":
+        return "merged"
+    if status in _RETIRED:
+        return "retired"
+    if status == "deprecated_candidate" and _page_fm(wiki_dir, node).get("review_status") == "approved":
+        return "retired"
+    return None
+
+
+def _decided_effect(gconn, wiki_dir: Path, node: dict[str, Any]) -> tuple[str, str | None] | None:
+    """What a suggestion naming a decided tag becomes: `("redirected", survivor)` for a merged tag
+    whose (final) survivor is a live tag, else `("hidden", None)` / `("retired", None)`; None when the
+    tag is not decided. The merge redirect follows `merged_into`, never the survivor's aliases."""
+    decision = decided_status(wiki_dir, node)
+    if decision is None:
+        return None
+    for _ in range(_MAX_MERGE_HOPS):
+        if decision != "merged":
+            return (decision, None)
+        target = _page_fm(wiki_dir, node).get("merged_into")
+        node = graph.get_node(gconn, target) if isinstance(target, str) else None
+        if node is None:
+            return ("retired", None)
+        decision = decided_status(wiki_dir, node)
+        if decision is None:
+            return ("redirected", node["node_id"]) if node["status"] in _RESOLVABLE else ("retired", None)
+    return ("retired", None)                              # a merge chain too long (or a cycle)
+
+
+def _resolution_index(gconn, wiki_dir: Path) -> dict[str, Any]:
+    """The tag vocabulary suggestions are matched against, read from the item pages (the title/alias
+    authority):
+    - `keys` — `{merge_key: [node_id…]}` over the titles and aliases of ACTIVE and UNUSED tags (never
+      candidates — one unreviewed suggestion must not attract others), and `titles` — `{node_id: title}`
+      (ADR-0066 P3);
+    - `decided` — `{node_id: (effect, target)}` for every tag a human hid, merged or retired, and
+      `decided_keys` — `{merge_key: [node_id…]}` over their titles and aliases (part-2 review)."""
+    from app.workers import merge_candidates
+    index: dict[str, list[str]] = {}
+    titles: dict[str, str] = {}
+    decided: dict[str, tuple[str, str | None]] = {}
+    decided_keys: dict[str, list[str]] = {}
+    for node in graph.nodes_of_type(gconn, "item"):
+        if node["status"] in _RESOLVABLE:
+            target = index
+        elif (effect := _decided_effect(gconn, wiki_dir, node)) is not None:
+            decided[node["node_id"]] = effect
+            target = decided_keys
+        else:
+            continue
+        rec = merge_candidates._item_record(wiki_dir, node)
+        if rec is None:
+            continue
+        if target is index:
+            titles[rec["node_id"]] = rec["title"]
+        for key in rec["keys"]:
+            target.setdefault(key, []).append(rec["node_id"])
+    return {"keys": {k: sorted(set(v)) for k, v in index.items()}, "titles": titles,
+            "decided": decided, "decided_keys": {k: sorted(set(v)) for k, v in decided_keys.items()}}
+
+
+def _rejected_merge_pairs(reviews_dir: Path) -> set[frozenset[str]]:
+    """Pairs the user decided are distinct (a rejected `merge_items`, ADR-0064): never auto-resolved
+    to each other (ADR-0066 decision 8)."""
+    from app.workers import merge_candidates
+    out: set[frozenset[str]] = set()
+    for state, item in merge_candidates._merge_ledger(reviews_dir):
+        pair = merge_candidates._pair(item) if state == "rejected" else None
+        if pair is not None:
+            out.add(frozenset(pair))
+    return out
+
+
+def _combined_effect(effects: list[tuple[str, Any]]) -> tuple[str, Any] | None:
+    """One outcome for a name several decided tags answer to: hidden wins (the user hid that name),
+    then a single merge survivor, several survivors are ambiguous, else retired."""
+    if not effects:
+        return None
+    if any(kind == "hidden" for kind, _ in effects):
+        return ("hidden", None)
+    targets = sorted({t for kind, t in effects if kind == "redirected"})
+    if len(targets) == 1:
+        return ("redirected", targets[0])
+    return ("ambiguous", targets) if targets else ("retired", None)
+
+
+def plan_suggestions(raw_items: list[Any], *, md: str, gconn, vocab: dict[str, Any],
+                     rejected_pairs: set[frozenset[str]], dropped: tuple[set[str], set[str]],
+                     blocked_keys: set[str], kept_ids: set[str], cap: int) -> dict[str, Any]:
+    """The ADR-0066 P6 suggestion pipeline over the model's ranked list, before any write:
+
+    1. clean each name; keep only aliases that occur in the body text (P4);
+    2. resolve: the exact name wins when it is an active/unused tag; otherwise one `merge_key` match
+       among active/unused tags resolves to it, several (or a rejected merge pair) are ambiguous
+       and stay the suggestion's own candidate with `ambiguous_with` (P3). A suggestion naming a tag a
+       human hid or retired is filtered (`hidden` / `retired`); one naming a merged tag follows the
+       merge to its survivor (`redirected`) — the suggestion's own id first, then, when no live tag
+       answers to the name, the titles and aliases of decided tags (part-2 review);
+    3. filter drops and blocks against the suggested name AND the tag it resolved to;
+    4. move the first three domain suggestions to the front (P2);
+    5. cut at `cap`, counting the tags this document already keeps (they are never cut).
+
+    Returns `{emit, filtered, reference_cut_at, counts}`; `emit` entries carry `node_id` (the target),
+    `name`, `item_type` (as suggested), `aliases`, `aliases_filtered`, `resolution` and, when
+    ambiguous, `ambiguous_with`."""
+    from app.workers import merge_candidates, tag_links
+    cut = reference_cut(md)
+    folded_body = merge_candidates.fold_text(md if cut is None else md[:cut])
+    dropped_keys, dropped_ids = dropped
+    counts = {"dropped": 0, "blocked": 0, "hidden": 0, "retired": 0, "over_cap": 0, "resolved": 0,
+              "redirected": 0, "ambiguous": 0, "aliases_filtered": 0, "domains": 0}
+    filtered: list[dict[str, Any]] = []
+    tag_index, tag_titles, decided = vocab["keys"], vocab["titles"], vocab["decided"]
+
+    def _filter(entry: dict[str, Any], reason: str) -> None:
+        counts[reason] += 1
+        if not any(f["key"] == entry["key"] for f in filtered):
+            row = {"name": entry["name"], "key": entry["key"], "reason": reason}
+            if entry["resolution"] in ("resolved", "redirected"):
+                row["resolved_to"] = entry["node_id"]
+                row["resolved_title"] = tag_titles.get(entry["node_id"])
+            filtered.append(row)
+
+    ranked: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for it in raw_items[:_MAX_ITEMS]:
+        if not isinstance(it, dict):
+            continue
+        name = _WS.sub(" ", str(it.get("name") or "")).strip()[:_MAX_NAME]
+        if not name:
+            continue
+        item_type = it.get("item_type", "")
+        if not taxonomy.is_item_type(item_type):
+            item_type = taxonomy.UNCLASSIFIED
+        counts["domains"] += item_type == "domain"
+        aliases, removed = _body_aliases(_clean_aliases(it.get("aliases", [])), folded_body)
+        counts["aliases_filtered"] += len(removed)
+        own, key = node_id(name), tag_links.tag_key(name)
+        entry: dict[str, Any] = {"name": name, "key": key, "item_type": item_type,
+                                 "aliases": aliases, "aliases_filtered": removed,
+                                 "node_id": own, "resolution": "new"}
+        own_node = graph.get_node(gconn, own)
+        effect = decided.get(own) if own_node is not None else None
+        if own_node is not None and own_node.get("status") in _RESOLVABLE:
+            entry["resolution"] = "exact"
+        elif effect is None:
+            if own_node is not None:
+                entry["resolution"] = "existing"
+            matches = [m for m in tag_index.get(key, []) if m != own]
+            if len(matches) == 1 and frozenset((own, matches[0])) not in rejected_pairs:
+                entry.update(node_id=matches[0], resolution="resolved")
+            elif matches:
+                entry["ambiguous_with"] = matches
+            else:
+                effect = _combined_effect(
+                    [decided[n] for n in vocab["decided_keys"].get(key, []) if n != own and n in decided])
+        if effect is not None:
+            if effect[0] == "redirected":
+                entry.update(node_id=effect[1], resolution="redirected")
+            elif effect[0] == "ambiguous":
+                entry["ambiguous_with"] = effect[1]
+            else:
+                _filter(entry, effect[0])
+                continue
+        target = entry["node_id"]
+        target_key = tag_links.tag_key(tag_titles.get(target)) if target != own else ""
+        if (key in dropped_keys or own in dropped_ids or target in dropped_ids
+                or (target_key and target_key in dropped_keys)):
+            _filter(entry, "dropped")
+            continue
+        if key in blocked_keys or (target_key and target_key in blocked_keys):
+            _filter(entry, "blocked")
+            continue
+        if target in seen:
+            continue
+        seen.add(target)
+        ranked.append(entry)
+
+    domains = [e for e in ranked if e["item_type"] == "domain"][:_DOMAINS_FIRST]
+    ranked = domains + [e for e in ranked if all(e is not d for d in domains)]
+    emit: list[dict[str, Any]] = []
+    slots = max(0, cap - len(kept_ids))
+    for entry in ranked:
+        if entry["node_id"] in kept_ids:                  # already kept here: counted, never cut
+            emit.append(entry)
+        elif slots > 0:
+            slots -= 1
+            emit.append(entry)
+        else:
+            _filter(entry, "over_cap")
+            continue
+        counts["resolved"] += entry["resolution"] == "resolved"
+        counts["redirected"] += entry["resolution"] == "redirected"
+        counts["ambiguous"] += bool(entry.get("ambiguous_with"))
+    return {"emit": emit, "filtered": filtered, "reference_cut_at": cut, "counts": counts}
 
 
 def _union(existing: list[str], new: list[str]) -> list[str]:
@@ -155,6 +406,16 @@ def _recompose_node(gconn, *, node_id, wiki_dir, reviews_dir, now, text_hint=Non
     page_dir = wiki_dir / NODE_DIR[node_type]
     page_path = page_dir / f"{slug}.md"
     existing = _read_node_meta(page_path)
+    # Part-2 review: a decided lifecycle is never re-derived from mentions. A merge tombstone is left
+    # as it is; a hidden or retired tag re-renders at its own status (its suggestion list may change).
+    decision = decided_status(wiki_dir, node)
+    if decision == "merged":
+        return "skipped"
+    if decision is not None:
+        outcome = recompose_semantic_node_page(
+            gconn, node_id=node_id, wiki_dir=wiki_dir, status=node["status"],
+            review_status=(existing or {}).get("review_status") or "approved", now=now)
+        return "written" if outcome == "written" else "skipped"
     new_title = text_hint["title"] if text_hint else None
     new_aliases = text_hint["aliases"] if text_hint else []
     title = (existing["title"] if existing else None) or new_title  # page title is authority
@@ -279,6 +540,7 @@ def extract_items(
     rebuild_index: bool = True,
     record_job: bool = True,
     cache_only: bool = False,
+    cap: int = DEFAULT_SUGGESTION_CAP,
 ) -> dict[str, Any]:
     """Extract candidate knowledge items for pending (or selected) sources; return a summary.
 
@@ -288,7 +550,11 @@ def extract_items(
 
     ``cache_only`` (ADR-0066 Re-suggest): replay stored responses only — zero provider calls, no
     API key needed. Each document replays under the chain member its artifact recorded; a miss
-    leaves the document untouched and is reported in ``cache_miss_sources``."""
+    leaves the document untouched and is reported in ``cache_miss_sources``.
+
+    ``cap`` (ADR-0066 P1, the ``ENRICH_ITEMS_CAP`` setting): at most this many suggestions per
+    document, counting the tags it already keeps — applied by :func:`plan_suggestions` after
+    resolution and filtering. Not in the fingerprint: a cap change restales nothing."""
     root = Path(root).resolve()
     manifests_dir = Path(manifests_dir) if manifests_dir else root / "raw" / "manifests"
     jobs_db = Path(jobs_db) if jobs_db else root / "db" / "jobs.sqlite"
@@ -299,7 +565,9 @@ def extract_items(
     reviews_dir = Path(reviews_dir) if reviews_dir else root / "reviews"
     policies_dir = Path(policies_dir) if policies_dir else root / "policies"
     from app.workers import tag_links                    # lazy: tag_links imports this module
-    blocked_keys = set(tag_links.load_blocked(policies_dir))
+    if not isinstance(cap, int) or cap <= 0:
+        raise ValueError(f"cap must be a positive integer, got {cap!r}")
+    rejected_pairs = _rejected_merge_pairs(reviews_dir)
 
     now = iso_now()
     job_id = f"job_{uuid.uuid4().hex[:16]}"
@@ -314,7 +582,10 @@ def extract_items(
     gconn = graph.connect(graph_db)
 
     strategy_ref = art.items_strategy_ref(input_max_chars)
-    considered = nodes_written = mentions_written = filtered_dropped = filtered_blocked = 0
+    considered = nodes_written = mentions_written = 0
+    plan_totals = {"dropped": 0, "blocked": 0, "hidden": 0, "retired": 0, "over_cap": 0,
+                   "resolved": 0, "redirected": 0, "ambiguous": 0, "aliases_filtered": 0}
+    no_domain_sources: list[str] = []
     skipped_fresh = skipped_not_extracted = skipped_empty = skipped_no_key = 0
     topic_starved_sources: list[str] = []
     unclassified_count = 0
@@ -326,59 +597,51 @@ def extract_items(
     touched: set[str] = set()
     affected: set[str] = set()
 
-    def _emit(sid, md, item_type, name, aliases, source_nodes, seen, dropped, filtered):
-        nonlocal mentions_written, unclassified_count, filtered_dropped, filtered_blocked
-        name = _WS.sub(" ", str(name)).strip()[:_MAX_NAME]
-        if not name:
-            return
-        # ADR-0066: a tag dropped on this document — under any name it had when dropped, or the
-        # id its extracted name derives to (a renamed tag) — or a name blocked vault-wide, is never
-        # re-suggested. Filtered names are recorded in the artifact (unblock's Re-suggest finds them).
-        key = tag_links.tag_key(name)
-        dropped_keys, dropped_ids = dropped
-        reason = ("dropped" if key in dropped_keys or node_id(name) in dropped_ids
-                  else "blocked" if key in blocked_keys else None)
-        if reason is not None:
-            if reason == "dropped":
-                filtered_dropped += 1
-            else:
-                filtered_blocked += 1
-            if not any(f["key"] == key for f in filtered):
-                filtered.append({"name": name, "key": key, "reason": reason})
-            return
-        clean_aliases = _clean_aliases(aliases)
-
-        # One node per canonical referent (ADR-0059 decision 3): the type-neutral id makes the
-        # probe a single lookup. When the model classifies an existing name under a DIFFERENT
+    def _emit(sid, md, entry, source_nodes):
+        """Write one planned suggestion (`plan_suggestions`) as an `llm` mention of its target."""
+        nonlocal mentions_written, unclassified_count
+        nid, name, item_type = entry["node_id"], entry["name"], entry["item_type"]
+        # One node per canonical referent (ADR-0059 decision 3): when the model classifies an
+        # existing tag — by exact name or resolved by key (ADR-0066 P6 step 6) — under a DIFFERENT
         # type, the mention routes to the existing node (its page keeps its item_type — the
-        # authority) and a `change_item_type` review is filed; nothing auto-retypes. The
-        # sentinel never proposes a retype (an unsure classification is not a correction).
-        nid = node_id(name)
+        # authority) and a `change_item_type` review is filed; nothing auto-retypes. The sentinel
+        # never proposes a retype (an unsure classification is not a correction).
         existing = graph.get_node(gconn, nid)
         used_type = (existing.get("item_type") if existing else None) or item_type
         type_conflict = (existing is not None and existing.get("item_type") is not None
                          and item_type != existing["item_type"]
                          and taxonomy.is_production_item_type(item_type))
-        if nid in seen:
-            return
-        seen.add(nid)
         if used_type == taxonomy.UNCLASSIFIED:
             unclassified_count += 1
-
-        slug = _slug(name)
-        graph.upsert_node(gconn, node_id=nid, node_type="item", slug=slug, status="candidate",
-                          item_type=used_type, now=now)
+        if entry["resolution"] not in ("resolved", "redirected"):
+            # A live tag keeps its slug and status (a renamed tag's slug is not the extracted
+            # name's); anything else is (re)created as a candidate. Decided tags never get here.
+            keep_status = existing is not None and existing.get("status") in _RESOLVABLE
+            graph.upsert_node(gconn, node_id=nid, node_type="item",
+                              slug=existing["slug"] if keep_status else _slug(name),
+                              status=existing["status"] if keep_status else "candidate",
+                              item_type=used_type, now=now)
+            # A never-kept suggestion's page unions in this run's (body-checked) aliases. After the
+            # first keep the user owns the list (part-2 review): extraction adds nothing to a live
+            # tag, and a resolved/redirected suggestion adds nothing to its target (merges still
+            # union, ADR-0050).
+            texts[nid] = {"title": name, "aliases": [] if keep_status else entry["aliases"],
+                          "item_type": used_type}
         # Optional evidence anchor when the name is mechanically locatable (Q2).
         span = citations.locate_quote(md, name)
         anchor = {"evidence_source_id": sid, "evidence_char_start": span[0],
                   "evidence_char_end": span[1]} if span else {}
         graph.upsert_assertion(gconn, src_id=sid, dst_id=nid, edge_type="mentions",
                                asserted_by="llm", status="active", job_id=job_id, now=now, **anchor)
-        texts[nid] = {"title": name, "aliases": clean_aliases, "item_type": used_type}
         touched.add(nid)
         mentions_written += 1
-        source_nodes.append({"node_id": nid, "item_type": used_type, "name": name,
-                             "aliases": clean_aliases})
+        row = {"node_id": nid, "item_type": used_type, "name": name, "aliases": entry["aliases"],
+               "resolution": entry["resolution"]}
+        if entry["aliases_filtered"]:
+            row["aliases_filtered"] = entry["aliases_filtered"]
+        if entry.get("ambiguous_with"):
+            row["ambiguous_with"] = entry["ambiguous_with"]
+        source_nodes.append(row)
 
         if type_conflict:
             # Subject keys on the proposed classification change, not just the node (ADR-0051
@@ -485,16 +748,23 @@ def extract_items(
             with tag_links.ledger_lock(reviews_dir):
                 try:
                     dropped = tag_links.drop_filter(reviews_dir, sid)
+                    kept_ids = set(tag_links.load_ledger(reviews_dir, sid)["kept"])
                 except tag_links.LedgerCorrupt as exc:
                     errors.append({"source_id": sid, "error": f"ledger_corrupt: {exc.problem}"})
                     continue
+                blocked_keys = set(tag_links.load_blocked(policies_dir))
+                vocab = _resolution_index(gconn, wiki_dir)
+                plan = plan_suggestions(
+                    result["items"], md=md, gconn=gconn, vocab=vocab, rejected_pairs=rejected_pairs,
+                    dropped=dropped, blocked_keys=blocked_keys, kept_ids=kept_ids, cap=cap)
                 busy = tag_links.source_in_flight(
                     gconn, reviews_dir, sid,
-                    [node_id(str(it.get("name") or "")) for it in result["items"][:_MAX_ITEMS]])
+                    [n for e in plan["emit"] for n in [e["node_id"], *(e.get("ambiguous_with") or [])]]
+                    + [node_id(str(it.get("name") or "")) for it in result["items"][:_MAX_ITEMS]
+                       if isinstance(it, dict)])
                 if busy is not None:                          # nothing written for this document
                     in_flight_sources.append({"source_id": sid, "review_id": busy})
                     continue
-                blocked_keys = set(tag_links.load_blocked(policies_dir))
                 # Parse succeeded: retire the old mentions immediately before emitting replacements
                 # (supersede covers ALL active mentions for the source, so it must precede _emit).
                 affected.update(graph.supersede_mentions_for_source(gconn, sid, now=now))
@@ -503,17 +773,16 @@ def extract_items(
                     gconn, node_id=sid, node_type="source", slug=sid,
                     status=get_status(manifest), now=now)
                 source_nodes: list[dict[str, Any]] = []
-                filtered: list[dict[str, str]] = []
-                seen: set[str] = set()
-                for it in result["items"][:_MAX_ITEMS]:
-                    itype = it.get("item_type", "")
-                    if not taxonomy.is_item_type(itype):
-                        itype = taxonomy.UNCLASSIFIED
-                    _emit(sid, md, itype, it.get("name", ""), it.get("aliases", []), source_nodes, seen,
-                          dropped, filtered)
+                for entry in plan["emit"]:
+                    _emit(sid, md, entry, source_nodes)
+                for k in plan_totals:
+                    plan_totals[k] += plan["counts"][k]
+                if not plan["counts"]["domains"]:
+                    no_domain_sources.append(sid)
 
                 _write_artifact(apath, sid, fingerprint, source_nodes, run_ref, now,
-                                strategy_ref, coverage, filtered)
+                                strategy_ref, coverage, plan["filtered"],
+                                reference_cut_at=plan["reference_cut_at"], cap=cap)
                 nodes_written += len(source_nodes)
                 # ADR-0059: immediate operator feedback for the starvation failure signature (no
                 # thematic topic layer from a substantive source). Artifact/claim state only —
@@ -522,10 +791,22 @@ def extract_items(
                     topic_starved_sources.append(sid)
 
         pages_written = pages_tombstoned = 0
+        aliases_withheld_damaged = 0
         with tag_links.ledger_lock(reviews_dir):          # statuses read + written under the lock
+            # Review round 8 follow-up: alias ownership is decided HERE, at the final write and under
+            # the lock every keep takes — a keep made while this run was buffering (or one that
+            # stopped after its ledger write) must not get the buffered aliases unioned back in.
+            owned = tag_links.kept_anywhere(reviews_dir)
             for nid in touched | affected:
+                hint = texts.get(nid)
+                if hint and hint["aliases"]:
+                    node = graph.get_node(gconn, nid) or {}
+                    if owned is None and node.get("status") == "candidate":
+                        aliases_withheld_damaged += 1     # a damaged ledger may hold its keep
+                    if owned is None or nid in owned or node.get("status") != "candidate":
+                        hint = {**hint, "aliases": []}
                 outcome = _recompose_node(gconn, node_id=nid, wiki_dir=wiki_dir,
-                                          reviews_dir=reviews_dir, now=now, text_hint=texts.get(nid))
+                                          reviews_dir=reviews_dir, now=now, text_hint=hint)
                 pages_written += outcome == "written"
                 pages_tombstoned += outcome == "tombstoned"
 
@@ -548,8 +829,23 @@ def extract_items(
             "topic_starved": len(topic_starved_sources),
             "topic_starved_sources": sorted(topic_starved_sources),
             "unclassified_items": unclassified_count,
-            "suggestions_filtered_dropped": filtered_dropped,
-            "suggestions_filtered_blocked": filtered_blocked,
+            "suggestions_filtered_dropped": plan_totals["dropped"],
+            "suggestions_filtered_blocked": plan_totals["blocked"],
+            # Part-2 review: names of tags a human hid / retired (filtered) or merged (redirected).
+            "suggestions_filtered_hidden": plan_totals["hidden"],
+            "suggestions_filtered_retired": plan_totals["retired"],
+            "suggestions_redirected": plan_totals["redirected"],
+            # ADR-0066 part 2: the cap cut, key resolution, ambiguous matches, the alias check and
+            # documents with no domain suggestion (code never invents one).
+            "suggestion_cap": cap,
+            "suggestions_over_cap": plan_totals["over_cap"],
+            "suggestions_resolved": plan_totals["resolved"],
+            "suggestions_ambiguous": plan_totals["ambiguous"],
+            "aliases_filtered": plan_totals["aliases_filtered"],
+            # Candidates whose new aliases were not added because a damaged ledger may keep them.
+            "aliases_withheld_ledger_damaged": aliases_withheld_damaged,
+            "no_domain": len(no_domain_sources),
+            "no_domain_sources": sorted(no_domain_sources),
             "coverage_truncated": len(coverage_truncated_sources),
             "coverage_truncated_sources": sorted(coverage_truncated_sources),
             "errors": len(errors), "error_details": errors,
@@ -572,7 +868,8 @@ def extract_items(
 
 
 def _write_artifact(apath, sid, fingerprint, source_nodes, model_ref, now,
-                    strategy_ref=None, coverage="full", filtered=None):
+                    strategy_ref=None, coverage="full", filtered=None, *, reference_cut_at=None,
+                    cap=None):
     apath.parent.mkdir(parents=True, exist_ok=True)
     apath.write_text(json.dumps({
         "source_id": sid, "schema_version": art.ITEMS_SCHEMA_VERSION,
@@ -583,6 +880,10 @@ def _write_artifact(apath, sid, fingerprint, source_nodes, model_ref, now,
         "coverage": coverage,
         "input_fingerprint": fingerprint, "generation_status": "enriched",
         "generated_at": now, "nodes": source_nodes,
-        # ADR-0066: names extracted but not suggested (dropped here / blocked vault-wide).
+        # ADR-0066: names extracted but not suggested (dropped here / blocked vault-wide / past the
+        # cap); `cap` is the setting this run cut at (audit only — not part of the fingerprint).
         "filtered": filtered or [],
+        "cap": cap,
+        # ADR-0066 P4: where the reference list starts (aliases must occur before it), or null.
+        "reference_cut_at": reference_cut_at,
     }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

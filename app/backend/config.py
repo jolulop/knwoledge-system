@@ -101,6 +101,10 @@ class Settings:
     # the strategy refs, so changing one restales that pass vault-wide (deliberate, billable).
     enrich_claim_window_chars: int
     enrich_items_input_max_chars: int
+    # ADR-0066 P1: at most this many tag suggestions per document (kept tags count toward it).
+    # Applied in code only — NOT a coverage knob: changing it restales and re-bills nothing; a
+    # `--force --cache-only` Re-suggest re-cuts the stored responses.
+    enrich_items_cap: int
     enrich_local_base_url: str | None
     anthropic_api_key: str | None
     openai_api_key: str | None
@@ -185,6 +189,7 @@ def get_settings(root: Path | None = None) -> Settings:
             cfg("ENRICH_CLAIM_WINDOW_CHARS", "12000"), "ENRICH_CLAIM_WINDOW_CHARS"),
         enrich_items_input_max_chars=_positive_int(
             cfg("ENRICH_ITEMS_INPUT_MAX_CHARS", "300000"), "ENRICH_ITEMS_INPUT_MAX_CHARS"),
+        enrich_items_cap=_positive_int(cfg("ENRICH_ITEMS_CAP", "15"), "ENRICH_ITEMS_CAP"),
         enrich_local_base_url=(cfg("ENRICH_LOCAL_BASE_URL", "") or None),
         anthropic_api_key=(cfg("ANTHROPIC_API_KEY", "") or None),
         openai_api_key=(cfg("OPENAI_API_KEY", "") or None),

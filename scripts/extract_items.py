@@ -7,7 +7,8 @@ Usage:
     uv run python scripts/extract_items.py <source_id>    # one source (repeatable)
     uv run python scripts/extract_items.py --force --cache-only <source_id>…
                                    # ADR-0066 Re-suggest: replay stored responses only — zero
-                                   # provider calls; a cache miss leaves the document untouched
+                                   # provider calls; a cache miss leaves the document untouched.
+                                   # Also re-cuts at a changed ENRICH_ITEMS_CAP (ADR-0066 P1).
 
 Precondition: run scripts/generate_wiki.py first — item pages link to Source pages
 and the Source pages project these mentions, so the Source pages must already exist.
@@ -60,6 +61,7 @@ def main(argv: list[str]) -> int:
         markdown_dir=settings.markdown_dir,
         input_max_chars=settings.enrich_items_input_max_chars,
         cache_only=cache_only,
+        cap=settings.enrich_items_cap,
     )
 
     print("Knowledge-item extraction complete.")
@@ -74,6 +76,23 @@ def main(argv: list[str]) -> int:
     for sid in summary["topic_starved_sources"]:
         print(f"  - {sid}: no thematic topic layer despite named items/claims present")
     print(f"Unclassified items (QA sentinel): {summary['unclassified_items']}")
+    # ADR-0066 part 2: the per-document cap cut, key resolution and the alias check.
+    print(f"Suggestion cap: {summary['suggestion_cap']} per document "
+          f"(cut: {summary['suggestions_over_cap']})")
+    print(f"Resolved to an existing tag: {summary['suggestions_resolved']}  "
+          f"ambiguous (choose on the document screen): {summary['suggestions_ambiguous']}")
+    print(f"Followed a merge to its surviving tag: {summary['suggestions_redirected']}")
+    print(f"Filtered: dropped here {summary['suggestions_filtered_dropped']}, "
+          f"blocked {summary['suggestions_filtered_blocked']}, "
+          f"hidden tag {summary['suggestions_filtered_hidden']}, "
+          f"retired tag {summary['suggestions_filtered_retired']}; "
+          f"aliases not in the body text: {summary['aliases_filtered']}")
+    if summary["aliases_withheld_ledger_damaged"]:
+        print(f"Aliases NOT added to {summary['aliases_withheld_ledger_damaged']} suggested tag(s): a "
+              "damaged tag ledger may keep them — restore it, then re-run")
+    print(f"Documents with no domain suggestion: {summary['no_domain']}")
+    for sid in summary["no_domain_sources"]:
+        print(f"  - {sid}")
     print(f"Coverage-truncated sources: {summary['coverage_truncated']}")  # ADR-0056 cap marker
     for sid in summary["coverage_truncated_sources"]:
         print(f"  - {sid}: document exceeds ENRICH_ITEMS_INPUT_MAX_CHARS, head-truncated")

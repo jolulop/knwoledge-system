@@ -126,7 +126,8 @@ def test_extracts_items_routes_pages_and_writes_mentions(tmp_path):
     assert fm["item_type"] == "method_technique"
     assert parse_frontmatter(acme.read_text(encoding="utf-8"))["item_type"] == "provider_institution"
     assert parse_frontmatter(model.read_text(encoding="utf-8"))["item_type"] == "model"
-    assert "PMI" in pmi.read_text(encoding="utf-8")  # alias rendered
+    # ADR-0066 decision 8(b): "PMI" does not occur in the document text, so it is not an alias.
+    assert "PMI" not in pmi.read_text(encoding="utf-8")
     # ADR-0066 review round 6: an unkept suggestion is listed apart, never linked as Mentioned By.
     assert f"[[Sources/{sid}" not in pmi.read_text(encoding="utf-8")
     assert "## Suggested On" in pmi.read_text(encoding="utf-8")
@@ -257,7 +258,10 @@ def _two_sources(tmp_path):
 
 
 def test_alias_union_across_sources_preserves_both(tmp_path):
-    a, b = _two_sources(tmp_path)
+    _build(tmp_path, extra={"doc2.md": "# Other\n\nA second body that says AliasB.\n",
+                            "doc3.md": "# Third\n\nA third body that says AliasA.\n"})
+    s = _sids(tmp_path)
+    a, b = s["doc3.md"], s["doc2.md"]
     _extract(tmp_path, FakeAdapter(payload=_payload(_item("Shared", aliases=["AliasA"]))), source_ids=[a])
     _extract(tmp_path, FakeAdapter(payload=_payload(_item("Shared", aliases=["AliasB"]))), source_ids=[b])
     page = (tmp_path / "wiki" / "Items" / "shared.md").read_text(encoding="utf-8")
@@ -476,19 +480,24 @@ def test_items_prompt_contract_pinned():
 
     # v2 = the 2026-07-09 UAT label revision (sub_domain -> ai_topic_area,
     # ai_model_family -> model_family_architecture); v3 = the ADR-0061 encoding change (the
-    # builder now entity-escapes the source body). Schema (enum) unchanged since v2.
-    assert art.ITEMS_PROMPT_VERSION == "enrich-items-prompt-v3"
+    # builder now entity-escapes the source body); v4 = ADR-0066 part 2 (one ranked list of at most
+    # 20, domains first, naming style, strict aliases). Schema (enum) unchanged since v2.
+    assert art.ITEMS_PROMPT_VERSION == "enrich-items-prompt-v4"
     assert art.ITEMS_SCHEMA_VERSION == "enrich-items-v2"
     text = prompts._ITEMS_SYSTEM
     assert "UNTRUSTED" in text                                   # untrusted-data framing kept
     # 15-step priority order: every production type appears, numbered 1..15.
     for i, itype in enumerate(taxonomy.PRIORITY_ORDER, start=1):
         assert f"{i}. {itype}" in text
-    # Band guidance by group (thematic 3-10; named up to ~25, salience-worded, never padded).
-    assert "typically 3-10 central items" in text
-    assert "up to ~25" in text
+    # ADR-0066 part 2: one centrality-ranked list with a constant ceiling, 1-3 broad domains
+    # first, the naming style and the strict alias rule (salience-worded, never padded).
+    assert f"at most {prompts.ITEMS_PROMPT_MAX} items" in text and prompts.ITEMS_PROMPT_MAX == 20
+    assert "1-3 broad `domain` items at bookmark-folder" in text
     assert "substantively central" in text
-    assert "Never invent an item or pad to satisfy a count" in text
+    assert "Never invent an item or pad to reach a count" in text
+    assert "in the singular" in text and "no leading article" in text
+    assert "OTHER NAMES FOR THE SAME THING" in text
+    assert "Never a related, broader or narrower term" in text
     # People / publication / bibliography / host-document exclusions.
     assert "never return a person" in text
     assert "books are never items" in text
@@ -540,9 +549,13 @@ def test_within_cap_document_marked_coverage_full(tmp_path):
         art.items_artifact_path(tmp_path / "normalized" / "enrichment", sid).read_text())
     assert artifact["coverage"] == "full"
     assert artifact["strategy_ref"] == "full-doc-v1:300000"
-    # Artifact node entries are {node_id, item_type, name, aliases} — no node_type.
+    # Artifact node entries are {node_id, item_type, name, aliases, resolution} (+ aliases_filtered
+    # when the alias check removed one) — no node_type.
     node = artifact["nodes"][0]
-    assert set(node) == {"node_id", "item_type", "name", "aliases"}
+    assert set(node) == {"node_id", "item_type", "name", "aliases", "resolution",
+                         "aliases_filtered"}
+    assert node["resolution"] == "new" and node["aliases_filtered"] == ["PMI"]
+    assert artifact["cap"] == items.DEFAULT_SUGGESTION_CAP and artifact["reference_cut_at"] is None
 
 
 def test_input_cap_change_restales_the_pass(tmp_path):

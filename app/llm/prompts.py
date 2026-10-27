@@ -187,6 +187,10 @@ ITEMS_SCHEMA: dict[str, Any] = {
 # suppressed by the noise boundary). The elicitation contract, noise boundaries, and
 # never-invent rules of ADR-0055/0056 carry over. Bump ITEMS_PROMPT_VERSION whenever this
 # text changes.
+# ADR-0066 P1: the prompt's ceiling is a constant (changing it is a prompt-version bump); the
+# per-document suggestion CAP is a setting applied only in code (`items.extract_items`), so tuning
+# it never changes this text, the response-cache key or the freshness fingerprint.
+ITEMS_PROMPT_MAX = 20
 _ITEMS_SYSTEM = (
     "You identify the knowledge items a source document is about — classified by the ROLE "
     "each plays as a knowledge object, never by grammatical or named-entity type — and "
@@ -230,27 +234,32 @@ _ITEMS_SYSTEM = (
     "If an item clearly belongs in the knowledge base but genuinely fits none of the 15 "
     "types, use `unclassified_review_required` — a rare QA escape hatch for human review, "
     "never a normal category; never use it to avoid choosing between two plausible types.\n\n"
-    "How many: for the thematic types (domain, ai_topic_area, problem_risk, use_case, "
-    "method_technique, architecture_pattern, technology_capability, "
-    "model_family_architecture, governance_regulation) return typically 3-10 central items "
-    "for substantive prose; for "
-    "the named/concrete types (model, product_tool_platform, data_ontology_asset, "
-    "standard_protocol_interface, infrastructure_hardware, provider_institution) include "
-    "one only when it is substantively central — discussed in the body, performing an "
-    "action, affected, compared, evaluated, or quoted — usually fewer, up to ~25. "
-    "Most-central first. Never invent an item or pad to satisfy a count; fewer is always "
-    "acceptable. An empty list is acceptable only when the document genuinely has no "
-    "durable knowledge content (a receipt, OCR noise, a raw table dump, a very short "
-    "administrative record). Items may be abstractions over the text and need not appear "
-    "verbatim, but they must be supported by the document's content.\n\n"
+    "How many, and in what order (ADR-0066): return ONE list ranked by centrality, at most "
+    f"{ITEMS_PROMPT_MAX} items in total. Begin with 1-3 broad `domain` items at bookmark-folder "
+    "level — the top-level subject a reader would file this document under (e.g. AI, Business, "
+    "Health, Philosophy, Finance, Software). Then the most central items of any other type, most "
+    "central first. A named/concrete item (model, product_tool_platform, data_ontology_asset, "
+    "standard_protocol_interface, infrastructure_hardware, provider_institution) belongs in the "
+    "list only when it is substantively central — discussed in the body, performing an action, "
+    "affected, compared, evaluated, or quoted — never merely mentioned. Never invent an item or "
+    "pad to reach a count; fewer is always acceptable. An empty list is acceptable only when the "
+    "document genuinely has no durable knowledge content (a receipt, OCR noise, a raw table dump, "
+    "a very short administrative record). Items may be abstractions over the text and need not "
+    "appear verbatim, but they must be supported by the document's content.\n\n"
+    "Naming: name each item in the singular, in its common short form or acronym when that is "
+    "how the field names it (\"LLM\", \"NLP\"), with no leading article and no qualifiers "
+    "(\"Knowledge Graph\", not \"The enterprise knowledge graphs of this paper\").\n\n"
     "Exclusions: PEOPLE are provenance/metadata, never knowledge items — never return a "
     "person, regardless of how central they are. Named publications, papers, reports, and "
     "books are never items (a publication enters the knowledge base only as an ingested "
     "source), and the document you are reading is never an item itself. Exclude names that "
     "appear only in references, citations, bibliographies, footnotes, bylines, author "
     "lists, affiliations, acknowledgments, or publisher metadata.\n\n"
-    "For each item, give an `aliases` list of synonyms/abbreviations actually used in the "
-    "document (empty list if none). Do not invent items not supported by the document."
+    "Aliases: for each item, give an `aliases` list of OTHER NAMES FOR THE SAME THING — its "
+    "acronym or expansion, a spelling variant, a short or long form — that the document's body "
+    "text actually uses. Never a related, broader or narrower term, and never a name found only "
+    "in the references or bibliography. Use an empty list when there is none. Do not invent "
+    "items not supported by the document."
 )
 
 

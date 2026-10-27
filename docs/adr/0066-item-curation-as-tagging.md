@@ -3,8 +3,10 @@
 - **Status:** accepted — design-locked by grill-phase 2026-10-24. **Part 1 implemented
   2026-10-25** (decisions 1–5 plus the decision 4 merge/split rules; see "Implementation — part 1"
   at the end), hardened by **review rounds 2–7** (2026-10-25/27); round 2 also brought
-  **decision 9** forward. Decisions 6–8, 10 and 11 are not implemented; **part 2 (decisions 7–8)
-  design-locked by grill-phase 2026-10-27** (see "Part 2 — implementation decisions"). Item
+  **decision 9** forward. **Part 2 (decisions 7–8) design-locked by grill-phase 2026-10-27 and
+  implemented 2026-10-27** (see "Part 2 — implementation decisions" and "Implementation — part 2"),
+  hardened by **review round 8** (user authority over aliases and lifecycle; unfinished "use X").
+  Decisions 6, 10 and 11 are not implemented. Item
   consolidation Part B ("Slice A" of the post-UAT-r6 plan); follows ADR-0064 (Part A). **Review
   round 1 applied 2026-10-24** (see the section at the end): durable keep ledger, merge/split and
   unused-status rules, ambiguous-match path, sentinel gate, confirmed-vs-suggested metadata, the
@@ -724,3 +726,159 @@ introduced by the round 6 recovery code.
 Tests: a hand-deleted page is reported and nothing is deleted; an interrupted Delete unused resumes
 from its record; a record whose tag was kept meanwhile is dropped without deleting; a repair that
 re-renders only an unused tag's page still refreshes the indexes.
+
+## Implementation — part 2 (2026-10-27)
+
+Decisions 7–8 as resolved by P1–P7.
+
+**Code:**
+- `app/llm/prompts.py`: the items prompt asks for one centrality-ranked list of at most
+  `ITEMS_PROMPT_MAX = 20`, 1–3 broad domains first, the naming style and the strict alias rule.
+  `ITEMS_PROMPT_VERSION` is now `enrich-items-prompt-v4` (the schema is unchanged).
+- `app/workers/items.py`:
+  - `plan_suggestions` runs the P6 pipeline before any write;
+  - `reference_cut` is P4;
+  - `_resolution_index` reads active/unused tags' titles and aliases from their pages;
+  - `_rejected_merge_pairs` reads rejected `merge_items`.
+  - `extract_items(cap=…)` takes the setting. The artifact gains per-node `resolution`
+    (`new`/`existing`/`exact`/`resolved`), `aliases_filtered` and `ambiguous_with`, plus top-level
+    `cap` and `reference_cut_at`. `filtered[]` gains `over_cap`, and a row filtered through its
+    resolved tag carries `resolved_to`/`resolved_title`.
+  - New job counters: `suggestion_cap`, `suggestions_over_cap`, `suggestions_resolved`,
+    `suggestions_ambiguous`, `aliases_filtered`, `no_domain`/`no_domain_sources`.
+- `app/workers/merge_candidates.py`: `fold_text`/`occurs_in`, the same fold as `merge_key` applied
+  to running text with every token singularised.
+- `app/workers/tag_links.py`:
+  - `use_existing` is **Use X**: keep X, then drop the suggestion, then a `tag-resolved` audit
+    entry. The keep runs first because a keep clears drop records matching the kept tag's names.
+  - `suggesting_sources` also finds a row blocked through its resolved tag.
+- **Screen:**
+  - `review_read` reads `ambiguous_with` from the items artifact. It shows only choices that are
+    still active/unused, with their type and keep count.
+  - `review_html` renders **use *X*** / **keep as new tag**, and the one-alias-per-line textarea
+    prefilled with the current aliases.
+  - `main.py` accepts `use:<itm_id>` on the form and `{action: "use", chosen}` on the JSON route,
+    checked server-side against the row's matches (otherwise `not_an_ambiguous_match`). An
+    unchanged alias field records no amendment.
+- **Setting:** `ENRICH_ITEMS_CAP` (default 15, `Settings.enrich_items_cap`). `scripts/extract_items.py`
+  passes it and prints the new counters.
+
+Implementation choices not spelled out above:
+- **Resolved suggestions add nothing to the tag:** a resolved suggestion's aliases are not unioned
+  into the tag it resolved to; only merges teach aliases (decision 8). (Exact-name suggestions of a
+  live tag first kept the additive union; review round 8 below stopped that.)
+- **A live tag keeps its slug and status on re-extraction.** An exact-name suggestion of an
+  active/unused tag no longer rewrites the graph slug from the extracted name. Before this fix, a
+  tag renamed by a keep amendment could get a second page under its original slug. Its status is
+  also no longer briefly set to `candidate`, so a later document in the same run still resolves to
+  it.
+- **Domains** are judged by the model's suggested type; the cut counts each emitted non-kept row,
+  ambiguous ones included.
+- **Frontmatter lists:** the page parsers (`wiki_render._parse_value`, `rebuild_index.parse_value`)
+  now keep a comma inside a double-quoted list item. Before, an alias such as "Bias, Variance" was
+  split into two on the next read, which P5 relies on not happening.
+
+**Tests:** `tests/test_tag_suggestions.py` (new, 20 tests): the reference cut, the fold, the
+alias check, domains first, the cap (kept tags count, cache-only re-cut, no restale), resolution
+(title/alias, candidates excluded, exact wins), ambiguity and Use X (form and JSON), rejected
+merge pairs, drop/block through the resolved tag, the resolved type conflict, and the prefilled
+alias field, and the renamed-tag slug fix. The items, prompt-encoding and source-flow tests were
+updated to the new contract.
+
+**Rollout (P7):** existing artifacts are stale under the prompt bump, so the next
+`extract_items.py` run re-extracts and bills every document. Kept links and drops survive.
+
+## Review round 8 (2026-10-27) — the user's decisions outrank re-extraction
+
+Architecture review of the uncommitted part 2; all answers user-approved.
+
+**Blocking 1 — aliases are the user's after the first keep.** Extraction unioned the body-checked
+aliases of an exact-name suggestion into the tag's page, so an alias the user deleted on keep came
+back with the next document that used it.
+- **Now:** extraction adds aliases only to a tag nobody has kept yet (a candidate). It adds nothing
+  to an active, unused, hidden, merged or retired tag, and proposes nothing (no review item). The
+  document's artifact still records what the model proposed, as evidence only.
+- A deleted alias therefore cannot come back, and cannot redirect a later suggestion: matching is
+  built from the pages.
+- **Unchanged:** a merge still unions the absorbed tag's names into the survivor (ADR-0050) — that is
+  a human approval.
+- **Follow-up (same day):** the first version checked ownership when extraction buffered a
+  suggestion, but the pages are written at the end of the run. A keep landing in between (the
+  user editing while a run is going), or a first keep that stopped after its ledger write (the tag
+  still `candidate`), got the buffered aliases unioned in — repair then activated the tag with them.
+  **Ownership is now decided at the final page write, under the ledger lock** every keep takes:
+  extraction adds buffered aliases only to a tag that is still `candidate` **and kept by no
+  document's ledger** (`tag_links.kept_anywhere`; the ledger keep is written first, so it is durable
+  first-keep evidence, an interrupted keep included). The aliases on the page at that moment are the
+  confirmed list. A damaged ledger may hold a keep, so while one exists no buffered alias is added to
+  any candidate (`aliases_withheld_ledger_damaged`, printed by `extract_items.py`).
+
+**Blocking 2 — extraction undid lifecycle decisions.** Extraction rewrote any existing tag that was
+not active/unused to `candidate` (the graph upsert in `_emit` and the page status in
+`_recompose_node`); repair then read "a ledger keeps a candidate" as an interrupted keep and
+activated it. That turned *hidden → candidate → active*, and the same path undid approved
+deprecations and merge tombstones. (The bug predates part 2.)
+- **Decided statuses** (`items.decided_status`): `hidden`; `merged`; `archive_candidate`,
+  `archived`, `delete_candidate`, `deleted`; and `deprecated_candidate` **only** when the page's
+  `review_status` is `approved`. The automatic no-mentions tombstone (`deprecated_candidate`,
+  pending) and `stale_candidate` may still revive (ADR-0057).
+- **A suggestion naming a decided tag** — by its own id first, then (when no live tag answers to the
+  name) by the decided tags' titles and aliases:
+  - hidden → filtered silently, counted (`filtered[]` reason `hidden`,
+    `suggestions_filtered_hidden`);
+  - approved deprecation / archive / delete → filtered (`retired`, `suggestions_filtered_retired`);
+  - merged → follows `merged_into` (up to 8 hops) to the survivor, **independently of the
+    survivor's current aliases** — removing an alias stops ordinary matching, it does not revoke the
+    merge (`resolution: redirected`, `suggestions_redirected`). A hidden survivor filters the
+    suggestion; a retired or missing one counts as `retired`.
+  - Several decided tags behind one name: hidden wins, then a single survivor; several survivors
+    leave the suggestion ambiguous.
+- `_recompose_node` never re-derives a decided status: a merge tombstone is left as it is, a hidden or
+  retired tag re-renders at its own status and review_status (its suggestion list may change).
+- **Repair** leaves the keeps of a hidden tag alone (they are kept for unhide) instead of reporting
+  them as invalid keeps; it never treats a decided tag as an interrupted keep.
+
+**Non-blocking — an interrupted "use X" stays visibly pending.**
+- `use_existing` writes a pending record `reviews/tag_links/resolving/<source>/<suggestion>.json`
+  (`{source_id, node_id, name, chosen, chosen_title, chosen_was_kept, op_id, at}`) before its first
+  change and removes it after its last: record → keep X → drop the suggestion → `tag-resolved` audit
+  (carrying `op_id`) → remove the record.
+- **Retry** (the same choice again) skips every step already done: the keep when X is already kept
+  here, the drop when the suggestion's drop record exists or the suggestion was deleted, the audit
+  when one with that `op_id` exists. Nothing is decided or audited twice.
+- **Shown** on the document screen: on the suggestion row while it is still there ("unfinished:
+  use X started …"), otherwise in an **Unfinished choices** list with *finish* / *cancel*. The JSON
+  route takes `{action: "cancel"}`, and `use` accepts the pending choice as a retry.
+- **Changing the decision** — another option on that row, a different *use Y*, a drop of X, or
+  *cancel* — cancels it (`tag_links.cancel_resolutions`, audited `tag-resolve-cancelled` with
+  `retained_keep`). What already happened stays: if the operation kept X here, X stays an ordinary
+  kept tag and the result says so, so the user can drop it explicitly.
+- **Repair** reports pending records (`pending_resolutions`, report-only; `rebuild_tag_links.py`
+  prints them) and never resumes them. They are not validation errors: each primitive is complete.
+  (Repair still completes a keep that itself stopped half-way — that is the keep's own recovery,
+  not the use-X operation.)
+
+**Non-blocking — the vocabulary scan.** `_resolution_index` reads every live and decided tag's page
+once per document, under the ledger lock. Measured on a synthetic vault (WSL2, warm page cache):
+
+| tags (live + decided) | per document (lock held) | over 600 documents |
+|---|---|---|
+| 500 + 50 | 12 ms | 7 s |
+| 2,000 + 200 | 51 ms | 31 s |
+| 5,000 + 500 | 135 ms | 81 s |
+
+At the expected scale (hundreds to ~2,000 tags) a UI action waits at most ~50 ms, and the scan is a
+small fraction of a billed extraction (one model call per document). No cache now; if the
+vocabulary passes ~3,000 tags, cache the index per job and invalidate it with a counter that every
+tag action bumps.
+
+**Tests:** `tests/test_tag_authority.py` (14): the alias freeze (re-extraction while active and
+while unused; no review item filed; a deleted alias no longer matches; a keep landing between the
+buffering and the final write; an interrupted first keep, then repair; a damaged ledger withholds); a hidden tag through
+extraction (own name and a plural variant) and repair; an approved deprecation through extraction;
+the merge redirect without the survivor's alias, and a hidden survivor; "use X" interrupted after
+each durable step (record, keep, drop, audit) — pending on the screen, reported and not resumed by
+repair, finished by the retry with exactly one `tag-resolved`, `tag-kept` and `tag-dropped`; a
+different decision cancels it and keeps X visibly; cancel after the suggestion is gone; a comma
+inside an alias round-trips through both frontmatter parsers. The decided-status and alias-ownership
+tests fail without their fixes.
