@@ -3,7 +3,8 @@
 - **Status:** accepted — design-locked by grill-phase 2026-10-24. **Part 1 implemented
   2026-10-25** (decisions 1–5 plus the decision 4 merge/split rules; see "Implementation — part 1"
   at the end), hardened by **review rounds 2–7** (2026-10-25/27); round 2 also brought
-  **decision 9** forward. Decisions 6–8, 10 and 11 are not implemented. Item
+  **decision 9** forward. Decisions 6–8, 10 and 11 are not implemented; **part 2 (decisions 7–8)
+  design-locked by grill-phase 2026-10-27** (see "Part 2 — implementation decisions"). Item
   consolidation Part B ("Slice A" of the post-UAT-r6 plan); follows ADR-0064 (Part A). **Review
   round 1 applied 2026-10-24** (see the section at the end): durable keep ledger, merge/split and
   unused-status rules, ambiguous-match path, sentinel gate, confirmed-vs-suggested metadata, the
@@ -361,6 +362,90 @@ Slice A targets:
   user already keeps (decision 8). The user expects that too.
 - **Known golden-list miss:** "University" as the provider of *Climbing towards NLU* names no
   extractable publisher.
+
+## Part 2 — implementation decisions (grill-phase 2026-10-27)
+
+Decisions 7 and 8 left seven implementation questions open. All seven were resolved with the user.
+
+**P1. Prompt ceiling vs cap setting.** The items prompt asks for a centrality-ranked list of **at
+most 20** — a prompt constant (changing it is a prompt-version bump). The **cap setting** (default
+**15**) is applied only in code. It is not in the prompt and not in the freshness fingerprint. So
+changing the cap restales nothing and re-bills nothing: a `--cache-only` Re-suggest replays the
+stored responses and re-cuts them. Names past the cut are recorded in the artifact's `filtered[]`
+with reason `over_cap`. The prompt-cache key hashes the prompt text (`app/llm/cache.py`), which is
+why the setting is kept out of it.
+
+**P2. Domains first.** The prompt asks first for 1–3 broad domain tags at bookmark-folder level,
+with examples (AI, Business, Health, Philosophy, Finance, Software). Only the prompt can judge
+"broad": in UAT r7 the model also typed narrow areas as `domain`. Code moves the **first three**
+`domain`-typed suggestions to the front before the cut, so the cap never removes them. Any further
+`domain`-typed suggestions keep their rank and compete like other tags; they are not cut, because
+the user kept narrower ones such as *Philosophy of Mind*. A job counter `no_domain_sources` reports
+documents with no domain suggestion (like `topic_starved`). Code never invents one.
+
+**P3. Ambiguous matches.**
+- *Exact name wins.* If the suggestion's own id is an active or unused tag, it links there and no
+  resolution runs.
+- *Otherwise resolve:* the suggestion's `merge_key` is compared with the titles and aliases of
+  active and unused tags only. Candidates nobody kept are excluded, so one unreviewed suggestion
+  cannot attract others.
+  - One match: the suggestion links to that tag.
+  - Several matches (ambiguous): the suggestion stays its own candidate link, and its artifact entry
+    gets `ambiguous_with: [ids]`. Nothing goes into the ledger until the user decides. Ambiguity
+    is recomputed at each extraction.
+- *Screen:* the row says it matches several existing tags and offers **Use *X*** (one per matching
+  tag, with its type and keep count), **Keep as new tag**, **Drop** and **Never suggest**.
+- *Recording.* **Use *X*** keeps X on this document (a ledger keep plus a human link, like a
+  human-add of an existing tag). It also drops the suggestion, and the drop record carries the
+  suggested name, so re-extraction filters it. It writes one `tag-resolved {suggestion, chosen}`
+  audit entry. **Keep as new** is a normal keep; the exact name then wins from now on.
+- *Rejected alternative:* a pending choice stored in the ledger with no candidate node. "Keep as
+  new" would then need a new tag-creation path.
+
+**P4. The reference cut for the alias check.** The UAT PDFs extract as long paragraphs with no
+headings, and their chunks carry no section metadata, so a heading search does not work.
+- *The cut:* the **last** capitalised, standalone `References` / `Bibliography` / `Works Cited` /
+  `Literature Cited` that meets all three conditions:
+  - it lies in the second half of the text;
+  - a year (`19xx`/`20xx`) or a bracketed number (`[1]`) follows within about 200 characters;
+  - it is capitalised, which skips JSTOR's lower-case "This article references…" footer.
+- *Fallback:* with no qualifying marker, the whole text counts as body.
+- *The check:* an alias survives only if its `merge_key` occurs in the body text (case-,
+  punctuation- and plural-insensitive). Removed aliases go into the artifact per suggestion
+  (`aliases_filtered`). The artifact also records `reference_cut_at` (a character offset or
+  `null`).
+- *Scope:* footnotes and endnotes inside the body are left to the prompt rule. The deferred F4 work
+  (reference-chunk down-ranking) can reuse this cut.
+
+**P5. The alias field on keep.**
+- It **replaces** the alias list (the existing approve-with-amendments semantics) and is
+  **prefilled** with the tag's current aliases, after the P4 check. Aliases belong to the tag, so a
+  deletion removes the alias from the tag everywhere.
+- An unchanged field records no `aliases` amendment.
+- The field becomes a **one-alias-per-line textarea**. A comma-split field would silently split a
+  prefilled alias that contains a comma. The JSON route keeps its list.
+- If the title is amended, the old title still joins the aliases.
+- The field still appears only on a first keep. Editing the aliases of an active tag stays deferred
+  (ADR-0058 rename-of-active).
+
+**P6. The pipeline, in order** (applied to the ranked list of up to 20):
+1. Clean the names, and apply the P4 alias check.
+2. Resolve each suggestion (P3).
+3. Filter drops and blocks against **both** the suggested name and the tag it resolved to: a drop of
+   *LLM* also filters a later *Large Language Models* that resolves to it, and a blocked *LLM*
+   blocks it too.
+4. Move domains to the front (P2).
+5. Cut at the cap. **Tags this document already keeps count toward the cap**, so a document with
+   12 kept tags gets at most 3 new suggestions. Kept links are never removed by the cut.
+6. A suggestion that resolves to a tag of a different type routes to the existing tag, which keeps
+   its type, and files `change_item_type` (today's exact-name rule, extended to resolved matches).
+
+**P7. Rollout.** Part 2 bumps only the items prompt. What the prompt receives is unchanged: the
+title stays the filename-derived one, and whether part 3's Enrich title feeds it is a part-3
+question. Part 2's UAT can use either a fresh clone (the UAT Guide flow; the user is happy to re-tag
+all 9 documents) or a forced re-extraction of the r7 clone. Kept links and drops survive
+re-extraction, so the code path is the same; the choice is made at UAT time. Decision 10's clean
+restart still happens once all prompt bumps exist, before the golden-list measurement.
 
 ## Consequences
 
