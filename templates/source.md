@@ -28,17 +28,7 @@ items: {{items_fm}}
 
 ## Source Details
 
-- Raw file: `{{relative_raw_path}}`
-- Normalized file: `{{normalized_path}}`
-- Type: {{file_type}}
-- Language: {{language}}
-- Pages: {{page_count}}
-- Chunks: {{chunk_count}}
-- Checksum: {{sha256}}
-
-## Key Points
-
-_Pending semantic enrichment._
+{{details_block}}
 
 ## Claims
 
@@ -47,7 +37,3 @@ _Pending semantic enrichment._
 ## Items Mentioned
 
 {{items_block}}
-
-## Notes
-
-{{notes}}

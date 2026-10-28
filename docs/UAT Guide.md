@@ -485,7 +485,7 @@ readable ~120-node knowledge map instead of all ~460 pages. To see a page's clai
 Install Front Matter Title (by Snezhig). Your UAT Guide covers it under §11, "Readable titles". Obsidian's graph labels nodes by filename, and page files are deliberately named by id (src_…, itm_…). The plugin swaps in each page's frontmatter title: instead.
 
 1. Settings → Community plugins → turn off Restricted mode → Browse → search Front Matter Title → Install → Enable.
-2. In the plugin's settings, leave the field as title, which is the default. Turn on the Graph toggle; it's off by default, while File Explorer is on by default.
+2. In the plugin's settings, leave the field as title, which is the default. Turn on the Graph and File Explorer toggles: in v4.2.1 only Header (tab titles) is on by default, and File Explorer and Graph are off. Leave Alias and Note Link off — they write to the notes.
 3. Close and reopen the graph view so the labels refresh.
 
 What the labels will look like: a Source page's title: is the original filename without its extension, with hyphens and underscores turned into spaces. For example:
@@ -508,12 +508,13 @@ explorer, tabs, and graph label nodes by id out of the box. Wiki **links** alrea
 1. Settings → **Community plugins** → turn off Restricted mode → **Browse** → search *Front Matter
    Title* (by Snezhig) → Install → Enable.
 2. In its settings, confirm the frontmatter field is `title` (the default), and turn **on** the
-   **Graph** feature toggle (the File Explorer feature is on by default; Graph is off by default).
+   **Graph** and **File Explorer** feature toggles (in v4.2.1 only Header is on by default; File
+   Explorer and Graph are off). Leave Alias and Note Link off — they write to the notes.
 
 Titles then replace ids in the explorer, tab headers, and graph. This is per-clone (the plugin binary
 is not committed); the graph preset above is committed and needs no setup.
 
-The exact install path, for reference: Settings → Community plugins → turn off Restricted mode → Browse → search Front Matter Title → Install → Enable, then in its settings turn on the Graph feature toggle (File Explorer is on by default; Graph is off).
+The exact install path, for reference: Settings → Community plugins → turn off Restricted mode → Browse → search Front Matter Title → Install → Enable, then in its settings turn on the Graph and File Explorer feature toggles (in v4.2.1 only Header is on by default; File Explorer and Graph are off).
 
 ## 12. Error-handling checks
 

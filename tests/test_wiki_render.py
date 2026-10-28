@@ -250,3 +250,56 @@ def test_index_sentinel_renders_only_as_qa_bucket_last(tmp_path):
     assert text.index("### Model (1)") < text.index("### Unclassified (review required) (1)")
     assert "### unclassified_review_required" not in text
     assert "### Unclassified Review Required" not in text
+
+
+def test_source_details_link_the_original_and_drop_dead_sections():
+    template = (ROOT / "templates" / "source.md").read_text(encoding="utf-8")
+    md = "# T\n\nStable body paragraph long enough for an extractive summary stub.\n"
+    page = wiki_render.render_source_page(
+        template, _manifest(), md, summary_max=320, summary_min=40,
+        raw_url="http://127.0.0.1:18000/raw/src_0123456789abcdef",
+    )
+    assert ("- Original: [open original](http://127.0.0.1:18000/raw/src_0123456789abcdef) "
+            "(`raw/inbox/Big Report-2026_final.pdf`; needs the app running)") in page
+    assert "- Type: PDF" in page and "- Pages: 4" in page
+    body = page.split("\n---\n", 1)[1]
+    for gone in ("## Key Points", "## Notes", "Normalized file:", "Checksum:", "Chunks:", "Language:"):
+        assert gone not in body
+    # Bookkeeping stays in the frontmatter.
+    fm = wiki_render.parse_frontmatter(page)
+    assert fm["sha256"] == "a" * 64 and str(fm["chunk_count"]) == "12"
+
+
+def test_source_details_without_url_or_page_count():
+    template = (ROOT / "templates" / "source.md").read_text(encoding="utf-8")
+    page = wiki_render.render_source_page(
+        template, _manifest(page_count=None, file_extension=".md"), "# T\n\nbody text here.\n",
+        summary_max=320, summary_min=40,
+    )
+    assert "- Original: `raw/inbox/Big Report-2026_final.pdf`" in page
+    assert "open original" not in page and "- Pages:" not in page and "- Type: MD" in page
+
+
+def test_raw_url_is_in_the_fingerprint():
+    template = (ROOT / "templates" / "source.md").read_text(encoding="utf-8")
+    md = "# T\n\nStable body paragraph long enough for an extractive summary stub.\n"
+    fps = {
+        wiki_render.parse_frontmatter(wiki_render.render_source_page(
+            template, _manifest(), md, summary_max=320, summary_min=40, raw_url=url,
+        ))["input_fingerprint"]
+        for url in ("http://127.0.0.1:18000/raw/src_0123456789abcdef",
+                    "http://127.0.0.1:18001/raw/src_0123456789abcdef")
+    }
+    assert len(fps) == 2
+
+
+@pytest.mark.parametrize("host,expected", [
+    ("127.0.0.1", "http://127.0.0.1:18000/raw/"),
+    ("0.0.0.0", "http://127.0.0.1:18000/raw/"),
+    ("::1", "http://[::1]:18000/raw/"),
+])
+def test_raw_view_base_from_settings(tmp_path, monkeypatch, host, expected):
+    from app.workers import wiki
+    monkeypatch.setenv("APP_HOST", host)
+    monkeypatch.setenv("APP_PORT", "18000")
+    assert wiki.raw_view_base(tmp_path) == expected

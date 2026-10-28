@@ -27,7 +27,7 @@ _FP_LINE = re.compile(r"(?m)^input_fingerprint:.*\n?")
 _WIKILINK_SUB = re.compile(r"\[\[([^\]]+)\]\]")
 
 # Bump to force a global Source-page rebuild even when rendered bytes are unchanged.
-SOURCE_SCHEMA_VERSION = "wiki-source-v1"
+SOURCE_SCHEMA_VERSION = "wiki-source-v2"
 
 # Frontmatter review_status vocabulary (ADR-0022). An explicit render override (the Phase-6 deprecation
 # render seam, ADR-0035 A5) must be one of these; None preserves the renderer's derived value.
@@ -226,6 +226,21 @@ def _suggested_block(suggested: list[dict[str, Any]] | None) -> str:
             + "\n".join(f"- {n}" for n in names))
 
 
+def _details_block(manifest: dict[str, Any], raw_url: str | None) -> str:
+    """The Source Details lines a reader browses by: the original (a link to the API's raw view,
+    `GET /raw/<source_id>`, when the worker supplies one), its type and page count. Internal
+    bookkeeping (normalized path, chunks, checksum, language) stays in the frontmatter."""
+    rel = manifest.get("relative_raw_path", "")
+    original = f"[open original]({raw_url}) (`{rel}`; needs the app running)" if raw_url else f"`{rel}`"
+    lines = [f"- Original: {original}"]
+    ext = str(manifest.get("file_extension", "")).lstrip(".")
+    if ext:
+        lines.append(f"- Type: {ext.upper()}")
+    if manifest.get("page_count") is not None:
+        lines.append(f"- Pages: {manifest['page_count']}")
+    return "\n".join(lines)
+
+
 def _items_block(items: list[dict[str, Any]] | None) -> str:
     """Source-page Items section: mention links grouped by `item_type` (ADR-0059).
 
@@ -265,6 +280,7 @@ def build_source_values(
     claims: list[dict[str, Any]] | None = None,
     items: list[dict[str, Any]] | None = None,
     suggested_items: list[dict[str, Any]] | None = None,
+    raw_url: str | None = None,
 ) -> dict[str, Any]:
     sid = manifest["source_id"]
     title = title_from_filename(manifest.get("original_filename", sid))
@@ -314,6 +330,7 @@ def build_source_values(
         "summary_label": summary_label,
         "summary_text": summary_text,
         "tags": tags,
+        "details_block": _details_block(manifest, raw_url),
         "claims_block": _claims_block(claims),
         "items_block": _items_block(items) + _suggested_block(suggested_items),
         # The frontmatter array mirrors the projected body links as an **advisory** slug
@@ -321,7 +338,6 @@ def build_source_values(
         # for mentions (ADR-0029/0030); on rename/re-slug these re-project from the graph.
         # validate_projection enforces frontmatter == body so they never drift.
         "items_fm": _render_tag_list(_mention_slugs(items)),
-        "notes": "",
     }
 
 
@@ -760,12 +776,13 @@ def render_source_page(
     claims: list[dict[str, Any]] | None = None,
     items: list[dict[str, Any]] | None = None,
     suggested_items: list[dict[str, Any]] | None = None,
+    raw_url: str | None = None,
 ) -> str:
     """Render a Source page, stamping its input_fingerprint.
 
     The fingerprint hashes the page's own rendered content (with the fingerprint line
     excluded) plus a schema version, so it transitively covers the template, the
-    normalized text, the manifest fields, the summary config, and — when present — the
+    normalized text, the manifest fields, the summary config, the raw-view URL, and — when present — the
     composed enrichment artifact (summary/tags), every input that determines the bytes
     (ADR-0023/0025). No wall-clock value is embedded; enrichment freshness is the
     artifact's own fingerprint, checked before composition (ADR-0027).
@@ -773,6 +790,7 @@ def render_source_page(
     values = build_source_values(
         manifest, normalized_markdown, summary_max=summary_max, summary_min=summary_min,
         enrichment=enrichment, claims=claims, items=items, suggested_items=suggested_items,
+        raw_url=raw_url,
     )
     draft = render_template(template, {**values, "input_fingerprint": ""})
     fingerprint = _fingerprint(_FP_LINE.sub("", draft))

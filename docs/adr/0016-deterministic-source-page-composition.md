@@ -53,3 +53,20 @@ idempotent overwrite and diffs stay clean. The linter can enforce one Source-pag
 contract across phases. The trade is that backbone pages visibly carry several
 "pending enrichment" sections until Phase 3.5 runs, which is honest about what has and
 has not yet been derived.
+
+## Amendment (2026-10-28) — a page to browse by
+
+The Source page is now read as a bookmark (ADR-0066), so its body keeps what a reader browses by:
+
+- **Source Details** lists the original — an **open original** link to the API's raw view
+  (`http://<APP_HOST>:<APP_PORT>/raw/<source_id>`, the operator view of ADR-0058; a wildcard bind
+  address renders as `127.0.0.1`) with the repository-relative path beside it — plus the type and,
+  when known, the page count. The normalized path, chunk count, checksum and language stay in the
+  frontmatter only. The link opens only while the app runs; it is a plain URL, not a wikilink, so it
+  adds no graph edge.
+- **Key Points** (a placeholder never filled — the summary callout and Claims do that job) and
+  **Notes** (always empty; the page is regenerated, so hand notes would be overwritten) are removed.
+
+The raw-view URL is part of the rendered bytes and so of the `input_fingerprint`: changing
+`APP_HOST`/`APP_PORT` re-renders every Source page on the next run. `SOURCE_SCHEMA_VERSION` is
+`wiki-source-v2`, so the next `generate_wiki` rewrites every Source page (free, deterministic).

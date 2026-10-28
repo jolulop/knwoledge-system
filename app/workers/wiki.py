@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from app.backend import db, graph
+from app.backend.config import get_settings
 from app.backend.manifests import iso_now, valid_manifests
 from app.workers import enrichment_artifact, labels, wiki_render
 
@@ -48,6 +49,19 @@ def _node_title(wiki_dir: Path, node_type: str, slug: str) -> str | None:
     return re.sub(r"\\(.)", r"\1", match.group(1)) if match else None
 
 _GENERATED_STATUSES = {"extracted", "partial"}
+# A wildcard bind address is not something a browser can open; links use loopback instead.
+_WILDCARD_HOSTS = {"", "0.0.0.0", "::"}
+
+
+def raw_view_base(root: Path) -> str:
+    """The base URL of the API's raw view (`GET /raw/<source_id>`) for Source-page "open original"
+    links, from APP_HOST/APP_PORT. It goes into the rendered page, so changing the port re-renders
+    every Source page on the next run."""
+    settings = get_settings(root)
+    host = "127.0.0.1" if settings.app_host in _WILDCARD_HOSTS else settings.app_host
+    if ":" in host:
+        host = f"[{host}]"
+    return f"http://{host}:{settings.app_port}/raw/"
 
 
 def _append_log(wiki_dir: Path, now: str, summary: dict[str, Any]) -> None:
@@ -114,6 +128,7 @@ def generate_wiki(
     gconn = graph.connect(graph_db) if graph_db.exists() else None
 
     template = (templates_dir / "source.md").read_text(encoding="utf-8")
+    raw_base = raw_view_base(root)
     now = iso_now()
     job_id = f"job_{uuid.uuid4().hex[:16]}"
     conn = None
@@ -188,7 +203,7 @@ def generate_wiki(
                     template, manifest, normalized_markdown,
                     summary_max=summary_max, summary_min=summary_min,
                     enrichment=enrichment, claims=claims, items=items,
-                    suggested_items=suggested_items,
+                    suggested_items=suggested_items, raw_url=raw_base + source_id,
                 )
             except Exception as exc:  # one page's failure must not abort the run
                 errors.append({"source_id": source_id, "error": f"{type(exc).__name__}: {exc}"})

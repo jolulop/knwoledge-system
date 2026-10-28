@@ -301,7 +301,7 @@ critical rules and `CONTEXT.md` for the glossary.
     2026-10-28).
   - **Clone after the fixes:** `/tmp/ks-uat` pulled to `20f6885`; aliases cleaned (AI Agent →
     [agent], Agentic AI → [agentic systems]); 12 validators pass, `rebuild_tag_links` dry-run clean.
-- **Tests/lint green (at `20f6885`):** `1543 passed, 2 skipped` (opt-in `gpu`/`model` marks), ruff
+- **Tests/lint green (2026-10-28):** `1549 passed, 2 skipped` (opt-in `gpu`/`model` marks), ruff
   clean, all 12 validators pass. ADR-0066 coverage: `tests/test_tag_links.py` + helper
   `tests/tagging.py` (`keep_all`, `close_journals`), `test_tag_suggestions.py`,
   `test_tag_authority.py`, `test_uat_round8.py`, `test_apply_tag_serialization.py`; ADR-0067
@@ -380,10 +380,12 @@ critical rules and `CONTEXT.md` for the glossary.
      `cd /tmp/ks-uat && uv run --no-sync python -m app.backend` (port 18000) — **`--no-sync`**: a
      plain `uv sync` strips the GPU overlay (torch cu128 / FlagEmbedding) and the API won't start;
      restore with `uv sync --all-extras` + the pinned cu128 torch, never `-U`.
-  2. **Small open proposals (awaiting the user's decision):** a Source-page "open original" link via
-     `/raw/<source_id>`; trim the Source template (dead Key Points placeholder, Source Details lines,
-     Notes); correct the UAT Guide's Front Matter Title note (v4.2.1 defaults: Header on,
-     Explorer/Graph off).
+  2. **Done 2026-10-28 (ADR-0016 amendment):** Source pages link the original through the API
+     (**open original** → `http://<APP_HOST>:<APP_PORT>/raw/<source_id>`, `wiki.raw_view_base`);
+     Source Details trimmed to Original / Type / Pages (bookkeeping stays in frontmatter), Key Points
+     and Notes removed, `SOURCE_SCHEMA_VERSION` `wiki-source-v2` (next `generate_wiki` rewrites
+     every Source page); UAT Guide Front Matter Title defaults corrected (v4.2.1: only Header on —
+     turn on Graph + File Explorer, leave Alias/Note Link off). Click-check in the clone pending.
   3. **Part 3** — decision 6: Enrich extracts title/author/publisher (PDF metadata as a hint) into
      `provenance_suggested`; user-confirmed `provenance` is never overwritten; Authors/publishers
      pages shown once kept; Enrich prompt bump. Open part-3 question (P7): whether the Enrich title
