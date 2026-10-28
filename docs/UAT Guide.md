@@ -467,7 +467,7 @@ Run this **after** you have kept tags in §9.0: lint proposes merges only betwee
 
 ## 11. Browse
 
-Use Obsidian if available (`obsidian --no-sandbox --disable-gpu --ozone-platform=wayland &` under WSLg — without `--disable-gpu` no window appears, and without Wayland clicks land off-target on a maximized window at Windows display scaling above 100%) and open `/tmp/ks-uat/wiki` as the vault, or:
+Use Obsidian if available (`GALLIUM_DRIVER=d3d12 obsidian --no-sandbox --ozone-platform=wayland --use-gl=angle --use-angle=gl &` under WSLg — WSL has no `/dev/dri`, so Chromium's default GPU start-up fails; the D3D12 driver plus ANGLE-over-OpenGL renders on the real GPU, and without Wayland clicks land off-target on a maximized window at Windows display scaling above 100%; if no window appears, fall back to `--disable-gpu` instead of the last three settings) and open `/tmp/ks-uat/wiki` as the vault, or:
 
 ```bash
 sed -n '1,160p' wiki/index.md

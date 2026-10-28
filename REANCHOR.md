@@ -323,10 +323,11 @@ critical rules and `CONTEXT.md` for the glossary.
 - **Display aliases (ADR-0060):** links render human-readable labels via `[[id|label]]` and pages
   carry `title:`/`aliases:` frontmatter; page **filenames remain id-keyed**, and the file
   explorer/tabs/graph therefore show ids — that is by design, not a bug.
-- **Obsidian is installed in WSL** (apt `.deb`, WSLg). Launch `obsidian --no-sandbox --disable-gpu --ozone-platform=wayland &`
-  (without `--disable-gpu` the Chromium GPU process fails under WSLg and no window appears; without
-  native Wayland, clicks land off-target on a maximized window at 125% Windows scaling — X11 path).
-  On this machine `~/.local/bin/obsidian` and `~/.local/share/applications/obsidian.desktop` already
+- **Obsidian is installed in WSL** (apt `.deb`, WSLg). Launch `GALLIUM_DRIVER=d3d12 obsidian --no-sandbox --ozone-platform=wayland --use-gl=angle --use-angle=gl &`
+  (WSL has no `/dev/dri`, so Chromium's default GPU start-up fails; Mesa's D3D12 driver plus
+  ANGLE-over-OpenGL renders on the real GPU — without `GALLIUM_DRIVER=d3d12` Mesa picks llvmpipe and
+  WebGL is turned off; the software fallback is `--disable-gpu`. Without native Wayland, clicks land
+  off-target on a maximized window at 125% Windows scaling — X11 path). On this machine `~/.local/bin/obsidian` and `~/.local/share/applications/obsidian.desktop` already
   add these flags, so plain `obsidian &` works. Use the WSL Obsidian, not Windows-over-`\\wsl$`.
 - The committed graph preset filters `-path:Claims -file:index -file:log`; to hide unreviewed tags
   too, add `-[status:candidate]` (the space before it matters).

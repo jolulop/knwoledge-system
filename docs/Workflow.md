@@ -166,7 +166,7 @@ uv run python -m app.backend   # blessed entrypoint (loopback-guarded; see docs/
 # anything; re-run reindex_keyword.py only if it warns keyword_reindex_failed), then validate_all
 
 # browse the vault
-obsidian --no-sandbox --disable-gpu --ozone-platform=wayland &   # WSLg; open the  wiki/  folder as a vault
+GALLIUM_DRIVER=d3d12 obsidian --no-sandbox --ozone-platform=wayland --use-gl=angle --use-angle=gl &   # WSLg, GPU; open the  wiki/  folder as a vault
 
 # check integrity any time (deterministic)
 uv run python scripts/validate_all.py
