@@ -85,11 +85,55 @@ def _write_audit(reviews_dir: Path, rid: str, record: dict[str, Any], now: str) 
         encoding="utf-8")
 
 
+def retype_check(gconn, item: dict[str, Any], *, wiki_dir: Path) -> tuple[str, Any]:
+    """Where one approved `change_item_type` stands, by the executor's own rules (ADR-0066 review
+    round 10: shared with the approved queue's "applied" column so the two can't drift):
+    `("skip", reason)` — apply would skip it (malformed, node/page missing, not retypable);
+    `("done", None)` — the page already carries the target type (apply is a no-op);
+    `("todo", ctx)` — apply has work to do (`ctx` = node, page_rel, page_path, meta, from/to type)."""
+    subj = item.get("subject") or {}
+    proposal = item.get("proposal") or {}
+    nid = subj.get("node_id")
+    to_type = subj.get("to_item_type")
+    if not taxonomy.is_production_item_type(to_type):       # sentinel is never a valid target
+        return "skip", "invalid_to_item_type"
+    if proposal.get("to_item_type") != to_type:              # proposal must agree with the subject
+        return "skip", "to_item_type_mismatch"
+    if not _is_canonical_item_id(nid):                       # canonical id before any page path (security)
+        return "skip", "noncanonical_node_id"
+    node = graph.get_node(gconn, nid)
+    if node is None:
+        return "skip", "node_missing"
+    if node["node_type"] != "item":
+        return "skip", "out_of_scope"
+    if node["status"] not in _RETYPABLE_STATUSES:
+        return "skip", "node_not_retypable"
+    page_rel = f"{NODE_DIR['item']}/{node['slug']}.md"
+    page_path = Path(wiki_dir) / page_rel
+    meta = items._read_node_meta(page_path)
+    if meta is None:
+        return "skip", "page_missing"
+    from_type = meta.get("item_type") or node.get("item_type")
+    if from_type == to_type:
+        return "done", None             # already in the target state — idempotent no-op (re-apply safe)
+    return "todo", {"nid": nid, "to_type": to_type, "node": node, "page_rel": page_rel,
+                    "page_path": page_path, "meta": meta, "from_type": from_type}
+
+
 def apply_retypes(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = None) -> dict[str, Any]:
     """Apply approved `change_item_type` decisions (ADR-0059). Returns
     `{applied, skipped:[{review_id, reason}], changed_pages, graph_changed, affected_sources}`.
     Graph-REQUIRED; the caller owns the final commit + the Source-page re-render of
     `affected_sources` (their Items sections group by item_type)."""
+    from app.workers import tag_links                    # lazy: tag_links imports items/promote
+    # ADR-0066 review round 10: a retype reads the item page and writes it back, so it is serialized
+    # with tag actions (an alias edit in between would be overwritten) — from the read to the write.
+    with tag_links.ledger_lock(reviews_dir):
+        return _apply_retypes(gconn, reviews_dir, wiki_dir=wiki_dir, now=now)
+
+
+def _apply_retypes(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None) -> dict[str, Any]:
+    """The body of :func:`apply_retypes` (called under the ledger lock)."""
     now = now or iso_now()
     applied = 0
     skipped: list[dict[str, str]] = []
@@ -98,43 +142,15 @@ def apply_retypes(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None =
 
     for item in _approved_retypes(reviews_dir):
         rid = str(item.get("review_id", ""))
-        subj = item.get("subject") or {}
-        proposal = item.get("proposal") or {}
-        nid = subj.get("node_id")
-        to_type = subj.get("to_item_type")
-
-        def _skip(reason: str) -> None:
-            skipped.append({"review_id": rid, "reason": reason})
-
-        # --- subject guards; each appends a typed reason, never partial-applies ---
-        if not taxonomy.is_production_item_type(to_type):   # sentinel is never a valid target
-            _skip("invalid_to_item_type")
+        state, ctx = retype_check(gconn, item, wiki_dir=wiki_dir)
+        if state == "skip":
+            skipped.append({"review_id": rid, "reason": ctx})
             continue
-        if proposal.get("to_item_type") != to_type:          # proposal must agree with the subject
-            _skip("to_item_type_mismatch")
+        if state == "done":
             continue
-        if not _is_canonical_item_id(nid):                   # canonical id before any page path (security)
-            _skip("noncanonical_node_id")
-            continue
-        node = graph.get_node(gconn, nid)
-        if node is None:
-            _skip("node_missing")
-            continue
-        if node["node_type"] != "item":
-            _skip("out_of_scope")
-            continue
-        if node["status"] not in _RETYPABLE_STATUSES:
-            _skip("node_not_retypable")
-            continue
-        page_rel = f"{NODE_DIR['item']}/{node['slug']}.md"
-        page_path = wiki_dir / page_rel
-        meta = items._read_node_meta(page_path)
-        if meta is None:
-            _skip("page_missing")
-            continue
-        from_type = meta.get("item_type") or node.get("item_type")
-        if from_type == to_type:
-            continue        # already in the target state — idempotent no-op (re-apply safe)
+        nid, to_type, node = ctx["nid"], ctx["to_type"], ctx["node"]
+        page_rel, page_path, meta, from_type = (ctx["page_rel"], ctx["page_path"], ctx["meta"],
+                                                ctx["from_type"])
 
         # --- APPLY: the metadata flip — re-render the page with the new item_type (status,
         # review_status, and every page-owned field preserved), mirror the graph row, done. ---

@@ -41,7 +41,7 @@ from app.backend.manifests import get_provenance, is_source_id, iso_now, valid_m
 from app.backend.paths import safe_child, safe_under
 from app.backend.policy import load_yaml
 from app.llm.client import ConfigError, parse_chain
-from app.workers import citations, enrichment_artifact, labels, merge_candidates, reviews, synthesis
+from app.workers import citations, enrichment_artifact, labels, merge_candidates, reviews, synthesis, tag_links
 from app.workers.enrichment_artifact import artifact_fingerprint
 from app.workers.wiki_render import display_link_label, parse_frontmatter
 
@@ -231,7 +231,8 @@ def _check_merge_candidates(gconn, wiki_dir: Path, reviews_dir: Path, *, policy_
     counted as existing (the in-flight freeze keeps them out of the recomputation)."""
     found = merge_candidates.find_merge_candidates(
         gconn, wiki_dir=wiki_dir, reviews_dir=reviews_dir,
-        max_items_per_key=_merge_key_budget(policy_path))
+        max_items_per_key=_merge_key_budget(policy_path),
+        blocked_keys=frozenset(tag_links.load_blocked(policy_path.parent)))
     findings: list[dict[str, Any]] = []
     for prop in found["proposals"]:
         subj = prop["subject"]

@@ -136,6 +136,7 @@ Copy one or more real UAT documents into the inbox. Do not edit existing raw fil
 
 ```bash
 mkdir -p raw/inbox
+cp /mnt/c/Users/jllop/Downloads/UAT/*.pdf /tmp/ks-uat/raw/inbox/
 cp /path/to/your/test-file.pdf raw/inbox/
 cp /path/to/your/test-file.md raw/inbox/
 ```
@@ -233,8 +234,8 @@ curl -fsS "$APP/wiki/index" | head -80
 Set these to terms from one of your UAT documents.
 
 ```bash
-TOPIC='your topic'
-PHRASE='an exact phrase from a source'
+TOPIC='Agentic AI'
+PHRASE='Rather than fragmenting investment across a smattering of use cases'
 
 curl -fsS --get "$APP/search" \
   --data-urlencode "q=$TOPIC" \
@@ -294,7 +295,13 @@ On each document screen, decide every **Suggested tag** row:
   X on this document and drops the suggestion; pre-select never picks for such a row.
 - On a first keep the **aliases** box is prefilled, one alias per line: delete the wrong ones before
   submitting (it replaces the tag's aliases; leaving it unchanged records no edit). After that the
-  aliases are yours: re-extraction never adds one back (only a merge adds aliases).
+  aliases are yours: re-extraction never adds one back (only a merge adds aliases). To change them
+  later, open **edit aliases** on the tag's **Kept tags** row (one per line; it changes the tag
+  everywhere, not just on this document). An alias box you don't touch records nothing, even on an
+  old page; if the tag's aliases changed after you opened the page (e.g. edited from another
+  document), your edit is refused with the current list — reload and edit again.
+- A row noting **“X” is also the title/alias of “Y”** means another tag shares that name — the
+  duplicate check would propose merging them. Delete the alias if the tags are different.
 - If a *use X* stopped part-way (an error or a restart), the row says **unfinished**, or — when the
   suggestion is already gone — it is listed under **Unfinished choices**. Choose *use X* / *finish*
   again to complete it, or anything else / *cancel* to abandon it; if X was already kept by then it
@@ -404,6 +411,7 @@ Run this **after** you have kept tags in §9.0: lint proposes merges only betwee
    Expect `merge_candidate` for alias/title twins (in UAT r4: *Agentic AI* ⟵ *AI Agents and
    Multi-agent Systems*, *McKinsey & Company* ⟵ *McKinsey*, and the false *Theory of Mind in AI* ↔
    *Agent Phenomenology*); `merge_key_too_common` only if one alias sits on more than 5 active items.
+   A tag on the blocked list (*never suggest*) is never part of a proposal, on either side.
 
 2. List the filed proposals (each `context` shows the matched keys and which title/alias matched):
 
@@ -433,8 +441,16 @@ Run this **after** you have kept tags in §9.0: lint proposes merges only betwee
    - Previewing the pair you rejected in step 3 (either direction) is **blocked** with a reopen hint.
    - A second merge absorbing the same item, or chaining through it, is **blocked** while the first is
      approved.
+   - A blocked merge says why in plain words (e.g. a tag not kept on any document yet: "not in use
+     yet — keep it on a document first"), with the typed reason in brackets. The advice follows
+     the tag's status: a hidden tag must be unhidden first, an already-merged one names the tag it
+     went into ("nothing to do"), a retired one can't be merged.
 
-5. Dry-run, then apply (§9 discipline — the dry-run must list exactly the merges you intend):
+5. Dry-run, then apply (§9 discipline — the dry-run must list exactly the merges you intend).
+   Approved items stay in the **approved** queue after apply; its *applied* column shows when a
+   merge, split or type change was carried out (**not yet** = run Apply). A reopened and re-approved
+   one that needs nothing more shows **already in effect**; **cannot verify** means the saved state is
+   incomplete (e.g. a missing page or an interrupted merge) and Apply re-checks it:
 
    ```bash
    curl -fsS -X POST "$APP/reviews/apply/dry-run" | python3 -m json.tool
@@ -461,7 +477,8 @@ find wiki -maxdepth 2 -type f | sort | less
 ### Obsidian graph
 
 The clone ships a committed graph-view preset (`wiki/.obsidian/graph.json`): the **Claims** layer is
-filtered out (`-path:Claims`) and **Sources**/**Items** are color-coded, so the graph opens as a
+filtered out (`-path:Claims`), the `index`/`log` hub pages are hidden (`-file:index -file:log`), and
+**Sources**/**Items** are color-coded, so the graph opens as a
 readable ~120-node knowledge map instead of all ~460 pages. To see a page's claims, open it and use
 **"Open local graph"** (command palette) rather than un-filtering the global view.
 
@@ -585,6 +602,8 @@ nothing, and applies nothing.
   as new); aliases found only in the references are not kept.
 - After a tag's first keep, re-extraction leaves its aliases exactly as you confirmed them; hidden,
   retired and merged tags keep their status through re-extraction and `rebuild_tag_links.py`.
+- A kept tag's aliases can be edited on its Kept tags row; a name shared with another tag is flagged;
+  no merge is proposed for a blocked tag; the approved queue shows what apply carried out.
 - Review items are decision-only until apply; the dry-run shows the intended scope before apply.
 - Applying approved reviews updates only the governed surfaces and validators still pass.
 - Maintenance jobs complete with reports and never act autonomously on semantic/destructive decisions.

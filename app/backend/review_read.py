@@ -255,6 +255,80 @@ def list_reviews(
     }
 
 
+# UAT round 8: the executors that leave a per-review audit record when apply carries a decision out
+# (`audit_log/<review_id>-<decision>-<hex>.json`, decided_by system). Other executors re-assert a
+# status idempotently on every apply and leave no such record, so they get no "applied" marker.
+APPLIED_EVIDENCE = {"merge_items": "merged", "change_item_type": "retyped", "split_item": "split"}
+
+
+def _executor_times(reviews_dir: Path, rid: str, decision: str) -> list[str]:
+    """The `decided_at` of every executor audit record apply wrote for this review, sorted."""
+    times = []
+    for path in sorted((Path(reviews_dir) / "audit_log").glob(f"{rid}-{decision}-*.json")):
+        try:
+            rec = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        at = rec.get("decided_at") if isinstance(rec, dict) else None
+        if isinstance(at, str):
+            times.append(at)
+    return sorted(times)
+
+
+def applied_at(reviews_dir: Path, item: dict[str, Any]) -> str | None:
+    """When apply carried out this approved item (the latest executor audit record at or after its
+    approval), else None. Only for `APPLIED_EVIDENCE` types; None for every other type."""
+    decision = APPLIED_EVIDENCE.get(str(item.get("type")))
+    rid = item.get("review_id")
+    if decision is None or not isinstance(rid, str) or not rid:
+        return None
+    approved_at = str(item.get("decided_at") or "")
+    later = [at for at in _executor_times(reviews_dir, rid, decision) if at >= approved_at]
+    return later[-1] if later else None
+
+
+def applied_state(reviews_dir: Path, item: dict[str, Any], gconn: Any = None,
+                  wiki_dir: Path | None = None) -> dict[str, Any] | None:
+    """The approved queue's "applied" cell (UAT round 8; review rounds 9–10), or None for a type that
+    leaves no per-item record. `state`:
+    - `applied` — an executor record at/after the approval (`at` = its time);
+    - `in_effect` — no record follows the approval (re-approving an applied item makes apply a no-op,
+      which writes none), but the durable state passes the EXECUTOR'S OWN completion check
+      (`retypes.retype_check` → done, `merges.merge_state` → done: a tombstone pointing at this
+      survivor and no open journal);
+    - `not_yet` — that check says apply has work to do;
+    - `cannot_verify` — anything else: a page missing, a tombstone pointing elsewhere or naming no
+      survivor, an interrupted operation, a split (no state check), or no graph. Apply re-checks it;
+      `at` = the latest earlier record, if any."""
+    decision = APPLIED_EVIDENCE.get(str(item.get("type")))
+    rid = item.get("review_id")
+    if decision is None or not isinstance(rid, str) or not rid:
+        return None
+    at = applied_at(reviews_dir, item)
+    if at is not None:
+        return {"state": "applied", "at": at}
+    before = _executor_times(reviews_dir, rid, decision)
+    unverified = {"state": "cannot_verify", "at": before[-1] if before else None}
+    if gconn is None or wiki_dir is None:
+        return unverified
+    from app.workers import merges, retypes            # lazy: executor modules (shared rules)
+    rtype = item.get("type")
+    if rtype == "change_item_type":
+        state, _ctx = retypes.retype_check(gconn, item, wiki_dir=Path(wiki_dir))
+        return {"done": {"state": "in_effect"}, "todo": {"state": "not_yet"}}.get(state, unverified)
+    if rtype == "merge_items":
+        subject = item.get("subject") if isinstance(item.get("subject"), dict) else {}
+        absorbed = subject.get("absorbed_node_id")
+        node = graph.get_node(gconn, absorbed) if isinstance(absorbed, str) else None
+        survivor = subject.get("survivor_node_id")
+        if node is None or not isinstance(survivor, str):
+            return unverified
+        state = merges.merge_state(reviews_dir, wiki_dir=Path(wiki_dir), review_id=rid,
+                                   survivor=survivor, absorbed_node=node)
+        return {"done": {"state": "in_effect"}, "todo": {"state": "not_yet"}}.get(state, unverified)
+    return unverified if before else {"state": "not_yet"}
+
+
 def apply_scope_counts(reviews_dir: Path) -> dict[str, Any]:
     """Read-only classification of the `approved/` queue for the apply confirm page (ADR-0035 A8).
 
@@ -1456,8 +1530,45 @@ def _ambiguous_matches(enrichment_dir: Path | None, sid: str) -> dict[str, list[
     return out
 
 
+_COLLIDING_STATUSES = ("candidate", "active", "unused")
+
+
+def _name_index(pages: dict[str, dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """UAT round 8: every live tag's names by merge key — `{key: [{node_id, title, status, field}]}`
+    (field "title" or "alias"), for the alias-collision notes on the document screen."""
+    from app.workers.merge_candidates import merge_key   # lazy: the workers import the read model
+    out: dict[str, list[dict[str, Any]]] = {}
+    for nid, page in sorted(pages.items()):
+        if page.get("status") not in _COLLIDING_STATUSES or not isinstance(page.get("title"), str):
+            continue
+        names = [("title", page["title"]), *(("alias", a) for a in page.get("aliases") or [])]
+        for field, name in names:
+            key = merge_key(name) if isinstance(name, str) else ""
+            if key and all(e["node_id"] != nid for e in out.get(key, [])):
+                out.setdefault(key, []).append({"node_id": nid, "title": page["title"],
+                                                "status": page.get("status"), "field": field})
+    return out
+
+
+def alias_collisions(names: dict[str, list[dict[str, Any]]], nid: str, title: Any,
+                     aliases: list[Any]) -> list[dict[str, Any]]:
+    """The names of tag `nid` (its title + aliases) that another live tag also carries as a title
+    or alias — `[{name, other_id, other_title, other_status, other_field}]`. Such a shared name is
+    what makes the duplicate check propose a merge, so the screen flags it before the keep."""
+    from app.workers.merge_candidates import merge_key
+    out: list[dict[str, Any]] = []
+    for name in [title, *aliases]:
+        key = merge_key(name) if isinstance(name, str) else ""
+        for e in names.get(key, []) if key else []:
+            if e["node_id"] != nid:
+                out.append({"name": name, "other_id": e["node_id"], "other_title": e["title"],
+                            "other_status": e["status"], "other_field": e["field"]})
+    return out
+
+
 def _tag_rows(gconn: Any, sid: str, pages: dict[str, dict[str, Any]],
-              ambiguous: dict[str, list[str]] | None = None) -> tuple[list, list]:
+              ambiguous: dict[str, list[str]] | None = None,
+              names: dict[str, list[dict[str, Any]]] | None = None) -> tuple[list, list]:
     """ADR-0066: one source's tag links → (suggestion rows, kept rows). An active `human` mention is
     a keep; an active `llm` mention without one is a suggestion; `rejected` links are drops (shown
     from the ledger's drop records, not here). A suggestion whose name matched several existing
@@ -1487,6 +1598,8 @@ def _tag_rows(gconn: Any, sid: str, pages: dict[str, dict[str, Any]],
             "needs_type": page.get("item_type") == taxonomy.UNCLASSIFIED,
             "amendable": page.get("status") == "candidate",
             "decidable": True, "status": "kept" if slot["human"] else "pending",
+            "collisions": alias_collisions(names or {}, nid, page.get("title"),
+                                           page.get("aliases") or []),
         }
         if not slot["human"]:
             row["ambiguous_with"] = [
@@ -1534,6 +1647,7 @@ def _source_flow(reviews_dir: Path, *, gconn: Any, wiki_dir: Path | None,
             unresolved_unattributed.append(it)   # pruned below once attribution is known
 
     pages = _family_page_meta(wiki_dir)
+    names = _name_index(pages)
     added_counts = _human_added_counts(reviews_dir)
     attributed_rids: set[str] = set()
     sources: list[dict[str, Any]] = []
@@ -1541,7 +1655,8 @@ def _source_flow(reviews_dir: Path, *, gconn: Any, wiki_dir: Path | None,
 
     for m in ordered:
         sid = m["source_id"]
-        suggestions, kept = (_tag_rows(gconn, sid, pages, _ambiguous_matches(enrichment_dir, sid))
+        suggestions, kept = (_tag_rows(gconn, sid, pages, _ambiguous_matches(enrichment_dir, sid),
+                                       names)
                              if gconn is not None else ([], []))
         try:
             ledger_drops, ledger_error = tag_links.load_ledger(reviews_dir, sid)["drops"], None

@@ -84,6 +84,19 @@ def apply_approved_deprecations(
 
     Returns `{applied, normalized, skipped:[{review_id, reason}], changed_pages, graph_changed}`. Skips
     are honest and typed; a fully-effected item is a silent no-op. No index rebuild (caller-owned)."""
+    from app.workers import tag_links                    # lazy: tag_links imports items
+    # ADR-0066 review round 10: item-page writers are serialized with tag actions (the ledger lock,
+    # re-entrant — a no-op inside run_apply, which already holds it).
+    with tag_links.ledger_lock(reviews_dir):
+        return _apply_approved_deprecations(gconn, reviews_dir, wiki_dir=wiki_dir,
+                                            claims_dir=claims_dir, markdown_dir=markdown_dir, now=now)
+
+
+def _apply_approved_deprecations(
+    gconn, reviews_dir: Path, *, wiki_dir: Path, claims_dir: Path, markdown_dir: Path,
+    now: str | None = None,
+) -> dict[str, Any]:
+    """The body of :func:`apply_approved_deprecations` (called under the ledger lock)."""
     now = now or iso_now()
     applied = normalized = 0
     skipped: list[dict[str, str]] = []
@@ -256,9 +269,12 @@ def apply_hidden_semantic_pages(
     """Apply approved `hide_semantic_page` decisions: an **active** concept/entity-family node -> `hidden`
     + `review_status: approved` (ADR-0046). Active-only (a non-active node is a typed `node_not_active`
     skip). Thin wrapper over the shared visibility-transition executor; graph-REQUIRED."""
-    return _apply_semantic_visibility_transition(
-        gconn, reviews_dir, review_type="hide_semantic_page", from_status="active", to_status="hidden",
-        to_review_status="approved", not_in_from_reason="node_not_active", wiki_dir=wiki_dir, now=now)
+    from app.workers import tag_links                    # lazy: tag_links imports items
+    with tag_links.ledger_lock(reviews_dir):             # ADR-0066 review round 10 (as above)
+        return _apply_semantic_visibility_transition(
+            gconn, reviews_dir, review_type="hide_semantic_page", from_status="active",
+            to_status="hidden", to_review_status="approved", not_in_from_reason="node_not_active",
+            wiki_dir=wiki_dir, now=now)
 
 
 def apply_unhidden_semantic_pages(
@@ -268,9 +284,12 @@ def apply_unhidden_semantic_pages(
     + `review_status: none` — the clean default active state (ADR-0047), the governed inverse of
     `hide_semantic_page`. Hidden-only (a non-hidden node is a typed `node_not_hidden` skip). Thin wrapper
     over the shared visibility-transition executor; graph-REQUIRED."""
-    return _apply_semantic_visibility_transition(
-        gconn, reviews_dir, review_type="unhide_semantic_page", from_status="hidden", to_status="active",
-        to_review_status="none", not_in_from_reason="node_not_hidden", wiki_dir=wiki_dir, now=now)
+    from app.workers import tag_links                    # lazy: tag_links imports items
+    with tag_links.ledger_lock(reviews_dir):             # ADR-0066 review round 10 (as above)
+        return _apply_semantic_visibility_transition(
+            gconn, reviews_dir, review_type="unhide_semantic_page", from_status="hidden",
+            to_status="active", to_review_status="none", not_in_from_reason="node_not_hidden",
+            wiki_dir=wiki_dir, now=now)
 
 
 def _apply_claim_visibility_transition(

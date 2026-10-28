@@ -5,7 +5,11 @@
   at the end), hardened by **review rounds 2–7** (2026-10-25/27); round 2 also brought
   **decision 9** forward. **Part 2 (decisions 7–8) design-locked by grill-phase 2026-10-27 and
   implemented 2026-10-27** (see "Part 2 — implementation decisions" and "Implementation — part 2"),
-  hardened by **review round 8** (user authority over aliases and lifecycle; unfinished "use X").
+  hardened by **review round 8** (user authority over aliases and lifecycle; unfinished "use X")
+  and the **UAT round 8 fixes** (2026-10-28: blocked tags out of merge proposals, alias edit of a
+  kept tag, shared-name notes, "applied" in the queue, plain merge errors), reviewed in **review
+  round 9** (stale alias forms, "already in effect", status-specific merge advice) and **review
+  round 10** (Apply serialized with tagging; the applied column uses the executors' checks).
   Decisions 6, 10 and 11 are not implemented. Item
   consolidation Part B ("Slice A" of the post-UAT-r6 plan); follows ADR-0064 (Part A). **Review
   round 1 applied 2026-10-24** (see the section at the end): durable keep ledger, merge/split and
@@ -882,3 +886,138 @@ repair, finished by the retry with exactly one `tag-resolved`, `tag-kept` and `t
 different decision cancels it and keeps X visibly; cancel after the suggestion is gone; a comma
 inside an alias round-trips through both frontmatter parsers. The decided-status and alias-ownership
 tests fail without their fixes.
+
+## UAT round 8 fixes (2026-10-28)
+
+The part-2 UAT (9 documents, one forced re-extraction under prompt v4) found no resolution bug: a
+suggestion that looked new ("Agentic AI") linked to an existing tag of that exact title, which wins
+over an alias match. It did show three overlapping tags (AI, AI Agent, Agentic AI) sharing the name
+"agentic AI" through extraction aliases accepted unedited at their first keep, and with no way to
+correct them afterwards. The user decided: aliases may include acronyms and the prompt stays as is;
+AI Agent and Agentic AI stay distinct tags; AI goes entirely. Fixes:
+
+1. **No merge proposal involves a blocked tag.** `merge_candidates.find_merge_candidates(blocked_keys=)`
+   leaves out every tag whose title folds (merge key) onto a blocked name — on **either** side, not
+   only as survivor: a blocked tag is one the user wants gone, and absorbing it would hand its names
+   to the other tag as aliases (with AI blocked, "Agentic AI ← AI" would make "AI" an alias of
+   Agentic AI). The lint passes `policies/blocked_tags.txt`. A merge the user files is still allowed;
+   an already-filed proposal is left for the user to decide.
+2. **A kept tag's aliases are editable.** After the first keep the aliases are the user's (round 8),
+   so the document screen's **Kept tags** rows get an *edit aliases* box (one per line; replaces the
+   tag's aliases everywhere) and the JSON route an `aliases` action. `tag_links.edit_aliases` (under
+   the ledger lock): only an in-use tag that this document keeps, not during an unfinished merge/split,
+   the shared amendment limits; it re-renders the page through `recompose_semantic_node_page(aliases=)`
+   and writes a `tag-aliases-edited` audit record `{source_id, node_id, from, to}`. An unchanged box
+   records nothing; a drop in the same submit wins. The alias freeze still holds — extraction never
+   undoes the edit.
+3. **Shared names are flagged.** Each tag row on the document screen notes every name (title or
+   alias) that another live tag (candidate, active or unused) also carries, e.g. "“agentic AI” is
+   also the title of “Agentic AI” (suggested, not kept yet)" — the shared key that makes the
+   duplicate check propose a merge, shown while the aliases can still be fixed.
+4. **The approved queue says what apply carried out.** Approved items stay in `reviews/approved/`
+   after apply, which read as "not applied". The approved view adds an *applied* column for the
+   executors that leave a per-review record (`merge_items` → `merged`, `change_item_type` →
+   `retyped`, `split_item` → `split`): the time of the latest record at or after the approval, or
+   **not yet**. Other types re-assert a status on every apply and leave no such record (—).
+5. **A blocked human merge says why in plain words**, e.g. "'financial-reporting' is not in use yet
+   (status: candidate) — keep it on a document first, then merge (survivor_not_active)"; the typed
+   reason stays at the end for scripts.
+
+Not changed: the type-change proposals for AI Agent and Agentic AI disagreed because the model typed
+two different tags differently in two documents — each is decided on its own.
+
+**Tests:** `tests/test_uat_round8.py` (10). The blocked-tag, collision and applied-marker tests fail
+without their fixes.
+
+## Review round 9 (2026-10-28) — the UAT round 8 fixes
+
+External review of the uncommitted UAT round 8 fixes; the user approved the three fixes as proposed.
+
+**Blocking — an untouched stale form could undo a newer alias edit.** Browsers submit every
+*edit aliases* box, collapsed or not, and the route compared each box with the tag's **current**
+aliases. A page opened before another document removed an alias therefore put it back on its next
+submit, recorded as a deliberate `tag-aliases-edited` edit (reproduced: open A → remove
+"Foundation Model" through B → submit A untouched → it returns).
+- **Now:** each box carries a hidden `shown_aliases_<id>` (the list as displayed, JSON). A box equal
+  to what it showed is untouched and records nothing, whatever the current aliases are.
+- A changed box passes the shown list to `tag_links.edit_aliases(expected=)`, which compares it with
+  the page's aliases **under the ledger lock** and refuses with `aliases_changed_since_shown` (the
+  current list in the result; the screen says "reload and edit again") if they differ. Nothing is
+  written.
+- A form without a valid shown list (a page from before this change, or hand-built): a box that
+  differs from the current aliases is refused with "this page is out of date"; an equal one is
+  silent.
+- The JSON route's `aliases` action takes an optional `expected_aliases` with the same check (409).
+  Without it the call is an explicit replace — a script call is always deliberate.
+
+**Non-blocking 1 — "not yet" forever after a re-approval.** Reopening and re-approving an applied
+type change makes the older executor record predate the approval; apply then has nothing to do and
+writes no new record. `review_read.applied_state` reads the live state when no record follows the
+approval: a type change whose tag already has the target type (page `item_type`, as the executor
+checks), or a merge whose absorbed tag this review already merged (`merged` is terminal — there is
+no un-merge), shows **already in effect**. A split, or any type when the graph is unavailable, with
+only an older record shows "applied ‹time›, before this approval — Apply re-checks it". **not yet**
+now means apply has work to do.
+
+**Non-blocking 2 — merge advice that couldn't be followed.** "Keep it on a document first" covered
+every status that isn't in use. The advice now follows the status: a suggestion — keep it first; a
+hidden tag — it must be unhidden first (an approved and applied `unhide_semantic_page` review —
+there is no button for filing one yet, ADR-0047); an absorbed tag already merged — "already merged
+into ‹survivor title› — nothing to do" (the survivor is read from the tombstone's `merged_into`);
+retired statuses (deprecated/archive/delete candidates, archived, deleted) — can't be merged. A
+merged survivor also names the tag it went into. The typed reason stays at the end.
+
+**Tests:** `tests/test_uat_round8.py` (+6, 16 in all): the reviewer's stale-form sequence, a refused
+edit on a stale page, a form without the shown list, the JSON `expected_aliases` check, "already in
+effect" for a re-approved retype and merge (and "applied earlier" for a split / no graph), and
+status-specific merge advice; the existing alias-edit tests now submit the hidden field as a browser
+does. Mutation checks: comparing with the current aliases, dropping the primitive's check, removing
+the in-effect check and restoring the generic advice each fail their tests.
+
+## Review round 10 (2026-10-28) — Apply and tagging may overlap
+
+External review of round 9; the user approved the recommendations as proposed.
+
+**Blocking — a concurrent Apply could undo a successful alias edit.** The alias writer holds the
+ledger lock, but the retype executor read the item page and wrote it back without it. Reproduced:
+retype reads the aliases → an alias edit removes "Foundation Model" → the retype writes its earlier
+copy, restoring it. **Decision: Apply may overlap tagging** (two tabs, a maintenance script) and the
+code — not the user — keeps that safe.
+- **Every item-page writer runs under the ledger lock**, from reading the page to writing it. Merges,
+  splits, extraction and tag actions already did. Now also: `retypes.apply_retypes`,
+  `deprecations.apply_approved_deprecations`, semantic-page hide/unhide,
+  `duplicates.apply_marked_duplicates` and `promote.promote_candidates` (also run by
+  `scripts/promote.py`). Each takes the lock itself; it is re-entrant, so inside Apply this is a no-op.
+- **Lock order: the ledger lock first, then the graph.** `run_apply` takes the ledger lock before its
+  first graph write and holds it through the graph executors, the commit and promotion, releasing it
+  before the source-status executors, the index rebuild and the validators. Before, Apply wrote to the
+  graph first and took the ledger lock only at the merge step, while a tag action takes the ledger
+  lock and then writes to the graph: when the two overlapped, the tag action timed out on "database is
+  locked" instead of waiting its turn. **Rule for any future writer of item pages or tag ledgers:
+  take the ledger lock before the first graph write.**
+- Claim, synthesis and Source-page writers are unchanged: tag actions don't edit those pages'
+  human-owned fields (Source pages are re-rendered from the graph and manifests).
+
+**Non-blocking — "already in effect" could overstate completion.** Round 9's check read the absorbed
+node's status without the tombstone's destination or an unfinished journal, and fell back to the
+graph when a retyped tag's page was missing (which Apply skips). The approved queue now uses the
+**executors' own completion checks**, moved into shared functions so the two can't drift:
+`retypes.retype_check` (skip / done / todo — the executor's guards and no-op test) and
+`merges.merge_state` (todo / resuming / done / elsewhere / unverified — the executor's journal and
+tombstone rules). Labels:
+- **already in effect** — the check says done (a retype's page already has the target type; the
+  absorbed tag is a tombstone pointing at this survivor with no open journal);
+- **not yet — run Apply** — the check says there is work to do;
+- **cannot verify — Apply re-checks it** — anything else: a missing page, a tombstone pointing
+  elsewhere or naming no survivor, an interrupted operation, a split (no state check), or no graph;
+  with the time of the last earlier record when there is one.
+
+**Tests:** `tests/test_apply_tag_serialization.py` (new, 3): a retype Apply with an alias edit arriving
+from another thread mid-operation (the edit waits; both changes survive); two processes editing the
+same aliases from the same displayed list (one wins, the other is refused — the cross-process
+`flock`); Apply holding the ledger lock at its first graph executor. `tests/test_uat_round8.py`: the
+applied-column test now builds real tombstones and covers a missing page, a wrong merge destination,
+an open journal, a tombstone without destination, a split and no graph (it replaces round 9's test,
+whose merged tag had no tombstone). Mutation checks: removing the retype executor's lock, Apply's
+lock, the `flock`, or the tombstone check each fail their tests; the cross-process test passed 10 of
+10 repeated runs.

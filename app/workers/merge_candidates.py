@@ -19,6 +19,9 @@ the item page frontmatter (title/aliases authority, ADR-0030); node set + status
   **Direct matches only** (review round): a member that shares no key with the survivor is not filed
   this run — once `A←B` applies, the alias union gives A B's names, so the next run proposes `A←C`
   with real A–C evidence instead of a transitive guess.
+- **Blocked tags (UAT round 8):** a tag whose title is on the blocked list (ADR-0066 *never suggest*)
+  takes no part in proposals, on either side: the user wants it gone, and merging it would hand its
+  names to the other tag as aliases (or make it a survivor). A human-filed merge is still allowed.
 - **Key budget (review round):** a merge key carried by more than `max_items_per_key` active items
   (default 5, `policies/review.yaml` `merge_candidates.max_items_per_key`) is too generic to signal
   identity — it pairs nothing and is reported once (`too_common`), bounding pair generation.
@@ -138,20 +141,25 @@ def _pair(item: dict[str, Any]) -> tuple[str, str] | None:
 
 
 def find_merge_candidates(gconn: Any, *, wiki_dir: Path, reviews_dir: Path,
-                          max_items_per_key: int = DEFAULT_MAX_ITEMS_PER_KEY) -> dict[str, Any]:
-    """Compute merge proposals. Returns {"proposals", "unpromoted", "pending", "too_common"}:
+                          max_items_per_key: int = DEFAULT_MAX_ITEMS_PER_KEY,
+                          blocked_keys: Any = frozenset()) -> dict[str, Any]:
+    """Compute merge proposals. Returns {"proposals", "unpromoted", "pending", "too_common", "blocked"}:
 
     - `proposals`: new star proposals to file — {subject, proposal, context};
     - `unpromoted`: report-only matches with a candidate side — {node_ids, matched_keys};
     - `pending`: unresolved machine-filed (`alias_cross_match`) merge items, re-reported each run;
-    - `too_common`: keys over the budget, ignored for pairing — {key, active_items}.
+    - `too_common`: keys over the budget, ignored for pairing — {key, active_items};
+    - `blocked`: ids of tags left out because their title is in `blocked_keys` (merge_key fold).
     Reads only; files nothing."""
     status = {n["node_id"]: n["status"] for n in graph.nodes_of_type(gconn, "item")}
     records = {}
+    blocked: list[str] = []
     for node in graph.nodes_of_type(gconn, "item"):
         if node["status"] in _CONSIDERED:
             rec = _item_record(wiki_dir, node)
-            if rec is not None:
+            if rec is not None and rec["title_key"] in blocked_keys:
+                blocked.append(rec["node_id"])
+            elif rec is not None:
                 records[rec["node_id"]] = rec
 
     suppressed: set[frozenset[str]] = set()
@@ -237,4 +245,4 @@ def find_merge_candidates(gconn: Any, *, wiki_dir: Path, reviews_dir: Path,
                     "match_evidence": evidence, "component_size": len(component)},
             })
     return {"proposals": proposals, "unpromoted": unpromoted, "pending": pending,
-            "too_common": too_common}
+            "too_common": too_common, "blocked": sorted(blocked)}

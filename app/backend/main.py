@@ -72,7 +72,7 @@ from app.workers import (
     splits, synthesis, tag_links, wiki,
 )
 from app.workers import labels
-from app.workers.wiki_render import parse_frontmatter, render_query_page
+from app.workers.wiki_render import NODE_DIR, parse_frontmatter, render_query_page
 
 # Hosts on which serving the unauthenticated API is acceptable (loopback only).
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost", ""}
@@ -708,6 +708,58 @@ def _file_human_merge(survivor: str, absorbed: str) -> dict[str, Any]:
     return result
 
 
+_RETIRED_STATUSES = frozenset({"deprecated_candidate", "archive_candidate", "archived",
+                               "delete_candidate", "deleted"})
+
+
+def _not_in_use_advice(name: str, status: Any, merged_into: str | None) -> str:
+    """Review round 9: what to do about a merge side that isn't in use, by its status — "keep it
+    first" only helps a tag that is still a suggestion."""
+    if status in ("candidate", "stale_candidate"):
+        return (f"{name!r} is not in use yet (suggested, not kept) — keep it on a document first, "
+                "then merge")
+    if status == "hidden":
+        return (f"{name!r} is hidden — it must be unhidden first (an approved and applied "
+                "unhide_semantic_page review; there is no button for this yet), then merge")
+    if status == "merged":
+        target = repr(merged_into) if merged_into else "another tag"
+        return f"{name!r} is already merged into {target} — nothing to do"
+    if status in _RETIRED_STATUSES:
+        return f"{name!r} is retired (status: {status}) — a retired tag can't be merged"
+    return f"{name!r} is not in use (status: {status}) — only a tag in use can be merged"
+
+
+def _merged_into_title(slug: Any) -> str | None:
+    """The title of the tag a merged tag now points to (its tombstone's `merged_into` id, resolved
+    through the graph to the survivor's page), or None when it isn't a tombstone or anything is
+    missing. Read-only; only for error messages."""
+    if not isinstance(slug, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", slug):
+        return None
+    try:
+        tomb = settings.wiki_dir / NODE_DIR["item"] / f"{slug}.md"
+        target_id = parse_frontmatter(tomb.read_text(encoding="utf-8", errors="replace")).get(
+            "merged_into")
+    except OSError:
+        return None
+    if not isinstance(target_id, str) or not _NODE_ID_RE.fullmatch(target_id):
+        return None
+    gconn = _open_graph_safe()
+    if gconn is None:
+        return None
+    try:
+        node = graph.get_node(gconn, target_id)
+    finally:
+        gconn.close()
+    if node is None or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", str(node.get("slug") or "")):
+        return None
+    try:
+        page = settings.wiki_dir / NODE_DIR["item"] / f"{node['slug']}.md"
+        title = parse_frontmatter(page.read_text(encoding="utf-8", errors="replace")).get("title")
+    except OSError:
+        return None
+    return str(title) if title else None
+
+
 def _merge_block_error(result: dict[str, Any]) -> HTTPException:
     """Map a blocked human-merge plan to its HTTP error (shared by filing + the UI preview)."""
     reason = result["reason"]
@@ -722,9 +774,22 @@ def _merge_block_error(result: dict[str, Any]) -> HTTPException:
                   f"{result.get('conflicting_subject')}) — apply or reopen it first (ADR-0045); "
                   "two conflicting merges are never approved together.")
     else:
-        detail = f"merge blocked: {reason}"
-        if result.get("side"):
-            detail += f" ({result['side']}: {result.get('ref')!r})"
+        # UAT round 8: plain words first; the typed reason stays at the end for scripts and tests.
+        name = result.get("slug") or result.get("ref") or result.get("node_id")
+        survivor_of = _merged_into_title(result.get("slug"))
+        plain = {
+            "invalid_ref": f"the {result.get('side')} tag is empty — give a tag name or id",
+            "unknown_item": f"no tag called {name!r} ({result.get('side')})",
+            "not_an_item": f"{name!r} is not a tag ({result.get('side')})",
+            "ambiguous_ref": f"several tags are called {name!r} — use the tag id (itm_…) instead",
+            "self_merge": "the surviving tag and the absorbed tag are the same tag",
+            "survivor_already_merged": f"{name!r} was itself merged into "
+                                       f"{repr(survivor_of) if survivor_of else 'another tag'} — merge "
+                                       "into that tag instead",
+            "survivor_not_active": _not_in_use_advice(name, result.get("node_status"), survivor_of),
+            "absorbed_not_active": _not_in_use_advice(name, result.get("node_status"), survivor_of),
+        }.get(reason)
+        detail = f"merge blocked: {plain} ({reason})" if plain else f"merge blocked: {reason}"
     status = 400 if reason == "invalid_ref" else 404 if reason == "unknown_item" else 409
     return HTTPException(status_code=status, detail=detail)
 
@@ -858,91 +923,98 @@ def run_apply(st: Any) -> dict[str, Any]:
     split_res: dict[str, Any] = {"applied": 0, "skipped": [], "changed_pages": [], "affected_sources": []}
     promo = {"promoted": 0}
 
-    # Safe open: None on absent OR schema-mismatch (archive doesn't need the graph, so an unrelated graph
-    # problem must not block an archive-only apply). The graph executors + promote run only when the graph
-    # is available; 503 only when graph-*required* items are waiting (archive_source is not graph-required).
-    gconn = _open_graph_safe_at(st.graph_db_path)
-    graph_available = gconn is not None
-    if gconn is not None:
-        try:
-            syntheses = synthesis.apply_resolved_syntheses(
-                gconn, reviews_dir, synthesis_dir=synthesis_dir, enrichment_dir=enrichment_dir, now=now)
-            contra = contradictions.apply_contradiction_decisions(
-                gconn, reviews_dir, claims_dir=claims_dir, markdown_dir=markdown_dir, now=now)
-            deprec = deprecations.apply_approved_deprecations(
-                gconn, reviews_dir, wiki_dir=wiki_dir, claims_dir=claims_dir,
-                markdown_dir=markdown_dir, now=now)
-            # ADR-0046: governance semantic-page hide (active -> hidden) via the deprecation render
-            # seam (recompose_semantic_node_page), graph-REQUIRED — so it runs inside the graph block.
-            sem_hidden = deprecations.apply_hidden_semantic_pages(
-                gconn, reviews_dir, wiki_dir=wiki_dir, now=now)
-            # ADR-0047: the governed inverse — semantic unhide (hidden -> active), same render seam,
-            # also graph-REQUIRED.
-            sem_unhidden = deprecations.apply_unhidden_semantic_pages(
-                gconn, reviews_dir, wiki_dir=wiki_dir, now=now)
-            # ADR-0048: claim visibility (active <-> hidden) via recompose_claim + partner re-render;
-            # graph-REQUIRED.
-            claims_hidden = deprecations.apply_hidden_claims(
-                gconn, reviews_dir, wiki_dir=wiki_dir, markdown_dir=markdown_dir, now=now)
-            claims_unhidden = deprecations.apply_unhidden_claims(
-                gconn, reviews_dir, wiki_dir=wiki_dir, markdown_dir=markdown_dir, now=now)
-            # ADR-0049: explicit synthesis visibility (active <-> hidden) via the synthesis.py / _render_page
-            # seam (artifact-sourced); graph-REQUIRED. Runs AFTER the claim status flips but BEFORE the claim
-            # fan-out, so an operator hide_synthesis applies to a still-`active` synthesis and the final
-            # fan-out then PRESERVES operator `hidden` (decision 10 precedence: operator hidden wins).
-            syn_hidden = synthesis.apply_hidden_syntheses(
-                gconn, reviews_dir, synthesis_dir=synthesis_dir, enrichment_dir=enrichment_dir, now=now)
-            syn_unhidden = synthesis.apply_unhidden_syntheses(
-                gconn, reviews_dir, synthesis_dir=synthesis_dir, enrichment_dir=enrichment_dir, now=now)
-            # ADR-0049 fan-out (FINAL reconciliation): re-render every synthesis citing a hidden/unhidden
-            # claim so its Supporting Evidence drops/restores that claim and its status reconciles to the
-            # current evidence (active <-> evidence_hidden), while PRESERVING operator `hidden`. The edges
-            # stay active in the graph (SoT); only the rendered discovery surface + status change.
-            claim_affected_syn = sorted(set(claims_hidden.get("affected_syntheses", []))
-                                        | set(claims_unhidden.get("affected_syntheses", [])))
-            for _sid in claim_affected_syn:
-                _before = (graph.get_node(gconn, _sid) or {}).get("status")
-                _result = synthesis.rerender_synthesis_page(gconn, _sid, synthesis_dir=synthesis_dir,
-                                                            enrichment_dir=enrichment_dir, now=now)
-                if _result is None:
-                    syn_fanout_unreconciled += 1   # page missing/unbindable/artifact gone -> can't suppress
-                    continue
-                _after, _changed = _result
-                if _changed:                       # page OR graph-mirror changed -> reindex; no churn if not
-                    claim_syn_pages.append(f"Synthesis/{_sid}.md")
-                    synthesis_fanout_work += 1
-                    # ADR-0049 decision 10: audit the active <-> evidence_hidden transitions in the summary.
-                    if _after == "evidence_hidden" and _before != "evidence_hidden":
-                        syn_evidence_suppressed += 1
-                    elif _after == "active" and _before == "evidence_hidden":
-                        syn_evidence_restored += 1
-            dups = duplicates.apply_marked_duplicates(
-                gconn, reviews_dir, wiki_dir=wiki_dir, now=now)
-            # ADR-0050/0059: identity-surgery merge (knowledge items), forward-only; re-points active edges +
-            # tombstones the absorbed id + unions aliases. GRAPH-REQUIRED. Source pages whose mentions were
-            # re-pointed are re-rendered after the commit (affected_sources, like the claim fan-out).
-            merged = merges.apply_merges(gconn, reviews_dir, wiki_dir=wiki_dir, now=now)
-            # ADR-0059: governed classification flip (NON-rekeying) — page item_type + graph mirror; no
-            # id change, no page move, no edge re-point. GRAPH-REQUIRED. Mentioning Source pages re-render
-            # after the commit (affected_sources — their Items sections group by item_type).
-            rekeyed = retypes.apply_retypes(gconn, reviews_dir, wiki_dir=wiki_dir, now=now)
-            # ADR-0052/0059: identity-surgery item split (inverse of merge), forward-only; mints the spin-off +
-            # re-points the human-partitioned mentions + re-renders the primary. GRAPH-REQUIRED. The moved
-            # sources' Source pages re-render after the commit (affected_sources). Runs before promote_
-            # candidates (below) so a spin-off with >=2 independent sources can promote in the same apply.
-            split_res = splits.apply_splits(gconn, reviews_dir, wiki_dir=wiki_dir, now=now)
-            gconn.commit()
-        finally:
-            gconn.close()
-    elif _approved_graph_backed_count(reviews_dir):
-        # The graph is unavailable (absent or schema-mismatched) but approved graph-required decisions
-        # are waiting — refuse loudly rather than report a silent "applied" (and BEFORE promote_candidates
-        # would init an empty graph). archive_source is NOT graph-required, so it doesn't trigger this.
-        # The gate lives here so live apply (-> 503) and dry-run (-> blocked preview) refuse identically.
-        raise GraphUnavailable()
+    # ADR-0066 review round 10: the graph executors and promote rewrite item pages, so they run under
+    # the ledger lock — taken BEFORE the first graph write, the same order as every tag action (ledger
+    # lock, then graph). Taken after a graph write (as merges/splits alone did), Apply would hold the
+    # SQLite write lock while waiting for the ledger lock a tag action holds while waiting for SQLite.
+    # Released before the source-status executors, the index rebuild and the validators.
+    with tag_links.ledger_lock(reviews_dir):
+        # Safe open: None on absent OR schema-mismatch (archive doesn't need the graph, so an unrelated
+        # graph problem must not block an archive-only apply). The graph executors + promote run only
+        # when the graph is available; 503 only when graph-*required* items are waiting (archive_source
+        # is not graph-required).
+        gconn = _open_graph_safe_at(st.graph_db_path)
+        graph_available = gconn is not None
+        if gconn is not None:
+            try:
+                syntheses = synthesis.apply_resolved_syntheses(
+                    gconn, reviews_dir, synthesis_dir=synthesis_dir, enrichment_dir=enrichment_dir, now=now)
+                contra = contradictions.apply_contradiction_decisions(
+                    gconn, reviews_dir, claims_dir=claims_dir, markdown_dir=markdown_dir, now=now)
+                deprec = deprecations.apply_approved_deprecations(
+                    gconn, reviews_dir, wiki_dir=wiki_dir, claims_dir=claims_dir,
+                    markdown_dir=markdown_dir, now=now)
+                # ADR-0046: governance semantic-page hide (active -> hidden) via the deprecation render
+                # seam (recompose_semantic_node_page), graph-REQUIRED — so it runs inside the graph block.
+                sem_hidden = deprecations.apply_hidden_semantic_pages(
+                    gconn, reviews_dir, wiki_dir=wiki_dir, now=now)
+                # ADR-0047: the governed inverse — semantic unhide (hidden -> active), same render seam,
+                # also graph-REQUIRED.
+                sem_unhidden = deprecations.apply_unhidden_semantic_pages(
+                    gconn, reviews_dir, wiki_dir=wiki_dir, now=now)
+                # ADR-0048: claim visibility (active <-> hidden) via recompose_claim + partner re-render;
+                # graph-REQUIRED.
+                claims_hidden = deprecations.apply_hidden_claims(
+                    gconn, reviews_dir, wiki_dir=wiki_dir, markdown_dir=markdown_dir, now=now)
+                claims_unhidden = deprecations.apply_unhidden_claims(
+                    gconn, reviews_dir, wiki_dir=wiki_dir, markdown_dir=markdown_dir, now=now)
+                # ADR-0049: explicit synthesis visibility (active <-> hidden) via the synthesis.py / _render_page
+                # seam (artifact-sourced); graph-REQUIRED. Runs AFTER the claim status flips but BEFORE the claim
+                # fan-out, so an operator hide_synthesis applies to a still-`active` synthesis and the final
+                # fan-out then PRESERVES operator `hidden` (decision 10 precedence: operator hidden wins).
+                syn_hidden = synthesis.apply_hidden_syntheses(
+                    gconn, reviews_dir, synthesis_dir=synthesis_dir, enrichment_dir=enrichment_dir, now=now)
+                syn_unhidden = synthesis.apply_unhidden_syntheses(
+                    gconn, reviews_dir, synthesis_dir=synthesis_dir, enrichment_dir=enrichment_dir, now=now)
+                # ADR-0049 fan-out (FINAL reconciliation): re-render every synthesis citing a hidden/unhidden
+                # claim so its Supporting Evidence drops/restores that claim and its status reconciles to the
+                # current evidence (active <-> evidence_hidden), while PRESERVING operator `hidden`. The edges
+                # stay active in the graph (SoT); only the rendered discovery surface + status change.
+                claim_affected_syn = sorted(set(claims_hidden.get("affected_syntheses", []))
+                                            | set(claims_unhidden.get("affected_syntheses", [])))
+                for _sid in claim_affected_syn:
+                    _before = (graph.get_node(gconn, _sid) or {}).get("status")
+                    _result = synthesis.rerender_synthesis_page(gconn, _sid, synthesis_dir=synthesis_dir,
+                                                                enrichment_dir=enrichment_dir, now=now)
+                    if _result is None:
+                        syn_fanout_unreconciled += 1   # page missing/unbindable/artifact gone -> can't suppress
+                        continue
+                    _after, _changed = _result
+                    if _changed:                       # page OR graph-mirror changed -> reindex; no churn if not
+                        claim_syn_pages.append(f"Synthesis/{_sid}.md")
+                        synthesis_fanout_work += 1
+                        # ADR-0049 decision 10: audit the active <-> evidence_hidden transitions in the summary.
+                        if _after == "evidence_hidden" and _before != "evidence_hidden":
+                            syn_evidence_suppressed += 1
+                        elif _after == "active" and _before == "evidence_hidden":
+                            syn_evidence_restored += 1
+                dups = duplicates.apply_marked_duplicates(
+                    gconn, reviews_dir, wiki_dir=wiki_dir, now=now)
+                # ADR-0050/0059: identity-surgery merge (knowledge items), forward-only; re-points active edges +
+                # tombstones the absorbed id + unions aliases. GRAPH-REQUIRED. Source pages whose mentions were
+                # re-pointed are re-rendered after the commit (affected_sources, like the claim fan-out).
+                merged = merges.apply_merges(gconn, reviews_dir, wiki_dir=wiki_dir, now=now)
+                # ADR-0059: governed classification flip (NON-rekeying) — page item_type + graph mirror; no
+                # id change, no page move, no edge re-point. GRAPH-REQUIRED. Mentioning Source pages re-render
+                # after the commit (affected_sources — their Items sections group by item_type).
+                rekeyed = retypes.apply_retypes(gconn, reviews_dir, wiki_dir=wiki_dir, now=now)
+                # ADR-0052/0059: identity-surgery item split (inverse of merge), forward-only; mints the spin-off +
+                # re-points the human-partitioned mentions + re-renders the primary. GRAPH-REQUIRED. The moved
+                # sources' Source pages re-render after the commit (affected_sources). Runs before promote_
+                # candidates (below) so a spin-off with >=2 independent sources can promote in the same apply.
+                split_res = splits.apply_splits(gconn, reviews_dir, wiki_dir=wiki_dir, now=now)
+                gconn.commit()
+            finally:
+                gconn.close()
+        elif _approved_graph_backed_count(reviews_dir):
+            # The graph is unavailable (absent or schema-mismatched) but approved graph-required decisions
+            # are waiting — refuse loudly rather than report a silent "applied" (and BEFORE promote_candidates
+            # would init an empty graph). archive_source is NOT graph-required, so it doesn't trigger this.
+            # The gate lives here so live apply (-> 503) and dry-run (-> blocked preview) refuse identically.
+            raise GraphUnavailable()
 
-    if graph_available:
-        promo = promote.promote_candidates(root, rebuild_index=False, record_job=False)
+        if graph_available:
+            promo = promote.promote_candidates(root, rebuild_index=False, record_job=False)
 
     # Phase 7: reversible source archive (active -> archive_candidate; ADR-0036). Own graph conn +
     # per-source page re-render; raw bytes untouched. NOT graph-required.
@@ -1354,6 +1426,17 @@ def ui_review_queue(
             limit=limit, offset=offset)
     except ValueError as exc:
         return HTMLResponse(review_html.render_error(400, str(exc)), status_code=400)
+    if status == "approved":     # UAT round 8: approved items stay here after apply — say which ran
+        gconn = _open_graph_safe()      # review round 9: "already in effect" needs the live state
+        try:
+            data["applied"] = {
+                it["review_id"]: review_read.applied_state(settings.reviews_dir, it, gconn,
+                                                           settings.wiki_dir)
+                for it in data["items"]
+                if it.get("type") in review_read.APPLIED_EVIDENCE and it.get("review_id")}
+        finally:
+            if gconn is not None:
+                gconn.close()
     return HTMLResponse(review_html.render_queue(data, status=status))
 
 
@@ -1633,6 +1716,55 @@ async def ui_review_source_decide(source_id: str, request: Request) -> HTMLRespo
             gconn.close()
         warnings += tag_links.finish(settings.root, affected, wiki_dir=settings.wiki_dir)["warnings"]
 
+    # UAT round 8: alias edits on kept tags (a changed `edit_aliases_<id>` box). A row dropped in
+    # this same submit is not edited. Review round 9: a box counts as edited only when it differs
+    # from what the page SHOWED (`shown_aliases_<id>`), not from the current aliases — browsers send
+    # every box, so comparing with the current list let an untouched stale form undo a newer edit.
+    # The shown list goes to the primitive, which refuses the write if the aliases changed since.
+    edits = []
+    for key in sorted(k for k in form.keys() if str(k).startswith("edit_aliases_")):
+        nid = str(key)[len("edit_aliases_"):]
+        target = links.get(nid)
+        if not _NODE_ID_RE.fullmatch(nid) or target is None or target["kind"] != "kept" \
+                or str(form.get(f"link_{nid}") or ""):
+            continue
+        new_aliases = _alias_lines(str(form.get(key) or "").splitlines())
+        shown = _shown_aliases(form.get(f"shown_aliases_{nid}"))
+        if shown is None:                                 # no (valid) record of what was shown
+            if new_aliases != _alias_lines(target.get("aliases") or []):
+                results.append({"node_id": nid, "action": "edit aliases", "recorded": False,
+                                "title": target.get("title"),
+                                "skip_reason": "this page is out of date — reload it and edit again"})
+            continue
+        if new_aliases != shown:
+            edits.append((nid, target, new_aliases, shown))
+    if edits:
+        gconn = _open_graph_safe()
+        if gconn is None:
+            return _source_flow_unavailable()
+        affected = set()
+        try:
+            for nid, target, new_aliases, shown in edits:
+                row = {"node_id": nid, "action": "edit aliases", "recorded": False,
+                       "title": target.get("title")}
+                out = tag_links.edit_aliases(gconn, source_id=source_id, node_id=nid,
+                                             aliases=new_aliases, wiki_dir=settings.wiki_dir,
+                                             reviews_dir=settings.reviews_dir, expected=shown)
+                affected.update(out.get("affected_sources") or [])
+                if out["outcome"] == "blocked" and out["reason"] == "aliases_changed_since_shown":
+                    current = ", ".join(out.get("current") or []) or "none"
+                    results.append(row | {"skip_reason": "the aliases changed after this page was "
+                                          f"shown (now: {current}) — reload and edit again "
+                                          "(aliases_changed_since_shown)"})
+                elif out["outcome"] == "blocked":
+                    results.append(row | {"skip_reason": out["reason"]})
+                else:
+                    results.append(row | {"recorded": out["outcome"] == "aliases_updated",
+                                          "status": out.get("effect") or out["outcome"]})
+        finally:
+            gconn.close()
+        warnings += tag_links.finish(settings.root, affected, wiki_dir=settings.wiki_dir)["warnings"]
+
     for key in sorted(k for k in form.keys() if str(k).startswith("decision_")):
         rid = str(key)[len("decision_"):]
         action = str(form.get(key) or "")
@@ -1662,19 +1794,38 @@ async def ui_review_source_decide(source_id: str, request: Request) -> HTMLRespo
                                                                 warnings=warnings))
 
 
+def _alias_lines(values: Any) -> list[str]:
+    """Alias box/list → the stripped, non-empty entries in order (how an edit box is compared)."""
+    return [str(a).strip() for a in values if str(a).strip()]
+
+
+def _shown_aliases(raw: Any) -> list[str] | None:
+    """The alias list an edit box was shown with (review round 9; a JSON list in a hidden field), or
+    None when absent/malformed — a page from before the field existed, or a hand-built form."""
+    try:
+        value = json.loads(str(raw)) if raw is not None else None
+    except ValueError:
+        return None
+    if not isinstance(value, list) or any(not isinstance(a, str) for a in value):
+        return None
+    return _alias_lines(value)
+
+
 @app.post("/reviews/sources/{source_id}/links")
 def post_source_link(source_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     """JSON twin of one tag-row decision (ADR-0066), for scripting/curl: `{node_id, action:
-    keep|drop|block|use|cancel, title?, aliases?, description?, item_type?, chosen?}`. `use` resolves
-    an ambiguous suggestion to `chosen`, one of its matching tags (P3) — or retries an unfinished one;
-    `cancel` abandons an unfinished one. Same scope guard as the form: the node must be a suggestion,
-    kept link or unfinished choice on this source's screen."""
+    keep|drop|block|use|cancel|aliases, title?, aliases?, expected_aliases?, description?, item_type?,
+    chosen?}`. `use` resolves an ambiguous suggestion to `chosen`, one of its matching tags (P3) — or
+    retries an unfinished one; `cancel` abandons an unfinished one; `aliases` replaces a kept tag's
+    aliases with `aliases` (UAT round 8) — given `expected_aliases`, only if they still equal that
+    list, else 409 `aliases_changed_since_shown` (review round 9). Same scope guard as the form: the
+    node must be a suggestion, kept link or unfinished choice on this source's screen."""
     if not manifests.is_source_id(source_id):
         raise HTTPException(status_code=404, detail=f"unknown source: {source_id}")
     nid, action = str(payload.get("node_id") or ""), str(payload.get("action") or "")
     if not _NODE_ID_RE.fullmatch(nid):
         raise HTTPException(status_code=400, detail="invalid item id")
-    if action not in _LINK_ACTIONS | {"use", "cancel"}:
+    if action not in _LINK_ACTIONS | {"use", "cancel", "aliases"}:
         raise HTTPException(status_code=400, detail=f"unknown action: {action}")
     view = review_read.source_review_view(
         settings.reviews_dir, source_id, graph_db=settings.graph_db_path,
@@ -1687,8 +1838,11 @@ def post_source_link(source_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     target = links.get(nid) or pending.get(nid)
     if target is None:
         raise HTTPException(status_code=409, detail="not_attributable_to_source")
-    if target["kind"] == "kept" and action != "drop":
-        raise HTTPException(status_code=409, detail="already kept (only drop applies)")
+    if target["kind"] == "kept" and action not in ("drop", "aliases"):
+        raise HTTPException(status_code=409, detail="already kept (only drop or aliases applies)")
+    if action == "aliases" and target["kind"] != "kept":
+        raise HTTPException(status_code=409, detail="not_kept_here (keep it first; a first keep "
+                                                    "takes aliases as an amendment)")
     if action == "cancel" and nid not in pending:
         raise HTTPException(status_code=409, detail="no_unfinished_choice")
     if target["kind"] == "unfinished" and action not in ("use", "cancel"):
@@ -1705,11 +1859,25 @@ def post_source_link(source_id: str, payload: dict[str, Any]) -> dict[str, Any]:
                 {k: payload[k] for k in promote.AMENDMENT_FIELDS if payload.get(k) is not None})
         except promote.AmendmentError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+    new_aliases = expected = None
+    if action == "aliases":
+        new_aliases = payload.get("aliases")
+        if not isinstance(new_aliases, list) or any(not isinstance(a, str) for a in new_aliases):
+            raise HTTPException(status_code=400, detail="aliases must be a list of strings")
+        expected = payload.get("expected_aliases")      # optional compare-and-set (review round 9)
+        if expected is not None and (not isinstance(expected, list)
+                                     or any(not isinstance(a, str) for a in expected)):
+            raise HTTPException(status_code=400, detail="expected_aliases must be a list of strings")
     gconn = _open_graph_safe()
     if gconn is None:
         raise HTTPException(status_code=503, detail="graph unavailable")
     try:
-        out = _apply_link_action(gconn, source_id, nid, action, amendments, chosen)
+        if new_aliases is not None:
+            out = tag_links.edit_aliases(gconn, source_id=source_id, node_id=nid, aliases=new_aliases,
+                                         wiki_dir=settings.wiki_dir, reviews_dir=settings.reviews_dir,
+                                         expected=expected)
+        else:
+            out = _apply_link_action(gconn, source_id, nid, action, amendments, chosen)
     finally:
         gconn.close()
     if out["outcome"] == "blocked":

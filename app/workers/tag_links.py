@@ -480,6 +480,53 @@ def drop(gconn, *, source_id: str, node_id: str, wiki_dir: Path, reviews_dir: Pa
 
 
 @ledger_action
+def edit_aliases(gconn, *, source_id: str, node_id: str, aliases: list[str], wiki_dir: Path,
+                 reviews_dir: Path, expected: list[str] | None = None,
+                 now: str | None = None) -> dict[str, Any]:
+    """Replace the aliases of a tag this document keeps (UAT round 8). After the first keep the
+    aliases are the human's (re-extraction never adds one), so this is the only way to change them
+    short of a merge. Only an in-use tag (active/unused) kept here; the shared amendment limits apply.
+    `expected` (review round 9) is the list the editor was shown: if the page's aliases differ from it
+    now (another document edited them since), the edit is refused — checked here, under the ledger
+    lock, so a stale form can never undo a newer edit. Outcomes: `aliases_updated`, `unchanged`, or
+    `blocked` (nothing written)."""
+    now = now or iso_now()
+    wiki_dir, reviews_dir = Path(wiki_dir), Path(reviews_dir)
+    node = _item_node(gconn, node_id)
+    if node is None:
+        return _blocked("unknown_item", node_id=node_id)
+    if node["status"] not in ("active", "unused"):
+        return _blocked("item_not_in_use", node_id=node_id, node_status=node["status"])
+    if (busy := _in_flight(reviews_dir, [node_id])) is not None:
+        return busy
+    if node_id not in load_ledger(reviews_dir, source_id)["kept"]:
+        return _blocked("not_kept_here", node_id=node_id, source_id=source_id)
+    try:
+        new = (promote.normalize_amendments({"aliases": list(aliases)}) or {}).get("aliases", [])
+    except promote.AmendmentError as exc:
+        return _blocked("invalid_amendments", detail=str(exc))
+    meta = _node_meta(wiki_dir, node)
+    if meta is None:
+        return _blocked("page_missing", node_id=node_id)
+    old = [str(a) for a in meta.get("aliases") or []]
+    if expected is not None and items._union(
+            [str(a).strip() for a in expected if str(a).strip()], []) != items._union(old, []):
+        return _blocked("aliases_changed_since_shown", node_id=node_id, current=old)
+    new = items._union(new, [])
+    if new == items._union(old, []):
+        return {"outcome": "unchanged", "node_id": node_id, "affected_sources": []}
+    out = items.recompose_semantic_node_page(
+        gconn, node_id=node_id, wiki_dir=wiki_dir, status=implied_status(gconn, node_id, node["status"]),
+        review_status="none", now=now, aliases=new)
+    if out not in ("written", "unchanged"):
+        return _blocked(out, node_id=node_id)
+    _audit(reviews_dir, node_id, "tag-aliases-edited", {"source_id": source_id, "node_id": node_id,
+                                                        "from": old, "to": new}, now)
+    return {"outcome": "aliases_updated", "effect": "aliases updated", "node_id": node_id,
+            "aliases": new, "affected_sources": [source_id]}
+
+
+@ledger_action
 def undo_drop(gconn, *, source_id: str, key: str, wiki_dir: Path, reviews_dir: Path,
               now: str | None = None) -> dict[str, Any]:
     """Remove a drop record. If the tag still exists, its rejected suggestion on this document is

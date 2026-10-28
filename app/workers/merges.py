@@ -255,6 +255,30 @@ def _write_audit(reviews_dir: Path, rid: str, record: dict[str, Any], now: str) 
         encoding="utf-8")
 
 
+def merge_state(reviews_dir: Path, *, wiki_dir: Path, review_id: str, survivor: str,
+                absorbed_node: dict[str, Any]) -> str:
+    """Where one approved merge stands, by the executor's own rules (ADR-0066 review round 10: shared
+    with the approved queue's "applied" column so the two can't drift):
+    - `todo` — the absorbed tag is still live: apply merges it;
+    - `resuming` — an open journal entry for THIS review (ADR-0066 review round 3): the merge was
+      interrupted and apply finishes it (adopting a tombstone it may already have written);
+    - `done` — the absorbed tag is a `merged` tombstone pointing at this survivor: apply is a no-op;
+    - `elsewhere` — its tombstone points at another tag (a conflicting merge won);
+    - `unverified` — merged in the graph but the tombstone page is missing or names no survivor."""
+    from app.workers import identity_journal              # lazy, like apply_merges
+    resuming = identity_journal.is_open(reviews_dir, review_id)
+    tomb = Path(wiki_dir) / NODE_DIR["item"] / f"{absorbed_node.get('slug')}.md"
+    merged_into = parse_frontmatter(tomb.read_text(encoding="utf-8", errors="replace")) \
+        .get("merged_into") if tomb.exists() else None
+    if absorbed_node.get("status") != "merged":
+        return "resuming" if resuming else "todo"
+    if resuming and merged_into == survivor:
+        return "resuming"
+    if merged_into == survivor:
+        return "done"
+    return "elsewhere" if merged_into else "unverified"
+
+
 def apply_merges(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = None) -> dict[str, Any]:
     """Apply approved `merge_items` decisions (ADR-0050/0059). Returns
     `{applied, skipped:[{review_id, reason}], changed_pages, graph_changed, affected_sources,
@@ -302,18 +326,15 @@ def apply_merges(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = 
                 _skip("out_of_scope")
                 continue
             b_page = f"{NODE_DIR[nt]}/{nb['slug']}.md"
-            # ADR-0066 review round 3: an open journal entry means THIS merge was interrupted — resume
-            # it (adopt the tombstone it may already have written) instead of treating it as done.
-            resuming = identity_journal.is_open(reviews_dir, rid)
-            tomb = wiki_dir / b_page
-            merged_into = parse_frontmatter(tomb.read_text(encoding="utf-8", errors="replace")) \
-                .get("merged_into") if tomb.exists() else None
-            if nb["status"] == "merged" and not (resuming and merged_into == a):
+            state = merge_state(reviews_dir, wiki_dir=wiki_dir, review_id=rid, survivor=a,
+                                absorbed_node=nb)
+            if state in ("done", "elsewhere", "unverified"):
                 # Idempotent: a completed merge INTO THIS survivor is a true no-op; a tombstone pointing
                 # elsewhere means a conflicting merge won — loud typed skip, never silent (ADR-0064).
-                if merged_into is not None and merged_into != a:
+                if state == "elsewhere":
                     _skip("absorbed_merged_elsewhere")
                 continue
+            resuming = state == "resuming"
             if na["status"] not in _MERGEABLE_STATUSES:       # ADR-0066: an unused tag stays mergeable
                 _skip("survivor_not_active")
                 continue

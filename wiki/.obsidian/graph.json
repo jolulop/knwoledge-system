@@ -1,6 +1,6 @@
 {
   "collapse-filter": false,
-  "search": "-path:Claims",
+  "search": "-path:Claims -file:index -file:log",
   "showTags": false,
   "showAttachments": false,
   "hideUnresolved": false,

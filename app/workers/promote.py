@@ -217,6 +217,28 @@ def promote_candidates(
     rebuild_index: bool = True,
     record_job: bool = True,
 ) -> dict[str, Any]:
+    """Activate candidates whose `promote_candidate_node` item is approved (see the module docstring).
+    ADR-0066 review round 10: it rewrites item pages, so the whole run is serialized with tag actions
+    (the ledger lock — re-entrant, so a no-op inside run_apply, which already holds it)."""
+    from app.workers import tag_links                    # lazy: tag_links imports this module
+    lock_dir = Path(reviews_dir) if reviews_dir else Path(root).resolve() / "reviews"
+    with tag_links.ledger_lock(lock_dir):
+        return _promote_candidates(root, manifests_dir=manifests_dir, graph_db=graph_db,
+                                   wiki_dir=wiki_dir, reviews_dir=reviews_dir, jobs_db=jobs_db,
+                                   rebuild_index=rebuild_index, record_job=record_job)
+
+
+def _promote_candidates(
+    root: Path,
+    *,
+    manifests_dir: Path | None,
+    graph_db: Path | None,
+    wiki_dir: Path | None,
+    reviews_dir: Path | None,
+    jobs_db: Path | None,
+    rebuild_index: bool,
+    record_job: bool,
+) -> dict[str, Any]:
     root = Path(root).resolve()
     manifests_dir = Path(manifests_dir) if manifests_dir else root / "raw" / "manifests"
     graph_db = Path(graph_db) if graph_db else root / "db" / "graph.sqlite"

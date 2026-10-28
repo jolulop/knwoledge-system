@@ -475,6 +475,7 @@ def _recompose_node(gconn, *, node_id, wiki_dir, reviews_dir, now, text_hint=Non
 
 def recompose_semantic_node_page(
     gconn, *, node_id: str, wiki_dir: Path, status: str, review_status: str, now: str | None = None,
+    aliases: list[str] | None = None,
 ) -> str:
     """Re-render an item page at an EXPLICIT status + review_status (ADR-0035 A5).
 
@@ -485,7 +486,8 @@ def recompose_semantic_node_page(
     re-renders with the **explicit** status (never re-derived from mentions, so a still-mentioned node
     cannot resurrect out of a deprecation) and mirrors the graph node status. Idempotent and
     deterministic. Returns "written", else a typed skip reason
-    ("node_missing"/"unsupported_node_type"/"page_missing")."""
+    ("node_missing"/"unsupported_node_type"/"page_missing"). `aliases`, when given, replaces the
+    page's aliases (the human alias edit of an in-use tag, UAT round 8)."""
     node = graph.get_node(gconn, node_id)
     if node is None:
         return "node_missing"
@@ -503,7 +505,8 @@ def recompose_semantic_node_page(
     duplicates = graph.active_duplicates(gconn, node_id)
     rendered = render_item_page({
         "node_id": node_id, "item_type": item_type,
-        "title": meta["title"], "aliases": meta["aliases"], "confidence": meta["confidence"],
+        "title": meta["title"], "aliases": meta["aliases"] if aliases is None else _union(aliases, []),
+        "confidence": meta["confidence"],
         "source_ids": kept, "suggested_ids": suggested, "status": status,
         "duplicates": duplicates,
         "split_from": meta.get("split_from"),                           # ADR-0052: preserve spin-off lineage

@@ -79,6 +79,16 @@ def apply_marked_duplicates(gconn, reviews_dir: Path, *, wiki_dir: Path,
     deprecation executor): `applied` = new edge written, `normalized` = edge already active but a page
     projection repaired, true no-ops counted in neither. The caller owns the single index rebuild/reindex
     and `gconn.commit()` (ADR-0035)."""
+    from app.workers import tag_links                    # lazy: tag_links imports items
+    # ADR-0066 review round 10: item-page writers are serialized with tag actions (the ledger lock,
+    # re-entrant — a no-op inside run_apply, which already holds it).
+    with tag_links.ledger_lock(reviews_dir):
+        return _apply_marked_duplicates(gconn, reviews_dir, wiki_dir=wiki_dir, now=now)
+
+
+def _apply_marked_duplicates(gconn, reviews_dir: Path, *, wiki_dir: Path,
+                             now: str | None = None) -> dict[str, Any]:
+    """The body of :func:`apply_marked_duplicates` (called under the ledger lock)."""
     now = now or iso_now()
     applied = normalized = 0
     skipped: list[dict[str, str]] = []

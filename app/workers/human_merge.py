@@ -97,10 +97,10 @@ def plan_merge(
     if a["node_id"] == b["node_id"]:
         return _blocked("self_merge", node_id=a["node_id"])
     if a["status"] == "merged":
-        return _blocked("survivor_already_merged", node_id=a["node_id"])
+        return _blocked("survivor_already_merged", node_id=a["node_id"], slug=a.get("slug"))
     for side, node in (("survivor", a), ("absorbed", b)):
         if node["status"] not in ("active", "unused"):   # ADR-0066: an unused tag stays mergeable
-            return _blocked(f"{side}_not_active", node_id=node["node_id"],
+            return _blocked(f"{side}_not_active", node_id=node["node_id"], slug=node.get("slug"),
                             node_status=node["status"])
 
     subject = {"survivor_node_id": a["node_id"], "absorbed_node_id": b["node_id"]}

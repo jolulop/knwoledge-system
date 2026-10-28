@@ -13,6 +13,7 @@ which recurses and escapes every leaf, so nested dict/list markup can never reac
 from __future__ import annotations
 
 import html
+import json
 from typing import Any
 
 from app.backend import taxonomy
@@ -98,15 +99,38 @@ def render_queue(data: dict[str, Any], *, status: str) -> str:
     if not data["items"]:
         parts.append("<p><em>No items.</em></p>")
     else:
+        applied = data.get("applied")       # approved view only: {review_id: applied_state}
         rows = ["<tr><th>review_id</th><th>type</th><th>status</th><th>priority</th>"
-                "<th>created_at</th></tr>"]
+                "<th>created_at</th>" + ("<th>applied</th>" if applied is not None else "") + "</tr>"]
         for it in data["items"]:
             rid = _h(it.get("review_id"))
+            cell = ""
+            if applied is not None:
+                state = applied.get(it.get("review_id")) or {}
+                if state.get("state") == "applied":
+                    cell = f"<td>applied {_h(state.get('at'))}</td>"
+                elif state.get("state") == "in_effect":
+                    cell = "<td>already in effect — nothing left to apply</td>"
+                elif state.get("state") == "cannot_verify":
+                    last = (f" (last applied {_h(state['at'])}, before this approval)"
+                            if state.get("at") else "")
+                    cell = f"<td>cannot verify — Apply re-checks it{last}</td>"
+                elif state.get("state") == "not_yet":
+                    cell = "<td><strong>not yet</strong> — run Apply</td>"
+                else:
+                    cell = "<td>—</td>"
             rows.append(
                 f"<tr><td><a href='/ui/reviews/{rid}'>{rid}</a></td>"
                 f"<td>{_h(it.get('type'))}</td><td>{_h(it.get('status'))}</td>"
-                f"<td>{_h(it.get('priority'))}</td><td>{_h(it.get('created_at'))}</td></tr>")
+                f"<td>{_h(it.get('priority'))}</td><td>{_h(it.get('created_at'))}</td>{cell}</tr>")
         parts.append("<table>" + "".join(rows) + "</table>")
+        if applied is not None:
+            parts.append("<p>Approved items stay listed here after Apply. <em>applied</em> shows when "
+                         "a merge, split or type change was carried out; <em>already in effect</em> "
+                         "means a re-approved one needs nothing more; <em>cannot verify</em> means "
+                         "the saved state is incomplete (a missing page, an unfinished operation) — "
+                         "Apply re-checks it; — means the type leaves no per-item record (Apply "
+                         "re-checks those every run).</p>")
     parts.append(
         "<h2>Merge items</h2>"
         "<p>Merge one knowledge item into another: the absorbed item becomes a tombstone "
@@ -470,6 +494,22 @@ def _amend_inputs(row: dict[str, Any]) -> str:
             f"<select name='amend_item_type_{nid}'>" + "".join(options) + "</select>" + required)
 
 
+def _alias_editor(row: dict[str, Any]) -> str:
+    """UAT round 8: the aliases of a kept tag are the human's — edit them here (one per line; the
+    list replaces the tag's aliases everywhere, not just on this document). Review round 9: the
+    hidden `shown_aliases_<id>` carries the list as displayed, so an untouched box (browsers submit
+    every textarea, collapsed or not) is told apart from an edit and a stale page can't undo a newer
+    edit — the write is refused if the aliases changed since."""
+    nid = _h(row.get("node_id"))
+    shown = [str(a) for a in row.get("aliases") or []]
+    rows = max(2, min(6, len(shown) + 1))
+    return (f"<details><summary>edit aliases</summary><label>aliases (one per line; applies to this "
+            f"tag everywhere): <textarea name='edit_aliases_{nid}' rows='{rows}' cols='24'>"
+            f"{_h(chr(10).join(shown))}</textarea></label>"
+            f"<input type='hidden' name='shown_aliases_{nid}' value='{_h(json.dumps(shown))}'>"
+            f"</details>")
+
+
 def _decided_cell(row: dict[str, Any]) -> str:
     meta = {"decision": row.get("status"), "decided_by": row.get("decided_by"),
             "decided_at": row.get("decided_at")}
@@ -535,6 +575,11 @@ def render_source_screen(data: dict[str, Any]) -> str:
                 notes.append("unused tag — keeping revives it")
             if row.get("ambiguous_with"):
                 notes.append("matches several existing tags — choose one, or keep as a new tag")
+            for c in row.get("collisions") or []:          # UAT round 8: shared names → merge proposals
+                where = "suggested, not kept yet" if c.get("other_status") == "candidate" \
+                    else str(c.get("other_status"))
+                notes.append(f"“{c.get('name')}” is also the {c.get('other_field')} of "
+                             f"“{c.get('other_title')}” ({where})")
             choices = list(row.get("ambiguous_with") or [])
             if (pending := row.get("pending_use")) and pending.get("chosen"):
                 notes.append(f"unfinished: “use {pending.get('chosen_title')}” started "
@@ -547,6 +592,8 @@ def render_source_screen(data: dict[str, Any]) -> str:
                                 ambiguous=choices)
             if not kept and row.get("amendable"):
                 cell += "<br>" + _amend_inputs(row)
+            elif kept:
+                cell += "<br>" + _alias_editor(row)
             table.append(
                 f"<tr><td>{_h(row.get('title'))}</td><td>{_h(row.get('item_type'))}</td>"
                 f"<td>{_h(', '.join(row.get('aliases') or []))}</td>"
