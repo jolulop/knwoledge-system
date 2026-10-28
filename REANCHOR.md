@@ -1,6 +1,6 @@
 # REANCHOR — session status
 
-_Last updated: 2026-10-26. **Reanchor command:** "read REANCHOR.md and reanchor". Read this
+_Last updated: 2026-10-28. **Reanchor command:** "read REANCHOR.md and reanchor". Read this
 first after an app restart, then `wiki/index.md` if working in the vault._
 
 > [!warning] This is a periodically-refreshed snapshot and can lag the live state. The authoritative
@@ -12,17 +12,16 @@ first after an app restart, then `wiki/index.md` if working in the vault._
 
 Local-first **LLM Wiki** knowledge-system. Immutable `raw/` → derived `normalized/` →
 generated `wiki/` (gitignored, regenerable) → `db/` SQLite (graph, jobs, llm_cache) →
-`reviews/`, `policies/`. ADR-driven (`docs/adr/0001–0066`). See `CLAUDE.md` for the
+`reviews/`, `policies/`. ADR-driven (`docs/adr/0001–0067`). See `CLAUDE.md` for the
 critical rules and `CONTEXT.md` for the glossary.
 
 ## Where we are
 
-- **Branch:** `main` — pushed tip `302d067` (test-isolation fix). **6 commits are local, not
-  pushed:** `84e8868` (REANCHOR + UAT-Guide note), `ea88f64` + `ed6cd00` (ADR-0064 Part A),
-  `3b6e4ca` (UAT Guide §10.1), `16f9619` (ADR-0066 design + ADR-0065 deferral + golden tag list),
-  `d17e7a7` (ADR-0066 part 1 + review rounds 2–5). The tree is otherwise clean.
-  `wiki/.obsidian/graph.json` (runtime UI state) is never committed; `.vscode/`, `docs/UAT
-  Guide.html` and `.env (UAT)` are the user's untracked files. Run `git status --short` /
+- **Branch:** `main` — tip `20f6885` (UAT round 8 fixes + review rounds 9–10), **pushed, in sync
+  with `origin/main`**; the tree is clean. Obsidian's own local drift in `wiki/.obsidian/graph.json`
+  (zoom, trailing newline) is never committed — only intended preset changes are (the current preset
+  `-path:Claims -file:index -file:log` went in with `20f6885`). `.vscode/`, `docs/UAT Guide.html`
+  and `.env (UAT)` are the user's untracked files. Run `git status --short` /
   `git log --oneline origin/main..HEAD` for the live working set.
   The per-slice rhythm: grill (design-lock, docs-only) → implement (on "implement now") → test →
   external review (user pastes) → analyze+recommend+**wait** → fix → commit (user says so) → push.
@@ -236,21 +235,77 @@ critical rules and `CONTEXT.md` for the glossary.
   - Tooling: `scripts/validate_tag_links.py` (the **12th validator**) and
     `scripts/rebuild_tag_links.py` (repair from ledgers; dry-run by default; skips damaged ledgers,
     defers in-flight nodes).
-  - **Not yet implemented:** decision 6 (Enrich title/author/publisher, `provenance_suggested` vs
-    confirmed `provenance`, Authors pages), 7 (≤15 suggestions, 1–3 broad domains first, prompt
-    bump), 8 (naming style + deterministic `merge_key`/alias resolution with an ambiguity prompt),
-    10 (clean restart at the new prompt versions), 11 (`scripts/eval_item_tags.py` scorer).
-- **UAT round 7 (2026-10-25/26, fresh clone at `d17e7a7`, done except merges):** per-document
-  keep/drop worked — 76 active tags over 9 documents, McKinsey one tag kept on 3 documents, far
-  fewer candidates. Lint filed **no merge candidate** — expected, since the user dropped the
-  duplicate names, so no title/alias twins remain. **The merge path is untested**; proposed test =
-  hand-filed merge survivor `continual-learning` ⟵ absorbed `reinforcement-learning` (artificial
-  pair: RL is kept on `src_ee65c4ac7ca4aa51` and dropped on `src_ccc42aff0cd950d0`) → expect the keep
-  to move to the survivor, the drop re-pointed with no active link on `src_ccc4…`, a tombstone page,
-  `reviews/in_flight/` empty, 12 validators passing.
-- **Tests/lint green:** `1438 passed, 2 skipped` (opt-in `gpu`/`model` marks), ruff clean, all 12
-  validators pass. ADR-0066 coverage: `tests/test_tag_links.py` (50 tests) + helper
-  `tests/tagging.py` (`keep_all`, `close_journals`). **Test gotcha:** never `monkeypatch.undo()` in a
+  - Decisions 7–8 followed in part 2 (bullet below). **Still open:** decision 6 (Enrich
+    title/author/publisher, `provenance_suggested` vs confirmed `provenance`, Authors pages), 10
+    (clean restart at the new prompt versions), 11 (`scripts/eval_item_tags.py` scorer).
+- **UAT round 7 (2026-10-25/26, fresh clone at `d17e7a7`, complete):** per-document keep/drop
+  worked — 76 active tags over 9 documents, McKinsey one tag kept on 3 documents, far fewer
+  candidates. Lint filed no merge candidate (the user had dropped the duplicate names). It led to
+  ADR-0066 decision 8's alias-hygiene amendment (`705d029`).
+- **ADR-0066 review rounds 6–7 + ADR-0039 amendment + ADR-0067 (`71051ac`, 2026-10-26/27):**
+  - **Kept-only projections:** Source pages and item backlinks link only kept tags; unkept
+    suggestions are listed as plain text (**Suggested (not reviewed)** / **Suggested On**), so they
+    make no Obsidian graph edge. Legacy tags (activated before ADR-0066) keep all links until their
+    first keep; `validate_projection` checks the split.
+  - **Repair re-derives state from the ledgers:** `stale_status`, `unwithdrawn_blocks`,
+    `stale_item_pages`/`stale_source_pages`; a half-done deletion resumes **only** from its
+    deletion-intent record `reviews/tag_links/deleting/<item_id>.json` (a page missing with no record
+    is report-only `missing_pages` — restore from backup); `repair` returns `pages_changed`.
+  - **Consistent backups (ADR-0039 amendment):** SQLite online-backup snapshots + a vault-wide writer
+    lock `db/.vault.lock` — held shared by jobs, API writes and write scripts, exclusive (with a
+    timeout) by backup/restore.
+  - **ADR-0067 request-origin guard** (amends ADR-0009's CSRF deferral): one middleware —
+    loopback `Host` allowlist (+ `KS_ALLOWED_HOSTS`) against DNS rebinding, and same-origin state
+    changes (`Origin` / `Sec-Fetch-Site`; header-less curl/scripts pass); refusal = 403 with
+    `host_not_allowed` / `cross_origin` / `cross_site`. `tests/test_request_guard.py`.
+- **ADR-0066 part 2 — decisions 7–8 (grill `5be2e50`; impl + review round 8 `f0e43f1`, 2026-10-27):**
+  P1–P7 in the ADR's "Part 2 — implementation decisions".
+  - Items prompt **`enrich-items-prompt-v4`**: one centrality-ranked list (≤ `ITEMS_PROMPT_MAX` 20),
+    1–3 broad domain tags first, naming style, strict same-thing aliases.
+  - `items.plan_suggestions` pipeline: body-text alias check past a **reference cut** (last
+    capitalised References/Bibliography… in the second half) → resolution against active/unused
+    tags' titles + aliases by `merge_key` (exact name wins; candidates excluded) → drop/block filter
+    through **both** the suggested name and the resolved tag → domains first → cut at
+    **`ENRICH_ITEMS_CAP`** (default 15, code-only — changing it restales/re-bills nothing; kept tags
+    count toward it) → a resolved type conflict files `change_item_type`.
+  - **Ambiguous matches:** the row offers **Use *X*** / **Keep as new tag** / Drop / Never suggest;
+    Use X = keep X + drop the suggestion + `tag-resolved` audit. Alias field on first keep = a
+    prefilled one-per-line textarea that replaces the list.
+  - **Review round 8 — the user's decisions outrank re-extraction:** aliases are the user's after the
+    first keep (decided at the final page write under the ledger lock via `tag_links.kept_anywhere`);
+    **decided statuses** (hidden, merged, archived/deleted, approved deprecation) are never changed by
+    extraction or repair; an interrupted Use X stays pending
+    (`reviews/tag_links/resolving/<sid>/<itm>.json`, idempotent retry or cancel; repair reports,
+    never resumes). Tests `tests/test_tag_suggestions.py` (20) + `tests/test_tag_authority.py` (14).
+- **UAT round 8 = the part-2 UAT (2026-10-28, `/tmp/ks-uat`, 9 documents, one forced
+  re-extraction under v4):** no resolution bug; it showed three overlapping tags (AI, AI Agent,
+  Agentic AI) sharing "agentic AI" through aliases accepted unedited at first keep. **User
+  decisions:** aliases may include acronyms, **no prompt v5**; AI Agent and Agentic AI stay
+  distinct; the AI tag goes entirely (the user does it in the UI). Fixes + review rounds 9–10 in
+  **`20f6885`**:
+  - no merge proposal involves a blocked tag (either side);
+  - **a kept tag's aliases are editable** (Kept-tags *edit aliases* box; JSON `aliases` action with
+    optional `expected_aliases`; `tag-aliases-edited` audit). Stale-form safety (round 9): each box
+    carries hidden `shown_aliases_<id>`; an untouched box records nothing, a changed one is refused
+    with `aliases_changed_since_shown` if the tag changed meanwhile;
+  - tag rows flag a name another live tag also carries;
+  - the approved queue has an **applied** column (applied / already in effect / not yet — run Apply
+    / cannot verify) using the executors' own checks `retypes.retype_check` + `merges.merge_state`;
+  - blocked human merges explain themselves; merge advice follows the tag's status;
+  - **round 10 — Apply may overlap tagging:** every item-page writer runs under the ledger lock
+    (retypes, deprecations, semantic hide/unhide, duplicates, promote now too). **Lock order rule:
+    take the ledger lock before the first graph write** (`run_apply` holds it from its first graph
+    write through promotion).
+  - Tests `tests/test_uat_round8.py` (16) + `tests/test_apply_tag_serialization.py` (3). Also in the
+    commit: the `.claude/agents/coverage-reporter.md` subagent (pytest-cov evidence report; 87.2% on
+    2026-10-28).
+  - **Clone after the fixes:** `/tmp/ks-uat` pulled to `20f6885`; aliases cleaned (AI Agent →
+    [agent], Agentic AI → [agentic systems]); 12 validators pass, `rebuild_tag_links` dry-run clean.
+- **Tests/lint green (at `20f6885`):** `1543 passed, 2 skipped` (opt-in `gpu`/`model` marks), ruff
+  clean, all 12 validators pass. ADR-0066 coverage: `tests/test_tag_links.py` + helper
+  `tests/tagging.py` (`keep_all`, `close_journals`), `test_tag_suggestions.py`,
+  `test_tag_authority.py`, `test_uat_round8.py`, `test_apply_tag_serialization.py`; ADR-0067
+  `test_request_guard.py`. **Test gotcha:** never `monkeypatch.undo()` in a
   test using the `client` fixture (it undoes the settings patch and the API runs against the repo
   root) — use `pytest.MonkeyPatch.context()`. ADR-0064 suites: `tests/test_merge_candidates.py` +
   `tests/test_human_merge.py`. Older test files: `tests/test_prompt_encoding.py` (ADR-0061), `tests/
@@ -270,11 +325,14 @@ critical rules and `CONTEXT.md` for the glossary.
   explorer/tabs/graph therefore show ids — that is by design, not a bug.
 - **Obsidian is installed in WSL** (apt `.deb`, WSLg). Launch `obsidian --no-sandbox --disable-gpu &`
   (without `--disable-gpu` the Chromium GPU process fails under WSLg and no window appears). Use the WSL Obsidian, not Windows-over-`\\wsl$`.
+- The committed graph preset filters `-path:Claims -file:index -file:log`; to hide unreviewed tags
+  too, add `-[status:candidate]` (the space before it matters).
 - `wiki/` is **regenerated by the pipeline** — Obsidian is a viewer; manual edits are overwritten.
 - The **Human Review UI** is at `/ui/reviews` (loopback only); the high-volume **per-source flow**
   at `/ui/reviews/sources` (per-document tag keep / drop / never suggest with amendments incl.
-  `item_type`, undo drop, human-add, `?preselect=approve`, per-source "view original" via
-  `/raw/<source_id>`); unused and blocked tags at `/ui/reviews/tags/unused` and
+  `item_type`, Use *X* / keep as new for ambiguous matches, *edit aliases* on kept tags, undo drop,
+  human-add, `?preselect=approve`, per-source "view original" via `/raw/<source_id>`); unused and
+  blocked tags at `/ui/reviews/tags/unused` and
   `/ui/reviews/tags/blocked`.
 
 ## Phase status
@@ -296,10 +354,11 @@ critical rules and `CONTEXT.md` for the glossary.
 | **ADR-0063 W3 local-model-first / tier fallback routing** | **Complete + pushed** (`122b6c7` design-lock · `5d3e42a`+`beb2103` slices · `17ba269`+`d0b3f8f` review rounds 1–2 · `250b4ae` Local Models guide); local-model UAT **passed** 2026-09-07 |
 | **Docs reconciliation (item era) + review fixes · test isolation** | **Complete + pushed** (`f129b16` · `302d067`) |
 | **UAT rounds 4–6** (fresh clones, 5→9 sources) | **Done** — item fragmentation → ADR-0064; bookmark/tag model → ADR-0066 |
-| **ADR-0064 item consolidation Part A** (merge-candidate lint + human-filed merge) | **Committed, not pushed** (`ea88f64` · `ed6cd00` · `3b6e4ca`) |
+| **ADR-0064 item consolidation Part A** (merge-candidate lint + human-filed merge) | **Complete + pushed** (`ea88f64` · `ed6cd00` · `3b6e4ca`) |
 | **ADR-0065 item-type management** | **Deferred placeholder** (not scheduled) |
-| **ADR-0066 item curation as tagging** | **Part 1 + decision 9 committed, not pushed** (`16f9619` design · `d17e7a7` impl + review rounds 2–5); decisions 6, 7, 8, 10, 11 open |
-| **UAT round 7** (fresh clone at `d17e7a7`) | **Done except the merge path** (hand-filed merge test proposed) |
+| **ADR-0066 item curation as tagging** | **Parts 1–2 + decision 9 complete + pushed** (`16f9619` design · `d17e7a7` part 1 + rounds 2–5 · `705d029` decision 8 alias hygiene · `71051ac` rounds 6–7 · `5be2e50` part-2 grill · `f0e43f1` part 2 + round 8 · `20f6885` UAT r8 fixes + rounds 9–10); decisions 6, 10, 11 open |
+| **ADR-0067 request-origin guard** (+ ADR-0039 consistent-backup amendment) | **Complete + pushed** (`71051ac`) |
+| **UAT rounds 7–8** (r7 fresh clone at `d17e7a7`; r8 = part-2 UAT) | **Done** — r8 fixes in `20f6885`; user re-check of the screens pending |
 
 ## Next step
 
@@ -315,21 +374,23 @@ critical rules and `CONTEXT.md` for the glossary.
 - **To run enrichment/query on a LOCAL model** (Ollama/vLLM/LM Studio): see `docs/Local Models.md`
   — set `ENRICH_LOCAL_BASE_URL` + add `local:<model>` to a tier chain (start with
   `ENRICH_MODEL_LIGHT`). No-cost resolve-check snippet in that doc.
-- **NEXT — finish UAT r7, then ADR-0066 parts 2–4 (each on the user's go):**
-  1. Run (or skip) the hand-filed merge test in `/tmp/ks-uat` (UAT r7 bullet above; UAT Guide
-     §10.1 step 4) — the clone lives on the root disk, so it survives a reboot. Restart the API with
-     `cd /tmp/ks-uat && uv run python -m app.backend` (port 18000).
-  2. Push decision (6 local commits).
-  3. **Part 2** — decisions 7–8: total cap of 15 suggestions (a setting) with 1–3 broad domain tags
-     first, naming style (singular, short form/acronym, no qualifiers), deterministic resolution of
-     suggestions against existing titles + aliases via `merge_key` with an ambiguity prompt; items
-     prompt version bump.
-  4. **Part 3** — decision 6: Enrich extracts title/author/publisher (PDF metadata as a hint) into
+- **NEXT — re-check UAT r8, small open items, then ADR-0066 parts 3–4 (each on the user's go):**
+  1. **Re-check the screens** in `/tmp/ks-uat` with the r8–r10 fixes (the clone lives on the root
+     disk, so it survives a reboot). Restart the API with
+     `cd /tmp/ks-uat && uv run --no-sync python -m app.backend` (port 18000) — **`--no-sync`**: a
+     plain `uv sync` strips the GPU overlay (torch cu128 / FlagEmbedding) and the API won't start;
+     restore with `uv sync --all-extras` + the pinned cu128 torch, never `-U`.
+  2. **Small open proposals (awaiting the user's decision):** a Source-page "open original" link via
+     `/raw/<source_id>`; trim the Source template (dead Key Points placeholder, Source Details lines,
+     Notes); correct the UAT Guide's Front Matter Title note (v4.2.1 defaults: Header on,
+     Explorer/Graph off).
+  3. **Part 3** — decision 6: Enrich extracts title/author/publisher (PDF metadata as a hint) into
      `provenance_suggested`; user-confirmed `provenance` is never overwritten; Authors/publishers
-     pages shown once kept; Enrich prompt bump.
-  5. **Part 4** — decision 11: `scripts/eval_item_tags.py` (deterministic, manual run) against
+     pages shown once kept; Enrich prompt bump. Open part-3 question (P7): whether the Enrich title
+     feeds the items prompt. Starts with a `grill-phase`.
+  4. **Part 4** — decision 11: `scripts/eval_item_tags.py` (deterministic, manual run) against
      `evals/golden_item_tags.yaml`; then the decision 10 backup-gated clean restart + UAT.
-  6. **Slice B** (ADR-0066 deferred list): real titles on review screens, a readable apply preview,
+  5. **Slice B** (ADR-0066 deferred list): real titles on review screens, a readable apply preview,
      untouched-row warning + "next document", queue UX, hiding candidate/unused/dropped tags in
      Obsidian and `index.md`, UAT Guide §10.1 step 3 wording.
 - ADR-0064 deferrals still stand: manual `mark_semantic_duplicate` filing, token-containment /
@@ -414,7 +475,12 @@ key budget; human-filed pre-approved merge with a write-free preview; merge-conf
 approve and executor; amends 0050's re-apply no-op)**, 0065 (item-type management — deferred
 placeholder), **0066 (item curation as tagging: per-document keep/drop ledger
 `reviews/tag_links/`, tags exist through use, `unused` status, blocked-tag list, decisions survive
-merge/split, journaled identity operations, under_supported_item retired; parts 2–4 open)** — full glossary entries in `CONTEXT.md` (historical superseded entries
+merge/split, journaled identity operations, under_supported_item retired; part 2 = suggestion cap
+`ENRICH_ITEMS_CAP`, domains first, `merge_key` resolution with Use *X*, aliases the user's after
+the first keep and editable, decided statuses outrank re-extraction, lock order ledger-then-graph;
+parts 3–4 open)**, **0067 (request-origin guard: loopback `Host` allowlist + same-origin state
+changes; amends 0009's CSRF deferral; with the 0039 consistent-backup / vault writer lock
+amendment)** — full glossary entries in `CONTEXT.md` (historical superseded entries
 carry supersession notes).
 
 **Path safety:** `app/backend/paths.py` (`safe_under` containment, `safe_child` basename-only) is the
