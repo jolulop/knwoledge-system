@@ -467,7 +467,7 @@ Run this **after** you have kept tags in §9.0: lint proposes merges only betwee
 
 ## 11. Browse
 
-Use Obsidian if available (`obsidian --no-sandbox &`) and open `/tmp/ks-uat/wiki` as the vault, or:
+Use Obsidian if available (`obsidian --no-sandbox --disable-gpu --ozone-platform=wayland &` under WSLg — without `--disable-gpu` no window appears, and without Wayland clicks land off-target on a maximized window at Windows display scaling above 100%) and open `/tmp/ks-uat/wiki` as the vault, or:
 
 ```bash
 sed -n '1,160p' wiki/index.md
