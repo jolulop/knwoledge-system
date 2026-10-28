@@ -1,5 +1,7 @@
 # The SQLite graph is the source of truth; wiki backlinks are a derived projection
 
+> **Amended by ADR-0068 (2026-10-28):** the wiki is not wholly disposable. Item, claim and synthesis pages own declared durable fields (title, aliases, type, status…); only the remaining sections, Source pages and `index.md` are pure projections.
+
 Phase 3.5b introduces the system's first real relationships — bidirectional backlinks
 between sources and concepts/entities/claims (Build Spec §3.5), the dependency the Phase 3
 backbone explicitly recorded as "no semantic backlinks yet" (ADR-0016). That forces a

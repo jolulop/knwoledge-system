@@ -383,7 +383,15 @@ critical rules and `CONTEXT.md` for the glossary.
 - **To run enrichment/query on a LOCAL model** (Ollama/vLLM/LM Studio): see `docs/Local Models.md`
   — set `ENRICH_LOCAL_BASE_URL` + add `local:<model>` to a tier chain (start with
   `ENRICH_MODEL_LIGHT`). No-cost resolve-check snippet in that doc.
-- **NEXT — Obsidian test in the fresh clone, then ADR-0066 part 3 implementation, then part 4 (each on the user's go):**
+- **NEXT (order locked 2026-10-28, ADR-0068 §Sequencing; each step on the user's go):**
+  **ADR-0068 vault consistency contract** (design-locked: one exclusive write lock for every commit
+  phase, per-producer run guards, publication inside the lock plus a pending queue
+  (`saved_publication_pending`), consistent previews plus an `(epoch, counter)` revision token,
+  durable page fields declared) → implement in slices (locks/guards → publication + queue →
+  producers + keyword refresh → previews + token) with its 8 acceptance tests → graph traversal
+  bound (small, any time) → ADR-0066 **part 3** → **part 4 scorer** (pre-restart baseline) →
+  decision 10 **clean restart** → fresh UAT + scoring. The Obsidian test in `/tmp/ks-uat` can run at
+  any time. Detail of the older items follows:
   1. **Re-check the screens** in `/tmp/ks-uat` with the r8–r10 fixes (the clone lives on the root
      disk, so it survives a reboot). Restart the API with
      `cd /tmp/ks-uat && uv run --no-sync python -m app.backend` (port 18000) — **`--no-sync`**: a

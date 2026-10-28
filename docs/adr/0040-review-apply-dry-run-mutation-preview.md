@@ -1,5 +1,7 @@
 # ADR-0040 — Review apply dry-run: sandbox-on-copy mutation preview before commit
 
+> **Amended by ADR-0068 (2026-10-28):** the sandbox snapshot is built under the write lock with SQLite's online backup method, and the preview returns a revision token that Apply checks under the same lock before its first mutation (`stale_preview` refuses with no mutations).
+
 **Status:** Accepted. Design-locked **and implemented** 2026-06-26. `run_apply(settings)` + the
 `GraphUnavailable` gate were extracted in `app/backend/main.py`; the sandbox builder + semantic differ
 live in `app/backend/apply_sandbox.py`; `POST /reviews/apply/dry-run` and the UI gating

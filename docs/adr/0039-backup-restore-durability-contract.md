@@ -1,5 +1,7 @@
 # ADR-0039 — Backup/restore durability contract: raw opt-in, guarded restore, checksum-verified
 
+> **Amended by ADR-0068 (2026-10-28):** the vault lock only coordinates writers with backup/restore. Writers serialize with each other on the separate write lock (order: vault lock → write lock → SQLite), and every restore starts a new revision epoch.
+
 **Status:** Accepted. Design-locked **and implemented** 2026-06-26 (this slice). `scripts/backup.py`
 gained `BACKUP_INCLUDE_RAW` (manifest-driven opt-in raw inclusion via `_catalogued_raw_index` +
 sha256 verification + embedded `BACKUP_MANIFEST.json` sidecar), the `restore_backup` guarded-in-place
