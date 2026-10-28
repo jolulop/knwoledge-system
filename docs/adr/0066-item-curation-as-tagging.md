@@ -10,7 +10,9 @@
   kept tag, shared-name notes, "applied" in the queue, plain merge errors), reviewed in **review
   round 9** (stale alias forms, "already in effect", status-specific merge advice) and **review
   round 10** (Apply serialized with tagging; the applied column uses the executors' checks).
-  Decisions 6, 10 and 11 are not implemented. Item
+  Decisions 6, 10 and 11 are not implemented. **Part 3 (decision 6, extended: effective title in
+  every prompt, Enrich tags as suggestions, tick-box confirmation) design-locked by grill-phase
+  2026-10-28** (see "Part 3 — implementation decisions"). Item
   consolidation Part B ("Slice A" of the post-UAT-r6 plan); follows ADR-0064 (Part A). **Review
   round 1 applied 2026-10-24** (see the section at the end): durable keep ledger, merge/split and
   unused-status rules, ambiguous-match path, sentinel gate, confirmed-vs-suggested metadata, the
@@ -330,7 +332,8 @@ pipeline from `raw/`, then keep or drop on each document screen. No conversion s
   for it.
 - The response cache replays unchanged stages. Items re-extract because of the items prompt bump
   (decision 7) and Enrich re-runs because of its prompt bump (decision 6), so the cost is about one
-  paid Enrich pass plus one paid items pass, plus the user's review time.
+  paid Enrich pass plus one paid items pass, plus the user's review time. **Part 3 (Q1)** adds one
+  paid claims pass: the claims prompt now takes the Enrich title.
 
 ### 11. Success measure
 
@@ -453,6 +456,99 @@ all 9 documents) or a forced re-extraction of the r7 clone. Kept links and drops
 re-extraction, so the code path is the same; the choice is made at UAT time. Decision 10's clean
 restart still happens once all prompt bumps exist, before the golden-list measurement.
 
+## Part 3 — implementation decisions (grill-phase 2026-10-28)
+
+Decision 6 left the title's reach (P7) and the confirmation flow open. The user resolved five
+questions; Q5 bundled the smaller points and was accepted as recommended.
+
+Evidence from the 12-document UAT corpus:
+- **PDF metadata titles:** 7 usable; 2 garbage ("Day_1_v3.pdf", a "(6) " browser-tab prefix);
+  3 missing or only repeating the filename.
+- **PDF metadata authors:** present on only 4 documents, and the manifesto lists only its first
+  author. Metadata is a hint, never the answer.
+- **Enrich tags vs suggestions:** of the 80 free-text Enrich tags, only 34 (42%) were already among
+  the items suggestions. The rest were often the most descriptive topics. BIRD had none suggested:
+  "logical data model", "banking reporting", "collateral", "securitization".
+
+**Q1 (P7). The document title is inferred first and used everywhere.**
+- **What it replaces:** a filename such as "1 s2.0 S0306437926000529 main" carries no information.
+- **Where it is used:** the title replaces the filename-derived title in the Source page, the review
+  screens and Obsidian, and in the **Enrich, claims and items prompts**.
+- **How it is found:** extraction (deterministic, free) reads the PDF metadata title and author into
+  the extraction log as a hint. Enrich, the first LLM stage, which already runs before claims and
+  items, infers the title from the text plus that hint.
+- **Order of preference** (the *effective title*): confirmed title > Enrich title > PDF metadata
+  title > filename. The PDF metadata title is used only if a deterministic filter passes it: drop a
+  value that looks like a filename, strip a browser-tab "(n) " prefix, skip a title that only
+  repeats the filename. The filename is the last resort.
+- **Cost:** decision 10's restart now also re-bills **claims** (73 calls on the UAT corpus), not
+  only Enrich and items.
+
+**Q2. The prompts take the Enrich title; corrections are display-only.**
+- **Prompt input:** claims and items receive the **Enrich title**, or the fallback chain without the
+  confirmed title when Enrich has no output.
+- **Corrections:** a user correction changes the Source page, the screens, Obsidian and the
+  Authors pages only. It never restales or re-bills claims or items, so it cannot replace reviewed
+  claims or suggestions. Corrections are usually cosmetic, and the model already had a meaningful
+  title.
+- **Knock-on cost:** an Enrich re-run that *changes* the title restales and re-bills that
+  document's claims and items. That is the accepted cost of the dependency.
+
+**Q3. Enrich's tags become tag suggestions.** This is the user's call: the descriptive Enrich tags
+are often the best tags for a bookmark.
+- **One list per document:** Enrich's tags join the items suggestions in one per-document list, with
+  the same keep / drop / never suggest, the same resolution (decision 8), and the same drop-record
+  and blocked-list filters.
+- **No separate tags list:** the Source page's free-text `tags:` frontmatter goes away. The page
+  shows kept tags (linked) and the other suggestions (plain text), as today.
+- **Typed:** the Enrich prompt bump outputs an `item_type` for each tag, so a keep needs no manual
+  type choice (decision 2's sentinel gate still applies to anything coerced to the sentinel).
+- **Order and cap:** Enrich's tags come **first** because they summarize the whole document, then
+  the items suggestions in their P2 order (domains first). One cap (15, P1) applies to the combined
+  list. A name in both lists appears once, at its Enrich position.
+- **Search:** the suggested names stay indexed as keyword terms on the document, so search loses
+  nothing.
+- **Citations:** a tag link is navigation, not a factual claim. CLAUDE.md rule 3 does not require
+  an evidence span for it.
+- **Implementation defaults** (recorded here, open to the implementation review):
+  - **Where the merge runs:** in code, in the P6 pipeline of `extract_items`. It reads the Enrich
+    artifact, with no extra model call, and the items artifact records each suggestion's `origin`
+    (`enrich` / `items`).
+  - **Name in both lists:** it takes the items stage's `item_type` and aliases, since that prompt
+    carries the taxonomy priority order.
+  - **Enrich tags have no aliases:** the strict alias rule (P4) does not apply to them.
+  - **Freshness:** a changed Enrich artifact re-plans the document's suggestions. With an unchanged
+    title, a `--cache-only` replay suffices.
+
+**Q4. Details are confirmed with an explicit tick box.**
+- **The Details section:** the document screen gets a section above the tags, prefilled from
+  `provenance_suggested`: title, authors (ordered, one per line, each with a "show page" tick) and
+  publisher (with its own "show page" tick).
+- **One Save:** the existing Save covers tags and details. The details become confirmed
+  `provenance` **only if "These details are correct" is ticked**. A tags-only save never confirms
+  them, so unreviewed authors cannot make two documents look independent.
+- **"Show page":** a per-document decision, like a keep. An author who already has a page is
+  pre-ticked as a suggestion on later documents, and the link counts once saved. Pages are built
+  from **confirmed** details only, so a ticked name takes effect once that document's details are
+  confirmed.
+
+**Q5. Smaller points (accepted as recommended).**
+1. **Name variants:** the Authors field offers the names already confirmed in the vault, so the user
+   can pick the existing spelling. Nothing merges automatically, and author aliases stay deferred.
+   Enrich is not given the existing names: that list grows with every document and would restale
+   every Enrich call.
+2. **The PDF hint** lives in the extraction log. Only the Enrich prompt reads it.
+3. **The title fallback** without Enrich is the filtered PDF metadata title, then the filename (Q1).
+4. **Enrich tags:** at most 7 per document, cleaned like other names ("planning-taxonomy" becomes
+   "planning taxonomy").
+5. **The knock-on re-bill** of Q2 is accepted.
+6. **Clean restart:** part 3 carries the last prompt bump. Decision 10's backup-gated restart
+   follows part 3's UAT, and part 4's scorer measures the rebuilt vault.
+7. **Two demo-day gaps** (2026-10-28) are added to the deferred list below.
+
+**Versions:** the Enrich schema and prompt version and the claims and items prompt versions all
+bump (new outputs, new title input).
+
 ## Consequences
 
 - The review queue for a document becomes ≤15 keep/drop rows plus its author/publisher
@@ -493,7 +589,17 @@ restart still happens once all prompt bumps exist, before the golden-list measur
   - real titles on the review screens (built on decision 6);
   - a readable apply preview with reopen links that hides already-applied approvals;
   - an untouched-row warning plus "next document";
-  - queue content column, grouping, bulk actions and local time.
+  - queue content column, grouping, bulk actions and local time;
+  - **a "not yet tagged" marker on the document list plus a "next untagged document" link**
+    (demo day 2026-10-28: a document with 14 suggestions was never saved, and nothing showed it).
+- **Conflicting `change_item_type` proposals on one item** (demo day 2026-10-28: *Multi-Agent
+  System* had an approved retype to `ai_topic_area` and a pending one to `architecture_pattern`).
+  When a new retype is filed while another is pending or approved for the same item, flag the clash
+  on both, or replace the older pending one. Needs a short grill.
+- **Author aliases** (part 3 Q5.1): "D. C. Dennett" vs "Daniel C. Dennett" stay two names. The
+  user picks an existing spelling from the field's suggestions; nothing merges automatically.
+- **Claims-prompt quality from the real title** is assumed, not measured. If part 4's eval shows
+  no gain, the title input to claims can be revisited.
 - **Obsidian/index:** hiding candidate/unused/dropped tags in Obsidian and the index (stated as
   a consequence here; delivered in Slice B).
 - **UAT Guide:** the §10.1 step 3 wording fix ("reject in the UI *or* with curl").

@@ -17,8 +17,13 @@ critical rules and `CONTEXT.md` for the glossary.
 
 ## Where we are
 
-- **Branch:** `main` — tip `20f6885` (UAT round 8 fixes + review rounds 9–10), **pushed, in sync
-  with `origin/main`**; the tree is clean. Obsidian's own local drift in `wiki/.obsidian/graph.json`
+- **Branch:** `main` — tip `df34311` (Obsidian GPU launch docs; before it `b0b3494`, `19c720a`
+  open-original link + Source trim, `20f6885` UAT round 8 fixes + review rounds 9–10), **pushed, in
+  sync with `origin/main`**; the ADR-0066 part-3 grill docs are the only uncommitted change.
+  **Demo held 2026-10-28** (nothing new); the demo and old UAT clones were deleted and the paid LLM
+  responses saved to `~/ks-saved/2026-10-28/`. A fresh `/tmp/ks-uat` (12 PDFs, built at `df34311`
+  from that cache, zero cost; contradictions/synthesis not run) is ready for the Obsidian test and
+  re-tagging. Obsidian's own local drift in `wiki/.obsidian/graph.json`
   (zoom, trailing newline) is never committed — only intended preset changes are (the current preset
   `-path:Claims -file:index -file:log` went in with `20f6885`). `.vscode/`, `docs/UAT Guide.html`
   and `.env (UAT)` are the user's untracked files. Run `git status --short` /
@@ -378,7 +383,7 @@ critical rules and `CONTEXT.md` for the glossary.
 - **To run enrichment/query on a LOCAL model** (Ollama/vLLM/LM Studio): see `docs/Local Models.md`
   — set `ENRICH_LOCAL_BASE_URL` + add `local:<model>` to a tier chain (start with
   `ENRICH_MODEL_LIGHT`). No-cost resolve-check snippet in that doc.
-- **NEXT — re-check UAT r8, small open items, then ADR-0066 parts 3–4 (each on the user's go):**
+- **NEXT — Obsidian test in the fresh clone, then ADR-0066 part 3 implementation, then part 4 (each on the user's go):**
   1. **Re-check the screens** in `/tmp/ks-uat` with the r8–r10 fixes (the clone lives on the root
      disk, so it survives a reboot). Restart the API with
      `cd /tmp/ks-uat && uv run --no-sync python -m app.backend` (port 18000) — **`--no-sync`**: a
@@ -390,12 +395,16 @@ critical rules and `CONTEXT.md` for the glossary.
      and Notes removed, `SOURCE_SCHEMA_VERSION` `wiki-source-v2` (next `generate_wiki` rewrites
      every Source page); UAT Guide Front Matter Title defaults corrected (v4.2.1: only Header on —
      turn on Graph + File Explorer, leave Alias/Note Link off). Click-check in the clone pending.
-  3. **Part 3** — decision 6: Enrich extracts title/author/publisher (PDF metadata as a hint) into
-     `provenance_suggested`; user-confirmed `provenance` is never overwritten; Authors/publishers
-     pages shown once kept; Enrich prompt bump. Open part-3 question (P7): whether the Enrich title
-     feeds the items prompt. Starts with a `grill-phase`.
+  3. **Part 3 — DESIGN-LOCKED 2026-10-28** (ADR-0066 "Part 3 — implementation decisions"; next =
+     "implement now"). Decision 6 plus: the **effective title** (confirmed > Enrich > filtered PDF
+     metadata > filename) everywhere, with the claims and items prompts taking the Enrich title
+     (corrections are display-only); **Enrich's typed tags join the per-document suggestion list
+     first**, under one cap, and the free-text `tags:` frontmatter goes away; Details section with a
+     "These details are correct" tick box and per-document "show page" ticks; the PDF metadata hint
+     goes in the extraction log. The Enrich, claims and items prompts all bump, so the restart
+     re-bills claims too. Decision 10's clean restart follows part 3's UAT.
   4. **Part 4** — decision 11: `scripts/eval_item_tags.py` (deterministic, manual run) against
-     `evals/golden_item_tags.yaml`; then the decision 10 backup-gated clean restart + UAT.
+     `evals/golden_item_tags.yaml`, measured on the vault rebuilt by the clean restart.
   5. **Slice B** (ADR-0066 deferred list): real titles on review screens, a readable apply preview,
      untouched-row warning + "next document", queue UX, hiding candidate/unused/dropped tags in
      Obsidian and `index.md`, UAT Guide §10.1 step 3 wording.
