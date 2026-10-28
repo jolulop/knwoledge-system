@@ -25,7 +25,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from app.backend import db, graph, keyword_index, manifests
+from app.backend import db, graph, keyword_index, manifests, write_lock
 from app.backend.manifests import iso_now, load_manifest, valid_manifests
 from app.backend.policy import load_yaml
 from app.llm import cache as llm_cache
@@ -121,36 +121,39 @@ def run_stale_check(
         delete_existing: list[str] = []
         archive_detected = delete_detected = considered = 0
 
-        valid, manifests_skipped_invalid = valid_manifests(manifests_dir)
-        for m in valid:
-            sid = m.get("source_id")
-            if not sid:
-                continue
-            considered += 1
-            # archive candidate: active + content age (modified_at, fallback discovered_at) past threshold
-            if manifests.get_status(m) == "active":
-                ref = m.get("modified_at") or m.get("discovered_at")
-                age = _age_days(ref, now_dt)
-                if age is not None and age >= archive_after_days:
-                    archive_detected += 1                       # detection is unconditional
-                    if file_review_items:
-                        _file_tracked(
-                            reviews_dir, review_type="archive_source", subject={"source_id": sid},
-                            proposal={"to_status": "archive_candidate",
-                                      "reason": f"content age {age}d ≥ {archive_after_days}d threshold",
-                                      "age_days": age, "reference_date": ref},
-                            priority="medium", now=now, filed=archive_filed, existing=archive_existing)
-            # ephemeral delete candidate (record-only forever): time-in-system past the window
-            if ephemeral_enabled and m.get("retention_class") == "ephemeral":
-                age = _age_days(m.get("discovered_at"), now_dt)
-                if age is not None and age > ephemeral_after_days:
-                    delete_detected += 1
-                    if file_review_items:
-                        _file_tracked(
-                            reviews_dir, review_type="delete_raw_file", subject={"source_id": sid},
-                            proposal={"reason": f"ephemeral, in system {age}d > {ephemeral_after_days}d",
-                                      "age_days": age, "record_only": True},
-                            priority="medium", now=now, filed=delete_filed, existing=delete_existing)
+        # ADR-0068: each source's status check and its filing are one commit phase (an archive
+        # applied meanwhile is seen before anything is filed).
+        with write_lock.hold(reviews_dir):
+            valid, manifests_skipped_invalid = valid_manifests(manifests_dir)
+            for m in valid:
+                sid = m.get("source_id")
+                if not sid:
+                    continue
+                considered += 1
+                # archive candidate: active + content age (modified_at, fallback discovered_at) past threshold
+                if manifests.get_status(m) == "active":
+                    ref = m.get("modified_at") or m.get("discovered_at")
+                    age = _age_days(ref, now_dt)
+                    if age is not None and age >= archive_after_days:
+                        archive_detected += 1                       # detection is unconditional
+                        if file_review_items:
+                            _file_tracked(
+                                reviews_dir, review_type="archive_source", subject={"source_id": sid},
+                                proposal={"to_status": "archive_candidate",
+                                          "reason": f"content age {age}d ≥ {archive_after_days}d threshold",
+                                          "age_days": age, "reference_date": ref},
+                                priority="medium", now=now, filed=archive_filed, existing=archive_existing)
+                # ephemeral delete candidate (record-only forever): time-in-system past the window
+                if ephemeral_enabled and m.get("retention_class") == "ephemeral":
+                    age = _age_days(m.get("discovered_at"), now_dt)
+                    if age is not None and age > ephemeral_after_days:
+                        delete_detected += 1
+                        if file_review_items:
+                            _file_tracked(
+                                reviews_dir, review_type="delete_raw_file", subject={"source_id": sid},
+                                proposal={"reason": f"ephemeral, in system {age}d > {ephemeral_after_days}d",
+                                          "age_days": age, "record_only": True},
+                                priority="medium", now=now, filed=delete_filed, existing=delete_existing)
 
         # LLM-cache retention (only when policy-enabled): live stats every run; one aggregate record-only
         # purge candidate when over bounds. Never mutates the cache; payload carries only counts/sizes/ages.

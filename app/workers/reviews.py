@@ -15,12 +15,14 @@ sync with it.
 """
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import uuid
 from pathlib import Path
 from typing import Any
 
+from app.backend import write_lock
 from app.backend.manifests import iso_now
 
 REVIEW_TYPES = frozenset({
@@ -43,11 +45,23 @@ PRIORITIES = frozenset({"low", "medium", "high"})
 _STATE_DIRS = ("pending", "approved", "rejected")
 
 
+def _committed(fn):
+    """Each review-item state change is one commit phase under the vault write lock (ADR-0068
+    decision 2): its check of the current state and its file moves never interleave with another
+    decision, a reopen or Apply."""
+    @functools.wraps(fn)
+    def wrapper(reviews_dir: Path, *args: Any, **kwargs: Any) -> Any:
+        with write_lock.hold(Path(reviews_dir)):
+            return fn(reviews_dir, *args, **kwargs)
+    return wrapper
+
+
 def review_id(review_type: str, subject: dict[str, Any]) -> str:
     key = review_type + "|" + json.dumps(subject, sort_keys=True, ensure_ascii=False)
     return "rev_" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
 
 
+@_committed
 def create_review_item(
     reviews_dir: Path,
     *,
@@ -79,6 +93,7 @@ def create_review_item(
     return rid
 
 
+@_committed
 def withdraw_review_item(
     reviews_dir: Path, review_id: str, *, reason: str = "", now: str | None = None
 ) -> bool:
@@ -112,6 +127,7 @@ def withdraw_review_item(
     return True
 
 
+@_committed
 def resolve_review_item(
     reviews_dir: Path,
     review_id: str,
@@ -183,6 +199,7 @@ def resolve_review_item(
     return True
 
 
+@_committed
 def reopen_review_item(
     reviews_dir: Path,
     review_id: str,
@@ -235,6 +252,7 @@ def reopen_review_item(
     return True
 
 
+@_committed
 def defer_review_item(
     reviews_dir: Path,
     review_id: str,

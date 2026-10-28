@@ -36,7 +36,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from app.backend import db, graph, taxonomy
+from app.backend import db, graph, taxonomy, write_lock
 from app.backend.manifests import get_provenance, is_source_id, iso_now, valid_manifests
 from app.backend.paths import safe_child, safe_under
 from app.backend.policy import load_yaml
@@ -630,65 +630,68 @@ def run_lint(
         validators = run_validators(root)
         validators_ok = all(v["returncode"] == 0 for v in validators)
 
-        findings: list[dict[str, Any]] = []
-        filed: list[str] = []
-        existing: list[str] = []
+        # ADR-0068: the checks file and withdraw review items as they go, so detection and filing
+        # run as one commit phase under the write lock (the validators above only read).
+        with write_lock.hold(reviews_dir):
+            findings: list[dict[str, Any]] = []
+            filed: list[str] = []
+            existing: list[str] = []
 
-        findings += _check_missing_raw(
-            manifests_dir, root, reviews_dir, file_items=file_review_items, now=now,
-            filed=filed, existing=existing)
-        withdrawn = _withdraw_retired_rule_items(reviews_dir, now) if file_review_items else []
+            findings += _check_missing_raw(
+                manifests_dir, root, reviews_dir, file_items=file_review_items, now=now,
+                filed=filed, existing=existing)
+            withdrawn = _withdraw_retired_rule_items(reviews_dir, now) if file_review_items else []
 
-        # summary_rot is graph-independent (artifact + normalized md only) — runs always (ADR-0037).
-        rot_findings, coverage_degraded = _check_summary_rot(
-            enrichment_dir, markdown_dir, wiki_dir, summary_model_ref)
-        findings += rot_findings
+            # summary_rot is graph-independent (artifact + normalized md only) — runs always (ADR-0037).
+            rot_findings, coverage_degraded = _check_summary_rot(
+                enrichment_dir, markdown_dir, wiki_dir, summary_model_ref)
+            findings += rot_findings
 
-        # topic_starvation is artifact-driven and graph-independent — runs always (ADR-0059).
-        findings += _check_topic_starvation(enrichment_dir)
+            # topic_starvation is artifact-driven and graph-independent — runs always (ADR-0059).
+            findings += _check_topic_starvation(enrichment_dir)
 
-        # display_alias_rot reads wiki pages only — runs always (ADR-0060, report-only).
-        findings += _check_display_alias_rot(wiki_dir)
+            # display_alias_rot reads wiki pages only — runs always (ADR-0060, report-only).
+            findings += _check_display_alias_rot(wiki_dir)
 
-        gconn = _open_graph_ro(graph_db)
-        graph_available = gconn is not None
-        if gconn is not None:
-            try:
-                findings += _check_graph(
-                    gconn, wiki_dir, reviews_dir, file_items=file_review_items, now=now,
-                    filed=filed, existing=existing)
-                findings += _check_merge_candidates(  # graph-gated (ADR-0064)
-                    gconn, wiki_dir, reviews_dir, policy_path=root / "policies" / "review.yaml",
-                    file_items=file_review_items, now=now,
-                    filed=filed, existing=existing)
-                stale_findings, stale_degraded = _check_stale_claims(  # graph-gated (ADR-0037)
-                    gconn, enrichment_dir, markdown_dir)
-                findings += stale_findings
-                synth_findings, synth_degraded = _check_synthesis_rot(  # graph-gated (ADR-0037 dec. 6)
-                    gconn, manifests_dir, wiki_dir / "Claims", markdown_dir, enrichment_dir,
-                    synthesis_model_ref)
-                findings += synth_findings
-                coverage_degraded = coverage_degraded or stale_degraded or synth_degraded
-            finally:
-                gconn.close()
-        else:
-            findings.append({"check": "graph_unavailable", "severity": "medium", "subject": None,
-                             "detail": "graph absent or schema-mismatched; semantic checks skipped"})
+            gconn = _open_graph_ro(graph_db)
+            graph_available = gconn is not None
+            if gconn is not None:
+                try:
+                    findings += _check_graph(
+                        gconn, wiki_dir, reviews_dir, file_items=file_review_items, now=now,
+                        filed=filed, existing=existing)
+                    findings += _check_merge_candidates(  # graph-gated (ADR-0064)
+                        gconn, wiki_dir, reviews_dir, policy_path=root / "policies" / "review.yaml",
+                        file_items=file_review_items, now=now,
+                        filed=filed, existing=existing)
+                    stale_findings, stale_degraded = _check_stale_claims(  # graph-gated (ADR-0037)
+                        gconn, enrichment_dir, markdown_dir)
+                    findings += stale_findings
+                    synth_findings, synth_degraded = _check_synthesis_rot(  # graph-gated (ADR-0037 dec. 6)
+                        gconn, manifests_dir, wiki_dir / "Claims", markdown_dir, enrichment_dir,
+                        synthesis_model_ref)
+                    findings += synth_findings
+                    coverage_degraded = coverage_degraded or stale_degraded or synth_degraded
+                finally:
+                    gconn.close()
+            else:
+                findings.append({"check": "graph_unavailable", "severity": "medium", "subject": None,
+                                 "detail": "graph absent or schema-mismatched; semantic checks skipped"})
 
-        high = any(f["severity"] == "high" for f in findings)
-        if not validators_ok or high:
-            status = "failing"
-        elif not graph_available or coverage_degraded:  # incomplete/unverifiable coverage
-            status = "degraded"
-        else:
-            status = "healthy"
-        new_items = sorted(set(filed))
-        existing_items = sorted(set(existing))
-        by_check = dict(sorted(Counter(f["check"] for f in findings).items()))
+            high = any(f["severity"] == "high" for f in findings)
+            if not validators_ok or high:
+                status = "failing"
+            elif not graph_available or coverage_degraded:  # incomplete/unverifiable coverage
+                status = "degraded"
+            else:
+                status = "healthy"
+            new_items = sorted(set(filed))
+            existing_items = sorted(set(existing))
+            by_check = dict(sorted(Counter(f["check"] for f in findings).items()))
 
-        _append_log(wiki_dir, f"lint: {status} — {len(findings)} finding(s), "
-                              f"{len(new_items)} review item(s) filed, {len(existing_items)} existing "
-                              f"[{job_id}]")
+            _append_log(wiki_dir, f"lint: {status} — {len(findings)} finding(s), "
+                                  f"{len(new_items)} review item(s) filed, {len(existing_items)} existing "
+                                  f"[{job_id}]")
 
         summary = {"status": status, "validators_ok": validators_ok, "findings": len(findings),
                    "by_check": by_check, "review_items_filed": len(new_items),

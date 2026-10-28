@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import json
 import logging
@@ -26,7 +27,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from app.backend import (
     apply_sandbox, db, embeddings, graph, graph_read, keyword_index, manifests, review_html,
-    review_read, search, taxonomy, vault_lock, vector_index,
+    review_read, run_guard, search, taxonomy, vault_lock, vector_index, write_lock,
 )
 from app.backend.config import get_settings
 from app.backend.paths import safe_under
@@ -248,7 +249,36 @@ def get_job(job_id: str) -> dict[str, Any]:
     return job
 
 
+def _commit_phase(fn):
+    """Run `fn` as one commit phase under the vault write lock (ADR-0068 decision 2): its final
+    validation and its writes serialize with every other writer. Sync code only (the lock is
+    re-entrant per thread, so an async caller hands the work to a worker thread)."""
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        with write_lock.hold(settings.reviews_dir):
+            return fn(*args, **kwargs)
+    return wrapper
+
+
+def _producer_run(producer: str):
+    """Run a job route as one run of `producer` (ADR-0068 decision 3): a second run of the same
+    producer refuses with 409 `already_running` and writes nothing. The guard is an entry-point
+    concern, so the worker functions themselves take none."""
+    def decorate(fn):
+        @functools.wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            try:
+                with run_guard.guard(settings.db_dir, producer):
+                    return fn(*args, **kwargs)
+            except run_guard.ProducerBusy as exc:
+                raise HTTPException(status_code=409,
+                                    detail=f"already_running: {exc.producer}") from None
+        return wrapper
+    return decorate
+
+
 @app.post("/jobs/intake-scan")
+@_producer_run("intake_scan")
 def run_intake_scan() -> dict[str, Any]:
     # Phase 1: synchronous execution is acceptable (see Phase 1 Plan section 9.3).
     return intake.scan_inbox(
@@ -260,6 +290,7 @@ def run_intake_scan() -> dict[str, Any]:
 
 
 @app.post("/jobs/extract")
+@_producer_run("extract")
 def run_extract(force: bool = False) -> dict[str, Any]:
     # Phase 2 extraction runs synchronously and offline (no API keys).
     return extract.extract_sources(
@@ -320,6 +351,7 @@ def get_source_normalized(source_id: str) -> dict[str, Any]:
 
 
 @app.post("/jobs/generate-wiki")
+@_producer_run("generate_wiki")
 def run_generate_wiki(force: bool = False) -> dict[str, Any]:
     # Phase 3 generation runs synchronously and offline (no API keys).
     return wiki.generate_wiki(
@@ -578,6 +610,7 @@ def _require_no_conflicting_merge(item: dict[str, Any]) -> None:
                     "conflicting merges are never approved together"))
 
 
+@_commit_phase
 def _record_decision(
     review_id: str, decision: str, body: ReviewDecisionRequest | None
 ) -> dict[str, Any]:
@@ -655,6 +688,7 @@ def defer_review(
     return _record_decision(review_id, "deferred", body)
 
 
+@_commit_phase
 def _reopen_decision(review_id: str, reason: str) -> dict[str, Any]:
     """Reopen a terminal review item back to pending so it can be re-decided (ADR-0045). Shared by the
     JSON endpoint + the UI route. Graph-aware (unlike the graph-free approve): it projects the item to
@@ -692,6 +726,7 @@ def reopen_review(review_id: str, body: ReviewReopenRequest) -> dict[str, Any]:
     return _reopen_decision(review_id, body.reason)
 
 
+@_commit_phase
 def _file_human_merge(survivor: str, absorbed: str) -> dict[str, Any]:
     """Shared body of the JSON + form merge filing (ADR-0064). Raises HTTPException on a block:
     400 bad ref, 404 unknown item, 409 governance/lifecycle conflict, 503 graph unavailable."""
@@ -884,6 +919,14 @@ def _open_graph_safe_at(graph_db: Path) -> Any:
 
 
 def run_apply(st: Any) -> dict[str, Any]:
+    """Run :func:`_run_apply` as one commit phase (ADR-0068 decision 2): the whole Apply — reading
+    `approved/`, every executor, the index rebuild and the validators — holds the write lock, so a
+    reopen, a decision or a tag action never interleaves with it."""
+    with write_lock.hold(Path(st.reviews_dir)):
+        return _run_apply(st)
+
+
+def _run_apply(st: Any) -> dict[str, Any]:
     """The shared apply orchestration (ADR-0035 A4/A6, extracted per ADR-0040). Key-free, raw/-free.
 
     Composes the existing key-free executors — `apply_resolved_syntheses`,
@@ -927,7 +970,7 @@ def run_apply(st: Any) -> dict[str, Any]:
     # the ledger lock — taken BEFORE the first graph write, the same order as every tag action (ledger
     # lock, then graph). Taken after a graph write (as merges/splits alone did), Apply would hold the
     # SQLite write lock while waiting for the ledger lock a tag action holds while waiting for SQLite.
-    # Released before the source-status executors, the index rebuild and the validators.
+    # (ADR-0068: the whole Apply now holds the write lock — see run_apply — so this is re-entrant.)
     with tag_links.ledger_lock(reviews_dir):
         # Safe open: None on absent OR schema-mismatch (archive doesn't need the graph, so an unrelated
         # graph problem must not block an archive-only apply). The graph executors + promote run only
@@ -1366,6 +1409,7 @@ def dry_run_apply() -> dict[str, Any]:
 
 
 @app.post("/jobs/lint", response_model=LintResponse)
+@_producer_run("lint")
 def run_lint_job() -> dict[str, Any]:
     """Run the lint maintenance pass: structural health report + semantic checks that file governance
     review items (ADR-0036). Detect-and-propose: it never acts on semantic/destructive issues. Lint
@@ -1380,6 +1424,7 @@ def run_lint_job() -> dict[str, Any]:
 
 
 @app.post("/jobs/stale-check", response_model=StaleCheckResponse)
+@_producer_run("stale_check")
 def run_stale_check_job() -> dict[str, Any]:
     """Detect stale/ephemeral sources and propose archive/delete candidates (ADR-0036). Acts on nothing;
     the reversible archive is applied later via POST /reviews/apply."""
@@ -1389,6 +1434,7 @@ def run_stale_check_job() -> dict[str, Any]:
 
 
 @app.post("/jobs/reindex", response_model=ReindexResponse)
+@_producer_run("reindex")
 def run_reindex_job() -> dict[str, Any]:
     """Cheap deterministic reindex: rebuild wiki/index.md + refresh the keyword index (ADR-0036).
     Index + keyword only — never the vector index (explicit reindex_vector.py only)."""
@@ -1646,7 +1692,16 @@ async def ui_review_source_decide(source_id: str, request: Request) -> HTMLRespo
 
     Scope guard (review round, B1): the source view is recomputed SERVER-side and only rows actually
     visible on this source's screen are decidable here — a forged form naming another document's
-    link or a global item skips with `not_attributable_to_source` before any write."""
+    link or a global item skips with `not_attributable_to_source` before any write.
+
+    ADR-0068: the batch is one commit phase. The form is read here; the rest runs in a worker thread
+    under the write lock, so waiting for the lock never blocks the event loop."""
+    form = {str(k): v for k, v in (await request.form()).items()}
+    return await anyio.to_thread.run_sync(_source_decide, source_id, form)
+
+
+@_commit_phase
+def _source_decide(source_id: str, form: dict[str, Any]) -> HTMLResponse:
     if not manifests.is_source_id(source_id):
         return HTMLResponse(
             review_html.render_error(404, f"unknown source: {source_id}"), status_code=404)
@@ -1662,7 +1717,6 @@ async def ui_review_source_decide(source_id: str, request: Request) -> HTMLRespo
     visible = {str(r["review_id"]) for r in (view["retype_items"] + view["retired"])}
     links = {str(r["node_id"]): r for r in (view["suggestions"] + view["kept"])}
     pending = _pending_rows(view)
-    form = await request.form()
     note = str(form.get("note") or "").strip() or f"per-source flow: {source_id}"
     results: list[dict[str, Any]] = []
     warnings: list[str] = []
@@ -1812,6 +1866,7 @@ def _shown_aliases(raw: Any) -> list[str] | None:
 
 
 @app.post("/reviews/sources/{source_id}/links")
+@_commit_phase
 def post_source_link(source_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     """JSON twin of one tag-row decision (ADR-0066), for scripting/curl: `{node_id, action:
     keep|drop|block|use|cancel|aliases, title?, aliases?, expected_aliases?, description?, item_type?,
@@ -1888,6 +1943,7 @@ def post_source_link(source_id: str, payload: dict[str, Any]) -> dict[str, Any]:
 
 
 @app.post("/ui/reviews/sources/{source_id}/undrop", response_model=None)
+@_commit_phase
 def ui_review_source_undrop(source_id: str, key: str = Form("")) -> HTMLResponse | RedirectResponse:
     """Undo a drop record (ADR-0066): the tag becomes suggestible on this document again."""
     if not manifests.is_source_id(source_id):
@@ -1928,6 +1984,7 @@ def ui_unused_tags() -> HTMLResponse:
 
 
 @app.post("/ui/reviews/tags/unused/delete", response_class=HTMLResponse)
+@_commit_phase
 def ui_delete_unused_tags() -> HTMLResponse:
     """Bulk **Delete unused** — the explicit human deletion step (skips protected tags)."""
     gconn = _open_graph_safe()
@@ -1953,6 +2010,7 @@ def ui_blocked_tags() -> HTMLResponse:
 
 
 @app.post("/ui/reviews/tags/blocked/unblock", response_class=HTMLResponse)
+@_commit_phase
 def ui_unblock_tag(key: str = Form("")) -> HTMLResponse:
     """Unblock one name; the page then shows the cache-replayed Re-suggest command."""
     result = tag_links.unblock(key=key.strip(), policies_dir=settings.root / "policies",
@@ -1966,6 +2024,7 @@ def ui_unblock_tag(key: str = Form("")) -> HTMLResponse:
 
 
 @app.post("/ui/reviews/sources/{source_id}/add", response_model=None)
+@_commit_phase
 def ui_review_source_add(
     source_id: str, title: str = Form(""), item_type: str = Form(""),
     aliases: str = Form(""), description: str = Form(""),

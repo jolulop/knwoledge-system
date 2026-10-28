@@ -41,8 +41,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from app.backend import db, graph
-from app.backend.manifests import get_status, iso_now, valid_manifests
+from app.backend import db, graph, write_lock
+from app.backend.manifests import get_status, iso_now, load_manifest, valid_manifests
 from app.llm import prompts
 from app.llm.client import LLMClient, ParseError
 from app.workers import citations, reviews
@@ -164,6 +164,17 @@ def plan_windows(chunks: list[dict[str, Any]], window_chars: int) -> list[dict[s
         windows.append(current)
     return windows
 
+
+
+# Governance statuses a human set on a claim (ADR-0048 hide, ADR-0022 supersede). Re-asserting the
+# claim from a new extraction keeps them; the page re-render then confirms them from the page.
+_HUMAN_CLAIM_STATUSES = frozenset({"hidden", "deprecated_candidate"})
+
+
+def _reasserted_status(gconn: Any, cid: str) -> str:
+    """The graph status for a claim this run re-asserts: its human-set status if any, else active."""
+    status = (graph.get_node(gconn, cid) or {}).get("status")
+    return status if status in _HUMAN_CLAIM_STATUSES else "active"
 
 def _write_source_artifact(apath, sid, fingerprint, source_claims, model_ref, now,
                            strategy_ref=None):
@@ -316,7 +327,7 @@ def extract_claims(
     considered = sources_with_claims = claims_written = claims_dropped_ungrounded = 0
     skipped_fresh = skipped_not_extracted = skipped_empty = skipped_no_key = 0
     claim_windows = claim_window_over_budget = 0
-    replacement_not_applied = stale_claim_layer_preserved = 0
+    replacement_not_applied = stale_claim_layer_preserved = input_changed = 0
     errors: list[dict[str, Any]] = []
     texts: dict[str, str] = {}     # cid -> claim_text for claims (re)asserted this run
     touched: set[str] = set()
@@ -369,9 +380,10 @@ def extract_claims(
                 continue
             if not md.strip():
                 # Empty Markdown IS a deterministic complete replacement (ADR-0056).
-                affected.update(graph.supersede_source_edges(gconn, sid, now=now))
+                with write_lock.hold(reviews_dir):
+                    affected.update(graph.supersede_source_edges(gconn, sid, now=now))
+                    _write_source_artifact(apath, sid, fingerprint, [], model_ref, now, strategy_ref)
                 skipped_empty += 1
-                _write_source_artifact(apath, sid, fingerprint, [], model_ref, now, strategy_ref)
                 continue
 
             # Window plan (`chunk-greedy-v1`): greedy runs of consecutive chunks. Non-empty
@@ -419,72 +431,85 @@ def extract_claims(
                     stale_claim_layer_preserved += 1
                 continue
 
-            # Replacement staged in full: NOW retire the prior evidence and emit it.
-            affected.update(graph.supersede_source_edges(gconn, sid, now=now))
-            graph.upsert_node(
-                gconn, node_id=sid, node_type="source", slug=sid,
-                status=get_status(manifest), now=now)
-            source_claims: list[dict[str, Any]] = []
-            seen: set[tuple[str, int, int]] = set()
-            for w, result in staged:
-                window_start = w["char_start"]
-                window_text = md[window_start:w["char_end"]]
-                for item in result["claims"]:
-                    text = str(item.get("claim", "")).strip()
-                    # The window body is entity-escaped in the prompt (ADR-0061), so the model
-                    # may return the escaped form (`AT&amp;T`, `a &lt; b`); unescape exactly once
-                    # here so grounding runs against — and stores — the source-faithful quote.
-                    quote = html.unescape(str(item.get("quote", "")))
-                    if not text:
-                        continue
-                    # Locate inside the WINDOW text, then translate to full-document offsets
-                    # (ADR-0056: full-doc first-match can anchor a repeated phrase to the
-                    # wrong occurrence).
-                    span = citations.locate_quote(window_text, quote)
-                    if span is None:
-                        claims_dropped_ungrounded += 1
-                        continue
-                    start, end = span[0] + window_start, span[1] + window_start
-                    citation = {"source_id": sid, "char_start": start, "char_end": end,
-                                "quote": md[start:end]}
-                    if citations.ground_citation(citation, md, require_quote=True):
-                        claims_dropped_ungrounded += 1
-                        continue
-                    cid = claim_id(text)
-                    if (cid, start, end) in seen:
-                        continue
-                    seen.add((cid, start, end))
-                    source_claims.append({"claim_id": cid, "claim_text": text, "citation": citation})
-                    texts[cid] = text
-                    touched.add(cid)
-                    graph.upsert_node(gconn, node_id=cid, node_type="claim", slug=cid, status="active", now=now)
-                    graph.upsert_assertion(
-                        gconn, src_id=cid, dst_id=sid, edge_type="derived_from", asserted_by="llm",
-                        status="active", evidence_source_id=sid, evidence_char_start=start,
-                        evidence_char_end=end, job_id=job_id, now=now,
-                    )
+            # ADR-0068: the model calls above ran outside the write lock; this commit takes it and
+            # re-reads what may have changed meanwhile (the source's lifecycle status, a claim
+            # hidden or deprecated by a human).
+            with write_lock.hold(reviews_dir):
+                # The claims are grounded in the text the model read; a re-extraction installed
+                # meanwhile makes them stale — write nothing, the next run extracts the new text.
+                if (md_path.read_text(encoding="utf-8") if md_path.exists() else "") != md:
+                    input_changed += 1
+                    replacement_not_applied += 1
+                    continue
+                # Replacement staged in full: NOW retire the prior evidence and emit it.
+                affected.update(graph.supersede_source_edges(gconn, sid, now=now))
+                graph.upsert_node(
+                    gconn, node_id=sid, node_type="source", slug=sid,
+                    status=get_status(load_manifest(manifests_dir, sid) or manifest), now=now)
+                source_claims: list[dict[str, Any]] = []
+                seen: set[tuple[str, int, int]] = set()
+                for w, result in staged:
+                    window_start = w["char_start"]
+                    window_text = md[window_start:w["char_end"]]
+                    for item in result["claims"]:
+                        text = str(item.get("claim", "")).strip()
+                        # The window body is entity-escaped in the prompt (ADR-0061), so the model
+                        # may return the escaped form (`AT&amp;T`, `a &lt; b`); unescape exactly once
+                        # here so grounding runs against — and stores — the source-faithful quote.
+                        quote = html.unescape(str(item.get("quote", "")))
+                        if not text:
+                            continue
+                        # Locate inside the WINDOW text, then translate to full-document offsets
+                        # (ADR-0056: full-doc first-match can anchor a repeated phrase to the
+                        # wrong occurrence).
+                        span = citations.locate_quote(window_text, quote)
+                        if span is None:
+                            claims_dropped_ungrounded += 1
+                            continue
+                        start, end = span[0] + window_start, span[1] + window_start
+                        citation = {"source_id": sid, "char_start": start, "char_end": end,
+                                    "quote": md[start:end]}
+                        if citations.ground_citation(citation, md, require_quote=True):
+                            claims_dropped_ungrounded += 1
+                            continue
+                        cid = claim_id(text)
+                        if (cid, start, end) in seen:
+                            continue
+                        seen.add((cid, start, end))
+                        source_claims.append({"claim_id": cid, "claim_text": text, "citation": citation})
+                        texts[cid] = text
+                        touched.add(cid)
+                        graph.upsert_node(gconn, node_id=cid, node_type="claim", slug=cid,
+                                          status=_reasserted_status(gconn, cid), now=now)
+                        graph.upsert_assertion(
+                            gconn, src_id=cid, dst_id=sid, edge_type="derived_from", asserted_by="llm",
+                            status="active", evidence_source_id=sid, evidence_char_start=start,
+                            evidence_char_end=end, job_id=job_id, now=now,
+                        )
 
-            _write_source_artifact(apath, sid, fingerprint, source_claims, model_ref, now, strategy_ref)
+                _write_source_artifact(apath, sid, fingerprint, source_claims, model_ref, now, strategy_ref)
             claims_written += len(source_claims)
             if source_claims:
                 sources_with_claims += 1
 
         pages_written = pages_tombstoned = 0
         contradiction_affected: set[str] = set()  # surviving endpoints of superseded contradictions
-        for cid in touched | affected:
-            outcome = recompose_claim(gconn, cid=cid, claims_dir=claims_dir, reviews_dir=reviews_dir,
-                                      markdown_dir=markdown_dir, now=now, text_hint=texts.get(cid),
-                                      contradiction_affected=contradiction_affected)
-            pages_written += outcome == "written"
-            pages_tombstoned += outcome == "tombstoned"
+        with write_lock.hold(reviews_dir):                # pages read their status authority here
+            for cid in touched | affected:
+                outcome = recompose_claim(gconn, cid=cid, claims_dir=claims_dir,
+                                          reviews_dir=reviews_dir, markdown_dir=markdown_dir, now=now,
+                                          text_hint=texts.get(cid),
+                                          contradiction_affected=contradiction_affected)
+                pages_written += outcome == "written"
+                pages_tombstoned += outcome == "tombstoned"
 
-        # Re-render the surviving endpoints of any contradiction superseded above so their pages
-        # drop the now-dead backlink (the claim CLI stays valid without a contradiction pass).
-        for cid in sorted(contradiction_affected):
-            node = graph.get_node(gconn, cid)
-            if node and node["status"] == "active":
-                recompose_claim(gconn, cid=cid, claims_dir=claims_dir, reviews_dir=reviews_dir,
-                                markdown_dir=markdown_dir, now=now)
+            # Re-render the surviving endpoints of any contradiction superseded above so their pages
+            # drop the now-dead backlink (the claim CLI stays valid without a contradiction pass).
+            for cid in sorted(contradiction_affected):
+                node = graph.get_node(gconn, cid)
+                if node and node["status"] == "active":
+                    recompose_claim(gconn, cid=cid, claims_dir=claims_dir, reviews_dir=reviews_dir,
+                                    markdown_dir=markdown_dir, now=now)
 
         index_rebuilt = _rebuild_index(root) if (
             rebuild_index and (touched or affected or contradiction_affected)) else False
@@ -509,6 +534,7 @@ def extract_claims(
             "claim_windows": claim_windows,
             "claim_window_over_budget": claim_window_over_budget,
             "replacement_not_applied": replacement_not_applied,
+            "skipped_input_changed": input_changed,
             "stale_claim_layer_preserved": stale_claim_layer_preserved,
             "skipped_fresh": skipped_fresh, "skipped_not_extracted": skipped_not_extracted,
             "skipped_empty": skipped_empty, "skipped_no_key": skipped_no_key,

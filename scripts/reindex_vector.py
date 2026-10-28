@@ -77,5 +77,7 @@ def main(argv: list[str] | None = None) -> int:
 if __name__ == "__main__":
     from app.backend import vault_lock  # noqa: E402 - a vault writer (ADR-0039 amendment)
     _positional = [a for a in sys.argv[1:] if not a.startswith("-")]
-    with vault_lock.shared((Path(_positional[0]).resolve() if _positional else Path.cwd()) / "db"):
-        raise SystemExit(main())
+    from app.backend import run_guard  # noqa: E402 - one run at a time (ADR-0068)
+    _db = (Path(_positional[0]).resolve() if _positional else Path.cwd()) / "db"
+    with vault_lock.shared(_db):
+        raise SystemExit(run_guard.run_cli(_db, "reindex_vector", main))

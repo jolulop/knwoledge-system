@@ -19,7 +19,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from app.backend import db
+from app.backend import db, write_lock
 from app.backend.manifests import iso_now, valid_manifests
 from app.llm import prompts
 from app.llm.client import LLMClient, ParseError
@@ -74,6 +74,7 @@ def enrich_sources(
         skipped_not_extracted = 0
         skipped_empty = 0
         skipped_no_key = 0
+        input_changed = 0
         errors: list[dict[str, str]] = []
 
         # ADR-0063: the tier value is an ordered model chain; resolve once per run to the first
@@ -138,10 +139,16 @@ def enrich_sources(
                 "summary": result["summary"],
                 "tags": result["tags"],
             }
-            enrichment_dir.mkdir(parents=True, exist_ok=True)
-            artifact_path.write_text(
-                json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-            )
+            # ADR-0068: the model call above ran outside the write lock; the commit takes it, and
+            # writes nothing if a re-extraction installed new text meanwhile (the next run enriches it).
+            with write_lock.hold(root / "reviews"):
+                if (md_path.read_text(encoding="utf-8") if md_path.exists() else "") != normalized_markdown:
+                    input_changed += 1
+                    continue
+                enrichment_dir.mkdir(parents=True, exist_ok=True)
+                artifact_path.write_text(
+                    json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+                )
             enriched += 1
 
         summary: dict[str, Any] = {
@@ -153,6 +160,7 @@ def enrich_sources(
             "skipped_not_extracted": skipped_not_extracted,
             "skipped_empty": skipped_empty,
             "skipped_no_key": skipped_no_key,
+            "skipped_input_changed": input_changed,
             "manifests_skipped_invalid": len(skipped_invalid),
             "errors": len(errors),
             "error_details": errors,

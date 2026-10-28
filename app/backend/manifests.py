@@ -146,6 +146,12 @@ def normalized_paths(source_id: str) -> dict[str, str]:
     }
 
 
+# The fields :func:`apply_extraction_state` owns. Extraction writes back only these, onto the
+# manifest as it is on disk when it commits (ADR-0068: a status changed during the run survives).
+EXTRACTION_FIELDS = ("ingestion_status", "normalized", "extracted_at", "extraction_tool",
+                     "extraction_tool_version", "text_char_count", "chunk_count", "page_count")
+
+
 def apply_extraction_state(
     manifest: dict[str, Any],
     *,

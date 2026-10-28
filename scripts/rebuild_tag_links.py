@@ -83,8 +83,9 @@ def _locked_main(argv: list[str]) -> int:
     from app.backend import vault_lock
     positional = [a for a in argv if not a.startswith("-")]
     root = Path(positional[0]).resolve() if positional else Path.cwd()
+    from app.backend import run_guard
     with vault_lock.shared(root / "db"):
-        return main(argv)
+        return run_guard.run_cli(root / "db", "rebuild_tag_links", lambda: main(argv))
 
 
 if __name__ == "__main__":

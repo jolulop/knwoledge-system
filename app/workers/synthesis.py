@@ -37,7 +37,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from app.backend import db, graph
+from app.backend import db, graph, write_lock
 from app.backend.manifests import get_provenance, independent_sources, iso_now, valid_manifests
 from app.backend.paths import safe_child
 from app.llm import prompts
@@ -148,37 +148,54 @@ def eligible_topics(gconn, prov, *, claims_dir: Path, markdown_dir: Path) -> lis
     topics: list[dict[str, Any]] = []
     for node_type in _PROMOTABLE:
         for nid in graph.active_node_ids_of_type(gconn, node_type):
-            node = graph.get_node(gconn, nid)
-            if node is None:
-                continue
-            claim_ids: set[str] = set()
-            # ADR-0066 review round 2: only documents that KEEP the tag feed its synthesis — an
-            # undecided suggestion elsewhere is not evidence the user tagged.
-            for s in graph.kept_sources_for_node(gconn, nid):      # sources keeping the topic
-                for clm in graph.claims_for_source(gconn, s):      # their active claims
-                    cnode = graph.get_node(gconn, clm)
-                    if cnode and cnode["status"] == "active":
-                        claim_ids.add(clm)
-            # Build contexts and KEEP only grounded ones (have citations), then re-check the
-            # trigger over the surviving claims' own sources — not the pre-filter set.
-            ctxs = []
-            for c in sorted(claim_ids):
-                ctx = _claim_context(gconn, c, claims_dir=claims_dir, markdown_dir=markdown_dir)
-                if ctx is not None and ctx["citations"]:
-                    ctxs.append(ctx)
-            surviving_sources = {s for c in ctxs for s in c["sources"]}
-            if len(ctxs) < 2 or not _has_independent_pair(surviving_sources, prov):
-                continue
-            node_dir = claims_dir.parent / NODE_DIR[node_type]
-            topic_page = safe_child(node_dir, f"{node['slug']}.md")  # slug is graph-derived
-            topics.append({
-                "node_id": nid, "node_type": node_type, "slug": node["slug"],
-                "title": (_read_fm_title(topic_page) if topic_page else None) or node["slug"],
-                "claims": ctxs,
-                "disagreements": _disagreement_pairs(gconn, {c["claim_id"] for c in ctxs}),
-            })
+            topic = topic_for(gconn, nid, prov, claims_dir=claims_dir, markdown_dir=markdown_dir)
+            if topic is not None:
+                topics.append(topic)
     return topics
 
+
+def topic_for(gconn, nid: str, prov, *, claims_dir: Path, markdown_dir: Path) -> dict[str, Any] | None:
+    """`nid`'s synthesis topic if it is eligible now (the rule of :func:`eligible_topics`), else None.
+    Lets a commit re-check one topic under the write lock without rescanning the vault (ADR-0068)."""
+    node = graph.get_node(gconn, nid)
+    if node is None or node["status"] != "active" or node["node_type"] not in _PROMOTABLE:
+        return None
+    node_type = node["node_type"]
+    claim_ids: set[str] = set()
+    # ADR-0066 review round 2: only documents that KEEP the tag feed its synthesis — an
+    # undecided suggestion elsewhere is not evidence the user tagged.
+    for s in graph.kept_sources_for_node(gconn, nid):      # sources keeping the topic
+        for clm in graph.claims_for_source(gconn, s):      # their active claims
+            cnode = graph.get_node(gconn, clm)
+            if cnode and cnode["status"] == "active":
+                claim_ids.add(clm)
+    # Build contexts and KEEP only grounded ones (have citations), then re-check the
+    # trigger over the surviving claims' own sources — not the pre-filter set.
+    ctxs = []
+    for c in sorted(claim_ids):
+        ctx = _claim_context(gconn, c, claims_dir=claims_dir, markdown_dir=markdown_dir)
+        if ctx is not None and ctx["citations"]:
+            ctxs.append(ctx)
+    surviving_sources = {s for c in ctxs for s in c["sources"]}
+    if len(ctxs) < 2 or not _has_independent_pair(surviving_sources, prov):
+        return None
+    node_dir = claims_dir.parent / NODE_DIR[node_type]
+    topic_page = safe_child(node_dir, f"{node['slug']}.md")  # slug is graph-derived
+    return {
+        "node_id": nid, "node_type": node_type, "slug": node["slug"],
+        "title": (_read_fm_title(topic_page) if topic_page else None) or node["slug"],
+        "claims": ctxs,
+        "disagreements": _disagreement_pairs(gconn, {c["claim_id"] for c in ctxs}),
+    }
+
+
+def _current_fingerprint(gconn, topic_id: str, model_ref: str, *, manifests_dir: Path,
+                         claims_dir: Path, markdown_dir: Path) -> str | None:
+    """The evidence fingerprint `topic_id` has now, or None when it is no longer an eligible topic
+    (ADR-0068: compared under the write lock with the one the model was given)."""
+    prov = {m["source_id"]: get_provenance(m) for m in valid_manifests(manifests_dir)[0]}
+    topic = topic_for(gconn, topic_id, prov, claims_dir=claims_dir, markdown_dir=markdown_dir)
+    return _fingerprint(topic, model_ref) if topic is not None else None
 
 def _fingerprint(topic: dict[str, Any], model_ref: str) -> str:
     h = hashlib.sha256()
@@ -586,37 +603,39 @@ def generate_syntheses(
         # (plain split, pre-resolution) drives sticky-to-chain freshness; resolve_run_model validates.
         chain_refs = [c.strip() for c in model_ref.split(",") if c.strip()]
         model_ref, has_key = client.resolve_run_model(model_ref)
-        # 1. Apply human decisions (deterministic; runs without a key).
-        resolution = apply_resolved_syntheses(gconn, reviews_dir, synthesis_dir=synthesis_dir,
-                                              enrichment_dir=enrichment_dir, now=now)
-
-        # 2. Eligible topics from the current active graph.
-        _valid, _skipped_invalid = valid_manifests(manifests_dir)
-        prov = {m["source_id"]: get_provenance(m) for m in _valid}
-        topics = eligible_topics(gconn, prov, claims_dir=claims_dir, markdown_dir=markdown_dir)
-        eligible_ids = {t["node_id"] for t in topics}
-
-        # 3. Retract syntheses whose topic is no longer eligible (audited deprecation, keyless).
+        # ADR-0068: steps 1-3 are deterministic and commit under the write lock in one phase.
         retracted = 0
-        for syn in graph.nodes_of_type(gconn, "synthesis"):
-            page = synthesis_dir / f"{syn['node_id']}.md"
-            page_fm = parse_frontmatter(page.read_text(encoding="utf-8")) if page.exists() else {}
-            # ADR-0049: a `hidden`/`evidence_hidden` synthesis (page authority OR graph mirror) is a
-            # visibility-suppression state — the generate pass NEVER retracts it (a tombstone would re-expose
-            # it: deprecated_candidate is in default retrieval). Skip-only; the executor/fan-out owns drift.
-            if (syn["status"] in ("deprecated_candidate", *_PRESERVED_GENERATE_STATUSES)
-                    or page_fm.get("status") in _PRESERVED_GENERATE_STATUSES):
-                continue
-            topic_node = page_fm.get("topic_node")
-            if topic_node not in eligible_ids:
-                _deprecate_synthesis(gconn, syn_id=syn["node_id"], topic_node=topic_node or "",
-                                     reviews_dir=reviews_dir, synthesis_dir=synthesis_dir,
-                                     enrichment_dir=enrichment_dir,
-                                     reason="topic no longer an eligible synthesis subject", now=now)
-                retracted += 1
+        with write_lock.hold(reviews_dir):
+            # 1. Apply human decisions (deterministic; runs without a key).
+            resolution = apply_resolved_syntheses(gconn, reviews_dir, synthesis_dir=synthesis_dir,
+                                                  enrichment_dir=enrichment_dir, now=now)
+
+            # 2. Eligible topics from the current active graph.
+            _valid, _skipped_invalid = valid_manifests(manifests_dir)
+            prov = {m["source_id"]: get_provenance(m) for m in _valid}
+            topics = eligible_topics(gconn, prov, claims_dir=claims_dir, markdown_dir=markdown_dir)
+            eligible_ids = {t["node_id"] for t in topics}
+
+            # 3. Retract syntheses whose topic is no longer eligible (audited deprecation, keyless).
+            for syn in graph.nodes_of_type(gconn, "synthesis"):
+                page = synthesis_dir / f"{syn['node_id']}.md"
+                page_fm = parse_frontmatter(page.read_text(encoding="utf-8")) if page.exists() else {}
+                # ADR-0049: a `hidden`/`evidence_hidden` synthesis (page authority OR graph mirror) is a
+                # visibility-suppression state — the generate pass NEVER retracts it (a tombstone would re-expose
+                # it: deprecated_candidate is in default retrieval). Skip-only; the executor/fan-out owns drift.
+                if (syn["status"] in ("deprecated_candidate", *_PRESERVED_GENERATE_STATUSES)
+                        or page_fm.get("status") in _PRESERVED_GENERATE_STATUSES):
+                    continue
+                topic_node = page_fm.get("topic_node")
+                if topic_node not in eligible_ids:
+                    _deprecate_synthesis(gconn, syn_id=syn["node_id"], topic_node=topic_node or "",
+                                         reviews_dir=reviews_dir, synthesis_dir=synthesis_dir,
+                                         enrichment_dir=enrichment_dir,
+                                         reason="topic no longer an eligible synthesis subject", now=now)
+                    retracted += 1
 
         considered = len(topics)
-        written = skipped_fresh = skipped_reviewed = stale_active = 0
+        written = skipped_fresh = skipped_reviewed = stale_active = changed_during_call = 0
         errors: list[dict[str, str]] = []
 
         if has_key:
@@ -679,43 +698,66 @@ def generate_syntheses(
                     continue
                 confidence = round(max(0.0, min(1.0, float(result["confidence"]))), 3)
 
-                # Index the node candidate + (re)write grounded edges: supersede prior synthesis
-                # edges, then derived_from -> each contributing claim and related_to -> the topic.
-                graph.upsert_node(gconn, node_id=syn_id, node_type="synthesis", slug=syn_id,
-                                  status="candidate", now=now)
-                for e in graph.outgoing_active(gconn, syn_id):
-                    if e["edge_type"] in ("derived_from", "related_to"):
-                        graph.set_status(gconn, e["edge_id"], "superseded", now=now)
-                for c in t["claims"]:
-                    graph.upsert_assertion(gconn, src_id=syn_id, dst_id=c["claim_id"],
-                                           edge_type="derived_from", asserted_by="llm",
-                                           status="active", job_id=job_id, now=now)
-                graph.upsert_assertion(gconn, src_id=syn_id, dst_id=tid, edge_type="related_to",
-                                       asserted_by="llm", status="active", job_id=job_id, now=now)
+                # ADR-0068: the model call ran outside the write lock; a human may have hidden or
+                # approved this synthesis meanwhile, so re-read its status under the lock first.
+                with write_lock.hold(reviews_dir):
+                    now_status = (graph.get_node(gconn, syn_id) or {}).get("status")
+                    if (now_status in _PRESERVED_GENERATE_STATUSES
+                            or _page_status(synthesis_dir, syn_id) in _PRESERVED_GENERATE_STATUSES
+                            or (now_status == "active" and status != "active")):
+                        continue
+                    # The result is valid only for the evidence the model saw: the topic must still
+                    # be eligible with the same claims, wording and anchors (a tag link dropped, a
+                    # claim hidden or the topic hidden/merged meanwhile changes or removes it).
+                    if _current_fingerprint(gconn, tid, model_ref, manifests_dir=manifests_dir,
+                                            claims_dir=claims_dir, markdown_dir=markdown_dir) != fp:
+                        changed_during_call += 1
+                        continue
+                    # A decision on the current proposal recorded while the model ran wins: an
+                    # approval is of the prose the human read (Apply promotes the artifact), so it
+                    # must not be overwritten; a rejection must not be re-filed.
+                    fresh_rid = reviews.review_id("propose_synthesis", _review_subject(tid, fp))
+                    if any((reviews_dir / d / f"{fresh_rid}.json").exists()
+                           for d in ("approved", "rejected")):
+                        skipped_reviewed += 1
+                        continue
+                    # Index the node candidate + (re)write grounded edges: supersede prior synthesis
+                    # edges, then derived_from -> each contributing claim and related_to -> the topic.
+                    graph.upsert_node(gconn, node_id=syn_id, node_type="synthesis", slug=syn_id,
+                                      status="candidate", now=now)
+                    for e in graph.outgoing_active(gconn, syn_id):
+                        if e["edge_type"] in ("derived_from", "related_to"):
+                            graph.set_status(gconn, e["edge_id"], "superseded", now=now)
+                    for c in t["claims"]:
+                        graph.upsert_assertion(gconn, src_id=syn_id, dst_id=c["claim_id"],
+                                               edge_type="derived_from", asserted_by="llm",
+                                               status="active", job_id=job_id, now=now)
+                    graph.upsert_assertion(gconn, src_id=syn_id, dst_id=tid, edge_type="related_to",
+                                           asserted_by="llm", status="active", job_id=job_id, now=now)
 
-                apath = art.synthesis_artifact_path(enrichment_dir, tid)
-                apath.parent.mkdir(parents=True, exist_ok=True)
-                apath.write_text(json.dumps({
-                    "node_id": syn_id, "topic_node_id": tid, "title": t["title"],
-                    "summary": result["summary"], "synthesis": result["synthesis"],
-                    "confidence": confidence, "input_fingerprint": fp,
-                    "schema_version": art.SYNTHESIS_SCHEMA_VERSION, "model_ref": model_ref,
-                    "generation_status": "enriched", "generated_at": now,
-                }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                    apath = art.synthesis_artifact_path(enrichment_dir, tid)
+                    apath.parent.mkdir(parents=True, exist_ok=True)
+                    apath.write_text(json.dumps({
+                        "node_id": syn_id, "topic_node_id": tid, "title": t["title"],
+                        "summary": result["summary"], "synthesis": result["synthesis"],
+                        "confidence": confidence, "input_fingerprint": fp,
+                        "schema_version": art.SYNTHESIS_SCHEMA_VERSION, "model_ref": model_ref,
+                        "generation_status": "enriched", "generated_at": now,
+                    }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-                _render_page(gconn, syn_id=syn_id, topic_node=tid, title=t["title"],
-                             summary=result["summary"], synthesis_text=result["synthesis"],
-                             confidence=confidence, status="candidate", review_status="pending",
-                             synthesis_dir=synthesis_dir, now=now)
-                _withdraw_stale_pending(reviews_dir, tid, keep_fp=fp, now=now)
-                reviews.create_review_item(
-                    reviews_dir, review_type="propose_synthesis",
-                    subject=_review_subject(tid, fp),
-                    proposal={"to_status": "active", "synthesis_id": syn_id, "title": t["title"],
-                              "claim_ids": [c["claim_id"] for c in t["claims"]],
-                              "summary": result["summary"]},
-                    context={"node_type": t["node_type"]}, priority="medium", now=now)
-                written += 1
+                    _render_page(gconn, syn_id=syn_id, topic_node=tid, title=t["title"],
+                                 summary=result["summary"], synthesis_text=result["synthesis"],
+                                 confidence=confidence, status="candidate", review_status="pending",
+                                 synthesis_dir=synthesis_dir, now=now)
+                    _withdraw_stale_pending(reviews_dir, tid, keep_fp=fp, now=now)
+                    reviews.create_review_item(
+                        reviews_dir, review_type="propose_synthesis",
+                        subject=_review_subject(tid, fp),
+                        proposal={"to_status": "active", "synthesis_id": syn_id, "title": t["title"],
+                                  "claim_ids": [c["claim_id"] for c in t["claims"]],
+                                  "summary": result["summary"]},
+                        context={"node_type": t["node_type"]}, priority="medium", now=now)
+                    written += 1
 
         changed = written or retracted or resolution["promoted"] or resolution["rejected"]
         index_rebuilt = _rebuild_index(root) if (rebuild_index and changed) else False
@@ -731,6 +773,7 @@ def generate_syntheses(
             "job_id": job_id, "model_ref": model_ref, "status": status,
             "eligible_topics": considered, "syntheses_written": written,
             "skipped_fresh": skipped_fresh, "skipped_reviewed": skipped_reviewed,
+            "skipped_changed_during_call": changed_during_call,
             "stale_active": stale_active, "retracted": retracted,
             "promoted": resolution["promoted"], "rejected": resolution["rejected"],
             "manifests_skipped_invalid": len(_skipped_invalid),

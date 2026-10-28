@@ -47,4 +47,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from app.backend import run_guard  # noqa: E402 - one run at a time (ADR-0068)
+    _settings = get_settings(Path(sys.argv[1]) if len(sys.argv) > 1 else None)
+    raise SystemExit(run_guard.run_cli(_settings.db_dir, "intake_scan", main))

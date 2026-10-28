@@ -104,6 +104,12 @@ class BackupRefused(RuntimeError):
     """A backup/restore that cannot run now (writers still hold the vault lock); nothing was written."""
 
 
+def _is_lock_file(name: str) -> bool:
+    """The write lock (`.lock`), the vault lock and the per-producer run guards (`.run-<name>.lock`,
+    ADR-0068) hold no state, so they are never archived."""
+    return name in (".lock", ".vault.lock") or (name.startswith(".run-") and name.endswith(".lock"))
+
+
 def _is_sqlite(path: Path) -> bool:
     try:
         with path.open("rb") as fh:
@@ -169,11 +175,11 @@ def _snapshot_sqlite(src: Path, tmp_dir: Path) -> Path:
 
 @contextlib.contextmanager
 def _writer_exclusion(root: Path):
-    """Hold the tag-ledger lock (ADR-0066) while the archive is written: tag actions, extraction's
-    post-call writes, merges/splits and repair all take it, so their files and graph rows are
-    captured together."""
-    from app.workers import tag_links          # lazy: the restore/inspection paths don't need it
-    with tag_links.ledger_lock(Path(root) / "reviews"):
+    """Hold the write lock (ADR-0068) while the archive is written: every commit phase takes it, so
+    files and graph rows are captured together. The vault lock is already held exclusively here, so
+    the write lock is taken without it (``vault=False``)."""
+    from app.backend import write_lock
+    with write_lock.hold(Path(root) / "reviews", vault=False):
         yield
 
 
@@ -325,7 +331,7 @@ def _create_backup_report(root: Path) -> BackupReport:
                 # Don't recurse the backups dir into itself.
                 if not path.is_file() or backup_dir in path.parents:
                     continue
-                if path.name.endswith(_SQLITE_SIDE_SUFFIXES) or path.name in (".lock", ".vault.lock"):
+                if path.name.endswith(_SQLITE_SIDE_SUFFIXES) or _is_lock_file(path.name):
                     continue  # transient SQLite side files / the lock files themselves
                 if path.name == _CACHE_FILENAME:
                     if exclude_cache:

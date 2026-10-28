@@ -1,6 +1,9 @@
 # ADR-0068 — Vault consistency contract: one write lock, local publication, consistent previews
 
-- **Status:** accepted — design-locked by grill-phase 2026-10-28. Not implemented.
+- **Status:** accepted — design-locked by grill-phase 2026-10-28. **Slice 1 (decisions 2–3: write
+  lock, run guards, commit phases) implemented 2026-10-28** (see "Implementation — slice 1");
+  slices 2–4 (publication + queue, producer publication + keyword refresh, previews + token) not
+  yet.
 - **Date:** 2026-10-28
 - **Drivers:** an external architecture review after ADR-0066 part 3's grill. It found three
   blocking issues and four non-blocking ones; the user answered four framing questions and five
@@ -201,6 +204,79 @@ change and does not block ADR-0066 part 3.
    captured where practical.
 6. ADR-0066 decision 10: the backup-gated, human-approved clean restart, then fresh ingestion, UAT
    and scoring.
+
+## Implementation — slice 1 (2026-10-28)
+
+- **`app/backend/write_lock.py`:** the write lock (`hold`, `held`), moved out of `tag_links`
+  (`tag_links.ledger_lock` is now an alias). Same file, `reviews/tag_links/.lock`.
+- **`app/backend/run_guard.py`:** `guard(db_dir, producer)` (non-blocking `flock` on
+  `db/.run-<producer>.lock`, re-entrant per thread, `ProducerBusy`) and `run_cli` (exit code 3).
+  Taken at entry points only: the producer scripts' `__main__` (scan, extract, generate_wiki,
+  enrich, claims, items, promote, contradictions, synthesis, reindex_vector, rebuild_tag_links,
+  reconcile_reviews) and the `POST /jobs/*` routes (409 `already_running`). `rebuild_index.py` and
+  `reindex_keyword.py` take no guard: they are publication steps spawned by other writers (slice 2
+  puts them under the write lock).
+- **Commit phases under the write lock:**
+  - API: decisions, reopen, merge filing, the source-screen routes and the whole of `run_apply`
+    (`_commit_phase`; the async source-decide batch now runs in a worker thread).
+  - `reviews.py`: every review-item state change.
+  - Producers, per document: Enrich's artifact write; claims' commit and page recompose; items
+    (already); each Source page render in `generate_wiki`; contradictions' and synthesis' commits;
+    lint's and stale-check's detect-and-file; intake's manifest writes; extraction's manifest write;
+    the reconcile sweep.
+- **Re-validation under the lock:** claims and items mirror the source's status from the manifest
+  as it is at commit time; a re-asserted claim keeps a human-set `hidden`/`deprecated_candidate`
+  status; extraction writes back only its own fields (`manifests.EXTRACTION_FIELDS`) onto the current
+  manifest; contradictions skip a pair a human decided during the model call; synthesis skips a
+  topic hidden or approved during it; `generate_wiki` renders from the current manifest.
+- **Backup** skips the run-guard files.
+- **Tests:** `tests/test_write_lock.py` (17): the lock and guard units, acceptance test 1 (concurrent
+  approve/reject → one outcome; a reopen waits for a running Apply and is then refused), test 2
+  (archive during a claims/tags model call, hide during a claims call, archive during extraction)
+  and test 5 (a second run refuses; the write lock stays free during a model call). Six
+  mutation checks, each caught. The contradiction and synthesis re-checks have no dedicated test
+  yet.
+
+### Review round 1 on slice 1 (2026-10-28)
+
+Static review found four issues and one test gap; the user chose the structural fix for the first.
+- **P1 lock order (promotion vs backup deadlock):** `promote_candidates` took the write lock before
+  `insert_job` took the vault lock, while backup takes them the other way round. **Structural fix:**
+  the outermost `write_lock.hold()` now takes the vault lock shared first (at the reviews dir's
+  sibling `db/`), so no writer can hold the write lock while waiting for the vault lock. Backup,
+  already holding the vault lock exclusively, uses `hold(..., vault=False)`. Test: promotion paused
+  between the two steps, then a backup subprocess refuses after its timeout (without the fix it
+  deadlocks).
+- **P1 contradictions:** the commit-time check now also reads the review ledger (an approved or
+  rejected item counts at once, before Apply changes the edge) and re-checks that both claims still
+  stand, are not hidden and show the wording and evidence the model judged
+  (`_still_as_shown`; `skipped_changed_during_call`).
+- **P1 synthesis:** under the lock the topic's current eligibility and evidence fingerprint are
+  recomputed (`_current_fingerprint`); a changed or vanished topic discards the result
+  (`skipped_changed_during_call`), and a rejection recorded during the call wins
+  (`skipped_reviewed`).
+- **P2 extraction outputs:** `_extract_one` stages Markdown, chunks and tables in
+  `normalized/.staging/<source_id>/` outside the lock; the run installs them by rename, writes the
+  log and merges the manifest fields in one commit phase. Claims, items and Enrich compare the
+  normalized text with what the model read and write nothing if it changed
+  (`skipped_input_changed` / `input_changed_sources`).
+- **Test gap:** concurrent opposite merges (A ← B and B ← A) now file exactly one.
+- **Tests:** `tests/test_write_lock.py` grew to 30; every new check was mutation-tested (undo the
+  fix → its test fails).
+
+### Review round 2 on slice 1 (2026-10-28)
+
+- **P1 synthesis approval during a model call:** the commit now checks both terminal states of the
+  current proposal. An approval recorded while the model ran keeps the artifact and page the human
+  read, because Apply promotes that artifact (`skipped_reviewed`). Test: the model returns different
+  prose and both files stay byte-identical.
+- **Lock order inside one process:** the outermost `hold()` takes the vault lock before the
+  process lock, then the `flock`, so a writer thread never holds the process lock while it waits
+  for a backup thread. Test: a backup thread holding the vault lock exclusively and a writer thread
+  started in that order both finish.
+- **Per-topic re-check:** `eligible_topics` is now a loop over `topic_for(node_id)`, which the commit
+  check calls for its one topic instead of rescanning every topic under the write lock.
+- `tests/test_write_lock.py`: 32 tests; both new checks mutation-tested.
 
 ## Consequences
 

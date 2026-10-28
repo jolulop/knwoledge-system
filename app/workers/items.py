@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from app.backend import db, graph, taxonomy
-from app.backend.manifests import get_status, iso_now, valid_manifests
+from app.backend.manifests import get_status, iso_now, load_manifest, valid_manifests
 from app.llm import prompts
 from app.llm.client import CacheMiss, LLMClient, ParseError
 from app.workers import citations, reconcile, reviews
@@ -596,6 +596,7 @@ def extract_items(
     errors: list[dict[str, str]] = []
     cache_miss_sources: list[str] = []
     in_flight_sources: list[dict[str, str]] = []
+    input_changed_sources: list[str] = []
     texts: dict[str, dict[str, Any]] = {}
     touched: set[str] = set()
     affected: set[str] = set()
@@ -749,6 +750,12 @@ def extract_items(
             # made meanwhile must win — re-read both under the lock, then write this document's links
             # and artifact before releasing it.
             with tag_links.ledger_lock(reviews_dir):
+                # ADR-0068: the suggestions are valid only for the text the model read; a
+                # re-extraction installed meanwhile makes them stale — write nothing, the next run
+                # extracts the new text.
+                if (md_path.read_text(encoding="utf-8") if md_path.exists() else "") != md:
+                    input_changed_sources.append(sid)
+                    continue
                 try:
                     dropped = tag_links.drop_filter(reviews_dir, sid)
                     kept_ids = set(tag_links.load_ledger(reviews_dir, sid)["kept"])
@@ -772,9 +779,11 @@ def extract_items(
                 # (supersede covers ALL active mentions for the source, so it must precede _emit).
                 affected.update(graph.supersede_mentions_for_source(gconn, sid, now=now))
 
+                # ADR-0068: the manifest read at the run's start may be stale (an archive applied
+                # during the model call) — mirror the status as it is now, under the lock.
                 graph.upsert_node(
                     gconn, node_id=sid, node_type="source", slug=sid,
-                    status=get_status(manifest), now=now)
+                    status=get_status(load_manifest(manifests_dir, sid) or manifest), now=now)
                 source_nodes: list[dict[str, Any]] = []
                 for entry in plan["emit"]:
                     _emit(sid, md, entry, source_nodes)
@@ -855,6 +864,7 @@ def extract_items(
             "cache_only": cache_only, "cache_misses": len(cache_miss_sources),
             "cache_miss_sources": sorted(cache_miss_sources),
             "in_flight_sources": in_flight_sources,
+            "input_changed_sources": input_changed_sources,
             "index_rebuilt": index_rebuilt, "extracted_at": now,
         }
         if conn is not None:

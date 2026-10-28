@@ -38,6 +38,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from app.backend import write_lock
 from app.workers import reviews
 from app.workers.wiki_render import parse_frontmatter
 
@@ -280,6 +281,15 @@ def _preflight(gconn, eligible: list[dict[str, Any]],
 
 def sweep(reviews_dir: Path, gconn, *, wiki_dir: Path, now: str | None = None,
           allow_legacy_reason: bool = True) -> dict[str, Any]:
+    """Run :func:`_sweep` as one commit phase under the vault write lock (ADR-0068 decision 2): the
+    preflight and the withdrawals it gates see the same state."""
+    with write_lock.hold(Path(reviews_dir)):
+        return _sweep(reviews_dir, gconn, wiki_dir=wiki_dir, now=now,
+                      allow_legacy_reason=allow_legacy_reason)
+
+
+def _sweep(reviews_dir: Path, gconn, *, wiki_dir: Path, now: str | None = None,
+           allow_legacy_reason: bool = True) -> dict[str, Any]:
     """Catch-up sweep over the whole `pending/` set against current graph + page state
     (decision 4). Preflight-gated fail-closed: a non-empty `refused` list means NOTHING was
     withdrawn. Idempotent and key-free; the ONLY caller of the legacy-prose shim (on by

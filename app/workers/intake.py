@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from app.backend import db
+from app.backend import db, write_lock
 from app.backend.manifests import (
     iso_now,
     load_manifest,
@@ -223,44 +223,47 @@ def scan_inbox(
         updated_manifests = 0
         source_ids: list[str] = []
 
-        for sha, observed in by_content.items():
-            observed.sort(key=lambda m: m["relative_path"].lower())
-            canonical_meta = observed[0]
-            canonical_path = (root / canonical_meta["relative_path"]).resolve()
-            source_id = source_id_for(sha)
-            existing = load_manifest(manifests_dir, source_id)
+        # ADR-0068: manifests are authority, so reading and saving them is one commit phase under
+        # the write lock (an Apply changing a manifest's status never interleaves).
+        with write_lock.hold(root / "reviews"):
+            for sha, observed in by_content.items():
+                observed.sort(key=lambda m: m["relative_path"].lower())
+                canonical_meta = observed[0]
+                canonical_path = (root / canonical_meta["relative_path"]).resolve()
+                source_id = source_id_for(sha)
+                existing = load_manifest(manifests_dir, source_id)
 
-            if existing is not None:
-                manifest = existing
-                # Manifests are authoritative (ADR-0008): never merge into a record
-                # whose stored checksum disagrees with the scanned content.
-                if manifest.get("sha256") != sha:
-                    errors.append({
-                        "path": canonical_meta["relative_path"],
-                        "error": f"manifest sha256 mismatch for {source_id}; skipped",
-                    })
-                    continue
-                created = False
-            else:
-                manifest = _new_manifest(
-                    source_id, sha, canonical_meta, canonical_path, now
-                )
-                created = True
+                if existing is not None:
+                    manifest = existing
+                    # Manifests are authoritative (ADR-0008): never merge into a record
+                    # whose stored checksum disagrees with the scanned content.
+                    if manifest.get("sha256") != sha:
+                        errors.append({
+                            "path": canonical_meta["relative_path"],
+                            "error": f"manifest sha256 mismatch for {source_id}; skipped",
+                        })
+                        continue
+                    created = False
+                else:
+                    manifest = _new_manifest(
+                        source_id, sha, canonical_meta, canonical_path, now
+                    )
+                    created = True
 
-            _merge_occurrences(manifest, observed, now)
-            manifest["last_seen_at"] = now
-            manifest["last_scanned_at"] = now
+                _merge_occurrences(manifest, observed, now)
+                manifest["last_seen_at"] = now
+                manifest["last_scanned_at"] = now
 
-            if canonical_meta["size_bytes"] == 0 and "empty_file" not in manifest.get(
-                "notes", []
-            ):
-                manifest.setdefault("notes", []).append("empty_file")
-                warnings.append({"source_id": source_id, "warning": "empty_file"})
+                if canonical_meta["size_bytes"] == 0 and "empty_file" not in manifest.get(
+                    "notes", []
+                ):
+                    manifest.setdefault("notes", []).append("empty_file")
+                    warnings.append({"source_id": source_id, "warning": "empty_file"})
 
-            save_manifest(manifests_dir, manifest)
-            source_ids.append(source_id)
-            new_manifests += int(created)
-            updated_manifests += int(not created)
+                save_manifest(manifests_dir, manifest)
+                source_ids.append(source_id)
+                new_manifests += int(created)
+                updated_manifests += int(not created)
 
         files_found = len(files)
         unique_contents = len(by_content)

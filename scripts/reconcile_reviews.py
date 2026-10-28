@@ -64,5 +64,7 @@ def main(argv: list[str]) -> int:
 
 if __name__ == "__main__":
     from app.backend import vault_lock  # noqa: E402 - a vault writer (ADR-0039 amendment)
+    from app.backend import run_guard  # noqa: E402 - one run at a time (ADR-0068)
     with vault_lock.shared(get_settings().db_dir):
-        raise SystemExit(main(sys.argv[1:]))
+        raise SystemExit(run_guard.run_cli(get_settings().db_dir, "reconcile_reviews",
+                                           lambda: main(sys.argv[1:])))

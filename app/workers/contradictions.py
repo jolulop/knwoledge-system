@@ -36,7 +36,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from app.backend import db, graph
+from app.backend import db, graph, write_lock
 from app.backend.manifests import get_provenance, independent_sources, iso_now, valid_manifests
 from app.llm import prompts
 from app.llm.client import LLMClient, ParseError
@@ -268,6 +268,19 @@ def _execute_supersede(
 # --- the worker ------------------------------------------------------------
 
 
+
+def _still_as_shown(gconn, a: str, b: str, ctx_a: dict[str, Any], ctx_b: dict[str, Any], *,
+                    claims_dir: Path, markdown_dir: Path) -> bool:
+    """Whether both claims still stand (active evidence, not hidden) with the wording and evidence
+    the model judged (ADR-0068: re-checked under the write lock before a verdict is written)."""
+    standing = graph.claims_with_active_evidence(gconn)
+    for cid, shown in ((a, ctx_a), (b, ctx_b)):
+        if cid not in standing or (graph.get_node(gconn, cid) or {}).get("status") == "hidden":
+            return False
+        if _claim_context(gconn, cid, claims_dir=claims_dir, markdown_dir=markdown_dir) != shown:
+            return False
+    return True
+
 def detect_contradictions(
     root: Path,
     *,
@@ -310,47 +323,49 @@ def detect_contradictions(
         model_ref, has_key = client.resolve_run_model(model_ref)
         affected: set[str] = set()  # claim ids whose page projection must be re-rendered
 
-        # 1. Apply human decisions made since the last run (deterministic; runs without a key).
-        resolution = apply_resolved_contradictions(
-            gconn, reviews_dir, claims_dir=claims_dir, markdown_dir=markdown_dir,
-            affected=affected, now=now)
-
-        # 2. Recompute candidate pairs from the current active graph.
-        _valid, _skipped_invalid = valid_manifests(manifests_dir)
-        prov = {m["source_id"]: get_provenance(m) for m in _valid}
-        pairs = candidate_pairs(gconn, prov)
-        pair_keys = {(p["claim_a"], p["claim_b"]) for p in pairs}
-        active_claims = set(graph.active_node_ids_of_type(gconn, "claim"))
-        standing_claims = graph.claims_with_active_evidence(gconn)  # evidence-based endpoint validity
-
-        # 3. Supersede stale llm assertions and withdraw their pending reviews (runs without a
-        #    key — like claim retraction). Two distinct conditions (ADR-0031):
-        #    - **endpoint gone** (a claim no longer *stands* — has no `active` evidence, i.e. a
-        #      tombstone): supersede whether proposed OR active. Endpoint validity is
-        #      **evidence-based, not node-status-based**, so a claim that is `deprecated_candidate`
-        #      by a human supersede decision but *keeps* its evidence is NOT "gone" — its
-        #      `contradicts` edge stays active (the historical conflict is recorded). The CLAIM
-        #      worker is the *primary* enforcer on tombstone; this is a backstop.
-        #    - **pair left the candidate set** but both endpoints stand (e.g. a provenance edit
-        #      removed independence): supersede only a *proposed* assertion. Independence is the
-        #      blocking criterion for *finding* candidates, not a validity condition, so it must
-        #      not silently undo a human acknowledgement.
+        # ADR-0068: steps 1-3 are deterministic and commit under the write lock in one phase.
         stale = 0
-        for row in graph.contradiction_assertions(gconn, statuses=("proposed", "active")):
-            a, b = row["src_id"], row["dst_id"]
-            endpoint_gone = a not in standing_claims or b not in standing_claims
-            left_candidate = (a, b) not in pair_keys
-            if endpoint_gone or (row["status"] == "proposed" and left_candidate):
-                graph.set_status(gconn, row["edge_id"], "superseded", now=now)
-                rid = reviews.review_id("resolve_contradiction", {"claim_a": a, "claim_b": b})
-                reason = "an endpoint claim no longer stands" if endpoint_gone \
-                    else "pair no longer a candidate"
-                reviews.withdraw_review_item(reviews_dir, rid, reason=reason, now=now)
-                affected.update({a, b} & standing_claims)  # re-project the surviving claim(s)
-                stale += 1
+        with write_lock.hold(reviews_dir):
+            # 1. Apply human decisions made since the last run (deterministic; runs without a key).
+            resolution = apply_resolved_contradictions(
+                gconn, reviews_dir, claims_dir=claims_dir, markdown_dir=markdown_dir,
+                affected=affected, now=now)
+
+            # 2. Recompute candidate pairs from the current active graph.
+            _valid, _skipped_invalid = valid_manifests(manifests_dir)
+            prov = {m["source_id"]: get_provenance(m) for m in _valid}
+            pairs = candidate_pairs(gconn, prov)
+            pair_keys = {(p["claim_a"], p["claim_b"]) for p in pairs}
+            active_claims = set(graph.active_node_ids_of_type(gconn, "claim"))
+            standing_claims = graph.claims_with_active_evidence(gconn)  # evidence-based endpoint validity
+
+            # 3. Supersede stale llm assertions and withdraw their pending reviews (runs without a
+            #    key — like claim retraction). Two distinct conditions (ADR-0031):
+            #    - **endpoint gone** (a claim no longer *stands* — has no `active` evidence, i.e. a
+            #      tombstone): supersede whether proposed OR active. Endpoint validity is
+            #      **evidence-based, not node-status-based**, so a claim that is `deprecated_candidate`
+            #      by a human supersede decision but *keeps* its evidence is NOT "gone" — its
+            #      `contradicts` edge stays active (the historical conflict is recorded). The CLAIM
+            #      worker is the *primary* enforcer on tombstone; this is a backstop.
+            #    - **pair left the candidate set** but both endpoints stand (e.g. a provenance edit
+            #      removed independence): supersede only a *proposed* assertion. Independence is the
+            #      blocking criterion for *finding* candidates, not a validity condition, so it must
+            #      not silently undo a human acknowledgement.
+            for row in graph.contradiction_assertions(gconn, statuses=("proposed", "active")):
+                a, b = row["src_id"], row["dst_id"]
+                endpoint_gone = a not in standing_claims or b not in standing_claims
+                left_candidate = (a, b) not in pair_keys
+                if endpoint_gone or (row["status"] == "proposed" and left_candidate):
+                    graph.set_status(gconn, row["edge_id"], "superseded", now=now)
+                    rid = reviews.review_id("resolve_contradiction", {"claim_a": a, "claim_b": b})
+                    reason = "an endpoint claim no longer stands" if endpoint_gone \
+                        else "pair no longer a candidate"
+                    reviews.withdraw_review_item(reviews_dir, rid, reason=reason, now=now)
+                    affected.update({a, b} & standing_claims)  # re-project the surviving claim(s)
+                    stale += 1
 
         considered = len(pairs)
-        evaluated = proposed = not_contradiction = skipped_decided = 0
+        evaluated = proposed = not_contradiction = skipped_decided = changed_during_call = 0
         errors: list[dict[str, str]] = []
 
         if has_key:
@@ -381,45 +396,62 @@ def detect_contradictions(
                     continue
                 evaluated += 1
 
-                # Drop any prior proposed rows for this pair (e.g. a changed anchor), then write
-                # the current verdict. Existing active/rejected are excluded above.
-                for r in existing:
-                    if r["status"] == "proposed":
-                        graph.set_status(gconn, r["edge_id"], "superseded", now=now)
-
-                if not bool(verdict["contradicts"]):
+                # ADR-0068: the verdict came from a model call made outside the write lock, so re-read
+                # everything it depends on under the lock first. A human decision counts as soon as it
+                # is recorded (approve/reject move the review file; the edge changes only at Apply),
+                # and the verdict is only valid for the claims and evidence the model was shown.
+                with write_lock.hold(reviews_dir):
+                    existing = graph.contradiction_between(gconn, a, b)
                     rid = reviews.review_id("resolve_contradiction", {"claim_a": a, "claim_b": b})
-                    reviews.withdraw_review_item(reviews_dir, rid, reason="no longer judged a contradiction", now=now)
-                    not_contradiction += 1
-                    continue
+                    if ({r["status"] for r in existing} & {"active", "rejected"}
+                            or any((reviews_dir / d / f"{rid}.json").exists()
+                                   for d in ("approved", "rejected"))):
+                        skipped_decided += 1
+                        continue
+                    if not _still_as_shown(gconn, a, b, ctx_a, ctx_b, claims_dir=claims_dir,
+                                           markdown_dir=markdown_dir):
+                        changed_during_call += 1
+                        continue
+                    # Drop any prior proposed rows for this pair (e.g. a changed anchor), then write
+                    # the current verdict. Existing active/rejected are excluded above.
+                    for r in existing:
+                        if r["status"] == "proposed":
+                            graph.set_status(gconn, r["edge_id"], "superseded", now=now)
 
-                anchor = ctx_a["citations"][0]
-                confidence = max(0.0, min(1.0, float(verdict["confidence"])))  # clamp untrusted value
-                rid = reviews.review_id("resolve_contradiction", {"claim_a": a, "claim_b": b})
-                graph.upsert_assertion(
-                    gconn, src_id=a, dst_id=b, edge_type="contradicts", asserted_by="llm",
-                    status="proposed", confidence=confidence,
-                    evidence_source_id=anchor["source_id"], evidence_char_start=anchor["char_start"],
-                    evidence_char_end=anchor["char_end"], review_id=rid, job_id=job_id, now=now,
-                )
-                reviews.create_review_item(
-                    reviews_dir, review_type="resolve_contradiction",
-                    subject={"claim_a": a, "claim_b": b},
-                    proposal={
-                        "outcomes": ["acknowledge", "supersede", "reject"],
-                        "confidence": confidence,
-                        "explanation": str(verdict["explanation"]),
-                        "sides": [ctx_a, ctx_b],
-                    },
-                    context={"shared_nodes": p["shared_nodes"], "asserted_by": "llm"},
-                    priority="medium", now=now)
-                proposed += 1
+                    if not bool(verdict["contradicts"]):
+                        rid = reviews.review_id("resolve_contradiction", {"claim_a": a, "claim_b": b})
+                        reviews.withdraw_review_item(reviews_dir, rid, reason="no longer judged a contradiction", now=now)
+                        not_contradiction += 1
+                        continue
+
+                    anchor = ctx_a["citations"][0]
+                    confidence = max(0.0, min(1.0, float(verdict["confidence"])))  # clamp untrusted value
+                    rid = reviews.review_id("resolve_contradiction", {"claim_a": a, "claim_b": b})
+                    graph.upsert_assertion(
+                        gconn, src_id=a, dst_id=b, edge_type="contradicts", asserted_by="llm",
+                        status="proposed", confidence=confidence,
+                        evidence_source_id=anchor["source_id"], evidence_char_start=anchor["char_start"],
+                        evidence_char_end=anchor["char_end"], review_id=rid, job_id=job_id, now=now,
+                    )
+                    reviews.create_review_item(
+                        reviews_dir, review_type="resolve_contradiction",
+                        subject={"claim_a": a, "claim_b": b},
+                        proposal={
+                            "outcomes": ["acknowledge", "supersede", "reject"],
+                            "confidence": confidence,
+                            "explanation": str(verdict["explanation"]),
+                            "sides": [ctx_a, ctx_b],
+                        },
+                        context={"shared_nodes": p["shared_nodes"], "asserted_by": "llm"},
+                        priority="medium", now=now)
+                    proposed += 1
 
         # 4. Re-project Claim pages whose active contradiction backlinks changed (ADR-0031). Shared
         #    with the Phase-6 apply_contradiction_decisions via _reproject_claim_pages (ADR-0035 A4).
-        pages_reprojected = len(_reproject_claim_pages(
-            gconn, affected & active_claims, claims_dir=claims_dir, reviews_dir=reviews_dir,
-            markdown_dir=markdown_dir, now=now))
+        with write_lock.hold(reviews_dir):
+            pages_reprojected = len(_reproject_claim_pages(
+                gconn, affected & active_claims, claims_dir=claims_dir, reviews_dir=reviews_dir,
+                markdown_dir=markdown_dir, now=now))
         index_rebuilt = _rebuild_index(root) if (rebuild_index and pages_reprojected) else False
 
         if errors:
@@ -434,6 +466,7 @@ def detect_contradictions(
             "candidate_pairs": considered, "pairs_evaluated": evaluated,
             "contradictions_proposed": proposed, "not_contradiction": not_contradiction,
             "skipped_human_decided": skipped_decided, "superseded_stale": stale,
+            "skipped_changed_during_call": changed_during_call,
             "claim_pages_reprojected": pages_reprojected, "index_rebuilt": index_rebuilt,
             "resolutions_acknowledged": resolution["acknowledged"],
             "resolutions_rejected": resolution["rejected"],

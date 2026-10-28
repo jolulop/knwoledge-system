@@ -51,6 +51,15 @@ headers and are unaffected.
 Maintenance passes are **key-free**. Only the LLM *producers* (claims/items/contradictions/synthesis)
 and `POST /query` need `ANTHROPIC_API_KEY`.
 
+**Overlapping runs (ADR-0068).** Every commit (a screen action, a review decision, Apply, each
+producer's per-document write, lint/stale-check filing, repair) takes the vault **write lock**
+(`reviews/tag_links/.lock`), so writers never interleave; model calls stay outside it, so you can
+keep tagging while a pipeline runs. Each producer also allows **one run at a time**
+(`db/.run-<producer>.lock`): a second run of the same producer refuses at once and writes nothing —
+a script exits with code **3** ("Refused: … is already running"), a `POST /jobs/*` route answers
+**409** `already_running: <producer>`. Wait for the first run to finish, then start again. Different
+producers may run side by side. The lock files hold no state and are never backed up.
+
 ### Executor-backed review types (`POST /reviews/apply`)
 
 Every review type below has a deterministic, key-free executor (the canonical set is `_APPLY_TYPES` in

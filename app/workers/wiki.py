@@ -20,9 +20,9 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from app.backend import db, graph
+from app.backend import db, graph, write_lock
 from app.backend.config import get_settings
-from app.backend.manifests import iso_now, valid_manifests
+from app.backend.manifests import iso_now, load_manifest, valid_manifests
 from app.workers import enrichment_artifact, labels, wiki_render
 
 
@@ -152,12 +152,10 @@ def generate_wiki(
         skipped_not_extracted = 0
         errors: list[dict[str, str]] = []
 
-        for manifest in manifests:
+        def _render_one(manifest: dict[str, Any]) -> str | dict[str, str]:
+            """Render and write one Source page from current state (ADR-0068: called under
+            the write lock, so the manifest, ledger and graph it reads are consistent)."""
             source_id = manifest["source_id"]
-            if manifest.get("ingestion_status") not in _GENERATED_STATUSES:
-                skipped_not_extracted += 1
-                continue
-            considered += 1
             page_path = sources_dir / f"{source_id}.md"
             try:
                 md_path = markdown_dir / f"{source_id}.md"
@@ -206,8 +204,7 @@ def generate_wiki(
                     suggested_items=suggested_items, raw_url=raw_base + source_id,
                 )
             except Exception as exc:  # one page's failure must not abort the run
-                errors.append({"source_id": source_id, "error": f"{type(exc).__name__}: {exc}"})
-                continue
+                return {"source_id": source_id, "error": f"{type(exc).__name__}: {exc}"}
 
             # Idempotent: skip when the rendered page is unchanged (input fingerprint).
             if not force and page_path.exists():
@@ -216,10 +213,24 @@ def generate_wiki(
                 ).get("input_fingerprint")
                 candidate_fp = wiki_render.parse_frontmatter(candidate).get("input_fingerprint")
                 if existing_fp and existing_fp == candidate_fp:
-                    skipped_unchanged += 1
-                    continue
+                    return "unchanged"
             page_path.write_text(candidate, encoding="utf-8")
-            generated += 1
+            return "generated"
+
+        for manifest in manifests:
+            source_id = manifest["source_id"]
+            if manifest.get("ingestion_status") not in _GENERATED_STATUSES:
+                skipped_not_extracted += 1
+                continue
+            considered += 1
+            with write_lock.hold(root / "reviews"):
+                outcome = _render_one(load_manifest(manifests_dir, source_id) or manifest)
+            if isinstance(outcome, dict):
+                errors.append(outcome)
+            elif outcome == "unchanged":
+                skipped_unchanged += 1
+            else:
+                generated += 1
 
         summary: dict[str, Any] = {
             "job_id": job_id,

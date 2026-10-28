@@ -32,8 +32,7 @@ rebuilds `wiki/index.md` + the keyword index once per batch (:func:`finish`). Bl
 NOTHING.
 
 Integrity (ADR-0066 review round 2): every read-modify-write of a ledger or the blocked list runs
-under :func:`ledger_lock` (a process lock for the API's worker threads + an exclusive `flock` for
-other processes); the ledger is written BEFORE the graph mirror; a ledger that exists but does not
+under :func:`ledger_lock`, the vault write lock (`app/backend/write_lock.py`, ADR-0068); the ledger is written BEFORE the graph mirror; a ledger that exists but does not
 parse raises :class:`LedgerCorrupt` and is never overwritten (actions return `ledger_corrupt`).
 :func:`consistency_errors` / :func:`repair` check and restore ledger ↔ graph agreement
 (`scripts/validate_tag_links.py`, `scripts/rebuild_tag_links.py`).
@@ -45,18 +44,11 @@ import functools
 import json
 import os
 import re
-import threading
 import uuid
-from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-try:
-    import fcntl
-except ImportError:                                       # non-POSIX: the process lock still serializes
-    fcntl = None  # type: ignore[assignment]
-
-from app.backend import graph, keyword_index, taxonomy
+from app.backend import graph, keyword_index, taxonomy, write_lock
 from app.backend.manifests import is_source_id, iso_now
 from app.workers import identity_journal, items, merge_candidates, merges, promote, wiki
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter
@@ -125,34 +117,10 @@ class LedgerCorrupt(ValueError):
         self.source_id, self.problem = source_id, problem
 
 
-_PROCESS_LOCK = threading.RLock()
-_held = threading.local()
-
-
-@contextlib.contextmanager
-def ledger_lock(reviews_dir: Path) -> Iterator[None]:
-    """Serialize ledger and blocked-list updates: the process lock covers the API's worker threads,
-    an exclusive `flock` on `reviews/tag_links/.lock` covers other processes. Re-entrant per thread."""
-    with _PROCESS_LOCK:
-        if getattr(_held, "depth", 0):
-            _held.depth += 1
-            try:
-                yield
-            finally:
-                _held.depth -= 1
-            return
-        d = Path(reviews_dir) / LEDGER_DIR
-        d.mkdir(parents=True, exist_ok=True)
-        with open(d / LOCK_NAME, "a", encoding="utf-8") as fh:
-            if fcntl is not None:
-                fcntl.flock(fh, fcntl.LOCK_EX)
-            _held.depth = 1
-            try:
-                yield
-            finally:
-                _held.depth = 0
-                if fcntl is not None:
-                    fcntl.flock(fh, fcntl.LOCK_UN)
+# Ledger and blocked-list updates serialize on the vault write lock (ADR-0068 decision 2), which
+# grew out of this module's ledger lock and keeps its file, `reviews/tag_links/.lock`.
+ledger_lock = write_lock.hold
+_held = write_lock._held
 
 
 def ledger_path(reviews_dir: Path, source_id: str) -> Path:

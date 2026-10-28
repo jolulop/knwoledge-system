@@ -15,6 +15,7 @@ and ``db/jobs.sqlite``.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import importlib
 import signal
@@ -26,10 +27,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from app.backend import db
+from app.backend import db, write_lock
 from app.backend.manifests import (
+    EXTRACTION_FIELDS,
     apply_extraction_state,
     iso_now,
+    load_manifest,
     save_manifest,
     sha256_file,
     valid_manifests,
@@ -152,23 +155,40 @@ def is_supported(extension: str) -> bool:
 # --- output writing ---------------------------------------------------------
 
 
-def _write_outputs(
+def _stage_outputs(
     dirs: dict[str, Path], source_id: str, markdown_text: str, chunks: list[Any],
     table_files: list[tuple[str, str]],
 ) -> None:
-    (dirs["markdown"] / f"{source_id}.md").write_text(markdown_text, encoding="utf-8")
+    """Write one source's outputs to `normalized/.staging/<source_id>/`, outside the write lock
+    (ADR-0068); :func:`_install_outputs` moves them into place under it."""
+    stage = dirs["staging"] / source_id
+    if stage.exists():
+        shutil.rmtree(stage)
+    try:
+        (stage / "tables").mkdir(parents=True)
+        (stage / "markdown.md").write_text(markdown_text, encoding="utf-8")
+        chunk_lines = [json.dumps(c.to_dict(), ensure_ascii=False) for c in chunks]
+        body = "\n".join(chunk_lines) + ("\n" if chunk_lines else "")
+        (stage / "chunks.jsonl").write_text(body, encoding="utf-8")
+        # Per-source tables dir is always present (even empty).
+        for filename, content in table_files:
+            (stage / "tables" / filename).write_text(content, encoding="utf-8")
+    except BaseException:
+        shutil.rmtree(stage, ignore_errors=True)
+        raise
 
-    chunk_lines = [json.dumps(c.to_dict(), ensure_ascii=False) for c in chunks]
-    body = "\n".join(chunk_lines) + ("\n" if chunk_lines else "")
-    (dirs["chunks"] / f"{source_id}.jsonl").write_text(body, encoding="utf-8")
 
-    # Per-source tables dir is always present (even empty); rewrite it cleanly.
+def _install_outputs(dirs: dict[str, Path], source_id: str) -> None:
+    """Move staged outputs into place by rename (call under the write lock): readers holding the
+    lock see the old Markdown, chunks and tables or the new ones, never a mix."""
+    stage = dirs["staging"] / source_id
+    os.replace(stage / "markdown.md", dirs["markdown"] / f"{source_id}.md")
+    os.replace(stage / "chunks.jsonl", dirs["chunks"] / f"{source_id}.jsonl")
     table_dir = dirs["tables"] / source_id
     if table_dir.exists():
-        shutil.rmtree(table_dir)
-    table_dir.mkdir(parents=True, exist_ok=True)
-    for filename, content in table_files:
-        (table_dir / filename).write_text(content, encoding="utf-8")
+        os.replace(table_dir, stage / "old_tables")
+    os.replace(stage / "tables", table_dir)
+    shutil.rmtree(stage)
 
 
 def _write_log(dirs: dict[str, Path], source_id: str, log: dict[str, Any]) -> None:
@@ -198,12 +218,13 @@ def _extract_one(
     timeout_s: int,
     target_chars: int,
     max_chars: int,
-) -> tuple[dict[str, Any], bool]:
-    """Extract one source.
+) -> tuple[dict[str, Any], bool, bool]:
+    """Extract one source, outside the write lock: nothing it produces is visible yet.
 
-    Returns ``(log, persisted)``. ``persisted`` is False when a failed re-extraction
+    Returns ``(log, persisted, staged)``. ``persisted`` is False when a failed re-extraction
     left a prior successful result untouched (last-good preserved), so the caller must
-    not rewrite the manifest. ``log['status']`` drives the run summary either way.
+    not rewrite the manifest or the log. ``staged`` says outputs wait in the staging dir for
+    :func:`_install_outputs`. ``log['status']`` drives the run summary either way.
     """
     source_id = manifest["source_id"]
     started = iso_now()
@@ -214,6 +235,7 @@ def _extract_one(
         and (dirs["markdown"] / f"{source_id}.md").exists()
     )
 
+    staged = False
     log: dict[str, Any] = {
         "source_id": source_id,
         "status": "error",
@@ -259,7 +281,8 @@ def _extract_one(
         markdown_text, chunks = assemble(
             source_id, extraction.elements, target_chars=target_chars, max_chars=max_chars
         )
-        _write_outputs(dirs, source_id, markdown_text, chunks, extraction.tables)
+        _stage_outputs(dirs, source_id, markdown_text, chunks, extraction.tables)
+        staged = True
 
         log.update(
             status=extraction.status,
@@ -288,7 +311,6 @@ def _extract_one(
             log["warnings"] = [*log["warnings"], "needs_ocr"]
 
     if log["status"] != "error":
-        _write_log(dirs, source_id, log)
         apply_extraction_state(
             manifest,
             ingestion_status=log["status"],
@@ -299,17 +321,18 @@ def _extract_one(
             chunk_count=log["chunk_count"],
             page_count=log["page_count"],
         )
-        return log, True
+        return log, True, staged
 
     # Failure. If a prior successful extraction exists, keep its artifacts, manifest,
     # and log untouched — the failure is surfaced in the run/job summary, not by
     # destroying usable evidence (last-good wins). Only flip to error when there is no
     # good prior state to protect.
+    if staged:                                            # failed after staging: discard it
+        shutil.rmtree(dirs["staging"] / source_id, ignore_errors=True)
     if prior_success:
         log["preserved_prior"] = True
-        return log, False
+        return log, False, False
 
-    _write_log(dirs, source_id, log)
     apply_extraction_state(
         manifest,
         ingestion_status="error",
@@ -320,7 +343,7 @@ def _extract_one(
         chunk_count=log["chunk_count"],
         page_count=log["page_count"],
     )
-    return log, True
+    return log, True, False
 
 
 # --- run --------------------------------------------------------------------
@@ -386,6 +409,7 @@ def extract_sources(
     }
     for path in dirs.values():
         path.mkdir(parents=True, exist_ok=True)
+    dirs["staging"] = normalized / ".staging"             # created per source, removed on install
 
     now = iso_now()
     job_id = f"job_{uuid.uuid4().hex[:16]}"
@@ -422,13 +446,22 @@ def extract_sources(
                 counts["skipped_unchanged"] += 1
                 continue
 
-            log, persisted = _extract_one(
+            log, persisted, staged = _extract_one(
                 manifest, root, dirs,
                 max_file_mb=max_file_mb, timeout_s=timeout_s,
                 target_chars=target_chars, max_chars=max_chars,
             )
             if persisted:
-                save_manifest(manifests_dir, manifest)
+                # ADR-0068: install the outputs, the log and the manifest fields together under the
+                # write lock, onto the manifest as it is now (a status changed meanwhile is kept).
+                with write_lock.hold(root / "reviews"):
+                    if staged:
+                        _install_outputs(dirs, source_id)
+                    _write_log(dirs, source_id, log)
+                    current = load_manifest(manifests_dir, source_id) or manifest
+                    for key in EXTRACTION_FIELDS:
+                        current[key] = manifest.get(key)
+                    save_manifest(manifests_dir, current)
 
             status = log["status"]
             if status == "extracted":
