@@ -51,8 +51,9 @@ from app.workers.extractors import Extraction  # noqa: F401  (re-exported for ca
 # Extractor implementation provenance, recorded in every extraction log (ADR-0054 decision 4).
 # Observability only — nothing gates, lints, or auto-reextracts on it; old logs are never mutated,
 # and a missing field means "pre-marker / older extractor". Increment on any behavior change to
-# extraction output (v1 = PDF line-break de-hyphenation + soft-hyphen strip).
-EXTRACT_CODE_VERSION = 1
+# extraction output (v1 = PDF line-break de-hyphenation + soft-hyphen strip; v2 = the PDF metadata
+# title/author hint in the log, ADR-0066 part 3).
+EXTRACT_CODE_VERSION = 2
 
 # Extension -> extractor module name under app.workers.extractors (loaded lazily).
 _TEXT_FORMATS = {
@@ -255,6 +256,7 @@ def _extract_one(
         "warnings": [],
         "error": None,
         "skip_reason": None,
+        "metadata": {},
     }
 
     try:
@@ -297,6 +299,7 @@ def _extract_one(
             chunk_count=len(chunks),
             table_count=len(extraction.tables),
             warnings=extraction.warnings,
+            metadata=dict(extraction.metadata),
         )
     except ExtractionError as exc:
         log.update(status="error", finished_at=iso_now(), error=str(exc), skip_reason=exc.skip_reason)

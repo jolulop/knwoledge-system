@@ -247,7 +247,14 @@ def test_artifact_records_strategy_ref_and_stays_fresh_for_renderers(tmp_path):
     sid, md = _build_two_window_doc(tmp_path)
     _extract(tmp_path, SequencedAdapter([[{"claim": "Ref claim.", "quote": REPEATED}]]),
              window_chars=400)
-    artifact = art.load_fresh_claims(tmp_path / "normalized" / "enrichment", sid, md)
+    from app.backend import manifests
+    from app.workers import titles
+    title = titles.prompt_title_for(   # ADR-0066 part 3: freshness takes the CURRENT prompt title
+        manifests.load_manifest(tmp_path / "raw" / "manifests", sid), md,
+        enrichment_dir=tmp_path / "normalized" / "enrichment",
+        logs_dir=tmp_path / "normalized" / "extraction_logs")
+    artifact = art.load_fresh_claims(tmp_path / "normalized" / "enrichment", sid, md,
+                                     prompt_input=title)
     assert artifact is not None  # _load_fresh recomputes with the artifact's OWN strategy_ref
     assert artifact["strategy_ref"] == "chunk-greedy-v1:400"
 
@@ -346,7 +353,7 @@ def test_malformed_summary_artifact_with_stray_strategy_ref_reads_stale_not_cras
             "strategy_ref": "tampered:999", "input_fingerprint": fingerprint,
             "summary": "s", "tags": [],
         }), encoding="utf-8")
-    assert art.load_fresh(enrichment, "src_0123456789abcdef", md) is None  # stale, no crash
+    assert art.load_fresh(enrichment, "src_0123456789abcdef", md, prompt_input=None) is None  # stale, no crash
 
 
 # --- e2e: document-complete beyond the head ------------------------------------

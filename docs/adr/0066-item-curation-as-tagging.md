@@ -695,6 +695,68 @@ before the next:
   The resulting response cache is preserved (as on 2026-10-28, under `~/ks-saved/<date>/`) before
   decision 10's backup-gated clean restart, which bills the real corpus once more.
 
+## Implementation — part 3 slice 1 (2026-10-29): titles and Enrich output
+
+- **The PDF hint:** the PDF extractor reads the document-info title and author
+  (`Extraction.metadata`, an untrusted hint; a broken info dictionary is no hint, never an error)
+  and extraction writes it to the log as `metadata`. `EXTRACT_CODE_VERSION` is 2. It stays
+  observability only, so the UAT clone is re-extracted with `--force` before the paid run (Q5).
+- **Titles** (`app/workers/titles.py`): `filter_pdf_title` (drops filename-like values, an editor's
+  "Microsoft Word - …", "Untitled", a value that only repeats the filename; strips a browser
+  tab's "(n) "), `prompt_title` (Enrich > filtered PDF > filename) and `effective_title`
+  (confirmed > prompt title). The confirmed title is read from the manifest's
+  `provenance.title`; its write path arrives with slice 3. `name_identity` is grill 2 Q3's fold.
+- **Enrich v2** (`SCHEMA_VERSION = "enrich-v2"`, `PROMPT_VERSION = "enrich-prompt-v2"`): the
+  prompt receives the file-name title and the PDF hint inside an untrusted `<file_metadata>`
+  block (escaped like the title) and returns `title`, ordered `authors`, `publisher`, `summary`
+  and typed `tags` (unknown values are `""` / `[]`). The artifact stores them cleaned: authors
+  de-duplicated by `name_identity`, tags cleaned like other names ("planning-taxonomy" →
+  "planning taxonomy"), de-duplicated, at most 7 (`ENRICH_TAGS_PROMPT_MAX`), an invalid type
+  coerced to the review sentinel. The item-type guide is now one constant shared with the items
+  prompt, whose text stays byte-identical.
+- **Prompt inputs in freshness:** `_fingerprint` takes a `prompt_input` component (every
+  model-visible input besides the text), recorded in each artifact as `prompt_input` so
+  render-side freshness recomputes it. Enrich's is the file title plus the PDF hint (a
+  re-extraction that finds a hint restales it); claims' and items' is the prompt title. Claims and
+  items compute the prompt title before their freshness check and prompt with it
+  (`CLAIM_PROMPT_VERSION = "enrich-claims-prompt-v4"`, `ITEMS_PROMPT_VERSION =
+  "enrich-items-prompt-v5"`). Lint's summary-rot check uses the same Enrich input
+  (`enrich_prompt_input_for`), so it never flags a fresh artifact.
+- **Surfaces:** the Source page (frontmatter `title` and heading) takes the effective title; the
+  review screens read it back from the Source page's frontmatter (the document list and the
+  document screen's heading, with the source id and filename beside it). Until slice 2, the
+  Source page's free-text `tags:` lists the Enrich tags' names.
+- **Tests:** `tests/test_titles.py` (24): the filter cases from the UAT corpus, both chains and a
+  junk PDF title falling through, the name fold (plurals, accents, scripts), the hint in the log,
+  Enrich's prompt and cleaned suggestions, unknown values, re-enrichment preserving confirmed
+  provenance, a failed Enrich keeping the previous artifact, a new hint restaling Enrich, the
+  Source page and review screens, claims and items prompted with the Enrich title, the fallback
+  title, a confirmed title never restaling them, an Enrich title change restaling them, and lint
+  agreeing with Enrich. Existing fakes moved to the v2 response shape; the version pins and the
+  title-encoding test followed (plus a hint-escaping test).
+- **Verification:** 1771 passed + 2 skipped; ruff clean. 18 mutation checks, all caught (the
+  unfiltered-PDF-title one after the junk-title test).
+- **Review round 1 on slice 1 (2 P1, 1 P2, fixed):**
+  1. *Commits rechecked only the text:* a hint changed during the Enrich call, or a prompt title
+     changed during the claims or items call, could commit a result for inputs the model never
+     saw. Each pass now captures its prompt inputs once (Enrich no longer reads the hint twice:
+     the messages and the fingerprint come from one capture) and, under the commit lock, before
+     any write, recomputes the current inputs (`enrich_prompt_input_for`, `prompt_title_for`) and
+     writes nothing if they differ (`skipped_input_changed` / `input_changed_sources`). Tests: a
+     hint changed during the Enrich call; a title changed during the claims call and during the
+     items call; an Enrich re-run retitling the document during the items call.
+  2. *Readers accepted stale prompt inputs:* `_load_fresh` recomputed freshness with the
+     artifact's own recorded `prompt_input`, so a new hint left rendering and the prompt title on
+     the old Enrich title while lint called it stale. `load_fresh` / `load_fresh_claims` now take
+     the **current** expected input (keyword-only, required); the recorded model and strategy
+     behaviour is unchanged. Test: after a hint change the Source page falls back to the filtered
+     PDF title with a stub summary, and the prompt title follows, until Enrich runs again.
+  3. *Titles could assert wikilinks:* the Source page title (frontmatter and heading) is now
+     neutralised with `_delink` like other generated text. Test: an Enrich title and a PDF
+     fallback title carrying `[[itm_…|…]]` and `[[Items/x]]` render as plain text.
+  5 mutation checks on these fixes, all caught. `tests/test_titles.py` now has 31 tests; one
+  existing claim-windows test now passes the current prompt title. Gate: 1778 passed + 2 skipped.
+
 ## Consequences
 
 - The review queue for a document becomes ≤15 keep/drop rows plus its author/publisher

@@ -43,10 +43,10 @@ from app.backend import producer_journal as journal
 from app.backend.manifests import get_status, iso_now, load_manifest, valid_manifests
 from app.llm import prompts
 from app.llm.client import CacheMiss, LLMClient, ParseError
-from app.workers import citations, publication, reconcile, reviews
+from app.workers import citations, publication, reconcile, reviews, titles
 from app.workers import enrichment_artifact as art
 from app.workers import labels
-from app.workers.wiki_render import NODE_DIR, parse_frontmatter, render_item_page, title_from_filename
+from app.workers.wiki_render import NODE_DIR, parse_frontmatter, render_item_page
 
 _ENRICHABLE_STATUSES = {"extracted", "partial"}
 _PRODUCER = "extract_items"                  # its run guard and journal name
@@ -741,17 +741,21 @@ def extract_items(
                     existing = {}
                 if not isinstance(existing, dict):
                     existing = {}
+            # ADR-0066 part 3: the prompt title is a prompt input, so it is part of freshness.
+            title = titles.prompt_title_for(manifest, md, enrichment_dir=enrichment_dir,
+                                            logs_dir=markdown_dir.parent / "extraction_logs")
             # ADR-0063 sticky-to-chain: fresh iff the recorded model is still a chain member and
             # its own-model fingerprint matches — an availability flip alone never restales.
             # An unfinished commit is never fresh: the artifact predates it (written last).
             if not force and existing and sid not in unfinished and art.chain_fresh(
-                    existing, chain_refs, lambda m: art.items_fingerprint(md, m, strategy_ref)):
+                    existing, chain_refs,
+                    lambda m: art.items_fingerprint(md, m, strategy_ref, prompt_input=title)):
                 skipped_fresh += 1
                 continue
             # A cache-only replay asks for the response the recorded chain member produced.
             run_ref = (existing["model_ref"] if cache_only and existing.get("model_ref") in chain_refs
                        else model_ref)
-            fingerprint = art.items_fingerprint(md, run_ref, strategy_ref)
+            fingerprint = art.items_fingerprint(md, run_ref, strategy_ref, prompt_input=title)
             # ADR-0066: a damaged ledger skips the document BEFORE the (billable) model call —
             # filtering against an empty drop list would resurrect drops. Re-read under the lock below.
             try:
@@ -782,7 +786,8 @@ def extract_items(
                     affected = set(rec["items"]) | set(
                         graph.supersede_mentions_for_source(gconn, sid, now=now))
                     _compose(affected)
-                    _write_artifact(apath, sid, fingerprint, [], run_ref, now, strategy_ref)
+                    _write_artifact(apath, sid, fingerprint, [], run_ref, now, strategy_ref,
+                                    prompt_input=title)
                     run.publish(intent, sources=[sid], later_items=affected)
                     journal.finish(root, _PRODUCER, sid)
                 skipped_empty += 1
@@ -794,7 +799,6 @@ def extract_items(
             coverage = "truncated" if len(md) > input_max_chars else "full"
             if coverage == "truncated":
                 coverage_truncated_sources.append(sid)
-            title = title_from_filename(manifest.get("original_filename", sid))
             try:
                 result = client.parse(
                     prompts.build_items_messages(title, md, max_chars=input_max_chars),
@@ -818,7 +822,11 @@ def extract_items(
                 # ADR-0068: the suggestions are valid only for the text the model read; a
                 # re-extraction installed meanwhile makes them stale — write nothing, the next run
                 # extracts the new text.
-                if (md_path.read_text(encoding="utf-8") if md_path.exists() else "") != md:
+                # ADR-0066 part 3: likewise the prompt title (an Enrich run may change it meanwhile).
+                if ((md_path.read_text(encoding="utf-8") if md_path.exists() else "") != md
+                        or titles.prompt_title_for(
+                            manifest, md, enrichment_dir=enrichment_dir,
+                            logs_dir=markdown_dir.parent / "extraction_logs") != title):
                     input_changed_sources.append(sid)
                     continue
                 try:
@@ -871,7 +879,8 @@ def extract_items(
                 _compose(touched | affected)
                 _write_artifact(apath, sid, fingerprint, source_nodes, run_ref, now,
                                 strategy_ref, coverage, plan["filtered"],
-                                reference_cut_at=plan["reference_cut_at"], cap=cap)
+                                reference_cut_at=plan["reference_cut_at"], cap=cap,
+                                prompt_input=title)
                 # Other Source pages that list these tags are refreshed once, at the end.
                 run.publish(intent, sources=[sid], later_items=touched | affected)
                 journal.finish(root, _PRODUCER, sid)
@@ -961,12 +970,13 @@ def _has_page(wiki_dir: Path, gconn, nid: str) -> bool:
 
 def _write_artifact(apath, sid, fingerprint, source_nodes, model_ref, now,
                     strategy_ref=None, coverage="full", filtered=None, *, reference_cut_at=None,
-                    cap=None):
+                    cap=None, prompt_input=None):
     apath.parent.mkdir(parents=True, exist_ok=True)
     apath.write_text(json.dumps({
         "source_id": sid, "schema_version": art.ITEMS_SCHEMA_VERSION,
         "prompt_version": art.ITEMS_PROMPT_VERSION, "model_ref": model_ref,
         "strategy_ref": strategy_ref,
+        "prompt_input": prompt_input,              # the prompt title (ADR-0066 part 3)
         # ADR-0056 honesty marker: "truncated" when the document exceeded the input cap, so
         # "document-complete" stays auditable (a future lint can consume this).
         "coverage": coverage,

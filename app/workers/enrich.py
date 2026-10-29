@@ -20,12 +20,12 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from app.backend import db, write_lock
+from app.backend import db, taxonomy, write_lock
 from app.backend.manifests import iso_now, valid_manifests
 from app.llm import prompts
 from app.llm.client import LLMClient, ParseError
 from app.workers import enrichment_artifact as art
-from app.workers import publication
+from app.workers import publication, titles
 from app.workers.wiki_render import title_from_filename
 
 _ENRICHABLE_STATUSES = {"extracted", "partial"}
@@ -49,6 +49,7 @@ def enrich_sources(
     manifests_dir = Path(manifests_dir) if manifests_dir else root / "raw" / "manifests"
     jobs_db = Path(jobs_db) if jobs_db else root / "db" / "jobs.sqlite"
     markdown_dir = Path(markdown_dir) if markdown_dir else root / "normalized" / "markdown"
+    logs_dir = markdown_dir.parent / "extraction_logs"   # the PDF metadata hint (ADR-0066 part 3)
     enrichment_dir = (
         Path(enrichment_dir) if enrichment_dir else root / "normalized" / "enrichment"
     )
@@ -106,6 +107,12 @@ def enrich_sources(
                 skipped_empty += 1
                 continue
 
+            # ADR-0066 part 3: the file title and the extraction log's PDF hint are prompt inputs.
+            # Captured once: the messages and the fingerprint are built from the same inputs, and
+            # the commit checks them again under the lock.
+            file_title = title_from_filename(manifest.get("original_filename", source_id))
+            hint = titles.read_metadata_hint(logs_dir, source_id)
+            prompt_input = art.enrich_prompt_input(file_title, hint)
             artifact_path = art.artifact_path(enrichment_dir, source_id)
             if not force and artifact_path.exists():
                 try:
@@ -115,13 +122,14 @@ def enrich_sources(
                 # ADR-0063 sticky-to-chain: recompute the fingerprint under the artifact's OWN recorded
                 # model; an availability flip alone (recorded model still in chain) never restales.
                 if art.chain_fresh(existing, chain_refs,
-                                   lambda m: art.artifact_fingerprint(normalized_markdown, m)):
+                                   lambda m: art.artifact_fingerprint(
+                                       normalized_markdown, m, prompt_input=prompt_input)):
                     skipped_fresh += 1
                     continue
-            fingerprint = art.artifact_fingerprint(normalized_markdown, model_ref)
+            fingerprint = art.artifact_fingerprint(normalized_markdown, model_ref,
+                                                   prompt_input=prompt_input)
 
-            title = title_from_filename(manifest.get("original_filename", source_id))
-            messages = prompts.build_messages(title, normalized_markdown)
+            messages = prompts.build_messages(file_title, normalized_markdown, metadata=hint)
             try:
                 result = client.parse(
                     messages, prompts.SUMMARY_TAGS_SCHEMA, model_ref,
@@ -139,14 +147,18 @@ def enrich_sources(
                 "input_fingerprint": fingerprint,
                 "generation_status": "enriched",
                 "generated_at": now,
-                "summary": result["summary"],
-                "tags": result["tags"],
+                "prompt_input": prompt_input,
+                **_suggestions(result),
             }
             # ADR-0068: the model call above ran outside the write lock; the commit takes it, and
             # writes nothing if a re-extraction installed new text meanwhile (the next run enriches it).
             # Then it publishes the document's Source page before releasing the lock (decision 5).
             with write_lock.hold(root / "reviews"):
-                if (md_path.read_text(encoding="utf-8") if md_path.exists() else "") != normalized_markdown:
+                # The result is valid only for the inputs the model saw: the text, and (ADR-0066
+                # part 3) the file title and the PDF hint (a re-extraction may record a new hint).
+                if ((md_path.read_text(encoding="utf-8") if md_path.exists() else "")
+                        != normalized_markdown
+                        or art.enrich_prompt_input_for(manifest, logs_dir) != prompt_input):
                     input_changed += 1
                     continue
                 intent = run.intent(sources=[source_id])
@@ -202,3 +214,32 @@ def enrich_sources(
     finally:
         if conn is not None:
             conn.close()
+
+
+def _suggestions(result: dict[str, Any]) -> dict[str, Any]:
+    """The validated Enrich output stored in the artifact (ADR-0066 part 3): the summary, the
+    suggested title / ordered authors / publisher (provenance suggestions; only a human
+    confirmation copies them into the manifest), and at most ENRICH_TAGS_PROMPT_MAX typed tags,
+    cleaned and de-duplicated, the single canonical tag list. Unknown values are None / []."""
+    tags: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for tag in result.get("tags") or []:
+        if not isinstance(tag, dict):
+            continue
+        name = titles.clean_tag_name(tag.get("name"))
+        if not name or name.casefold() in seen:
+            continue
+        seen.add(name.casefold())
+        item_type = tag.get("item_type")
+        tags.append({"name": name, "item_type": item_type if taxonomy.is_item_type(item_type)
+                     else taxonomy.UNCLASSIFIED})
+        if len(tags) >= prompts.ENRICH_TAGS_PROMPT_MAX:
+            break
+    return {
+        "summary": result["summary"],
+        "title": titles.clean_text(result.get("title")) or None,
+        "authors": titles.clean_names(result.get("authors")),
+        "publisher": titles.clean_text(result.get("publisher"), max_chars=titles.MAX_NAME_CHARS)
+        or None,
+        "tags": tags,
+    }

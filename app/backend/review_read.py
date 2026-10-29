@@ -1613,6 +1613,18 @@ def _tag_rows(gconn: Any, sid: str, pages: dict[str, dict[str, Any]],
     return sorted(suggestions, key=order), sorted(kept, key=order)
 
 
+def _source_title(wiki_dir: Path | None, sid: str) -> str | None:
+    """The document's effective title, as its Source page shows it (ADR-0066 part 3), or None."""
+    if wiki_dir is None:
+        return None
+    page = Path(wiki_dir) / "Sources" / f"{sid}.md"
+    try:
+        title = parse_frontmatter(page.read_text(encoding="utf-8")).get("title")
+    except OSError:
+        return None
+    return title if isinstance(title, str) and title.strip() else None
+
+
 def _source_flow(reviews_dir: Path, *, gconn: Any, wiki_dir: Path | None,
                  manifests_dir: Path | None, enrichment_dir: Path | None = None) -> dict[str, Any]:
     """Assemble the per-source model once (index + screen slice it): ADR-0058 lens, ADR-0066 rows.
@@ -1704,6 +1716,7 @@ def _source_flow(reviews_dir: Path, *, gconn: Any, wiki_dir: Path | None,
         suggestions_overall += len(suggestions)
         sources.append({
             "source_id": sid,
+            "title": _source_title(wiki_dir, sid),
             "filename": m.get("original_filename"),
             "discovered_at": m.get("discovered_at"),
             "suggestions": suggestions, "kept": kept, "dropped": dropped,

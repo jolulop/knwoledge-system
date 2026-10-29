@@ -281,9 +281,14 @@ def build_source_values(
     items: list[dict[str, Any]] | None = None,
     suggested_items: list[dict[str, Any]] | None = None,
     raw_url: str | None = None,
+    title: str | None = None,
 ) -> dict[str, Any]:
     sid = manifest["source_id"]
-    title = title_from_filename(manifest.get("original_filename", sid))
+    # ADR-0066 part 3: the caller passes the effective title (app/workers/titles.py).
+    # Untrusted (model / PDF metadata): wikilinks are neutralised like any generated text, so a
+    # title can never assert a link outside the governed projection.
+    title = _delink(title or title_from_filename(manifest.get("original_filename", sid))
+                    ).replace('"', "'")
     page_count = manifest.get("page_count")
     chunk_count = int(manifest.get("chunk_count") or 0)
     normalized = manifest.get("normalized") or {}
@@ -295,7 +300,12 @@ def build_source_values(
         generation_status = "enriched"
         summary_label = "Generated summary (unverified)"
         summary_text = _delink(_WS.sub(" ", str(enrichment.get("summary", "")).strip())) or "(no summary)"
-        tags = _render_tag_list(enrichment.get("tags") or [])
+        # ADR-0066 part 3: Enrich tags are typed {name, item_type} (slice 2 moves them into the
+        # tag suggestions and drops this free-text list).
+        tags = _render_tag_list([t["name"] if isinstance(t, dict) else t
+                                 for t in enrichment.get("tags") or []
+                                 if isinstance(t, (dict, str)) and (not isinstance(t, dict)
+                                                                    or t.get("name"))])
     else:
         summary_status = "stub"
         generation_status = "deterministic"
@@ -777,6 +787,7 @@ def render_source_page(
     items: list[dict[str, Any]] | None = None,
     suggested_items: list[dict[str, Any]] | None = None,
     raw_url: str | None = None,
+    title: str | None = None,
 ) -> str:
     """Render a Source page, stamping its input_fingerprint.
 
@@ -790,7 +801,7 @@ def render_source_page(
     values = build_source_values(
         manifest, normalized_markdown, summary_max=summary_max, summary_min=summary_min,
         enrichment=enrichment, claims=claims, items=items, suggested_items=suggested_items,
-        raw_url=raw_url,
+        raw_url=raw_url, title=title,
     )
     draft = render_template(template, {**values, "input_fingerprint": ""})
     fingerprint = _fingerprint(_FP_LINE.sub("", draft))

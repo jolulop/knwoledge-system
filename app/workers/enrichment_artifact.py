@@ -23,13 +23,15 @@ from app.backend import taxonomy
 # every builder now entity-escapes interpolated source text. That alters model-visible input
 # even though instruction wording is unchanged, so the fingerprint/cache must refresh or a
 # cached pre-hardening response would replay. (Free on the empty UAT vault.)
-SCHEMA_VERSION = "enrich-summary-tags-v1"
-PROMPT_VERSION = "enrich-summary-tags-prompt-v1-enc2"
+# v2 (ADR-0066 part 3): + title, ordered authors, publisher, typed tags (the PDF metadata hint as
+# input). `-enc2` lineage dropped: a fresh shape restales every prior artifact anyway.
+SCHEMA_VERSION = "enrich-v2"
+PROMPT_VERSION = "enrich-prompt-v2"
 # Phase 3.5b claim-extraction pass (separate artifact + versions, tier-2).
 # v2 = the ADR-0056 segment-framed prompt (claims are extracted per claim window; each call
 # states "segment i of N" + local section context); v3 = ADR-0061 encoding.
 CLAIM_SCHEMA_VERSION = "enrich-claims-v1"
-CLAIM_PROMPT_VERSION = "enrich-claims-prompt-v3"
+CLAIM_PROMPT_VERSION = "enrich-claims-prompt-v4"   # v4: the Enrich title as input (ADR-0066 part 3)
 # Tier-2 knowledge-item extraction pass (ADR-0059): ONE items array classified by
 # knowledge-object role, replacing the concepts/entities two-array contract of
 # ADR-0055/0056 (fresh version lineage — the clean-repository restart means there is no
@@ -37,7 +39,8 @@ CLAIM_PROMPT_VERSION = "enrich-claims-prompt-v3"
 # full-doc coverage strategy carry over. Each bump makes every prior artifact stale, so the
 # next extract_items run re-extracts opt-in — no --force machinery.
 ITEMS_SCHEMA_VERSION = "enrich-items-v2"      # v2: label renames ai_topic_area / model_family_architecture
-ITEMS_PROMPT_VERSION = "enrich-items-prompt-v4"   # v4: ADR-0066 ≤20 ranked, domains first, naming, strict aliases
+ITEMS_PROMPT_VERSION = "enrich-items-prompt-v5"   # v4: ADR-0066 ≤20 ranked, domains first, naming,
+# strict aliases; v5: the Enrich title as input (ADR-0066 part 3)
 
 # ADR-0056 extraction-strategy identity. The strategy ref is the explicit coverage component
 # of tier-2 identity — composed alongside (never folded into) schema/prompt versions in both
@@ -68,13 +71,15 @@ def synthesis_artifact_path(enrichment_dir: Path, node_id: str) -> Path:
 
 def _fingerprint(
     normalized_markdown: str, model_ref: str, schema_version: str, prompt_version: str,
-    strategy_ref: str | None = None,
+    strategy_ref: str | None = None, prompt_input: str | None = None,
 ) -> str:
     """Hash every input that should force re-enrichment (ADR-0027).
 
     `strategy_ref` (ADR-0056) is the composed extraction-strategy component — appended only
     when present so passes without one (summary/contradiction/synthesis) keep their
-    pre-ADR-0056 fingerprints.
+    pre-ADR-0056 fingerprints. `prompt_input` (ADR-0066 part 3) is every model-visible input
+    besides the text: the title the claims/items prompts receive, the file title and PDF hint
+    Enrich receives. Artifacts record it, so render-side freshness can recompute it.
     """
     parts = [
         schema_version.encode("utf-8"),
@@ -84,6 +89,8 @@ def _fingerprint(
     ]
     if strategy_ref is not None:
         parts.append(strategy_ref.encode("utf-8"))
+    if prompt_input is not None:
+        parts.append(b"input:" + prompt_input.encode("utf-8"))
     h = hashlib.sha256()
     for part in parts:
         h.update(part)
@@ -114,12 +121,29 @@ def artifact_path(enrichment_dir: Path, source_id: str) -> Path:
 
 
 def artifact_fingerprint(normalized_markdown: str, model_ref: str,
-                         strategy_ref: str | None = None) -> str:
+                         strategy_ref: str | None = None, prompt_input: str | None = None) -> str:
     # The summary pass has no strategy ref; the parameter exists so `_load_fresh` can pass a
     # STRAY `strategy_ref` from a malformed/tampered artifact and get "stale" (fingerprint
     # mismatch) instead of a TypeError crash (ADR-0056 review round 2).
     return _fingerprint(normalized_markdown, model_ref, SCHEMA_VERSION, PROMPT_VERSION,
-                        strategy_ref)
+                        strategy_ref, prompt_input)
+
+
+def enrich_prompt_input_for(manifest: dict[str, Any], logs_dir: Path) -> str:
+    """:func:`enrich_prompt_input` for a source on disk: its file title and the extraction log's
+    PDF hint. Shared by Enrich and lint's summary-rot check, so both agree on freshness."""
+    from app.workers import titles
+    from app.workers.wiki_render import title_from_filename
+    sid = manifest["source_id"]
+    return enrich_prompt_input(title_from_filename(manifest.get("original_filename", sid)),
+                               titles.read_metadata_hint(Path(logs_dir), sid))
+
+
+def enrich_prompt_input(file_title: str, hint: dict[str, str]) -> str:
+    """Enrich's model-visible inputs besides the text (ADR-0066 part 3): a changed PDF hint (a
+    re-extraction that now records one) restales the artifact."""
+    return json.dumps({"file_title": file_title, "hint": dict(sorted(hint.items()))},
+                      sort_keys=True, ensure_ascii=False)
 
 
 def claims_artifact_path(enrichment_dir: Path, source_id: str) -> Path:
@@ -127,9 +151,10 @@ def claims_artifact_path(enrichment_dir: Path, source_id: str) -> Path:
 
 
 def claims_fingerprint(normalized_markdown: str, model_ref: str,
-                       strategy_ref: str | None = None) -> str:
+                       strategy_ref: str | None = None, prompt_input: str | None = None) -> str:
+    """`prompt_input` is the prompt title (ADR-0066 part 3): an Enrich title change restales."""
     return _fingerprint(normalized_markdown, model_ref, CLAIM_SCHEMA_VERSION,
-                        CLAIM_PROMPT_VERSION, strategy_ref)
+                        CLAIM_PROMPT_VERSION, strategy_ref, prompt_input)
 
 
 def items_artifact_path(enrichment_dir: Path, source_id: str) -> Path:
@@ -137,9 +162,10 @@ def items_artifact_path(enrichment_dir: Path, source_id: str) -> Path:
 
 
 def items_fingerprint(normalized_markdown: str, model_ref: str,
-                      strategy_ref: str | None = None) -> str:
+                      strategy_ref: str | None = None, prompt_input: str | None = None) -> str:
+    """`prompt_input` is the prompt title (ADR-0066 part 3): an Enrich title change restales."""
     return _fingerprint(normalized_markdown, model_ref, ITEMS_SCHEMA_VERSION,
-                        ITEMS_PROMPT_VERSION, strategy_ref)
+                        ITEMS_PROMPT_VERSION, strategy_ref, prompt_input)
 
 
 # --- topic starvation (ADR-0059, redefining ADR-0055's concept starvation) --
@@ -187,7 +213,8 @@ def stored_claim_count(enrichment_dir: Path, source_id: str) -> int:
     return len(claims) if isinstance(claims, list) else 0
 
 
-def _load_fresh(path: Path, normalized_markdown: str, fingerprint_fn) -> dict[str, Any] | None:
+def _load_fresh(path: Path, normalized_markdown: str, fingerprint_fn, *,
+                prompt_input: str | None) -> dict[str, Any] | None:
     if not path.exists():
         return None
     try:
@@ -197,7 +224,9 @@ def _load_fresh(path: Path, normalized_markdown: str, fingerprint_fn) -> dict[st
     # Recompute with the artifact's OWN recorded model_ref/strategy_ref (ADR-0056): freshness
     # here means "does this artifact still describe the current text under its recorded
     # parameters" — the producer-side skip check is where a changed knob/model restales.
-    kwargs = {}
+    # The prompt input is the CURRENT expected one (ADR-0066 part 3), never the recorded one: a
+    # new PDF hint or Enrich title makes the artifact stale here exactly as for its producer.
+    kwargs: dict[str, Any] = {"prompt_input": prompt_input}
     if artifact.get("strategy_ref") is not None:
         kwargs["strategy_ref"] = artifact["strategy_ref"]
     if artifact.get("input_fingerprint") != fingerprint_fn(
@@ -206,11 +235,16 @@ def _load_fresh(path: Path, normalized_markdown: str, fingerprint_fn) -> dict[st
     return artifact
 
 
-def load_fresh(enrichment_dir: Path, source_id: str, normalized_markdown: str) -> dict[str, Any] | None:
-    """Return the summary/tags artifact only if fresh for the current text; else None."""
-    return _load_fresh(artifact_path(enrichment_dir, source_id), normalized_markdown, artifact_fingerprint)
+def load_fresh(enrichment_dir: Path, source_id: str, normalized_markdown: str, *,
+               prompt_input: str | None) -> dict[str, Any] | None:
+    """Return the Enrich artifact only if fresh for the current text and the current prompt input
+    (:func:`enrich_prompt_input_for`); else None."""
+    return _load_fresh(artifact_path(enrichment_dir, source_id), normalized_markdown,
+                       artifact_fingerprint, prompt_input=prompt_input)
 
 
-def load_fresh_claims(enrichment_dir: Path, source_id: str, normalized_markdown: str) -> dict[str, Any] | None:
-    """Return the claims artifact only if fresh for the current text; else None."""
-    return _load_fresh(claims_artifact_path(enrichment_dir, source_id), normalized_markdown, claims_fingerprint)
+def load_fresh_claims(enrichment_dir: Path, source_id: str, normalized_markdown: str, *,
+                      prompt_input: str | None) -> dict[str, Any] | None:
+    """Return the claims artifact only if fresh for the current text and prompt title; else None."""
+    return _load_fresh(claims_artifact_path(enrichment_dir, source_id), normalized_markdown,
+                       claims_fingerprint, prompt_input=prompt_input)

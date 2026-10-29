@@ -481,8 +481,9 @@ def test_items_prompt_contract_pinned():
     # v2 = the 2026-07-09 UAT label revision (sub_domain -> ai_topic_area,
     # ai_model_family -> model_family_architecture); v3 = the ADR-0061 encoding change (the
     # builder now entity-escapes the source body); v4 = ADR-0066 part 2 (one ranked list of at most
-    # 20, domains first, naming style, strict aliases). Schema (enum) unchanged since v2.
-    assert art.ITEMS_PROMPT_VERSION == "enrich-items-prompt-v4"
+    # 20, domains first, naming style, strict aliases); v5 = ADR-0066 part 3 (the Enrich title as
+    # input; the type guide is shared with Enrich, text unchanged). Schema (enum) unchanged since v2.
+    assert art.ITEMS_PROMPT_VERSION == "enrich-items-prompt-v5"
     assert art.ITEMS_SCHEMA_VERSION == "enrich-items-v2"
     text = prompts._ITEMS_SYSTEM
     assert "UNTRUSTED" in text                                   # untrusted-data framing kept

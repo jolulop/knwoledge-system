@@ -32,6 +32,8 @@ class Extraction:
     tables: list[tuple[str, str]] = field(default_factory=list)
     # "extracted" or "partial"; orchestrator owns the "error" path.
     status: str = "extracted"
+    # ADR-0066 part 3: embedded document metadata ({title, author}), an untrusted hint only.
+    metadata: dict[str, str] = field(default_factory=dict)
 
 
 def pkg_version(name: str) -> str:

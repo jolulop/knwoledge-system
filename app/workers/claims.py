@@ -47,11 +47,10 @@ from app.backend import producer_journal as journal
 from app.backend.manifests import get_status, iso_now, load_manifest, valid_manifests
 from app.llm import prompts
 from app.llm.client import LLMClient, ParseError
-from app.workers import citations, publication, reviews
+from app.workers import citations, publication, reviews, titles
 from app.workers import enrichment_artifact as art
 from app.workers import labels
-from app.workers.wiki_render import (REVIEW_STATUSES, parse_frontmatter, render_claim_page,
-                                     title_from_filename)
+from app.workers.wiki_render import REVIEW_STATUSES, parse_frontmatter, render_claim_page
 
 _ENRICHABLE_STATUSES = {"extracted", "partial"}
 _PRODUCER = "extract_claims"                 # its run guard and journal name
@@ -174,12 +173,13 @@ def _reasserted_status(gconn: Any, cid: str) -> str:
     return status if status in _HUMAN_CLAIM_STATUSES else "active"
 
 def _write_source_artifact(apath, sid, fingerprint, source_claims, model_ref, now,
-                           strategy_ref=None):
+                           strategy_ref=None, prompt_input=None):
     apath.parent.mkdir(parents=True, exist_ok=True)
     apath.write_text(json.dumps({
         "source_id": sid, "schema_version": art.CLAIM_SCHEMA_VERSION,
         "prompt_version": art.CLAIM_PROMPT_VERSION, "model_ref": model_ref,
         "strategy_ref": strategy_ref,
+        "prompt_input": prompt_input,              # the prompt title (ADR-0066 part 3)
         "input_fingerprint": fingerprint, "generation_status": "enriched",
         "generated_at": now, "claims": source_claims,
     }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -418,6 +418,10 @@ def extract_claims(
             md_path = markdown_dir / f"{sid}.md"
             md = md_path.read_text(encoding="utf-8") if md_path.exists() else ""
             apath = art.claims_artifact_path(enrichment_dir, sid)
+            # ADR-0066 part 3: the prompt title (Enrich title, else the filtered PDF title, else the
+            # filename; never the confirmed one) is a prompt input, so it is part of freshness.
+            title = titles.prompt_title_for(manifest, md, enrichment_dir=enrichment_dir,
+                                            logs_dir=markdown_dir.parent / "extraction_logs")
             # An unfinished commit is never fresh: the artifact predates it (written last).
             if not force and apath.exists() and sid not in unfinished:
                 try:
@@ -427,10 +431,11 @@ def extract_claims(
                 # ADR-0063 sticky-to-chain: fresh iff the recorded model is still a chain member and
                 # its own-model fingerprint matches — an availability flip alone never restales.
                 if art.chain_fresh(existing, chain_refs,
-                                   lambda m: art.claims_fingerprint(md, m, strategy_ref)):
+                                   lambda m: art.claims_fingerprint(md, m, strategy_ref,
+                                                                    prompt_input=title)):
                     skipped_fresh += 1
                     continue
-            fingerprint = art.claims_fingerprint(md, model_ref, strategy_ref)
+            fingerprint = art.claims_fingerprint(md, model_ref, strategy_ref, prompt_input=title)
 
             # ADR-0056 decision 3 (stage before replacing): a run that cannot produce the
             # complete replacement never supersedes existing evidence, so the no-key gate
@@ -451,7 +456,8 @@ def extract_claims(
                     intent = run.intent(sources=[sid], claims=rec["claims"])
                     superseded = graph.supersede_source_edges(gconn, sid, now=now)
                     _compose(set(rec["claims"]) | set(superseded), {})
-                    _write_source_artifact(apath, sid, fingerprint, [], model_ref, now, strategy_ref)
+                    _write_source_artifact(apath, sid, fingerprint, [], model_ref, now, strategy_ref,
+                                           prompt_input=title)
                     run.publish(intent, sources=[sid])
                     journal.finish(root, _PRODUCER, sid)
                 skipped_empty += 1
@@ -473,7 +479,6 @@ def extract_claims(
                 continue
             claim_window_over_budget += sum(1 for w in windows if w["over_budget"])
 
-            title = title_from_filename(manifest.get("original_filename", sid))
             # STAGE: every window must parse before any graph/wiki mutation for this source.
             staged: list[tuple[dict[str, Any], dict[str, Any]]] = []
             failed: dict[str, Any] | None = None
@@ -510,7 +515,11 @@ def extract_claims(
             with write_lock.hold(reviews_dir):
                 # The claims are grounded in the text the model read; a re-extraction installed
                 # meanwhile makes them stale — write nothing, the next run extracts the new text.
-                if (md_path.read_text(encoding="utf-8") if md_path.exists() else "") != md:
+                # ADR-0066 part 3: likewise the prompt title (an Enrich run may change it meanwhile).
+                if ((md_path.read_text(encoding="utf-8") if md_path.exists() else "") != md
+                        or titles.prompt_title_for(
+                            manifest, md, enrichment_dir=enrichment_dir,
+                            logs_dir=markdown_dir.parent / "extraction_logs") != title):
                     input_changed += 1
                     replacement_not_applied += 1
                     continue
@@ -567,7 +576,8 @@ def extract_claims(
                         )
 
                 _compose(set(texts) | affected, texts)
-                _write_source_artifact(apath, sid, fingerprint, source_claims, model_ref, now, strategy_ref)
+                _write_source_artifact(apath, sid, fingerprint, source_claims, model_ref, now,
+                                       strategy_ref, prompt_input=title)
                 run.publish(intent, sources=[sid])
                 journal.finish(root, _PRODUCER, sid)
             claims_written += len(source_claims)

@@ -522,7 +522,7 @@ def render_sources_index(data: dict[str, Any]) -> str:
                      "<strong>Start review</strong></a> (first source with remaining rows)</p>")
     else:
         parts.append("<p><em>Nothing remaining to decide by source.</em></p>")
-    rows = ["<tr><th>#</th><th>source</th><th>file</th><th>ingested</th>"
+    rows = ["<tr><th>#</th><th>document</th><th>file</th><th>ingested</th>"
             "<th>remaining / kept / dropped / deferred / added</th></tr>"]
     for i, s in enumerate(data.get("sources") or [], start=1):
         sid = _h(s.get("source_id"))
@@ -530,7 +530,8 @@ def render_sources_index(data: dict[str, Any]) -> str:
         style = "" if remaining else " style='color:#999'"
         rows.append(
             f"<tr{style}><td>{i}</td>"
-            f"<td><a href='/ui/reviews/sources/{sid}'>{sid}</a></td>"
+            f"<td><a href='/ui/reviews/sources/{sid}'>{_h(s.get('title') or s.get('source_id'))}"
+            "</a></td>"
             f"<td><a href='/raw/{sid}'>{_h(s.get('filename'))}</a></td>"
             f"<td>{_h(s.get('discovered_at'))}</td>"
             f"<td>{_counts_cell(s.get('counts') or {})}{'' if remaining else ' — done'}</td></tr>")
@@ -638,8 +639,8 @@ def render_source_screen(data: dict[str, Any]) -> str:
     preselect = data.get("preselect")
     parts = [
         _nav(),
-        f"<h1>Source {sid}</h1>",
-        f"<p>{_h(data.get('filename'))} — <a href='/raw/{sid}'>view original</a> — source "
+        f"<h1>{_h(data.get('title')) if data.get('title') else f'Source {sid}'}</h1>",
+        f"<p>{sid} · {_h(data.get('filename'))} — <a href='/raw/{sid}'>view original</a> — source "
         f"{_h(data.get('position'))} of "
         f"{_h(totals.get('sources'))} · {_h(totals.get('remaining_overall'))} rows remaining "
         f"overall · this source: {_counts_cell(counts)}</p>",

@@ -22,7 +22,7 @@ from typing import Any
 from app.backend import db, graph, write_lock
 from app.backend.config import get_settings
 from app.backend.manifests import iso_now, load_manifest, valid_manifests
-from app.workers import enrichment_artifact, labels, wiki_render
+from app.workers import enrichment_artifact, labels, titles, wiki_render
 
 
 def _claim_label(claims_dir: Path, claim_id: str) -> str | None:
@@ -111,6 +111,7 @@ def generate_wiki(
     wiki_dir = Path(wiki_dir) if wiki_dir else root / "wiki"
     templates_dir = Path(templates_dir) if templates_dir else root / "templates"
     markdown_dir = Path(markdown_dir) if markdown_dir else root / "normalized" / "markdown"
+    logs_dir = root / "normalized" / "extraction_logs"   # the PDF metadata hint (ADR-0066 part 3)
     enrichment_dir = (
         Path(enrichment_dir) if enrichment_dir else root / "normalized" / "enrichment"
     )
@@ -166,7 +167,8 @@ def generate_wiki(
                 )
                 # Compose a *fresh* enrichment artifact, if any; stale or absent -> stub.
                 enrichment = enrichment_artifact.load_fresh(
-                    enrichment_dir, source_id, normalized_markdown
+                    enrichment_dir, source_id, normalized_markdown,
+                    prompt_input=enrichment_artifact.enrich_prompt_input_for(manifest, logs_dir),
                 )
                 # Project the source's active claims (3b) and concept/entity mentions
                 # (slice 4) from the graph; resolve labels worker-side, pass plain data to
@@ -204,6 +206,9 @@ def generate_wiki(
                     summary_max=summary_max, summary_min=summary_min,
                     enrichment=enrichment, claims=claims, items=items,
                     suggested_items=suggested_items, raw_url=raw_base + source_id,
+                    title=titles.effective_title(   # ADR-0066 part 3
+                        manifest, enrichment=enrichment,
+                        hint=titles.read_metadata_hint(logs_dir, source_id)),
                 )
             except Exception as exc:  # one page's failure must not abort the run
                 return {"source_id": source_id, "error": f"{type(exc).__name__}: {exc}"}

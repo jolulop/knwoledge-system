@@ -25,13 +25,19 @@ TEMPLATES = ROOT / "templates"
 MODEL_REF = "anthropic:claude-haiku-4-5"
 
 
+def _resp(summary, tags, **fields):
+    """An Enrich v2 response (ADR-0066 part 3): typed tags plus title / authors / publisher."""
+    return {"title": "", "authors": [], "publisher": "", "summary": summary,
+            "tags": [{"name": t, "item_type": "domain"} for t in tags], **fields}
+
+
 class FakeAdapter:
     name = "anthropic"
     supports_batch = False
 
     def __init__(self, response=None, *, available=True):
         self.calls = 0
-        self._response = response or {"summary": "A faithful generated summary.", "tags": ["alpha", "beta"]}
+        self._response = response or _resp("A faithful generated summary.", ["alpha", "beta"])
         self._available = available
 
     def available(self):
@@ -186,10 +192,9 @@ def test_no_api_key_skips_enrichment_and_pages_stay_stub(tmp_path):
 def test_generated_wikilinks_are_neutralised(tmp_path):
     _build(tmp_path)
     # A model that emits a wikilink in the summary and bracket syntax in a tag.
-    adapter = FakeAdapter(response={
-        "summary": "Discusses [[Post-Merger Integration]] and [[concepts/x|synergy]] at length.",
-        "tags": ["[[merger]]", "integration"],
-    })
+    adapter = FakeAdapter(response=_resp(
+        "Discusses [[Post-Merger Integration]] and [[concepts/x|synergy]] at length.",
+        ["[[merger]]", "integration"]))
     _enrich(tmp_path, adapter)
     _gen(tmp_path)
 

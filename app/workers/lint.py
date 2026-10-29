@@ -286,7 +286,8 @@ def _chain_refs(model_ref_chain: str | None) -> list[str]:
 
 
 def _check_summary_rot(enrichment_dir: Path, markdown_dir: Path, wiki_dir: Path,
-                       summary_model_ref: str | None) -> tuple[list[dict[str, Any]], bool]:
+                       summary_model_ref: str | None,
+                       manifests_dir: Path | None = None) -> tuple[list[dict[str, Any]], bool]:
     """Enriched Source summaries whose artifact fingerprint no longer matches the current inputs (ADR-0037).
 
     `summary_rot` = `normalized/enrichment/<sid>.json.input_fingerprint` != `artifact_fingerprint(current
@@ -297,6 +298,10 @@ def _check_summary_rot(enrichment_dir: Path, markdown_dir: Path, wiki_dir: Path,
     findings: list[dict[str, Any]] = []
     degraded = False
     chain_refs = _chain_refs(summary_model_ref)
+    # ADR-0066 part 3: Enrich's freshness includes its file title and PDF hint (from the manifest
+    # and the extraction log); a source without a readable manifest falls back to the text alone.
+    by_sid = {m["source_id"]: m for m in valid_manifests(manifests_dir)[0]} if manifests_dir else {}
+    logs_dir = markdown_dir.parent / "extraction_logs"
     if enrichment_dir.exists() and chain_refs:
         for apath in sorted(enrichment_dir.glob("*.json")):
             # Positive-only allowlist (ADR-0037): exactly `src_<16 hex>.json`. `.claims`/`.items`/
@@ -322,8 +327,11 @@ def _check_summary_rot(enrichment_dir: Path, markdown_dir: Path, wiki_dir: Path,
             md_text = md_path.read_text(encoding="utf-8")
             # ADR-0063 sticky-to-chain: rot only if the recorded model left the chain OR its own-model
             # fingerprint drifted; an availability flip (recorded model still in the chain) is not rot.
-            if not enrichment_artifact.chain_fresh(art, chain_refs,
-                                                   lambda m: artifact_fingerprint(md_text, m)):
+            prompt_input = (enrichment_artifact.enrich_prompt_input_for(by_sid[sid], logs_dir)
+                            if sid in by_sid else art.get("prompt_input"))
+            if not enrichment_artifact.chain_fresh(
+                    art, chain_refs,
+                    lambda m: artifact_fingerprint(md_text, m, prompt_input=prompt_input)):
                 findings.append({"check": "summary_rot", "severity": "low", "subject": sid,
                                  "detail": "enriched summary stale vs current normalized markdown / model",
                                  "data": {"source_id": sid, "remediation": "rerun_enrich"}})
@@ -644,7 +652,7 @@ def run_lint(
 
             # summary_rot is graph-independent (artifact + normalized md only) — runs always (ADR-0037).
             rot_findings, coverage_degraded = _check_summary_rot(
-                enrichment_dir, markdown_dir, wiki_dir, summary_model_ref)
+                enrichment_dir, markdown_dir, wiki_dir, summary_model_ref, manifests_dir)
             findings += rot_findings
 
             # topic_starvation is artifact-driven and graph-independent — runs always (ADR-0059).

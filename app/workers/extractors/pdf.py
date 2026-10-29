@@ -50,4 +50,24 @@ def extract(path: Path) -> Extraction:
         page_count=page_count,
         warnings=warnings,
         status=status,
+        metadata=_metadata(reader),
     )
+
+
+def _metadata(reader: PdfReader) -> dict[str, str]:
+    """The document-info title and author, as an untrusted hint for Enrich (ADR-0066 part 3).
+    Often missing or wrong (a filename, a browser-tab prefix): the title filter and Enrich judge
+    it; a broken info dictionary is no hint, never an extraction failure."""
+    try:
+        info = reader.metadata
+    except Exception:  # noqa: BLE001 - malformed PDF metadata is not an extraction error
+        return {}
+    out: dict[str, str] = {}
+    for key, attr in (("title", "title"), ("author", "author")):
+        try:
+            value = getattr(info, attr, None) if info is not None else None
+        except Exception:  # noqa: BLE001
+            value = None
+        if isinstance(value, str) and value.strip():
+            out[key] = " ".join(value.split())[:300]
+    return out
