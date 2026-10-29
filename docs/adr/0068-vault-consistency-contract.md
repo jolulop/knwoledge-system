@@ -343,11 +343,130 @@ A page can hold both durable fields and generated sections. Authority is declare
   seconds. A hash of only the relevant state was rejected: it must know every executor's inputs,
   and a missed input would accept a stale preview.
 
-### 7. Bounded graph traversal (separate, non-blocking)
+### 7. Bounded graph traversal (separate, non-blocking; design-locked 2026-10-29, Q1–Q6)
 
 Output caps do not bound the assertions fetched while expanding the frontier. Graph traversal gets a
 limit on intermediate work per expansion, plus a bounded-traversal test. This is a small separate
 change and does not block ADR-0066 part 3.
+
+Grill-phase 2026-10-29 (decision-7 grill). Today each BFS step (`graph_read.neighborhood` behind
+`GET /graph/neighborhood`, `graph_read.search_subgraph` behind `/search` and `/query`) fetches every
+active edge touching the frontier with no limit, then the metadata of every endpoint, and the
+caps only trim the output. A topic-less disagreement search seeds from every endpoint of every
+active `contradicts` edge.
+- **Shape: a fan-out cap per frontier node** (Q1). Each frontier node contributes at most *k*
+  edges per step. **Database work is bounded, not just returned rows:** `ROW_NUMBER()` over all
+  incident edges would still scan and sort them, so the fetch is an indexed per-node query with
+  `LIMIT k + 1` (the extra row detects truncation without counting), and its query plan is
+  checked (no full scan, no temp B-tree over a node's edges).
+- **Seed fairness is kept at admission:** candidates are admitted in ranked frontier order (seeds
+  in BM25 order, each node's edges in its fan-out order), not sorted by id as today; round-robin
+  across frontier nodes, so each gets an opportunity before one consumes the remaining
+  `node_cap`.
+- **Smaller bounds:** metadata is fetched only for retained candidates; the topic-less
+  disagreement seed list is bounded **before** its metadata lookup, and clipping it sets
+  `truncated`; an edge selected through both of its frontier endpoints is counted once.
+- **Selection order and indexes** (Q2): a node keeps its first *k* edges in the stable order
+  `(edge_type, other endpoint, edge_id)`. Ids are content-derived, so the selection is the same
+  after a graph rebuild or restore. Two composite indexes serve it without sorting:
+  `(src_id, status, edge_type, dst_id, edge_id)` and `(dst_id, status, edge_type, src_id,
+  edge_id)`, under **new names** (`CREATE INDEX IF NOT EXISTS` would not widen an existing
+  `idx_edges_src`/`idx_edges_dst`). A physical index change: no `SCHEMA_VERSION` bump.
+  - **Merge rule:** each (direction, status, edge type) query fetches at most `k + 1` rows in
+    index order; the streams are merged by `(edge_type, other endpoint, edge_id)`, deduplicated by
+    `edge_id`, and the first *k* distinct edges are kept per frontier node. `truncated` is set
+    only when more than *k* distinct eligible edges exist, so a self-loop seen in both
+    directions never truncates falsely.
+  - **The work bound counts the query streams too:** about `(k + 1) × frontier × directions ×
+    statuses × types` rows, so each of those dimensions stays bounded.
+  - **Existing vaults must get the indexes before a read-only traversal relies on them**; a fresh
+    database alone is not enough.
+  - **Query plans are verified** for filtered and unfiltered requests, both directions and several
+    statuses: indexed searches, no temporary B-tree for `ORDER BY`. The topic-less disagreement
+    seed query (not endpoint-first) gets its own supporting plan.
+- **Installing the indexes** (Q3): `graph.ensure_indexes` creates every index the bounded queries
+  need (the two adjacency indexes and one for the topic-less disagreement seed query, e.g.
+  `(edge_type, status, src_id, dst_id)`), **creates the replacements before dropping**
+  `idx_edges_src`/`idx_edges_dst`, and **validates each definition** (columns and order), not only
+  its name. It is physical, not authority: it runs under the write lock with `changes=False` (lock
+  order vault → write → SQLite), so outstanding preview tokens stay valid. It runs:
+  - in `graph.init_db` (every writer);
+  - at API startup;
+  - at the end of a **successful** restore, while restore's exclusive lock still holds. A failure
+    to build is reported explicitly (in the restore report, with a non-zero exit).
+
+  Startup and restore first check that `db/graph.sqlite` exists and has a compatible schema: they
+  never create an empty graph nor upgrade an incompatible one (that stays `init_db`'s hard
+  failure).
+- **A traversal never builds indexes.** Installation guarantees their definitions, so a read checks
+  the expected names only (one `sqlite_master` lookup) and **fails closed when any is missing,
+  never falling back to the unbounded fetch**: `GET /graph/neighborhood` → 503
+  `graph_index_missing` ("restart the API to install graph indexes"); `/search` and `/query`
+  return an empty graph group with the warning `graph_index_missing` while their other channels
+  still answer.
+  - Required tests: an existing vault without the indexes gets them at startup; restoring an
+    older `graph.sqlite` installs them; installing twice is a no-op; a missing index degrades as
+    above; installing leaves the revision unchanged and a preview token valid.
+- **Limits** (Q4), initial defaults:
+
+  | Limit | `/search`, `/query` (`policies/retrieval.yaml`) | `GET /graph/neighborhood` |
+  |---|---|---|
+  | fan-out *k* per node | `max_graph_fanout: 25` | `fanout_limit` parameter, default 50 |
+  | disagreement seeds | `max_disagreement_seeds: 50` | — |
+  | query budget per traversal | `max_graph_queries: 500` | internal, 1000 |
+
+  **Hard ceilings apply to the policy values too** (fan-out 200, query budget 4000, the
+  neighborhood maxima as shared ceilings), so a policy edit cannot remove the resource bound. The
+  query budget is internal: callers tune fan-out within its ceiling, nothing else.
+  - **A node is expanded only when the budget covers all of its streams** (every direction,
+    status and type it needs). A budget that ran out halfway through a node's streams would
+    change which edges count as its top *k*; if not enough is left, expansion stops and
+    `truncated` is set.
+  - Expansion follows ranked frontier order, with round-robin candidate admission across the
+    expanded nodes when `node_cap` binds.
+  - `budget × (k + 1)` bounds the **adjacency rows fetched**, not total database work. Seed
+    selection, metadata and the output-edge query each need their own bounded, indexed path.
+  - Required tests: exact budget exhaustion; too little budget for the next node; several statuses
+    and edge types; `truncated` propagated to every surface. The ordinary-search eval decides
+    whether these defaults keep useful coverage; the values alone cannot guarantee it.
+- **Output edges: induced within fan-out** (Q5; amends ADR-0032, addendum 10). *Output edges are
+  the deduplicated union of each fetched retained node's top-k incident edges, restricted to
+  retained endpoints, then limited by `edge_cap`* — an approximation of the induced subgraph. A
+  node's final degree can exceed *k*, because its neighbors may select further edges incident to
+  it. A cross-edge outside both endpoints' top *k* is omitted (each such node's `k + 1` row has
+  already set `truncated`).
+  - Expanded nodes' fetched adjacency lists are reused, never queried again.
+  - Outer-ring nodes (retained, not expanded) get one fan-out fetch that shares the query budget
+    and reserves its complete streams per node. It **adds edges only**: it never discovers nodes
+    nor deepens the traversal.
+  - If the budget prevents any retained node's adjacency fetch, `truncated` is set, even when the
+    node and edge counts are below their caps.
+  - A deterministic final edge order (`edge_type, src_id, dst_id, edge_id`) applies before
+    `edge_cap`.
+  - Required tests: a retained outer-ring cross-edge is returned; one outside both endpoints' top
+    *k* is omitted (with `truncated`); an edge reached from both endpoints appears once; budget
+    exhaustion during outer-ring collection sets `truncated`; depth 0 (the root's own edges
+    among retained endpoints only).
+- **`GET /graph/node/{id}` is bounded too** (Q6). `node_view` fetched every incident edge and every
+  adjacent node's metadata, so a hub tag's view had the same gap. Each (direction, edge type,
+  status) group now fetches at most `limit + 1` rows through the shared indexes and fetch helper
+  and returns at most `limit` (`edge_limit` parameter, default 50, maximum 200); metadata is
+  loaded only for the returned endpoints. The number of groups is bounded by the supported
+  direction, edge-type and status sets. A self-loop is listed once, under `outgoing`.
+  - **Response-contract change:** `counts` (which presented the full degree, true only while the
+    fetch was unbounded) is replaced by `returned: {outgoing, incoming}` plus
+    `truncated_groups: [{direction, edge_type, status}]` and an overall `truncated` flag. No exact
+    totals: counting a hub's edges is itself an unbounded scan. Its only consumers today are
+    tests and `GraphNodeResponse`; `docs/Operations.md` and the API docs note the change.
+  - Missing indexes: 503 `graph_index_missing`, as for the neighborhood.
+  - Required tests: a large hub; a group at exactly `limit` (not truncated) vs `limit + 1`
+    (truncated); incoming and outgoing edges and a self-loop; metadata loaded only for returned
+    endpoints; missing indexes.
+- **`truncated` is set whenever** a fan-out, seed, node or edge limit omits anything.
+- **Required tests:** a large hub beside a smaller ranked seed (the smaller seed's neighbors are
+  still admitted); deterministic selection; a shared edge between two frontier nodes counted
+  once; disagreement-seed overflow sets `truncated`; database work is verified separately from
+  response size (query plans, and rows fetched per step).
 
 ## Acceptance tests (required)
 

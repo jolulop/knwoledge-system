@@ -290,3 +290,18 @@ adds no new dependencies.
      scope.** It may be defensible, but it is a **retention/retrieval-policy** decision (interacting with
      `RETENTION_DEFAULT_STATUSES`, ADR-0032 §8 / ADR-0036), not a fusion-weighting change — it must be
      grilled on its own terms, not bundled under "weighted RRF."
+
+## Addenda (ADR-0068 decision 7 — bounded graph traversal)
+
+10. **The neighborhood is induced *within fan-out*, not exactly induced (2026-10-29 grill,
+    ADR-0068 decision 7).** Each BFS step now fetches at most *k* edges per frontier node through
+    bounded, indexed queries, and the output edges are **the deduplicated union of each fetched
+    retained node's top-k incident edges, restricted to retained endpoints, then limited by
+    `edge_cap`**. This approximates addendum 1's induced subgraph: every edge inside a node's top
+    *k* still appears, including outer-ring cross-edges (outer-ring nodes get one edge-only fetch);
+    a cross-edge outside both endpoints' top *k* is omitted and `truncated` is set. A node's final
+    degree can exceed *k*, because its neighbors may select further edges incident to it. The
+    exact induced subgraph was rejected: SQLite resolves it by scanning every retained node's
+    edges, so a retained hub costs its whole degree whatever the `LIMIT`. Applies to
+    `GET /graph/neighborhood` and the `/search` graph group alike; the selection rules, limits and
+    indexes are in ADR-0068 decision 7.
