@@ -9,8 +9,13 @@ edge assertions for retrieval:
   split into ``outgoing`` (node is ``src_id``) and ``incoming`` (node is ``dst_id``), each with the
   adjacent node's metadata inline (resolved in one batched query, no N+1).
 - :func:`neighborhood` — a flat ``{root_id, depth, nodes[], edges[], truncated, cap}`` payload: a
-  bounded BFS out to ``depth`` (default 1, hard max 2) returning the induced subgraph over the
-  reachable nodes.
+  bounded BFS out to ``depth`` (default 1, hard max 2) returning the subgraph induced within
+  fan-out over the reachable nodes (ADR-0032 addendum 10).
+
+Every read is bounded at a hub (ADR-0068 decision 7): per-node indexed queries with ``LIMIT k + 1``
+in the stable order ``(edge_type, other endpoint, asserter and evidence anchor)``, a per-traversal query budget, and
+``truncated`` whenever a limit omitted anything. A missing traversal index fails closed
+(:class:`~app.backend.graph.GraphIndexMissing`), never falling back to an unbounded fetch.
 
 Invariants honored:
 - **Filtering is by edge status, not node status** (ADR-0032 decision 5). A ``candidate`` (or
@@ -51,6 +56,16 @@ DEFAULT_MAX_EDGES = 300
 # Upper bound on a caller-supplied override, so a single request can't pull the whole graph.
 HARD_MAX_NODES = 1000
 HARD_MAX_EDGES = 2000
+
+# ADR-0068 decision 7: bounded traversal. Each frontier node contributes at most `fanout` edges per
+# step, fetched by indexed per-node queries (`LIMIT k + 1`); a traversal runs at most `budget` such
+# query streams. Hard ceilings bound every caller and every policy value.
+DEFAULT_FANOUT = 50
+HARD_MAX_FANOUT = 200
+NEIGHBORHOOD_QUERY_BUDGET = 1000
+HARD_MAX_QUERY_BUDGET = 4000
+DEFAULT_EDGE_LIMIT = 50            # node view: edges per (direction, edge type, status) group
+HARD_MAX_EDGE_LIMIT = 200
 
 # Symmetric relations (ADR-0030/0031): stored once with src_id < dst_id, semantically undirected.
 SYMMETRIC_EDGE_TYPES = frozenset({"contradicts", "related_to", "duplicates"})
@@ -179,60 +194,167 @@ def _node_meta_map(conn: sqlite3.Connection, node_ids: set[str]) -> dict[str, di
     return {r["node_id"]: _node_meta(r) for r in rows}
 
 
-def _edges_touching(
-    conn: sqlite3.Connection,
-    node_ids: list[str],
-    statuses: tuple[str, ...],
-    edge_types: tuple[str, ...] | None,
-) -> list[sqlite3.Row]:
-    """Active-by-status edges with at least one endpoint in ``node_ids`` (frontier expansion)."""
-    if not node_ids:
-        return []
-    node_ph = ",".join("?" for _ in node_ids)
-    status_ph = ",".join("?" for _ in statuses)
-    sql = (
-        f"SELECT * FROM edges WHERE (src_id IN ({node_ph}) OR dst_id IN ({node_ph})) "
-        f"AND status IN ({status_ph})"
-    )
-    params: list[Any] = [*node_ids, *node_ids, *statuses]
-    if edge_types:
-        sql += f" AND edge_type IN ({','.join('?' for _ in edge_types)})"
-        params += list(edge_types)
-    sql += " ORDER BY edge_type, src_id, dst_id, edge_id"
-    return conn.execute(sql, params).fetchall()
+def require_indexes(conn: sqlite3.Connection) -> None:
+    """Fail closed when a traversal index is missing (never fall back to an unbounded fetch)."""
+    missing = graph.missing_indexes(conn)
+    if missing:
+        raise graph.GraphIndexMissing(missing)
 
 
-def _edges_among(
-    conn: sqlite3.Connection,
-    node_ids: set[str],
-    statuses: tuple[str, ...],
-    edge_types: tuple[str, ...] | None,
-    *,
-    limit: int | None = None,
-) -> list[sqlite3.Row]:
-    """Edges whose *both* endpoints are in ``node_ids`` — the induced subgraph (deterministic).
+def _other(row: sqlite3.Row, node_id: str) -> str:
+    return row["dst_id"] if row["src_id"] == node_id else row["src_id"]
 
-    ``limit`` (when given) is pushed down as a SQL ``LIMIT`` so the result set never grows
-    unbounded: the caller passes ``edge_cap + 1`` and treats an over-limit fetch as truncation.
-    """
-    if not node_ids:
-        return []
-    ids = sorted(node_ids)
-    node_ph = ",".join("?" for _ in ids)
-    status_ph = ",".join("?" for _ in statuses)
-    sql = (
-        f"SELECT * FROM edges WHERE src_id IN ({node_ph}) AND dst_id IN ({node_ph}) "
-        f"AND status IN ({status_ph})"
-    )
-    params: list[Any] = [*ids, *ids, *statuses]
-    if edge_types:
-        sql += f" AND edge_type IN ({','.join('?' for _ in edge_types)})"
-        params += list(edge_types)
-    sql += " ORDER BY edge_type, src_id, dst_id, edge_id"
-    if limit is not None:
-        sql += " LIMIT ?"
-        params.append(limit)
-    return conn.execute(sql, params).fetchall()
+
+def _streams(statuses: tuple[str, ...],
+             edge_types: tuple[str, ...] | None) -> list[tuple[str, str, str | None]]:
+    """The (direction, status, edge type) query streams one node needs."""
+    return [(d, st, et) for d in ("out", "in") for st in statuses for et in (edge_types or (None,))]
+
+
+_KEY_SQL = ", ".join(graph._ASSERTION_KEY)
+
+
+def _nulls_first(v: Any) -> tuple[bool, Any]:
+    return (v is not None, v)
+
+
+def _assertion_key(row: sqlite3.Row) -> tuple:
+    """The logical assertion key (asserter, evidence anchor), ordered like SQLite (NULLs first).
+    Unique per (src, dst, edge_type) by `uq_edges_assertion`, and stable across a rebuild."""
+    return (row["asserted_by"], _nulls_first(row["evidence_source_id"]),
+            _nulls_first(row["evidence_char_start"]), _nulls_first(row["evidence_char_end"]))
+
+
+def _stream_rows(conn: sqlite3.Connection, node_id: str, direction: str, status: str,
+                 edge_type: str | None, limit: int, *, other_range: str | None = None
+                 ) -> list[sqlite3.Row]:
+    """One indexed stream in the stable order (edge_type, other endpoint, assertion key), at most
+    `limit` rows. The index serves the order, so SQLite reads at most `limit` entries (no sort).
+    `other_range` ("lt"/"gt") keeps only other endpoints below/above `node_id`: an index range, so
+    excluding self-loops never scans them (a residual `src_id <> dst_id` filter would)."""
+    end, other, index = (("src_id", "dst_id", "idx_edges_src_walk") if direction == "out"
+                         else ("dst_id", "src_id", "idx_edges_dst_walk"))
+    sql = f"SELECT * FROM edges INDEXED BY {index} WHERE {end} = ? AND status = ?"
+    params: list[Any] = [node_id, status]
+    if edge_type is not None:
+        sql += " AND edge_type = ?"
+        params.append(edge_type)
+    if other_range is not None:
+        if edge_type is None:
+            raise ValueError("an other-endpoint range needs an edge type")
+        sql += f" AND {other} {'<' if other_range == 'lt' else '>'} ?"
+        params.append(node_id)
+    sql += (f" ORDER BY {other}, {_KEY_SQL}" if edge_type is not None
+            else f" ORDER BY edge_type, {other}, {_KEY_SQL}")
+    return conn.execute(sql + " LIMIT ?", [*params, limit]).fetchall()
+
+
+def _adjacency(conn: sqlite3.Connection, node_id: str,
+               streams: list[tuple[str, str, str | None]], k: int) -> tuple[list[sqlite3.Row], bool]:
+    """A node's top-k distinct edges over its streams, and whether more than k exist.
+
+    Each stream fetches at most k + 1 rows in the shared order; merging them and deduplicating by
+    edge_id yields the node's global top k (each of those ranks within k in its own stream). More
+    than k distinct edges exist exactly when the merge has more than k, so a self-loop seen from
+    both directions never truncates falsely."""
+    merged: dict[str, sqlite3.Row] = {}
+    for direction, status, edge_type in streams:
+        for row in _stream_rows(conn, node_id, direction, status, edge_type, k + 1):
+            merged.setdefault(row["edge_id"], row)
+    ordered = sorted(merged.values(),
+                     key=lambda r: (r["edge_type"], _other(r, node_id), _assertion_key(r)))
+    return ordered[:k], len(ordered) > k
+
+
+class _Budget:
+    """The query streams one traversal may still run. A node is expanded only if all of its streams
+    fit: a partial fetch would change which edges are its top k."""
+
+    def __init__(self, streams: int) -> None:
+        self.left = streams
+
+    def reserve(self, n: int) -> bool:
+        if n > self.left:
+            return False
+        self.left -= n
+        return True
+
+
+def _bounded_bfs(conn: sqlite3.Connection, seeds: list[str], *, depth: int,
+                 statuses: tuple[str, ...], edge_types: tuple[str, ...] | None,
+                 admit, node_cap: int, edge_cap: int, fanout: int, budget: int,
+                 ) -> tuple[dict[str, int], list[sqlite3.Row], bool]:
+    """The bounded BFS shared by the neighborhood and the search subgraph (ADR-0068 decision 7).
+
+    `seeds` are already admitted, in rank order. Each step expands the frontier in rank order while
+    the query budget covers a node's streams, then admits new endpoints round-robin across the
+    expanded nodes (each node's candidates in its fan-out order) until `node_cap`. Retained nodes
+    never expanded (the outer ring) get one edge-only fetch from the same budget. Output edges: the
+    deduplicated union of every fetched retained node's top-k edges among retained endpoints, in
+    a deterministic order, then `edge_cap`. Returns (visited -> distance in admission order, edge
+    rows, truncated)."""
+    fanout = max(1, min(fanout, HARD_MAX_FANOUT))
+    left = _Budget(max(0, min(budget, HARD_MAX_QUERY_BUDGET)))
+    streams = _streams(statuses, edge_types)
+    visited: dict[str, int] = {sid: 0 for sid in seeds}
+    adjacency: dict[str, list[sqlite3.Row]] = {}
+    truncated = False
+
+    def fetch(nid: str) -> bool:
+        nonlocal truncated
+        if not left.reserve(len(streams)):
+            truncated = True                       # a retained node's adjacency is not fetched
+            return False
+        rows, more = _adjacency(conn, nid, streams, fanout)
+        adjacency[nid] = rows
+        truncated = truncated or more
+        return True
+
+    frontier = list(seeds)
+    for dist in range(1, depth + 1):
+        expanded = []
+        for nid in frontier:
+            if not fetch(nid):
+                break
+            expanded.append(nid)
+        lists = [list(dict.fromkeys(_other(r, nid) for r in adjacency[nid])) for nid in expanded]
+        fresh = {c for lst in lists for c in lst if c not in visited}
+        meta = _node_meta_map(conn, fresh)         # only this step's retained edges' endpoints
+        lists = [[c for c in lst if c in fresh and admit(meta.get(c))] for lst in lists]
+        added: list[str] = []
+        depth_of = max((len(lst) for lst in lists), default=0)
+        for i in range(depth_of):                  # round-robin across the expanded nodes
+            for lst in lists:
+                if i >= len(lst) or lst[i] in visited:
+                    continue
+                if len(visited) >= node_cap:
+                    truncated = True
+                    break
+                visited[lst[i]] = dist
+                added.append(lst[i])
+            else:
+                continue
+            break
+        if not added:
+            break
+        frontier = added
+
+    for nid in list(visited):                      # the outer ring: edges only, no new nodes
+        if nid not in adjacency and not fetch(nid):
+            break
+
+    retained = set(visited)
+    picked: dict[str, sqlite3.Row] = {}
+    for rows in adjacency.values():
+        for row in rows:
+            if row["src_id"] in retained and row["dst_id"] in retained:
+                picked.setdefault(row["edge_id"], row)
+    edge_rows = sorted(picked.values(), key=lambda r: (r["edge_type"], r["src_id"], r["dst_id"],
+                                                       _assertion_key(r)))
+    if len(edge_rows) > edge_cap:
+        truncated = True
+        edge_rows = edge_rows[:edge_cap]
+    return visited, edge_rows, truncated
 
 
 # --------------------------------------------------------------------------- projections
@@ -243,35 +365,65 @@ def node_view(
     node_id: str,
     *,
     include_status: tuple[str, ...] = DEFAULT_EDGE_STATUSES,
+    edge_limit: int = DEFAULT_EDGE_LIMIT,
 ) -> dict[str, Any] | None:
     """Node metadata + adjacent assertions grouped by ``edge_type`` (outgoing/incoming).
 
-    Returns ``None`` if the node does not exist.
-    """
+    Bounded (ADR-0068 decision 7): each (direction, edge type, status) group fetches at most
+    ``edge_limit + 1`` rows through the traversal indexes and returns at most ``edge_limit``;
+    metadata is loaded only for the returned endpoints. ``returned`` counts what is listed (never
+    the full degree: counting a hub's edges is itself an unbounded scan); ``truncated_groups``
+    names the groups that had more, and ``truncated`` is set if any did. A self-loop is listed once,
+    under ``outgoing``. Returns ``None`` if the node does not exist."""
     node = graph.get_node(conn, node_id)
     if node is None:
         return None
-
-    rows = _edges_touching(conn, [node_id], tuple(include_status), None)
-    adjacent_ids = {r["src_id"] for r in rows} | {r["dst_id"] for r in rows}
-    adjacent_ids.discard(node_id)
-    meta = _node_meta_map(conn, adjacent_ids)
+    require_indexes(conn)
+    limit = max(1, min(edge_limit, HARD_MAX_EDGE_LIMIT))
+    groups: list[tuple[str, str, str, list[sqlite3.Row]]] = []
+    truncated_groups: list[dict[str, str]] = []
+    for direction in ("out", "in"):
+        for edge_type in sorted(graph.EDGE_TYPES):
+            for status in include_status:
+                if direction == "out":
+                    rows = _stream_rows(conn, node_id, direction, status, edge_type, limit + 1)
+                else:                              # self-loops are listed under outgoing
+                    rows = [*_stream_rows(conn, node_id, direction, status, edge_type, limit + 1,
+                                          other_range="lt"),
+                            *_stream_rows(conn, node_id, direction, status, edge_type, limit + 1,
+                                          other_range="gt")][:limit + 1]
+                if len(rows) > limit:
+                    rows = rows[:limit]
+                    truncated_groups.append({"direction": "outgoing" if direction == "out"
+                                             else "incoming", "edge_type": edge_type,
+                                             "status": status})
+                if rows:
+                    groups.append((direction, edge_type, status, rows))
+    meta = _node_meta_map(conn, {_other(r, node_id) for *_, rows in groups for r in rows}
+                          - {node_id})
+    meta[node_id] = _node_meta(node)               # a self-loop's other end is the node itself
 
     outgoing: dict[str, list[dict[str, Any]]] = {}
     incoming: dict[str, list[dict[str, Any]]] = {}
-    for row in rows:  # already sorted by (edge_type, src_id, dst_id, edge_id)
-        assertion = _assertion_obj(row, node_id, meta)
-        bucket = outgoing if row["src_id"] == node_id else incoming
-        bucket.setdefault(row["edge_type"], []).append(assertion)
+    buckets: dict[tuple[str, str], list[sqlite3.Row]] = {}
+    for direction, edge_type, _status, rows in groups:
+        buckets.setdefault((direction, edge_type), []).extend(rows)
+    for (direction, edge_type), rows in buckets.items():
+        rows.sort(key=lambda r: (r["src_id"], r["dst_id"], _assertion_key(r), r["status"]))
+        (outgoing if direction == "out" else incoming)[edge_type] = [
+            _assertion_obj(r, node_id, meta) for r in rows]
 
     return {
         "node": _node_meta(node),
         "outgoing": outgoing,
         "incoming": incoming,
-        "counts": {
+        "returned": {
             "outgoing": sum(len(v) for v in outgoing.values()),
             "incoming": sum(len(v) for v in incoming.values()),
         },
+        "truncated_groups": truncated_groups,
+        "truncated": bool(truncated_groups),
+        "cap": {"edges_per_group": limit},
     }
 
 
@@ -285,13 +437,17 @@ def neighborhood(
     include_status: tuple[str, ...] = DEFAULT_EDGE_STATUSES,
     node_cap: int = DEFAULT_MAX_NODES,
     edge_cap: int = DEFAULT_MAX_EDGES,
+    fanout: int = DEFAULT_FANOUT,
 ) -> dict[str, Any] | None:
     """Bounded BFS neighborhood as a flat node/edge payload. ``None`` if the root is absent.
 
     Nodes are discovered by BFS out to ``depth`` (clamped to ``[0, MAX_DEPTH]``), honoring the
-    ``node_types`` filter (the root is always included). Edges are then the induced subgraph over
-    the discovered nodes — so cross-edges within the outer ring are not missed. Both sets are
-    capped (``node_cap``/``edge_cap``) and ``truncated`` is set if either cap clipped the result.
+    ``node_types`` filter (the root is always included). Each node contributes at most ``fanout``
+    edges per step, and the traversal runs at most :data:`NEIGHBORHOOD_QUERY_BUDGET` query streams
+    (ADR-0068 decision 7). Edges are **induced within fan-out** (ADR-0032 addendum 10): every
+    retained node's top-k edges among the retained nodes, so outer-ring cross-edges are kept. Both
+    sets are capped (``node_cap``/``edge_cap``) and ``truncated`` is set whenever a fan-out, budget,
+    node or edge limit omitted anything.
 
     ``node_types`` filtering is **traversal-time**, not output-only: a node whose type is excluded
     is never entered, so it also blocks discovery of anything reachable *only* through it. This
@@ -301,76 +457,47 @@ def neighborhood(
     root = graph.get_node(conn, root_id)
     if root is None:
         return None
+    require_indexes(conn)
     depth = max(0, min(depth, MAX_DEPTH))
-    statuses = tuple(include_status)
 
-    visited: dict[str, int] = {root_id: 0}
-    frontier = [root_id]
-    truncated = False
+    def admit(meta: dict[str, Any] | None) -> bool:
+        node_type = meta["node_type"] if meta else None
+        return node_types is None or node_type in node_types
 
-    for dist in range(1, depth + 1):
-        rows = _edges_touching(conn, frontier, statuses, edge_types)
-        # Candidate new neighbors = endpoints not yet visited.
-        candidates: set[str] = set()
-        for row in rows:
-            for endpoint in (row["src_id"], row["dst_id"]):
-                if endpoint not in visited:
-                    candidates.add(endpoint)
-        if not candidates:
-            break
-        cand_meta = _node_meta_map(conn, candidates)
-        added: list[str] = []
-        for nid in sorted(candidates):
-            if node_types is not None:
-                meta = cand_meta.get(nid)
-                node_type = meta["node_type"] if meta else None
-                if node_type not in node_types:
-                    continue
-            if len(visited) >= node_cap:
-                truncated = True
-                break
-            visited[nid] = dist
-            added.append(nid)
-        if not added:
-            break
-        frontier = added
-
-    # Fetch at most edge_cap + 1 (bounded by SQL LIMIT); an over-cap fetch signals truncation.
-    edge_rows = _edges_among(conn, set(visited), statuses, edge_types, limit=edge_cap + 1)
-    if len(edge_rows) > edge_cap:
-        truncated = True
-        edge_rows = edge_rows[:edge_cap]
-    edges = [_edge_obj(row) for row in edge_rows]
-
+    visited, edge_rows, truncated = _bounded_bfs(
+        conn, [root_id], depth=depth, statuses=tuple(include_status), edge_types=edge_types,
+        admit=admit, node_cap=node_cap, edge_cap=edge_cap, fanout=fanout,
+        budget=NEIGHBORHOOD_QUERY_BUDGET)
     meta = _node_meta_map(conn, set(visited))
-    nodes = []
-    for nid in sorted(visited, key=lambda n: (visited[n], n)):
-        node_meta = meta.get(nid) or _unknown_meta(nid)
-        nodes.append({**node_meta, "distance": visited[nid]})
-
+    nodes = [{**(meta.get(nid) or _unknown_meta(nid)), "distance": visited[nid]}
+             for nid in sorted(visited, key=lambda n: (visited[n], n))]
     return {
         "root_id": root_id,
         "depth": depth,
         "nodes": nodes,
-        "edges": edges,
+        "edges": [_edge_obj(row) for row in edge_rows],
         "truncated": truncated,
-        "cap": {"nodes": node_cap, "edges": edge_cap},
+        "cap": {"nodes": node_cap, "edges": edge_cap,
+                "fanout": max(1, min(fanout, HARD_MAX_FANOUT))},
     }
 
 
-def active_contradiction_endpoints(conn: sqlite3.Connection) -> list[str]:
-    """Node ids on either end of an ``active`` ``contradicts`` edge (graph-native disagreement seed).
+def active_contradiction_endpoints(conn: sqlite3.Connection, limit: int) -> tuple[list[str], bool]:
+    """Up to ``limit`` node ids on either end of an ``active`` ``contradicts`` edge (the topic-less
+    disagreement seeds), and whether the limit clipped them (ADR-0068 decision 7).
 
     Lets a "which sources disagree" query surface contradictions directly from the graph, without
-    depending on the literal trigger words matching any page text.
+    depending on the literal trigger words matching any page text. Bounded before any metadata
+    lookup: at most ``limit + 1`` edges are read, through the ``(edge_type, status, …)`` index in
+    a stable order. Reading ``limit + 1`` edges means there may be more, so that counts as clipped.
     """
-    ids: set[str] = set()
-    for r in conn.execute(
-        "SELECT src_id, dst_id FROM edges WHERE edge_type = 'contradicts' AND status = 'active'"
-    ):
-        ids.add(r["src_id"])
-        ids.add(r["dst_id"])
-    return sorted(ids)
+    limit = max(0, limit)
+    rows = conn.execute(
+        "SELECT src_id, dst_id FROM edges INDEXED BY idx_edges_type_walk "
+        "WHERE edge_type = 'contradicts' AND status = 'active' ORDER BY src_id, dst_id LIMIT ?",
+        (limit + 1,)).fetchall()
+    ids = list(dict.fromkeys(nid for r in rows for nid in (r["src_id"], r["dst_id"])))
+    return ids[:limit], len(rows) > limit or len(ids) > limit
 
 
 def source_item_types(
@@ -415,6 +542,9 @@ def search_subgraph(
     edge_types: tuple[str, ...] | None = None,
     node_cap: int,
     edge_cap: int,
+    fanout: int = DEFAULT_FANOUT,
+    budget: int = NEIGHBORHOOD_QUERY_BUDGET,
+    seeds_truncated: bool = False,
 ) -> dict[str, Any]:
     """Multi-seed bounded BFS returning a flat ``{seeds, nodes, edges, depth, truncated}`` subgraph.
 
@@ -422,14 +552,16 @@ def search_subgraph(
     that is edge-status-only by contract), this accepts an optional ``node_statuses`` retention
     filter — a node is admitted only if its status is allowed — so the search layer can exclude
     archived/deleted nodes (ADR-0032 addendum 2: retention is ``/search``'s job, not the raw graph
-    projection's). Seeds that do not exist or fail the filters are dropped.
+    projection's). Seeds that do not exist or fail the filters are dropped; the rest keep the
+    caller's (BM25) order, which the bounded traversal (ADR-0068 decision 7) preserves.
+    ``seeds_truncated`` carries a clipped seed list into ``truncated``.
 
     ``item_types`` (ADR-0062) is a **type predicate, not a layer filter**: an *item* node is
     admitted only if its ``item_type`` is in the set, but non-item nodes (claim/synthesis) always
     pass — the facet narrows the item layer without dropping the rest.
     """
+    require_indexes(conn)
     depth = max(0, min(depth, MAX_DEPTH))
-    statuses = tuple(edge_statuses)
 
     def admit(meta: dict[str, Any] | None) -> bool:
         if meta is None:
@@ -442,49 +574,24 @@ def search_subgraph(
             return False
         return True
 
-    visited: dict[str, int] = {}
+    truncated = seeds_truncated
     admitted_seeds: list[str] = []
-    truncated = False
     seed_meta = _node_meta_map(conn, set(seed_ids))
     for sid in seed_ids:  # preserve caller ordering (BM25 rank)
-        if sid in visited or not admit(seed_meta.get(sid)):
+        if sid in admitted_seeds or not admit(seed_meta.get(sid)):
             continue
-        if len(visited) >= node_cap:
+        if len(admitted_seeds) >= node_cap:
             truncated = True
             break
-        visited[sid] = 0
         admitted_seeds.append(sid)
 
-    frontier = list(admitted_seeds)
-    for dist in range(1, depth + 1):
-        rows = _edges_touching(conn, frontier, statuses, edge_types)
-        candidates = {ep for r in rows for ep in (r["src_id"], r["dst_id"]) if ep not in visited}
-        if not candidates:
-            break
-        cand_meta = _node_meta_map(conn, candidates)
-        added: list[str] = []
-        for nid in sorted(candidates):
-            if not admit(cand_meta.get(nid)):
-                continue
-            if len(visited) >= node_cap:
-                truncated = True
-                break
-            visited[nid] = dist
-            added.append(nid)
-        if not added:
-            break
-        frontier = added
-
-    edge_rows = _edges_among(conn, set(visited), statuses, edge_types, limit=edge_cap + 1)
-    if len(edge_rows) > edge_cap:
-        truncated = True
-        edge_rows = edge_rows[:edge_cap]
-    edges = [_edge_obj(row) for row in edge_rows]
-
+    visited, edge_rows, clipped = _bounded_bfs(
+        conn, admitted_seeds, depth=depth, statuses=tuple(edge_statuses), edge_types=edge_types,
+        admit=admit, node_cap=node_cap, edge_cap=edge_cap, fanout=fanout, budget=budget)
     meta = _node_meta_map(conn, set(visited))
     nodes = [
         {**(meta.get(nid) or _unknown_meta(nid)), "distance": visited[nid]}
         for nid in sorted(visited, key=lambda n: (visited[n], n))
     ]
-    return {"seeds": admitted_seeds, "nodes": nodes, "edges": edges,
-            "depth": depth, "truncated": truncated}
+    return {"seeds": admitted_seeds, "nodes": nodes, "edges": [_edge_obj(r) for r in edge_rows],
+            "depth": depth, "truncated": truncated or clipped}

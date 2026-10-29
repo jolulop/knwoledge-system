@@ -150,6 +150,10 @@ _DEFAULT_CAPS = {
     "max_query_terms": 32,
     "escalation_primary_below_k": 3,
     "rrf_k": 60,  # Reciprocal Rank Fusion constant (Phase 4e); canonical default
+    # ADR-0068 decision 7: bounded graph traversal (clamped to graph_read's hard ceilings).
+    "max_graph_fanout": 25,
+    "max_disagreement_seeds": 50,
+    "max_graph_queries": 500,
 }
 # Fractional retrieval weights (ADR-0062) — kept apart from the integer `caps` because they are
 # compared against RRF scores (Σ 1/(k+rank) ≈ 0.016/rank at k=60). `item_type_boost` is the additive

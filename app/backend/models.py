@@ -187,7 +187,12 @@ class GraphNodeResponse(BaseModel):
     node: GraphNodeMeta
     outgoing: dict[str, list[GraphAssertion]]
     incoming: dict[str, list[GraphAssertion]]
-    counts: dict[str, int]
+    # ADR-0068 decision 7: bounded per (direction, edge type, status) group. `returned` counts the
+    # listed edges (not the full degree); `truncated_groups` names the groups that had more.
+    returned: dict[str, int]
+    truncated_groups: list[dict[str, str]] = []
+    truncated: bool = False
+    cap: dict[str, int] = {}
 
 
 class GraphEdge(BaseModel):

@@ -103,6 +103,9 @@ synthesis eligibility. Navigation surfaces candidates; evidence does not cite th
   `src_id`/`dst_id` + `other_node_id` (relative to the queried node) + `symmetric` (ADR-0032
   addendum 1). Node metadata is `id`/`type`/`slug`/`status` (+`answer_eligible`); `title` deferred
   (addendum 3).
+- **Bounded (ADR-0068 decision 7):** at most `edge_limit` (default 50, max 200) edges per
+  (direction, edge type, status) group. The response carries `returned` (what is listed, never the
+  full degree; it replaced `counts`), `truncated_groups` and `truncated`.
 
 ### 3.3 `GET /graph/neighborhood/{node_id}`
 - Flat payload `{root_id, depth, nodes[], edges[], truncated, cap}`. Default `depth=1`, hard max
@@ -111,6 +114,11 @@ synthesis eligibility. Navigation surfaces candidates; evidence does not cite th
   `src_id`/`dst_id` + `symmetric: true` — **canonical-only, no `other_node_id`** in the flat edge
   list (ADR-0032 addendum 1). Edge anchors labelled advisory. Traversal filters by edge status,
   not node status — `archived`/`deleted` nodes can surface via active edges (addendum 2).
+- **Bounded (ADR-0068 decision 7):** each node contributes at most `fanout_limit` (default 50, max
+  200) edges per step, within an internal query budget; edges are induced within fan-out (ADR-0032
+  addendum 10); `truncated` whenever any limit omitted something.
+- Both graph routes answer 503 `graph_index_missing` when a traversal index is missing (restart the
+  API to install them).
 
 ---
 

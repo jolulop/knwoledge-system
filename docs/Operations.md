@@ -89,6 +89,15 @@ screens show **Search refresh pending** (and `validate_publication.py` fails) un
 run stopped part-way, Retry publishing finishes its refresh. Tagging stays available during a run's
 model calls, and a keep made meanwhile is published at once and never overwritten by the run.
 
+**Graph traversal indexes (ADR-0068 decision 7).** Graph views and the graph part of search read
+at most a fixed number of edges per node, through three indexes on `db/graph.sqlite`. The API
+installs them at startup, every producer when it opens the graph, and a restore after it
+finishes (a restore that could not install them prints `GRAPH INDEXES NOT INSTALLED` and exits 1).
+If they are missing anyway, `GET /graph/node` and `GET /graph/neighborhood` answer 503
+`graph_index_missing`, and search returns no graph results with the note `graph_index_missing`:
+restart the API. A hub's node view now lists at most `edge_limit` edges per group and says which
+groups were cut (`returned`, `truncated_groups`; it replaced `counts`).
+
 **Apply tokens (ADR-0068 slice 4).** Every Apply applies exactly one clean preview. The preview
 copies the vault under the write lock, runs Apply on the copy, and returns a token; Apply checks it
 before writing anything and spends it. A token is refused, with nothing changed, when:

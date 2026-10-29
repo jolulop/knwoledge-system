@@ -8,6 +8,7 @@ import logging
 import mimetypes
 import os
 import re
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Any
@@ -127,6 +128,12 @@ async def _lifespan(_app: FastAPI):
     ONLY when ``EMBEDDING_PROVIDER=flagembedding_bge_m3`` is selected. Every other provider (and the
     light install) skips this entirely — no Torch import — so ingest/review/lint stay GPU-independent.
     A warmup failure (CUDA requested-but-unavailable, or model load) aborts startup by design."""
+    # ADR-0068 decision 7: an existing graph gets the traversal indexes before any read relies on
+    # them (never creating a graph nor upgrading an incompatible one).
+    try:
+        graph.ensure_indexes(settings.graph_db_path)
+    except (graph.GraphSchemaError, sqlite3.Error, OSError) as exc:
+        logger.warning("graph indexes not installed (%s); graph views refuse until they are", exc)
     info = embeddings.warmup_provider(settings)
     if info is not None:
         logger.info(
@@ -161,6 +168,16 @@ async def _producer_journal_corrupt(request: Request, exc: producer_journal.Jour
               "refused until it is repaired — `uv run python scripts/repair_producer_journal.py`")
     if request.url.path.startswith("/ui/"):
         return HTMLResponse(review_html.render_error(503, detail), status_code=503)
+    return JSONResponse(status_code=503, content={"detail": detail})
+
+
+@app.exception_handler(graph.GraphIndexMissing)
+async def _graph_index_missing(request: Request, exc: graph.GraphIndexMissing) -> Any:
+    """A graph view refuses rather than run an unbounded traversal (ADR-0068 decision 7)."""
+    detail = {"reason": "graph_index_missing", "action": "restart the API to install graph indexes",
+              "missing": exc.names}
+    if request.url.path.startswith("/ui/"):
+        return HTMLResponse(review_html.render_error(503, str(exc)), status_code=503)
     return JSONResponse(status_code=503, content={"detail": detail})
 
 
@@ -500,7 +517,11 @@ def _open_graph() -> Any:
 
 
 @app.get("/graph/node/{node_id}", response_model=GraphNodeResponse)
-def get_graph_node(node_id: str, include_status: str | None = None) -> dict[str, Any]:
+def get_graph_node(
+    node_id: str,
+    include_status: str | None = None,
+    edge_limit: int = Query(graph_read.DEFAULT_EDGE_LIMIT, ge=1, le=graph_read.HARD_MAX_EDGE_LIMIT),
+) -> dict[str, Any]:
     conn = _open_graph()
     if conn is None:
         raise HTTPException(status_code=404, detail=f"node not found: {node_id}")
@@ -509,7 +530,8 @@ def get_graph_node(node_id: str, include_status: str | None = None) -> dict[str,
             statuses = graph_read.parse_edge_statuses(include_status)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        view = graph_read.node_view(conn, node_id, include_status=statuses)
+        view = graph_read.node_view(conn, node_id, include_status=statuses,
+                                    edge_limit=edge_limit)
     finally:
         conn.close()
     if view is None:
@@ -526,6 +548,7 @@ def get_graph_neighborhood(
     include_status: str | None = None,
     node_limit: int = Query(graph_read.DEFAULT_MAX_NODES, ge=1, le=graph_read.HARD_MAX_NODES),
     edge_limit: int = Query(graph_read.DEFAULT_MAX_EDGES, ge=1, le=graph_read.HARD_MAX_EDGES),
+    fanout_limit: int = Query(graph_read.DEFAULT_FANOUT, ge=1, le=graph_read.HARD_MAX_FANOUT),
 ) -> dict[str, Any]:
     conn = _open_graph()
     if conn is None:
@@ -540,6 +563,7 @@ def get_graph_neighborhood(
         result = graph_read.neighborhood(
             conn, node_id, depth=depth, edge_types=et, node_types=nt,
             include_status=statuses, node_cap=node_limit, edge_cap=edge_limit,
+            fanout=fanout_limit,
         )
     finally:
         conn.close()

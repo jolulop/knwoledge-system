@@ -343,7 +343,7 @@ A page can hold both durable fields and generated sections. Authority is declare
   seconds. A hash of only the relevant state was rejected: it must know every executor's inputs,
   and a missed input would accept a stale preview.
 
-### 7. Bounded graph traversal (separate, non-blocking; design-locked 2026-10-29, Q1–Q6)
+### 7. Bounded graph traversal (separate, non-blocking; design-locked 2026-10-29, Q1–Q6; implemented 2026-10-29)
 
 Output caps do not bound the assertions fetched while expanding the frontier. Graph traversal gets a
 limit on intermediate work per expansion, plus a bounded-traversal test. This is a small separate
@@ -367,13 +367,16 @@ active `contradicts` edge.
   disagreement seed list is bounded **before** its metadata lookup, and clipping it sets
   `truncated`; an edge selected through both of its frontier endpoints is counted once.
 - **Selection order and indexes** (Q2): a node keeps its first *k* edges in the stable order
-  `(edge_type, other endpoint, edge_id)`. Ids are content-derived, so the selection is the same
-  after a graph rebuild or restore. Two composite indexes serve it without sorting:
-  `(src_id, status, edge_type, dst_id, edge_id)` and `(dst_id, status, edge_type, src_id,
-  edge_id)`, under **new names** (`CREATE INDEX IF NOT EXISTS` would not widen an existing
+  `(edge_type, other endpoint, assertion key)`, the assertion key being the asserter and the
+  evidence anchor (`asserted_by, evidence_source_id, evidence_char_start, evidence_char_end`,
+  unique per endpoint pair and type by `uq_edges_assertion`). It is the same after a graph
+  rebuild or restore. (The grill first said `edge_id`, assuming ids were content-derived; they are
+  random uuids, so review round 1 replaced it.) Two composite indexes serve it without sorting:
+  `(src_id, status, edge_type, dst_id, <assertion key>)` and `(dst_id, status, edge_type, src_id,
+  <assertion key>)`, under **new names** (`CREATE INDEX IF NOT EXISTS` would not widen an existing
   `idx_edges_src`/`idx_edges_dst`). A physical index change: no `SCHEMA_VERSION` bump.
   - **Merge rule:** each (direction, status, edge type) query fetches at most `k + 1` rows in
-    index order; the streams are merged by `(edge_type, other endpoint, edge_id)`, deduplicated by
+    index order; the streams are merged by `(edge_type, other endpoint, assertion key)`, deduplicated by
     `edge_id`, and the first *k* distinct edges are kept per frontier node. `truncated` is set
     only when more than *k* distinct eligible edges exist, so a self-loop seen in both
     directions never truncates falsely.
@@ -441,7 +444,7 @@ active `contradicts` edge.
     nor deepens the traversal.
   - If the budget prevents any retained node's adjacency fetch, `truncated` is set, even when the
     node and edge counts are below their caps.
-  - A deterministic final edge order (`edge_type, src_id, dst_id, edge_id`) applies before
+  - A deterministic final edge order (`edge_type, src_id, dst_id, assertion key`) applies before
     `edge_cap`.
   - Required tests: a retained outer-ring cross-edge is returned; one outside both endpoints' top
     *k* is omitted (with `truncated`); an edge reached from both endpoints appears once; budget
@@ -1008,6 +1011,74 @@ Decision 6 as design-locked by the slice-4 grill (Q1–Q8).
 - **Seen in practice:** editing code while the suite ran made every later API Apply in that run
   refuse with `restart_required` — the rule working as intended; install code only while nothing
   previews or applies.
+
+## Implementation — decision 7 (2026-10-29)
+
+Decision 7 as design-locked by its grill (Q1–Q6).
+- **Indexes** (`app/backend/graph.py`): `TRAVERSAL_INDEXES` — `idx_edges_src_walk`,
+  `idx_edges_dst_walk`, `idx_edges_type_walk`. A new graph gets them in `init_db`;
+  `ensure_indexes(path)` installs them on an existing one (replacements first, then
+  `idx_edges_src`/`idx_edges_dst` dropped; each definition checked through `pragma_index_xinfo`).
+  It reads first and takes the write lock (`authority=False, changes=False`) only when something
+  must change, so the common case costs about 0.1 ms. It never creates a graph (missing → False)
+  and never upgrades an incompatible one (`GraphSchemaError`). Called from `init_db`, the API
+  lifespan (a failure is logged; graph views then refuse) and `restore_backup` after a
+  successful extraction under its exclusive lock (`RestoreReport.graph_index_error`, printed, exit
+  1). `missing_indexes` is the read-time name check; `GraphIndexMissing` maps to 503
+  `graph_index_missing` with the action "restart the API to install graph indexes".
+- **Traversal** (`app/backend/graph_read.py`): `_stream_rows` (one `INDEXED BY` query per
+  (node, direction, status[, edge type]), `LIMIT`ed, ordered by the index); `_adjacency` (merge,
+  dedupe by edge id, top *k*, `len > k` truncation); `_Budget` (a node reserves all of its
+  streams); `_bounded_bfs` (ranked expansion, round-robin admission, metadata only for this step's
+  retained endpoints, the edge-only outer ring, induced-within-fan-out output edges in
+  `(edge_type, src_id, dst_id, assertion key)` order, then `edge_cap`). `neighborhood` and
+  `search_subgraph` both use it; `neighborhood` gains `fanout` (route `fanout_limit`) and reports
+  `cap.fanout`. `active_contradiction_endpoints(conn, limit)` returns `(ids, clipped)` from one
+  `LIMIT limit + 1` query on `idx_edges_type_walk` (reading `limit + 1` edges counts as clipped).
+  Fan-out and budget are clamped to `HARD_MAX_FANOUT` (200) and `HARD_MAX_QUERY_BUDGET` (4000).
+- **Node view:** per (direction, edge type, status) group `LIMIT edge_limit + 1` (route
+  `edge_limit`, default 50, max 200); incoming groups skip self-loops (listed under outgoing);
+  `returned`, `truncated_groups`, `truncated`, `cap.edges_per_group` replace `counts` (also in
+  `GraphNodeResponse`).
+- **Search** (`app/backend/search.py`, `policies/retrieval.yaml`, `policy._DEFAULT_CAPS`):
+  `max_graph_fanout: 25`, `max_disagreement_seeds: 50` (clamped to `HARD_MAX_NODES`),
+  `max_graph_queries: 500`. `graph_group` checks the indexes before any graph query, the seed
+  query included; `run_search` turns `GraphIndexMissing` into an empty graph group plus the note
+  `graph_index_missing: …`, other channels unaffected.
+- **Tests:** `tests/test_graph_bounds.py` (30) covers every test the grill required: index
+  installation, repetition, definition repair, no graph creation or upgrade, the startup and
+  restore hooks and an explicit restore failure, the unchanged revision, fail-closed reads; query
+  plans for every stream shape (both directions, filtered and unfiltered, two statuses: one
+  indexed search, no temp B-tree) and the seed query (a covering-index search); rows fetched
+  against a 1000-edge hub; a hub beside a smaller ranked seed; determinism across a rebuild in
+  reverse insertion order; shared edges and self-loops; seed overflow; the hard ceilings; exact
+  budget exhaustion, too little budget for the next node, streams × statuses × types; outer-ring
+  cross-edges, omission outside both top-k lists, outer-ring budget exhaustion, depth 0; the node
+  view (a 300-edge hub with metadata and rows fetched counted, exactly the limit vs one more,
+  incoming/outgoing and a self-loop) and the API parameters. `tests/test_retrieval_evals.py`
+  gains the ordinary-search check: under the shipped defaults no golden search is truncated
+  unless it declares it. Three assertions moved from `counts` to `returned`.
+- **Verification:** 1740 passed + 2 skipped; ruff clean. 24 mutation checks, all caught (one, an
+  unbounded node-view fetch still sliced to the limit, needed the rows-fetched assertion first).
+- **Review round 1 on decision 7 (1 P1, 2 P2, fixed):**
+  1. *Excluding self-loops from incoming node-view groups scanned them:* the residual
+     `src_id <> dst_id` filter applied before `LIMIT`, so 10,000 self-loops cost ~70,000 VM
+     operations. Incoming groups now read two index ranges, `src_id < node` and `src_id > node`,
+     and concatenate them (already in order). Test: SQLite VM work with 10,000 self-loops stays
+     within twice that with 10 (a progress-handler count, not rows or plans); both ranges have an
+     indexed, sort-free plan.
+  2. *`edge_id` is a random uuid, not content-derived:* tie-breaking on it picked parallel
+     assertions (same endpoints, other evidence anchors) differently after a rebuild. Ties now
+     break on the **logical assertion key** `(asserted_by, evidence_source_id,
+     evidence_char_start, evidence_char_end)`, unique per endpoint pair and type by
+     `uq_edges_assertion`, in SQL, the merge, the final edge order and the node view; the two
+     adjacency indexes end with it instead of `edge_id` (`ensure_indexes` replaces any index
+     whose definition differs). Tests: parallel assertions rebuilt in opposite orders with real
+     random ids pick the same ones; the same across two status streams.
+  3. *A self-loop's `other` was unknown metadata:* the node's own metadata is now reused. Test:
+     the self-loop's `other` equals the node's metadata.
+  7 mutation checks, all caught (the merge-order one only after the two-status test).
+  `tests/test_graph_bounds.py` now has 36 tests.
 
 ## Consequences
 

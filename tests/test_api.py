@@ -186,7 +186,7 @@ def test_graph_node_endpoint(client, tmp_path):
     body = resp.json()
     assert body["node"]["node_id"] == cpt
     assert body["node"]["answer_eligible"] is True
-    assert body["counts"]["incoming"] == 1
+    assert body["returned"]["incoming"] == 1
     inc = body["incoming"]["mentions"][0]
     assert inc["other_node_id"] == src
     assert inc["evidence"]["advisory"] is True

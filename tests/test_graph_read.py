@@ -68,7 +68,7 @@ def test_node_view_groups_incoming_outgoing(conn):
     # Node meta carries the governed classification (ADR-0059).
     assert view["node"]["item_type"] == "method_technique"
     # itm_x is dst of two active mentions, src of one related_to.
-    assert view["counts"] == {"outgoing": 1, "incoming": 2}
+    assert view["returned"] == {"outgoing": 1, "incoming": 2} and view["truncated"] is False
     assert set(view["incoming"]["mentions"][i]["other_node_id"] for i in range(2)) == {SRC_A, SRC_B}
     related = view["outgoing"]["related_to"][0]
     assert related["other_node_id"] == ITM_Y
@@ -87,9 +87,9 @@ def test_node_view_evidence_is_advisory(conn):
 
 def test_node_view_hides_proposed_by_default(conn):
     default = graph_read.node_view(conn, ITM_X)
-    assert default["counts"]["incoming"] == 2  # proposed mention hidden
+    assert default["returned"]["incoming"] == 2  # proposed mention hidden
     widened = graph_read.node_view(conn, ITM_X, include_status=("active", "proposed"))
-    assert widened["counts"]["incoming"] == 3  # proposed now surfaced
+    assert widened["returned"]["incoming"] == 3  # proposed now surfaced
 
 
 def test_node_view_symmetric_edge_direction_preserved(conn):

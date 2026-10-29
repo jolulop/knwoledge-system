@@ -30,7 +30,7 @@ import re
 import sqlite3
 from typing import Any, Callable
 
-from app.backend import graph_read
+from app.backend import graph, graph_read
 from app.backend.policy import RetrievalPolicy
 
 # Injected by the endpoint for the vector channel: returns LanceDB rows (citation fields +
@@ -495,6 +495,9 @@ def graph_group(
     item_types: frozenset[str] | None = None,
     node_cap: int,
     edge_cap: int,
+    fanout: int = graph_read.DEFAULT_FANOUT,
+    budget: int = graph_read.NEIGHBORHOOD_QUERY_BUDGET,
+    max_seeds: int = 50,
 ) -> dict[str, Any]:
     """Flat graph subgraph for /search: multi-seed BFS at ``depth`` over the Phase 4b projection.
 
@@ -504,11 +507,16 @@ def graph_group(
     so "which sources disagree" surfaces contradictions without relying on trigger-word text matches.
     Retention (``node_statuses``) is applied to every node, so archived/deleted adjacents do not leak.
     """
+    graph_read.require_indexes(conn)   # before any graph query, the seed query included
     topic_seeds = [h["node_id"] for h in nav_hits if h["page_type"] in GRAPH_SEED_TYPES and h["node_id"]]
     edge_types: tuple[str, ...] | None = None
+    seeds_truncated = False
     if shape == "disagreement":
         edge_types = ("contradicts",)
-        seeds = topic_seeds or graph_read.active_contradiction_endpoints(conn)
+        seeds = topic_seeds
+        if not seeds:                  # ADR-0068 decision 7: bounded before any metadata lookup
+            seeds, seeds_truncated = graph_read.active_contradiction_endpoints(
+                conn, min(max_seeds, graph_read.HARD_MAX_NODES))
     else:
         seeds = topic_seeds
     if not seeds:
@@ -516,7 +524,8 @@ def graph_group(
     return graph_read.search_subgraph(
         conn, seeds, depth=depth, edge_statuses=edge_statuses, node_statuses=node_statuses,
         node_types=node_types, item_types=item_types, edge_types=edge_types,
-        node_cap=node_cap, edge_cap=edge_cap,
+        node_cap=node_cap, edge_cap=edge_cap, fanout=fanout, budget=budget,
+        seeds_truncated=seeds_truncated,
     )
 
 
@@ -582,11 +591,16 @@ def run_search(
 
     # The graph channel runs even without an FTS topic (disagreement is graph-native).
     if "graph" in modes and graph_conn is not None:
-        graph_result = graph_group(
-            graph_conn, nav_hits, shape=shape, depth=depth, edge_statuses=edge_statuses,
-            node_statuses=node_statuses, node_types=node_types, item_types=item_types,
-            node_cap=node_cap, edge_cap=edge_cap,
-        )
+        try:
+            graph_result = graph_group(
+                graph_conn, nav_hits, shape=shape, depth=depth, edge_statuses=edge_statuses,
+                node_statuses=node_statuses, node_types=node_types, item_types=item_types,
+                node_cap=node_cap, edge_cap=edge_cap, fanout=policy.cap("max_graph_fanout"),
+                budget=policy.cap("max_graph_queries"),
+                max_seeds=policy.cap("max_disagreement_seeds"),
+            )
+        except graph.GraphIndexMissing as exc:  # ADR-0068: explicit, never an unbounded fallback
+            notes.append(f"graph_index_missing: graph results omitted — {exc}")
 
     # Vector-channel decision (ADR-0032 addenda 5–6). Explicit mode=vector always runs vector. In
     # auto, the conceptual `default` shape always blends vector, and the keyword-primary shapes

@@ -56,6 +56,12 @@ caps:
   max_navigation_hits: 20
   max_graph_nodes: 50
   max_graph_edges: 100
+  # ADR-0068 decision 7: bounded traversal. Edges one node contributes per step, the topic-less
+  # disagreement seeds, and the per-traversal query budget. Clamped to hard ceilings in code
+  # (fan-out 200, queries 4000, seeds 1000), so an edit here cannot remove the bound.
+  max_graph_fanout: 25
+  max_disagreement_seeds: 50
+  max_graph_queries: 500
   per_channel_prefusion_limit: 50
   max_query_chars: 512
   max_query_terms: 32

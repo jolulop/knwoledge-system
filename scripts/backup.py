@@ -186,6 +186,18 @@ def _writer_exclusion(root: Path):
         yield
 
 
+def _install_graph_indexes(root: Path) -> str | None:
+    """After a successful restore, while its exclusive lock still holds: install the graph traversal
+    indexes an older `db/graph.sqlite` lacks (ADR-0068 decision 7). Returns the error, if any."""
+    from app.backend import graph, write_lock
+    try:
+        with write_lock.hold(Path(root) / "reviews", vault=False, authority=False, changes=False):
+            graph.ensure_indexes(Path(root) / "db" / "graph.sqlite")
+    except (graph.GraphSchemaError, sqlite3.Error, OSError) as exc:
+        return f"{type(exc).__name__}: {exc}"
+    return None
+
+
 # Never restored, from any archive (older ones carry db/revision.json): restore keeps the epoch it
 # generated and the authorizations it cleared, so no earlier preview token can match (ADR-0068).
 _NEVER_RESTORED = {"db/revision.json", "db/apply_authorizations.json"}
@@ -402,6 +414,8 @@ class RestoreReport:
     raw_verified: int = 0       # raw files written/overwritten this run and checksum-verified
     raw_skipped: int = 0        # catalogued raw files left in place (pre-existing, not --force)
     raw_included: bool = False
+    # ADR-0068 decision 7: installing the graph traversal indexes after the restore failed.
+    graph_index_error: str | None = None
 
     @property
     def partial(self) -> bool:
@@ -430,6 +444,9 @@ class RestoreReport:
                             if self.raw_skipped else ""))
         else:
             lines.append("  raw bytes not present; manifest/raw checksum verification skipped.")
+        if self.graph_index_error:
+            lines.append(f"  GRAPH INDEXES NOT INSTALLED: {self.graph_index_error} (graph views "
+                         "refuse and search omits its graph results until they are)")
         return "\n".join(lines)
 
 
@@ -452,7 +469,9 @@ def restore_backup(archive: Path, root: Path, *, force: bool = False,
         # carry an older db/revision.json), so a restore interrupted anywhere never revives a token.
         _new_epoch(root)
         try:
-            return _restore_backup(archive, root, force=force, dry_run=False)
+            report = _restore_backup(archive, root, force=force, dry_run=False)
+            report.graph_index_error = _install_graph_indexes(root)
+            return report
         finally:
             _new_epoch(root)
 
@@ -545,7 +564,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
     print(report.render())
-    return 0
+    return 1 if getattr(report, "graph_index_error", None) else 0
 
 
 if __name__ == "__main__":

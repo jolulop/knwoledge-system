@@ -12,6 +12,7 @@ relationship). Dependency-free (stdlib sqlite3), same shape as `db.py`.
 """
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 import uuid
 from pathlib import Path
@@ -89,8 +90,6 @@ CREATE TABLE IF NOT EXISTS edges (
     created_at          TEXT NOT NULL,
     updated_at          TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges(dst_id, status);
-CREATE INDEX IF NOT EXISTS idx_edges_src ON edges(src_id, status);
 -- Assertion identity (ADR-0030). COALESCE makes it null-safe — a plain UNIQUE would treat
 -- NULL evidence anchors as distinct and let duplicates through; this rejects them even via
 -- raw SQL or a future import path, not just the write API.
@@ -101,6 +100,114 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_edges_assertion ON edges(
     COALESCE(evidence_char_end, -1)
 );
 """
+
+
+# ADR-0068 decision 7: the indexes the bounded traversal reads, in the stable selection order
+# (edge_type, other endpoint, then the logical assertion key: asserter and evidence anchor), so a
+# per-node `LIMIT k + 1` needs no sort. Not `edge_id`: it is a random uuid, so parallel assertions
+# would be picked differently after a rebuild. Installed by :func:`ensure_indexes`; reads never
+# build them (they fail closed with `graph_index_missing`).
+_ASSERTION_KEY = ("asserted_by", "evidence_source_id", "evidence_char_start", "evidence_char_end")
+TRAVERSAL_INDEXES: dict[str, tuple[str, ...]] = {
+    "idx_edges_src_walk": ("src_id", "status", "edge_type", "dst_id", *_ASSERTION_KEY),
+    "idx_edges_dst_walk": ("dst_id", "status", "edge_type", "src_id", *_ASSERTION_KEY),
+    "idx_edges_type_walk": ("edge_type", "status", "src_id", "dst_id"),   # topic-less seeds
+}
+# Their (src_id, status) / (dst_id, status) prefixes; dropped once the replacements exist.
+_LEGACY_INDEXES = ("idx_edges_src", "idx_edges_dst")
+
+
+class GraphIndexMissing(RuntimeError):
+    """A traversal index is missing; restart the API to install graph indexes."""
+
+    def __init__(self, names: list[str]) -> None:
+        super().__init__(f"graph_index_missing ({', '.join(names)}): restart the API to install "
+                         "graph indexes")
+        self.names = names
+
+
+def _index_columns(conn: sqlite3.Connection, name: str) -> tuple[str, ...] | None:
+    row = conn.execute("SELECT tbl_name, sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+                       (name,)).fetchone()
+    if row is None:
+        return None
+    if row[0] != "edges" or row[1] is None or "UNIQUE" in row[1].upper():
+        return ()                                          # not the expected definition
+    if conn.execute(f"SELECT 1 FROM pragma_index_xinfo('{name}') WHERE key = 1 AND desc = 1"
+                    ).fetchone() is not None:
+        return ()
+    return tuple(r[0] for r in conn.execute(
+        f"SELECT name FROM pragma_index_xinfo('{name}') WHERE key = 1 ORDER BY seqno"))
+
+
+def _indexes_in_place(conn: sqlite3.Connection) -> bool:
+    if any(_index_columns(conn, n) != cols for n, cols in TRAVERSAL_INDEXES.items()):
+        return False
+    return not conn.execute(
+        f"SELECT 1 FROM sqlite_master WHERE type = 'index' AND name IN "
+        f"({','.join('?' for _ in _LEGACY_INDEXES)})", _LEGACY_INDEXES).fetchone()
+
+
+def missing_indexes(conn: sqlite3.Connection) -> list[str]:
+    """The traversal indexes absent by name (the read-time check: installation guarantees their
+    definitions)."""
+    have = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
+    return [n for n in TRAVERSAL_INDEXES if n not in have]
+
+
+def _install_indexes(conn: sqlite3.Connection) -> None:
+    for name, cols in TRAVERSAL_INDEXES.items():
+        found = _index_columns(conn, name)
+        if found == cols:
+            continue
+        if found is not None:                              # same name, other definition
+            conn.execute(f"DROP INDEX {name}")
+        conn.execute(f"CREATE INDEX {name} ON edges({', '.join(cols)})")
+    for name in _LEGACY_INDEXES:                           # only after the replacements exist
+        conn.execute(f"DROP INDEX IF EXISTS {name}")
+    conn.commit()
+
+
+def ensure_indexes(db_path: Path) -> bool:
+    """Install the traversal indexes on an existing, compatible graph (ADR-0068 decision 7).
+
+    Idempotent, and a physical change only: no data changes, so it runs under the write lock with
+    ``changes=False`` (lock order vault → write → SQLite) and leaves Apply preview tokens valid. The
+    lock is taken only when something must change. Creates the replacements before dropping the
+    legacy indexes, and checks each definition, not just its name. Never creates a graph or
+    upgrades an incompatible one: a missing database returns False, an incompatible schema raises
+    :class:`GraphSchemaError`. Returns True when the indexes are in place."""
+    db_path = Path(db_path)
+    if not db_path.exists():
+        return False
+    conn = sqlite3.connect(db_path)
+    try:
+        _check_compatible(conn, db_path)
+        if _indexes_in_place(conn):
+            return True
+    finally:
+        conn.close()
+    from app.backend import write_lock
+    lock = (write_lock.hold(db_path.parent.parent / "reviews", authority=False, changes=False)
+            if db_path.parent.name == "db" else contextlib.nullcontext())
+    with lock:
+        conn = sqlite3.connect(db_path)
+        try:
+            _check_compatible(conn, db_path)
+            _install_indexes(conn)
+        finally:
+            conn.close()
+    return True
+
+
+def _check_compatible(conn: sqlite3.Connection, db_path: Path) -> None:
+    has_edges = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'edges'").fetchone()
+    if schema_version(conn) != SCHEMA_VERSION or not has_edges or \
+            not _nodes_table_has_item_type(conn):
+        raise GraphSchemaError(
+            f"graph database at {db_path} has an incompatible schema "
+            f"(v{schema_version(conn)}); refusing to install indexes")
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
@@ -140,10 +247,13 @@ def init_db(db_path: Path) -> None:
                 f"graph database at {db_path} is pre-ADR-0059 (schema v{found}); the "
                 f"clean-repository restart rebuilds it — refusing to modify")
         conn.executescript(_SCHEMA)
+        for name, cols in TRAVERSAL_INDEXES.items():      # a new graph gets them at once
+            conn.execute(f"CREATE INDEX IF NOT EXISTS {name} ON edges({', '.join(cols)})")
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         conn.commit()
     finally:
         conn.close()
+    ensure_indexes(db_path)          # an existing graph: replace the legacy ones (ADR-0068 decision 7)
 
 
 def schema_version(conn: sqlite3.Connection) -> int:

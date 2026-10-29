@@ -199,6 +199,15 @@ def test_golden_retrieval(case, harness):
     _assert_expect(res, case.get("expect", {}), harness, case)
 
 
+def test_the_traversal_bound_leaves_ordinary_searches_untruncated(harness):
+    # ADR-0068 decision 7: under the shipped fan-out / seed / query-budget defaults, every golden
+    # search that doesn't declare a truncation itself returns its whole graph group.
+    for case in _load_cases():
+        if case.get("expect", {}).get("graph_truncated") is True:
+            continue
+        assert _run_case(harness, case)["graph"]["truncated"] is False, case["id"]
+
+
 def test_eval_file_covers_all_categories():
     cats = {c["category"] for c in _load_cases()}
     assert cats == {
