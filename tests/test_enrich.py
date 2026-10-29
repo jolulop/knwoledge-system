@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import zipfile
 from pathlib import Path
@@ -123,7 +124,12 @@ def test_enriched_summary_is_composed_with_generated_label(tmp_path):
     text = page.read_text(encoding="utf-8")
     assert fm["summary_status"] == "enriched"
     assert fm["generation_status"] == "enriched"
-    assert fm["tags"] == ["alpha", "beta"]
+    # ADR-0066 part 3 slice 2: Enrich's tags are tag suggestions (after the items pass), never a
+    # free-text `tags:` list; `keywords:` lists the document's kept and suggested tags.
+    assert "tags" not in fm and fm["keywords"] == []
+    assert [t["name"] for t in json.loads(
+        (tmp_path / "normalized" / "enrichment" / f"{sid}.json").read_text())["tags"]] == \
+        ["alpha", "beta"]
     assert "A faithful generated summary." in text
     # Machine-checkable generated/unverified label, and the validator accepts it (ADR-0026).
     summary_line = next(ln for ln in text.splitlines() if ln.strip().startswith("> [!summary]"))
@@ -203,7 +209,8 @@ def test_generated_wikilinks_are_neutralised(tmp_path):
     text = page.read_text(encoding="utf-8")
     assert "[[" not in text and "]]" not in text  # no active wikilinks anywhere on the page
     assert "Post-Merger Integration" in text and "synergy" in text  # de-linked to plain text
-    assert fm["tags"] == ["merger", "integration"]  # bracket syntax stripped from tags
+    tags = json.loads((tmp_path / "normalized" / "enrichment" / f"{sid}.json").read_text())["tags"]
+    assert [t["name"] for t in tags] == ["merger", "integration"]  # bracket syntax stripped
     assert validate_wiki.main([str(tmp_path)]) == 0
 
 

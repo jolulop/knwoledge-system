@@ -550,11 +550,13 @@ def test_within_cap_document_marked_coverage_full(tmp_path):
         art.items_artifact_path(tmp_path / "normalized" / "enrichment", sid).read_text())
     assert artifact["coverage"] == "full"
     assert artifact["strategy_ref"] == "full-doc-v1:300000"
-    # Artifact node entries are {node_id, item_type, name, aliases, resolution} (+ aliases_filtered
-    # when the alias check removed one) — no node_type.
+    # Artifact node entries are {node_id, item_type, name, aliases, resolution, origin} (+
+    # aliases_filtered when the alias check removed one) — no node_type. `origin` is ADR-0066 part 3
+    # slice 2 (enrich / items / both).
     node = artifact["nodes"][0]
     assert set(node) == {"node_id", "item_type", "name", "aliases", "resolution",
-                         "aliases_filtered"}
+                         "aliases_filtered", "origin"}
+    assert node["origin"] == "items"
     assert node["resolution"] == "new" and node["aliases_filtered"] == ["PMI"]
     assert artifact["cap"] == items.DEFAULT_SUGGESTION_CAP and artifact["reference_cut_at"] is None
 

@@ -122,10 +122,37 @@ def clean_names(names: Any) -> list[str]:
     return out[:MAX_AUTHORS]
 
 
+_WIKILINK = re.compile(r"\[\[([^\]]*)\]\]")
+
+
 def clean_tag_name(name: Any) -> str:
-    """A tag name cleaned like other names: "planning-taxonomy" -> "planning taxonomy"."""
-    return clean_text(_TAG_JOINERS.sub(" ", name) if isinstance(name, str) else "",
-                      max_chars=MAX_NAME_CHARS)
+    """A tag name cleaned like other names: "planning-taxonomy" -> "planning taxonomy". Untrusted
+    model text: wikilink syntax is reduced to its label and stray brackets removed, since the name
+    becomes a tag page title (slice 2)."""
+    if not isinstance(name, str):
+        return ""
+    text = _WIKILINK.sub(lambda m: m.group(1).split("|", 1)[-1], name).replace("[", "").replace("]", "")
+    return clean_text(_TAG_JOINERS.sub(" ", text), max_chars=MAX_NAME_CHARS)
+
+
+def fresh_enrichment(manifest: dict[str, Any], normalized_markdown: str, *,
+                     enrichment_dir: Path, logs_dir: Path) -> dict[str, Any] | None:
+    """The Enrich artifact when fresh for the current text and prompt input, else None."""
+    from app.workers import enrichment_artifact as art
+    return art.load_fresh(Path(enrichment_dir), manifest["source_id"], normalized_markdown,
+                          prompt_input=art.enrich_prompt_input_for(manifest, Path(logs_dir)))
+
+
+def enrich_tags_for(manifest: dict[str, Any], normalized_markdown: str, *,
+                    enrichment_dir: Path, logs_dir: Path) -> list[dict[str, str]]:
+    """The typed tags of a fresh Enrich artifact, in its order (part 3 slice 2's merge input).
+    Absent or stale Enrich output is the explicit empty list."""
+    enrichment = fresh_enrichment(manifest, normalized_markdown, enrichment_dir=enrichment_dir,
+                                  logs_dir=logs_dir)
+    tags = (enrichment or {}).get("tags")
+    return [{"name": t["name"], "item_type": t.get("item_type") or ""}
+            for t in tags if isinstance(t, dict) and isinstance(t.get("name"), str)
+            and t["name"].strip()] if isinstance(tags, list) else []
 
 
 def prompt_title_for(manifest: dict[str, Any], normalized_markdown: str, *,
@@ -133,9 +160,7 @@ def prompt_title_for(manifest: dict[str, Any], normalized_markdown: str, *,
     """:func:`prompt_title` from disk: the Enrich artifact only when fresh for the current text,
     and the extraction log's hint. Used by claims and items for both their prompt and their
     freshness, so an Enrich title change restales them (part 3 Q2)."""
-    from app.workers import enrichment_artifact as art
-    sid = manifest["source_id"]
-    enrichment = art.load_fresh(Path(enrichment_dir), sid, normalized_markdown,
-                                prompt_input=art.enrich_prompt_input_for(manifest, Path(logs_dir)))
+    enrichment = fresh_enrichment(manifest, normalized_markdown, enrichment_dir=enrichment_dir,
+                                  logs_dir=logs_dir)
     return prompt_title(manifest, enrichment=enrichment,
-                        hint=read_metadata_hint(Path(logs_dir), sid))
+                        hint=read_metadata_hint(Path(logs_dir), manifest["source_id"]))

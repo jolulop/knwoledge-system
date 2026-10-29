@@ -14,6 +14,7 @@ under raw/ or normalized/.
 """
 from __future__ import annotations
 
+import json
 import re
 import uuid
 from pathlib import Path
@@ -46,6 +47,34 @@ def _node_title(wiki_dir: Path, node_type: str, slug: str) -> str | None:
         return None
     match = _TITLE_RE.search(page.read_text(encoding="utf-8", errors="replace"))
     return re.sub(r"\\(.)", r"\1", match.group(1)) if match else None
+
+def _keywords(enrichment_dir: Path, source_id: str, curated: list[dict[str, Any]],
+              suggested: list[dict[str, Any]], wiki_dir: Path) -> list[str]:
+    """A Source page's search terms (ADR-0066 part 3 slice 2 Q3): the tags it keeps, then its current
+    suggestions in the order its suggestion plan recorded (the items artifact), from the same
+    projection the page and the document screen list. Dropped, blocked and over-cap suggestions
+    have no active mention, so they never appear; a hidden tag is left out. De-duplicated by name."""
+    order: dict[str, int] = {}
+    try:
+        nodes = json.loads(enrichment_artifact.items_artifact_path(enrichment_dir, source_id)
+                           .read_text(encoding="utf-8")).get("nodes") or []
+        order = {n["node_id"]: i for i, n in enumerate(nodes) if isinstance(n, dict)
+                 and isinstance(n.get("node_id"), str)}
+    except (OSError, ValueError, AttributeError):
+        pass
+    rows = [m for m in curated if m["node_type"] == "item"] + sorted(
+        suggested, key=lambda m: (order.get(m["dst_id"], len(order)), m["slug"] or ""))
+    out: list[str] = []
+    seen: set[str] = set()
+    for m in rows:
+        if m.get("status") == "hidden":
+            continue
+        name = _node_title(wiki_dir, "item", m["slug"]) or m["slug"]
+        if name and name.casefold() not in seen:
+            seen.add(name.casefold())
+            out.append(name)
+    return out
+
 
 _GENERATED_STATUSES = {"extracted", "partial"}
 # A wildcard bind address is not something a browser can open; links use loopback instead.
@@ -176,6 +205,7 @@ def generate_wiki(
                 claims = None
                 items = None
                 suggested_items = None
+                keywords: list[str] = []
                 if gconn is not None:
                     claims = [
                         {"claim_id": cid, "title": _claim_label(claims_dir, cid)}
@@ -201,6 +231,7 @@ def generate_wiki(
                          "title": _node_title(wiki_dir, "item", m["slug"])}
                         for m in suggested
                     ]
+                    keywords = _keywords(enrichment_dir, source_id, curated, suggested, wiki_dir)
                 candidate = wiki_render.render_source_page(
                     template, manifest, normalized_markdown,
                     summary_max=summary_max, summary_min=summary_min,
@@ -209,6 +240,7 @@ def generate_wiki(
                     title=titles.effective_title(   # ADR-0066 part 3
                         manifest, enrichment=enrichment,
                         hint=titles.read_metadata_hint(logs_dir, source_id)),
+                    keywords=keywords,
                 )
             except Exception as exc:  # one page's failure must not abort the run
                 return {"source_id": source_id, "error": f"{type(exc).__name__}: {exc}"}

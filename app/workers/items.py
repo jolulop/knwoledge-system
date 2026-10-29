@@ -232,9 +232,12 @@ def _combined_effect(effects: list[tuple[str, Any]]) -> tuple[str, Any] | None:
 
 def plan_suggestions(raw_items: list[Any], *, md: str, gconn, vocab: dict[str, Any],
                      rejected_pairs: set[frozenset[str]], dropped: tuple[set[str], set[str]],
-                     blocked_keys: set[str], kept_ids: set[str], cap: int) -> dict[str, Any]:
+                     blocked_keys: set[str], kept_ids: set[str], cap: int,
+                     enrich_tags: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """The ADR-0066 P6 suggestion pipeline over the model's ranked list, before any write:
 
+    0. (part 3 slice 2) merge Enrich's typed tags in front of the items list — see
+       :func:`_merge_enrich`; every later step runs over the combined list;
     1. clean each name; keep only aliases that occur in the body text (P4);
     2. resolve: the exact name wins when it is an active/unused tag; otherwise one `merge_key` match
        among active/unused tags resolves to it, several (or a rejected merge pair) are ambiguous
@@ -243,12 +246,13 @@ def plan_suggestions(raw_items: list[Any], *, md: str, gconn, vocab: dict[str, A
        merge to its survivor (`redirected`) — the suggestion's own id first, then, when no live tag
        answers to the name, the titles and aliases of decided tags (part-2 review);
     3. filter drops and blocks against the suggested name AND the tag it resolved to;
-    4. move the first three domain suggestions to the front (P2);
+    4. move the first three domain suggestions of the items part to its front (P2); Enrich's tags
+       keep their own order at the head;
     5. cut at `cap`, counting the tags this document already keeps (they are never cut).
 
     Returns `{emit, filtered, reference_cut_at, counts}`; `emit` entries carry `node_id` (the target),
-    `name`, `item_type` (as suggested), `aliases`, `aliases_filtered`, `resolution` and, when
-    ambiguous, `ambiguous_with`."""
+    `name`, `item_type` (as suggested), `aliases`, `aliases_filtered`, `resolution`, `origin`
+    (`enrich` / `items` / `both`) and, when ambiguous, `ambiguous_with`."""
     from app.workers import merge_candidates, tag_links
     cut = reference_cut(md)
     folded_body = merge_candidates.fold_text(md if cut is None else md[:cut])
@@ -267,9 +271,8 @@ def plan_suggestions(raw_items: list[Any], *, md: str, gconn, vocab: dict[str, A
                 row["resolved_title"] = tag_titles.get(entry["node_id"])
             filtered.append(row)
 
-    ranked: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for it in raw_items[:_MAX_ITEMS]:
+    candidates: list[dict[str, Any]] = []
+    for it in raw_items[:_MAX_ITEMS]:              # the raw cap applies to the items list alone
         if not isinstance(it, dict):
             continue
         name = _WS.sub(" ", str(it.get("name") or "")).strip()[:_MAX_NAME]
@@ -278,13 +281,19 @@ def plan_suggestions(raw_items: list[Any], *, md: str, gconn, vocab: dict[str, A
         item_type = it.get("item_type", "")
         if not taxonomy.is_item_type(item_type):
             item_type = taxonomy.UNCLASSIFIED
-        counts["domains"] += item_type == "domain"
         aliases, removed = _body_aliases(_clean_aliases(it.get("aliases", [])), folded_body)
         counts["aliases_filtered"] += len(removed)
-        own, key = node_id(name), tag_links.tag_key(name)
-        entry: dict[str, Any] = {"name": name, "key": key, "item_type": item_type,
-                                 "aliases": aliases, "aliases_filtered": removed,
-                                 "node_id": own, "resolution": "new"}
+        candidates.append({"name": name, "key": tag_links.tag_key(name), "item_type": item_type,
+                           "aliases": aliases, "aliases_filtered": removed, "origin": "items",
+                           "extra_keys": set(), "extra_ids": set(), "head": None})
+
+    def _resolve(entry: dict[str, Any]) -> None:
+        """Resolve one entry in place (P3): `node_id` / `resolution` / `ambiguous_with`, and
+        `effect` — the filter reason when a human hid or retired the tag it names."""
+        name, key = entry["name"], entry["key"]
+        own = node_id(name)
+        entry.update(node_id=own, resolution="new", effect=None)
+        entry.pop("ambiguous_with", None)
         own_node = graph.get_node(gconn, own)
         effect = decided.get(own) if own_node is not None else None
         if own_node is not None and own_node.get("status") in _RESOLVABLE:
@@ -306,24 +315,41 @@ def plan_suggestions(raw_items: list[Any], *, md: str, gconn, vocab: dict[str, A
             elif effect[0] == "ambiguous":
                 entry["ambiguous_with"] = effect[1]
             else:
-                _filter(entry, effect[0])
-                continue
+                entry["effect"] = effect[0]
+
+    ranked: list[dict[str, Any]] = []
+    seen: dict[str, dict[str, Any]] = {}
+    for entry in _merge_enrich(enrich_tags or [], candidates, resolve=_resolve,
+                               rejected_pairs=rejected_pairs):
+        name, key, item_type = entry["name"], entry["key"], entry["item_type"]
+        counts["domains"] += item_type == "domain"
+        own = node_id(name)
+        if entry.get("effect"):
+            _filter(entry, entry["effect"])
+            continue
         target = entry["node_id"]
         target_key = tag_links.tag_key(tag_titles.get(target)) if target != own else ""
-        if (key in dropped_keys or own in dropped_ids or target in dropped_ids
-                or (target_key and target_key in dropped_keys)):
+        # Every contributing form counts (slice 2 Q2): an Enrich form merged under the items name
+        # still meets the drop or block recorded against it.
+        keys = {key, *entry["extra_keys"]} | ({target_key} if target_key else set())
+        if (keys & dropped_keys or {own, target, *entry["extra_ids"]} & dropped_ids):
             _filter(entry, "dropped")
             continue
-        if key in blocked_keys or (target_key and target_key in blocked_keys):
+        if keys & blocked_keys:
             _filter(entry, "blocked")
             continue
-        if target in seen:
+        if target in seen:                         # collapsed onto one tag: union the origins
+            first = seen[target]
+            if first["origin"] != entry["origin"]:
+                first["origin"] = "both"
             continue
-        seen.add(target)
+        seen[target] = entry
         ranked.append(entry)
 
-    domains = [e for e in ranked if e["item_type"] == "domain"][:_DOMAINS_FIRST]
-    ranked = domains + [e for e in ranked if all(e is not d for d in domains)]
+    head = [e for e in ranked if e["head"] is not None]
+    tail = [e for e in ranked if e["head"] is None]
+    domains = [e for e in tail if e["item_type"] == "domain"][:_DOMAINS_FIRST]
+    ranked = head + domains + [e for e in tail if all(e is not d for d in domains)]
     emit: list[dict[str, Any]] = []
     slots = max(0, cap - len(kept_ids))
     for entry in ranked:
@@ -338,7 +364,91 @@ def plan_suggestions(raw_items: list[Any], *, md: str, gconn, vocab: dict[str, A
         counts["resolved"] += entry["resolution"] == "resolved"
         counts["redirected"] += entry["resolution"] == "redirected"
         counts["ambiguous"] += bool(entry.get("ambiguous_with"))
+    for entry in emit:                             # plan-internal fields never leave the plan
+        for k in ("extra_keys", "extra_ids", "head", "effect"):
+            entry.pop(k, None)
     return {"emit": emit, "filtered": filtered, "reference_cut_at": cut, "counts": counts}
+
+
+# ADR-0066 part 3 slice 2: the deterministic merge's identity. Bump it whenever `_merge_enrich`
+# changes what it produces: the next run re-plans every document from its stored raw list, with no
+# model call (a merge change is never a prompt bump).
+MERGE_VERSION = "enrich-merge-v1"
+
+
+def merge_input(enrich_tags: list[dict[str, Any]]) -> str:
+    """The plan-freshness input (slice 2 Q1): a hash of the canonical, ordered, typed Enrich tags a
+    plan uses. No (or stale) Enrich output is the explicit empty input."""
+    canon = [{"name": t["name"], "item_type": t["item_type"]} for t in enrich_tags]
+    return hashlib.sha256(json.dumps(canon, ensure_ascii=False, sort_keys=True)
+                          .encode("utf-8")).hexdigest()[:16]
+
+
+def _merge_enrich(enrich_tags: list[dict[str, Any]], candidates: list[dict[str, Any]], *,
+                  resolve, rejected_pairs: set[frozenset[str]]) -> list[dict[str, Any]]:
+    """Put Enrich's tags in front of the items candidates (part 3 Q3, slice 2 Q2). An Enrich tag
+    whose key equals an items candidate's name key or one of its body-checked alias keys merges
+    into the first such candidate (in items order): the Enrich position, the items name, type and
+    aliases, `origin: both`, and the Enrich form's key and id kept for the drop/block checks. The
+    matched candidate is consumed (it leaves the items tail); several Enrich forms matching one
+    candidate give one entry at the earliest position. Unmatched Enrich tags keep their own name and
+    type, with no aliases (`origin: enrich`).
+
+    Every entry is resolved first (`resolve`), and a merge never bypasses governance (slice 2
+    review round 1): an Enrich form naming a tag a human hid, retired, merged elsewhere or made
+    ambiguous, or resolving to a different live tag than the candidate, or forming a rejected merge
+    pair with it, is **not** merged; it stays its own entry, resolved and filtered on its own."""
+    from app.workers import tag_links
+    for c in candidates:
+        resolve(c)
+    head: list[dict[str, Any]] = []
+    merged_into: dict[int, dict[str, Any]] = {}     # id(candidate) -> its head entry
+    by_key: dict[str, dict[str, Any]] = {}          # an Enrich key already placed at the head
+    for pos, tag in enumerate(enrich_tags):
+        name = _WS.sub(" ", str(tag.get("name") or "")).strip()[:_MAX_NAME]
+        if not name:
+            continue
+        key = tag_links.tag_key(name)
+        if key in by_key:                          # the same form twice: one entry
+            continue
+        item_type = tag.get("item_type")
+        form = {"name": name, "key": key, "item_type": item_type
+                if taxonomy.is_item_type(item_type) else taxonomy.UNCLASSIFIED,
+                "aliases": [], "aliases_filtered": [], "origin": "enrich", "head": pos,
+                "extra_keys": set(), "extra_ids": set()}
+        resolve(form)
+        match = next((c for c in candidates
+                      if key == c["key"]
+                      or key in {tag_links.tag_key(a) for a in c["aliases"]}), None)
+        if match is not None and not _may_merge(form, match, rejected_pairs):
+            match = None                           # governance keeps them apart
+        if match is not None and id(match) in merged_into:
+            entry = merged_into[id(match)]          # already merged by an earlier Enrich form
+            entry["extra_keys"].add(key)
+            entry["extra_ids"].add(node_id(name))
+        elif match is not None:
+            entry = {**match, "origin": "both", "head": pos,
+                     "extra_keys": {key} - {match["key"]}, "extra_ids": {node_id(name)} - {node_id(match["name"])}}
+            merged_into[id(match)] = entry
+            head.append(entry)
+        else:
+            entry = form
+            head.append(entry)
+        by_key[key] = entry
+    return head + [c for c in candidates if id(c) not in merged_into]
+
+
+def _may_merge(form: dict[str, Any], candidate: dict[str, Any],
+               rejected_pairs: set[frozenset[str]]) -> bool:
+    """Whether an Enrich form may merge into an items candidate without bypassing a human decision:
+    the form names no hidden/retired/ambiguous tag, it either names no live or decided tag at all
+    (`new`, or an unreviewed candidate node) or resolves to the candidate's own target, and the two
+    targets are not a rejected merge pair."""
+    if form.get("effect") or form.get("ambiguous_with") or candidate.get("effect"):
+        return False
+    if frozenset((form["node_id"], candidate["node_id"])) in rejected_pairs:
+        return False
+    return form["resolution"] in ("new", "existing") or form["node_id"] == candidate["node_id"]
 
 
 def _accumulate(existing: list[str], new: list[str]) -> list[str]:
@@ -600,6 +710,8 @@ def extract_items(
     plan_totals = {"dropped": 0, "blocked": 0, "hidden": 0, "retired": 0, "over_cap": 0,
                    "resolved": 0, "redirected": 0, "ambiguous": 0, "aliases_filtered": 0}
     no_domain_sources: list[str] = []
+    replanned_sources: list[str] = []          # plan-only changes: no model call (slice 2 Q1)
+    replan_unavailable: list[str] = []         # fresh model output but no stored raw list
     skipped_fresh = skipped_not_extracted = skipped_empty = skipped_no_key = 0
     topic_starved_sources: list[str] = []
     unclassified_count = 0
@@ -671,7 +783,7 @@ def extract_items(
         touched.add(nid)
         mentions_written += 1
         row = {"node_id": nid, "item_type": used_type, "name": name, "aliases": entry["aliases"],
-               "resolution": entry["resolution"]}
+               "resolution": entry["resolution"], "origin": entry.get("origin", "items")}
         if entry["aliases_filtered"]:
             row["aliases_filtered"] = entry["aliases_filtered"]
         if entry.get("ambiguous_with"):
@@ -741,20 +853,50 @@ def extract_items(
                     existing = {}
                 if not isinstance(existing, dict):
                     existing = {}
-            # ADR-0066 part 3: the prompt title is a prompt input, so it is part of freshness.
+            # ADR-0066 part 3: the prompt title is a prompt input, so it is part of freshness; the
+            # fresh Enrich artifact's typed tags are the merge input (slice 2), part of plan
+            # freshness only.
+            logs_dir = markdown_dir.parent / "extraction_logs"
             title = titles.prompt_title_for(manifest, md, enrichment_dir=enrichment_dir,
-                                            logs_dir=markdown_dir.parent / "extraction_logs")
+                                            logs_dir=logs_dir)
+            enrich_tags = titles.enrich_tags_for(manifest, md, enrichment_dir=enrichment_dir,
+                                                 logs_dir=logs_dir)
+            plan_input = merge_input(enrich_tags)
             # ADR-0063 sticky-to-chain: fresh iff the recorded model is still a chain member and
             # its own-model fingerprint matches — an availability flip alone never restales.
             # An unfinished commit is never fresh: the artifact predates it (written last).
-            if not force and existing and sid not in unfinished and art.chain_fresh(
+            replay: dict[str, Any] | None = None
+            if not force and existing and art.chain_fresh(
                     existing, chain_refs,
                     lambda m: art.items_fingerprint(md, m, strategy_ref, prompt_input=title)):
-                skipped_fresh += 1
-                continue
-            # A cache-only replay asks for the response the recorded chain member produced.
-            run_ref = (existing["model_ref"] if cache_only and existing.get("model_ref") in chain_refs
-                       else model_ref)
+                plan_current = (existing.get("merge_input") == plan_input
+                                and existing.get("merge_version") == MERGE_VERSION)
+                raw = existing.get("raw_items")
+                if sid in unfinished:
+                    # An interrupted commit is replayed from the stored raw list only when that
+                    # list is what it was committing (its record's fingerprint is the list's hash):
+                    # a forced re-extraction's newer output never was stored, so it goes back to
+                    # the model (or the cache) as before.
+                    if _valid_raw(raw) and unfinished[sid].get("fingerprint") == _raw_hash(raw):
+                        replay = {"items": raw}
+                elif plan_current:
+                    skipped_fresh += 1
+                    continue
+                elif _valid_raw(raw):
+                    # The model output is current; only the plan changed (slice 2 Q1): re-plan from
+                    # the stored raw list, with no model call.
+                    replay = {"items": raw}
+                elif not cache_only:
+                    # Never re-plan from [] (that would withdraw every suggestion): report it.
+                    # `--cache-only` regenerates it from the response cache (the branch below).
+                    replan_unavailable.append(sid)
+                    continue
+                # else: a cache-only run recovers the missing raw list by replaying the stored
+                # response (a miss leaves the document untouched, reported as a cache miss).
+            # A cache-only replay asks for the response the recorded chain member produced; a
+            # re-plan keeps the recorded model (its output is reused as is).
+            run_ref = (existing["model_ref"] if (cache_only or replay is not None)
+                       and existing.get("model_ref") in chain_refs else model_ref)
             fingerprint = art.items_fingerprint(md, run_ref, strategy_ref, prompt_input=title)
             # ADR-0066: a damaged ledger skips the document BEFORE the (billable) model call —
             # filtering against an empty drop list would resurrect drops. Re-read under the lock below.
@@ -774,20 +916,21 @@ def extract_items(
             # for an empty source. A no-key or failed-parse run must leave the existing topic layer
             # untouched: supersede-then-skip would recompose affected nodes with zero mentions and
             # tombstone them (the wipe hazard a prompt-version bump arms vault-wide).
-            if not has_key and not cache_only:
+            if not has_key and not cache_only and replay is None:
                 skipped_no_key += 1
                 continue
             if not md.strip():
                 with tag_links.ledger_lock(reviews_dir):
                     rec = journal.begin(root, _PRODUCER, sid,
-                                        items=graph.item_ids_for_source(gconn, sid), now=now)
+                                        items=graph.item_ids_for_source(gconn, sid),
+                                        fingerprint=_raw_hash([]), now=now)
                     intent = run.intent(sources=[sid], items=rec["items"])
                     texts = {}
                     affected = set(rec["items"]) | set(
                         graph.supersede_mentions_for_source(gconn, sid, now=now))
                     _compose(affected)
                     _write_artifact(apath, sid, fingerprint, [], run_ref, now, strategy_ref,
-                                    prompt_input=title)
+                                    prompt_input=title, raw_items=[], merge_input=plan_input)
                     run.publish(intent, sources=[sid], later_items=affected)
                     journal.finish(root, _PRODUCER, sid)
                 skipped_empty += 1
@@ -800,7 +943,7 @@ def extract_items(
             if coverage == "truncated":
                 coverage_truncated_sources.append(sid)
             try:
-                result = client.parse(
+                result = replay if replay is not None else client.parse(
                     prompts.build_items_messages(title, md, max_chars=input_max_chars),
                     prompts.ITEMS_SCHEMA, run_ref,
                     schema_version=art.ITEMS_SCHEMA_VERSION,
@@ -822,11 +965,14 @@ def extract_items(
                 # ADR-0068: the suggestions are valid only for the text the model read; a
                 # re-extraction installed meanwhile makes them stale — write nothing, the next run
                 # extracts the new text.
-                # ADR-0066 part 3: likewise the prompt title (an Enrich run may change it meanwhile).
+                # ADR-0066 part 3: likewise the prompt title and the merge input (an Enrich run may
+                # change either meanwhile).
                 if ((md_path.read_text(encoding="utf-8") if md_path.exists() else "") != md
                         or titles.prompt_title_for(
+                            manifest, md, enrichment_dir=enrichment_dir, logs_dir=logs_dir) != title
+                        or merge_input(titles.enrich_tags_for(
                             manifest, md, enrichment_dir=enrichment_dir,
-                            logs_dir=markdown_dir.parent / "extraction_logs") != title):
+                            logs_dir=logs_dir)) != plan_input):
                     input_changed_sources.append(sid)
                     continue
                 try:
@@ -839,12 +985,14 @@ def extract_items(
                 vocab = _resolution_index(gconn, wiki_dir)
                 plan = plan_suggestions(
                     result["items"], md=md, gconn=gconn, vocab=vocab, rejected_pairs=rejected_pairs,
-                    dropped=dropped, blocked_keys=blocked_keys, kept_ids=kept_ids, cap=cap)
+                    dropped=dropped, blocked_keys=blocked_keys, kept_ids=kept_ids, cap=cap,
+                    enrich_tags=enrich_tags)
                 busy = tag_links.source_in_flight(
                     gconn, reviews_dir, sid,
                     [n for e in plan["emit"] for n in [e["node_id"], *(e.get("ambiguous_with") or [])]]
                     + [node_id(str(it.get("name") or "")) for it in result["items"][:_MAX_ITEMS]
-                       if isinstance(it, dict)])
+                       if isinstance(it, dict)]
+                    + [node_id(t["name"]) for t in enrich_tags])
                 if busy is not None:                          # nothing written for this document
                     in_flight_sources.append({"source_id": sid, "review_id": busy})
                     continue
@@ -854,8 +1002,11 @@ def extract_items(
                 # The journal record keeps every tag this commit may retire — the document's current
                 # ones, unioned with any an interrupted attempt saved — so superseding the mentions
                 # below can't lose them (the record goes only after the artifact).
+                # The record's fingerprint is the raw list this commit plans from (slice 2): a
+                # resumed commit replays the stored list only when it is that list.
                 rec = journal.begin(root, _PRODUCER, sid,
-                                    items=graph.item_ids_for_source(gconn, sid), now=now)
+                                    items=graph.item_ids_for_source(gconn, sid),
+                                    fingerprint=_raw_hash(result["items"]), now=now)
                 intent = run.intent(sources=[sid], items=rec["items"])
                 texts, touched = {}, set()
                 # Parse succeeded: retire the old mentions immediately before emitting replacements
@@ -880,7 +1031,10 @@ def extract_items(
                 _write_artifact(apath, sid, fingerprint, source_nodes, run_ref, now,
                                 strategy_ref, coverage, plan["filtered"],
                                 reference_cut_at=plan["reference_cut_at"], cap=cap,
-                                prompt_input=title)
+                                prompt_input=title, raw_items=result["items"],
+                                merge_input=plan_input)
+                if replay is not None:
+                    replanned_sources.append(sid)
                 # Other Source pages that list these tags are refreshed once, at the end.
                 run.publish(intent, sources=[sid], later_items=touched | affected)
                 journal.finish(root, _PRODUCER, sid)
@@ -900,10 +1054,15 @@ def extract_items(
         # A document this run attempted whose commit is still unfinished is never a clean success.
         left_attempted = sorted(set(left) & attempted)
 
-        if errors or cache_miss_sources or in_flight_sources or left_attempted:
+        if errors or cache_miss_sources or in_flight_sources or left_attempted or replan_unavailable:
             status = "partial"
-        elif not has_key and not cache_only and considered > 0:
+        elif not has_key and not cache_only and considered > 0 and not replanned_sources:
+            # Derived from the work done (slice 2 review round 1): a provider-free run that re-planned
+            # documents from their stored output did write, so it isn't "skipped" (and its
+            # publication outcome still turns into saved_publication_pending below).
             status = "skipped"
+        elif skipped_no_key and replanned_sources:
+            status = "partial"                     # some documents still wait for a provider
         else:
             status = "succeeded"
         status = publication.job_status(status, pub)
@@ -945,6 +1104,10 @@ def extract_items(
             # next run that reaches them), and the ones finished here from authority.
             "unfinished_commits": sorted(left), "journal_reconciled": journal_reconciled,
             "input_changed_sources": input_changed_sources,
+            # ADR-0066 part 3 slice 2: re-planned from the stored model output (no model call), and
+            # documents whose plan changed but which have no stored raw list (regenerate them).
+            "replanned_sources": replanned_sources,
+            "replan_unavailable_sources": replan_unavailable,
             "index_rebuilt": bool(pub and pub["index_rebuilt"]),
             "keyword_reindexed": bool(pub and pub["keyword_reindexed"]),
             "publication": publication.summary(pub), "extracted_at": now,
@@ -968,15 +1131,39 @@ def _has_page(wiki_dir: Path, gconn, nid: str) -> bool:
     return node is None or (Path(wiki_dir) / NODE_DIR["item"] / f"{node['slug']}.md").exists()
 
 
+def _raw_hash(raw: list[Any]) -> str:
+    """A stable hash of a raw items list (the producer journal's fingerprint for an items commit)."""
+    return hashlib.sha256(json.dumps(raw, ensure_ascii=False, sort_keys=True)
+                          .encode("utf-8")).hexdigest()[:16]
+
+
+def _valid_raw(raw: Any) -> bool:
+    """A stored raw items list (slice 2 Q1): present and of the validated response shape. A valid
+    empty list is a real answer; a missing or malformed one is not."""
+    from app.llm import schema as schema_mod
+    if not isinstance(raw, list):
+        return False
+    try:
+        schema_mod.validate({"items": raw}, prompts.ITEMS_SCHEMA)
+    except Exception:  # noqa: BLE001 - any shape error means "not reusable"
+        return False
+    return True
+
+
 def _write_artifact(apath, sid, fingerprint, source_nodes, model_ref, now,
                     strategy_ref=None, coverage="full", filtered=None, *, reference_cut_at=None,
-                    cap=None, prompt_input=None):
+                    cap=None, prompt_input=None, raw_items=None, merge_input=None):
     apath.parent.mkdir(parents=True, exist_ok=True)
     apath.write_text(json.dumps({
         "source_id": sid, "schema_version": art.ITEMS_SCHEMA_VERSION,
         "prompt_version": art.ITEMS_PROMPT_VERSION, "model_ref": model_ref,
         "strategy_ref": strategy_ref,
         "prompt_input": prompt_input,              # the prompt title (ADR-0066 part 3)
+        # Slice 2 Q1: the model's validated list before any merge, cap or human decision, so a
+        # plan-only change (the Enrich tags, the merge rules) re-plans with no model call.
+        "raw_items": raw_items,
+        "merge_input": merge_input,
+        "merge_version": MERGE_VERSION,
         # ADR-0056 honesty marker: "truncated" when the document exceeded the input cap, so
         # "document-complete" stays auditable (a future lint can consume this).
         "coverage": coverage,

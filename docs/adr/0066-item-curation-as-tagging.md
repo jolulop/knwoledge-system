@@ -15,8 +15,8 @@
   2026-10-28** (see "Part 3 — implementation decisions") and fitted onto ADR-0068 by **implementation
   grill 2** (2026-10-29: suggestions in the Enrich artifact, Authors pages in publication's index
   step, name identity and filenames, the Details save model, four slices). **Slice 1 implemented
-  2026-10-29**; **slice 2 design-locked by its grill 2026-10-29** (plan freshness and the stored raw
-  list, the both-lists match, `keywords:`). Item
+  2026-10-29**; **slice 2 design-locked by its grill and implemented 2026-10-29** (plan freshness and
+  the stored raw list, the both-lists match, `keywords:`). Item
   consolidation Part B ("Slice A" of the post-UAT-r6 plan); follows ADR-0064 (Part A). **Review
   round 1 applied 2026-10-24** (see the section at the end): durable keep ledger, merge/split and
   unused-status rules, ambiguous-match path, sentinel gate, confirmed-vs-suggested metadata, the
@@ -843,6 +843,75 @@ would have removed the Enrich tag names from search.
 - An Enrich-origin suggestion is navigation, not a factual claim: like any suggestion it carries
   an evidence anchor only when its name is mechanically locatable (CLAUDE.md rule 3 does not
   apply, part 3 Q3).
+
+## Implementation — part 3 slice 2 (2026-10-29): Enrich tags into the suggestions
+
+- **The merge** (`items._merge_enrich`, step 0 of `plan_suggestions`): items candidates are built
+  first (the `_MAX_ITEMS` raw cap, name cleaning and the P4 body-alias check apply to the items
+  list alone); each Enrich tag then merges into the first candidate whose name key or body-checked
+  alias key equals its `tag_key` (items name, type and aliases; `origin: both`; the Enrich form's
+  key and id kept as `extra_keys` / `extra_ids`), or becomes its own head entry (`origin:
+  enrich`). Matched candidates leave the tail; later Enrich forms for the same candidate only add
+  their key. Resolution then runs per entry as before; drop and block checks see every
+  contributing key and id; entries collapsing onto one tag union their origins; domains-first
+  moves only the items tail. Emitted rows and the artifact's `nodes` carry `origin`.
+- **Plan freshness** (`items.merge_input`, `MERGE_VERSION = "enrich-merge-v1"`): the merge input
+  is a hash of the fresh Enrich artifact's ordered `{name, item_type}` tags
+  (`titles.enrich_tags_for`, `[]` when absent or stale). The items artifact stores `raw_items`
+  (the validated model list), `merge_input` and `merge_version`. A model-fresh document whose
+  plan differs re-plans from `raw_items` (`replanned_sources`), with no provider and no cache; one
+  without a valid raw list is reported (`replan_unavailable_sources`, status `partial`,
+  `scripts/extract_items.py` prints the `--cache-only` / `--force` remedy and exits 1) and left
+  untouched. The commit rechecks the merge input under the lock with the text and title.
+- **Interrupted commits** (an implementation choice, flagged for review): an items commit's
+  producer-journal record now carries `fingerprint` = a hash of the raw list it plans from
+  (`_raw_hash`). A resumed commit replays the stored `raw_items` only when the record's
+  fingerprint equals their hash, i.e. the interrupted attempt was committing exactly that list (a
+  re-plan, or a model run that returned the same output). An interrupted forced re-extraction,
+  whose newer output was never stored, goes back to the model (or the response cache) as before:
+  replaying the older list would have revived the tag it was retiring (caught by
+  `test_an_interrupted_re_extraction_with_fewer_tags_retires_the_lost_one`). A repaired journal
+  (no fingerprint) never replays.
+- **`keywords:`** (`wiki._keywords`, `templates/source.md`): the kept tags (projection order)
+  then the current suggestions in the items artifact's plan order, hidden tags left out,
+  de-duplicated by name; the free-text `tags:` and its Enrich-tag rendering are gone.
+  `keyword_index._search_terms` reads a Source page's `keywords` whenever present (even empty),
+  else its legacy `tags`; other page types are unchanged.
+- **Enrich tag names** are now also stripped of wikilink syntax and brackets when stored
+  (`titles.clean_tag_name`), since they become tag page titles.
+- **Tests:** `tests/test_enrich_tags.py` (21) covers every test the grill required (acronym
+  matching, a rejected alias, several Enrich forms on one item, several items for one Enrich tag,
+  drops and blocks under the Enrich form, the ordering rules, the raw and combined caps, origin
+  union; re-plans with no cache and an adapter that fails if called with keeps, drops and blocks
+  surviving, tags removed and reordered, a stale Enrich artifact as empty input, a legacy and a
+  malformed raw list, a merge-version change, a merge-input change during the call, an
+  interrupted re-plan replayed; `keywords:` contents, a keyword-only search hit, a dropped name
+  leaving search, the index's fallback rules). Three existing tests moved to the new contract
+  (`origin` in artifact rows; Enrich tags in the artifact rather than `tags:`).
+- **Verification:** 1799 passed + 2 skipped; ruff clean. 21 mutation checks, all caught.
+- **Review round 1 on slice 2 (1 P1, 2 P2, fixed; the journal raw-list hash accepted):**
+  1. *The merge could bypass governance:* hidden/retired/redirected outcomes were checked only for
+     the items name, so a hidden "LLM" merged into "Large Language Model" (alias LLM) surfaced as
+     `origin: both`, and two tags whose merge was rejected collapsed into one suggestion. Now
+     every entry is resolved first (`_resolve`, the former inline step), and `_may_merge` allows a
+     merge only when the Enrich form names no hidden/retired/ambiguous tag, either names no live
+     or decided tag (`new`, or an unreviewed candidate) or resolves to the candidate's own target,
+     and the two targets are not a rejected merge pair. Otherwise the form stays its own entry,
+     resolved and filtered on its own. Tests: hidden and retired forms (filtered alone, the items
+     suggestion `origin: items`), a redirected form (follows its merge), a rejected pair of active
+     tags, and a rejected pair where the form is only a candidate node.
+  2. *A provider-free re-plan reported `skipped`:* the status now follows the work done:
+     `skipped` only when nothing was re-planned; `partial` when some documents still wait for a
+     provider; otherwise `succeeded`, so `publication.job_status` can still turn a failed refresh
+     into `saved_publication_pending`. Tests: an unavailable adapter with no cache re-plans to
+     `succeeded`, and to `saved_publication_pending` when the end refresh fails; an offline run
+     with nothing to re-plan stays `skipped`.
+  3. *The printed recovery did not recover:* a `--cache-only` run now recovers an artifact
+     without a stored raw list by replaying the cached response (a miss is reported as a cache
+     miss); the script prints exactly `uv run python scripts/extract_items.py --cache-only <sid>`
+     (`RECOVER_COMMAND`). Test: the printed command, run as printed, restores the raw list.
+  6 mutation checks on these fixes, all caught (the rejected-pair one after the candidate-node
+  test). `tests/test_enrich_tags.py` now has 29 tests. Gate: 1807 passed + 2 skipped.
 
 ## Consequences
 

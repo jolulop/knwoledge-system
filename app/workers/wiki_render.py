@@ -282,6 +282,7 @@ def build_source_values(
     suggested_items: list[dict[str, Any]] | None = None,
     raw_url: str | None = None,
     title: str | None = None,
+    keywords: list[str] | None = None,
 ) -> dict[str, Any]:
     sid = manifest["source_id"]
     # ADR-0066 part 3: the caller passes the effective title (app/workers/titles.py).
@@ -300,12 +301,6 @@ def build_source_values(
         generation_status = "enriched"
         summary_label = "Generated summary (unverified)"
         summary_text = _delink(_WS.sub(" ", str(enrichment.get("summary", "")).strip())) or "(no summary)"
-        # ADR-0066 part 3: Enrich tags are typed {name, item_type} (slice 2 moves them into the
-        # tag suggestions and drops this free-text list).
-        tags = _render_tag_list([t["name"] if isinstance(t, dict) else t
-                                 for t in enrichment.get("tags") or []
-                                 if isinstance(t, (dict, str)) and (not isinstance(t, dict)
-                                                                    or t.get("name"))])
     else:
         summary_status = "stub"
         generation_status = "deterministic"
@@ -316,7 +311,6 @@ def build_source_values(
             normalized_markdown, title, page_count, chunk_count,
             max_chars=summary_max, min_chars=summary_min,
         ))
-        tags = "[]"
 
     return {
         "source_id": sid,
@@ -339,7 +333,9 @@ def build_source_values(
         "generation_status": generation_status,
         "summary_label": summary_label,
         "summary_text": summary_text,
-        "tags": tags,
+        # ADR-0066 part 3 slice 2: search terms (the kept tags plus the eligible suggestions, from
+        # the graph projection), an ordinary property, never Obsidian tags; it replaced `tags:`.
+        "keywords": _render_tag_list(list(keywords or [])),
         "details_block": _details_block(manifest, raw_url),
         "claims_block": _claims_block(claims),
         "items_block": _items_block(items) + _suggested_block(suggested_items),
@@ -788,6 +784,7 @@ def render_source_page(
     suggested_items: list[dict[str, Any]] | None = None,
     raw_url: str | None = None,
     title: str | None = None,
+    keywords: list[str] | None = None,
 ) -> str:
     """Render a Source page, stamping its input_fingerprint.
 
@@ -801,7 +798,7 @@ def render_source_page(
     values = build_source_values(
         manifest, normalized_markdown, summary_max=summary_max, summary_min=summary_min,
         enrichment=enrichment, claims=claims, items=items, suggested_items=suggested_items,
-        raw_url=raw_url, title=title,
+        raw_url=raw_url, title=title, keywords=keywords,
     )
     draft = render_template(template, {**values, "input_fingerprint": ""})
     fingerprint = _fingerprint(_FP_LINE.sub("", draft))

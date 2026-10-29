@@ -17,7 +17,7 @@ generation_status: {{generation_status}}
 created: "{{created_at}}"
 ingested: "{{ingested_at}}"
 input_fingerprint: "{{input_fingerprint}}"
-tags: {{tags}}
+keywords: {{keywords}}
 items: {{items_fm}}
 ---
 

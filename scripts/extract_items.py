@@ -45,6 +45,11 @@ from app.llm.client import build_client
 from app.workers import items, publication
 
 
+# The exact recovery printed for an artifact without stored model output (slice 2): a cache-only
+# run replays the stored response, with no provider call.
+RECOVER_COMMAND = "uv run python scripts/extract_items.py --cache-only {sid}"
+
+
 def main(argv: list[str]) -> int:
     force = "--force" in argv
     cache_only = "--cache-only" in argv
@@ -105,6 +110,12 @@ def main(argv: list[str]) -> int:
     for row in summary["in_flight_sources"]:
         print(f"  skipped {row['source_id']}: merge/split {row['review_id']} is unfinished — "
               "run /reviews/apply, then re-run this")
+    if summary["replanned_sources"]:
+        print(f"Re-planned from stored model output (no model call): "
+              f"{len(summary['replanned_sources'])}")
+    for sid in summary["replan_unavailable_sources"]:
+        print(f"  {sid}: its suggestions need re-planning but its artifact has no stored model "
+              f"output — recover it with: {RECOVER_COMMAND.format(sid=sid)}")
     print(f"Errors: {summary['errors']}")
     for err in summary["error_details"]:
         print(f"  - {err['source_id']}: {err['error']}")
@@ -127,6 +138,7 @@ def main(argv: list[str]) -> int:
     published = (summary["publication"] or {}).get("status") != publication.PENDING
     published = published and not summary["unfinished_commits"]
     return 0 if (not summary["errors"] and not summary["cache_misses"] and not summary["in_flight_sources"]
+                 and not summary["replan_unavailable_sources"]
                  and all(rc == 0 for rc in rcs) and published) else 1
 
 

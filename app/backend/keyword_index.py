@@ -266,9 +266,19 @@ def navigation_row(path: Path, root: Path) -> tuple | None:
         "1" if answer_eligible else "0",
         _page_title(path, fm, text),
         _as_terms(fm.get("aliases", [])),
-        _as_terms(fm.get("tags", [])),
+        _as_terms(_search_terms(page_type, fm)),
         extract_summary(text),
     )
+
+
+def _search_terms(page_type: str, fm: dict[str, Any]) -> Any:
+    """The terms indexed in the tags column. A Source page's `keywords:` (ADR-0066 part 3 slice 2)
+    wins whenever the property exists, even when empty, so an intentional empty list never revives
+    old terms; a Source page rendered before it falls back to its legacy `tags:`. Other page types
+    keep `tags`."""
+    if page_type == "source" and "keywords" in fm:
+        return fm.get("keywords") or []
+    return fm.get("tags", [])
 
 
 # --------------------------------------------------------------------------- connection / schema
