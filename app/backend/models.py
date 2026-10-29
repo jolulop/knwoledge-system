@@ -477,13 +477,15 @@ class FailedValidator(BaseModel):
 
 
 class ReindexResponse(BaseModel):
-    # POST /jobs/reindex (Phase 7, ADR-0036). Index + keyword only (never vector). status "failed" means
-    # a sub-step (rebuild_index script non-zero, or keyword reindex error) failed — not a silent success.
+    # POST /jobs/reindex (Phase 7, ADR-0036). Index + keyword only (never vector). ADR-0068: it is a
+    # publication, so it also retries pending work; status "saved_publication_pending" means a step
+    # (rebuild_index script non-zero, keyword reindex error, a pending page) is still queued.
     job_id: str
-    status: str  # succeeded | failed
+    status: str  # succeeded | saved_publication_pending
     index_rebuilt: bool
     keyword_reindexed: bool
     warnings: list[str] = []
+    publication: dict[str, Any] | None = None
 
 
 class LintValidator(BaseModel):

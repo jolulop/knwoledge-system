@@ -30,6 +30,7 @@ _NAME = re.compile(r"[a-z][a-z0-9_]*")
 _held = threading.local()
 EXIT_BUSY = 3                                             # a script's exit code when refused
 EXIT_QUEUE_CORRUPT = 4                                    # ... when the publication queue is damaged
+EXIT_JOURNAL_CORRUPT = 5                                  # ... when the producer journal is damaged
 
 
 class ProducerBusy(RuntimeError):
@@ -80,8 +81,9 @@ def run_cli(db_dir: Path, producer: str, main: Callable[[], int]) -> int:
     """A producer script's `__main__`: run `main()` under the guard; refuse with exit code
     :data:`EXIT_BUSY` and a one-line message when another run holds it, and with
     :data:`EXIT_QUEUE_CORRUPT` when a commit was refused because the publication queue is damaged
-    (ADR-0068 decision 4)."""
-    from app.backend import publication_queue
+    (ADR-0068 decision 4), and with :data:`EXIT_JOURNAL_CORRUPT` when a claims, items or synthesis
+    run refused because the producer journal is damaged."""
+    from app.backend import producer_journal, publication_queue
     try:
         with guard(db_dir, producer):
             return main()
@@ -91,3 +93,6 @@ def run_cli(db_dir: Path, producer: str, main: Callable[[], int]) -> int:
     except publication_queue.QueueCorrupt as exc:
         print(f"Refused: {exc}.", file=sys.stderr)
         return EXIT_QUEUE_CORRUPT
+    except producer_journal.JournalCorrupt as exc:
+        print(f"Refused: {exc}.", file=sys.stderr)
+        return EXIT_JOURNAL_CORRUPT

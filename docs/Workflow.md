@@ -55,8 +55,8 @@ Two halves: a **deterministic** half (free, no API key) and a **semantic** half 
 |---|---|---|
 | Intake | `scan_inbox.py` | `raw/inbox/` → content-hashed manifests (skips dupes + saved-page assets) |
 | Extract | `extract_sources.py` | PDF/DOCX/HTML/… → `normalized/` Markdown + chunks (needs `uv sync --extra extraction`) |
-| Wiki | `generate_wiki.py` | One **Source page** per document (mechanical facts only; semantic sections are placeholders) |
-| Indexes | `reindex_keyword.py`, `rebuild_index.py` | keyword search index + `wiki/index.md` |
+| Wiki | `generate_wiki.py` | One **Source page** per document (mechanical facts only; semantic sections are placeholders). Extraction already publishes each page; this re-renders them all (`--force`). |
+| Indexes | `reindex_keyword.py`, `rebuild_index.py` | keyword search index + `wiki/index.md`. Every producer refreshes both at the end of its run (ADR-0068); these are manual repairs. |
 
 After this you can already browse **Source pages** in Obsidian. No review items exist yet.
 
@@ -143,11 +143,9 @@ the cron recipe, the manual answer-quality smoke, and the raw-backup note.
 # add documents
 cp <files> raw/inbox/
 
-# build (deterministic, free)
+# build (deterministic, free) — extraction publishes each Source page, wiki/index.md and search
 uv run python scripts/scan_inbox.py
 uv run python scripts/extract_sources.py
-uv run python scripts/generate_wiki.py
-uv run python scripts/reindex_keyword.py && uv run python scripts/rebuild_index.py
 
 # enrich (LLM, billable) — fills semantics + files review items
 uv run python scripts/enrich.py
@@ -156,8 +154,8 @@ uv run python scripts/extract_items.py
 uv run python scripts/promote.py
 uv run python scripts/detect_contradictions.py
 uv run python scripts/generate_synthesis.py
-# producers rebuild wiki/index.md but NOT the keyword index — refresh so new pages reach /search
-uv run python scripts/reindex_keyword.py && uv run python scripts/rebuild_index.py
+# each producer publishes its pages, wiki/index.md and search before it reports success (ADR-0068);
+# one that prints "publication incomplete" left work queued: uv run python scripts/republish.py
 uv run python scripts/validate_all.py
 
 # serve + review

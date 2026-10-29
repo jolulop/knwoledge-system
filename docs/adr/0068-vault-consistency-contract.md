@@ -3,8 +3,9 @@
 - **Status:** accepted — design-locked by grill-phase 2026-10-28. **Slice 1 (decisions 2–3: write
   lock, run guards, commit phases) implemented 2026-10-28** (see "Implementation — slice 1").
   **Slice 2 (decision 4: the publication function and pending queue, for screen actions and
-  Apply) implemented 2026-10-29** (see "Implementation — slice 2"). Slices 3–4 (producer
-  publication + keyword refresh, previews + token) not yet.
+  Apply) implemented 2026-10-29** (see "Implementation — slice 2"). **Slice 3 (decision 5:
+  producers publish per document and refresh search once per run) implemented 2026-10-29** (see
+  "Implementation — slice 3"). Slice 4 (previews + token) not yet.
 - **Date:** 2026-10-28
 - **Drivers:** an external architecture review after ADR-0066 part 3's grill. It found three
   blocking issues and four non-blocking ones; the user answered four framing questions and five
@@ -61,7 +62,8 @@ A page can hold both durable fields and generated sections. Authority is declare
 - **Where else authority lives** is unchanged: `raw/` and `raw/manifests/` (including `status` and
   `provenance`), `reviews/` (review items, tag ledgers, audit log, journals), `policies/`,
   `db/graph.sqlite` (relationships and their status) and `db/llm_cache.sqlite`. This ADR adds
-  `db/publication_pending.json` and the revision record (decisions 4 and 5).
+  `db/publication_pending.json`, the revision record (decisions 4 and 5) and the producer commit
+  journal `db/producer_journal.json` (slice 3).
 - **Backup** already covers all of it (`wiki/`, `reviews/`, `policies/`, `raw/manifests/` and all
   of `db/`).
 - **Moving the durable fields out of the pages** (making the whole wiki disposable) was considered
@@ -387,9 +389,8 @@ Static review found four issues and one test gap; the user chose the structural 
   3 busy, 4 unreadable queue).
 - **`scripts/validate_publication.py`:** read-only, auto-wired into `validate_all`. It fails while
   any entry is pending or the queue is unreadable.
-- **Not yet (slice 3):** the producers (`generate_wiki`, extraction, claims, items, enrich, the
-  reindex job) still refresh on their own and record no intent. Apply's claim and synthesis
-  re-renders stay in its executors. Only an interrupted Apply's full entry publishes those pages.
+- **Producers** joined in slice 3 (below). Apply's claim and synthesis re-renders stay in its
+  executors; only an interrupted Apply's full entry publishes those pages.
 - **Tests:** `tests/test_publication.py` (15) covers:
   - the queue's fail-closed reads (3 corruptions) and intent under the lock;
   - acceptance test 4: a keep publishes the Source page and leaves search consistent;
@@ -427,6 +428,208 @@ Static review found four issues and one test gap; the user chose the structural 
   Fifteen existing tests moved to the new seams or statuses. 30 mutation checks were run, and
   every new rule is caught. A full republish of a copy of the UAT vault (12 documents, 151 tags,
   979 claims) reported `published` and changed no page except `log.md`.
+
+## Implementation — slice 3 (2026-10-29)
+
+- **`publication.Run`**, one bulk job's publication (decision 5). For each document, under the
+  write lock: `intent()` before the first write, the commit, then `publish()`, which publishes
+  **that document's** pages from its own entry only (`publish(own_only=True)` leaves every other
+  entry alone). Model calls for the next document run outside the lock. `finish()` is the end
+  refresh, once per run: everything pending, the Source pages of the tags the run touched
+  (`later_items`, a provisional widening), `index.md` and the keyword index.
+  - **The run's own entry** (origin `run_<producer>`, `publication_queue.extend`) is queued before the
+    first commit and kept queued before each later one. Another publication (a keep made during the
+    run, a Retry) may publish and clear it; the next commit queues it again. So a crash anywhere
+    leaves the end refresh to retry.
+  - **While a run is going** that entry is pending: screens show **Search refresh pending** (not the
+    "publication incomplete" banner) while only run entries are queued, and `validate_publication`
+    fails, naming the run.
+  - **A commit that may change no page** (`intent(refresh=False)`; contradictions and synthesis
+    steps 1–3, a promotion that skips) asks for the end refresh only if its `publish(refresh=…)`
+    says pages changed, so a run with nothing to re-project rebuilds nothing.
+  - `search=False` (`rebuild_index=False`) is a producer called as a step of a caller that owns the
+    refresh (tests, Apply's promotion step): it records and publishes each document but queues no run
+    entry and `finish()` does nothing.
+- **Each producer**:
+  - **extraction** installs the outputs, log and manifest, then publishes the document's Source page
+    in the same commit; the end refresh covers the keyword evidence. That closes the demo-day gap:
+    an extraction no longer leaves search stale.
+  - **`generate_wiki`** (as a run) records each Source page before writing it, which also queues its
+    end refresh again (another publication between documents may have cleared it), and
+    acknowledges the page once written (`Run.done`, so it is not rendered twice). A failed page stays
+    queued, and the end refresh tries it once more. Called by publication itself or Apply it is a
+    step and renders pages only.
+  - **enrich** publishes the document's Source page in the artifact's commit. `scripts/enrich.py
+    --no-compose` is gone: a saved artifact is always published.
+  - **claims** and **items** now write each document's pages **inside its commit**: the graph, then
+    its claim or tag pages (claims also re-render the partners of superseded contradictions), then the
+    artifact **last**, then the Source page. The producer commit journal (below) makes an interrupted
+    commit's document not fresh, so the next run redoes it, and its intent names the document's
+    earlier claims or tags too, so a retry publishes them. The one
+    end-of-run page pass and the scripts' all-sources `generate_wiki` call are removed. Items'
+    empty-document branch now commits under the lock too (it wrote outside it before).
+  - **contradictions**: steps 1–4 (apply decisions, recompute pairs, supersede stale assertions,
+    re-project claim pages) are one commit with a `full` intent (its claims are not known up front).
+    The verdicts after the model calls only file proposals, which no page shows.
+  - **synthesis**: steps 1–3 are one commit with a `full` intent; each written topic records an intent
+    naming its synthesis (its page re-renders from the artifact on retry). A topic's commit now writes
+    the graph, the page, the proposal and the artifact **last**, inside a journal record.
+  - **promotion**: `activate_node` now reports **every** Source page that lists the tag (activation
+    changes their projection), not only on a slug move. Before, a plain approved promotion left those
+    pages stale, standalone and inside Apply alike. A standalone run records an intent per
+    activation and publishes those pages in its commit. As Apply's step it renders none and reports
+    them, and Apply adds them to its one publication call. A failure there is
+    `saved_publication_pending`, and Retry publishes it.
+  - **the reindex job** is now a publication (`publish(index, keyword)`), so it also retries pending
+    work. A failed step is `saved_publication_pending`, not `failed`.
+- **The producer commit journal** (`app/backend/producer_journal.py`, `db/producer_journal.json`;
+  review round, user decisions 2026-10-29). The review found three crash gaps. Superseding a
+  document's relationships removed the links recovery and the rerun followed to its old claims and
+  tags. A forced re-extraction kept its previous, still-matching artifact until the end. A synthesis
+  wrote its artifact before its proposal, so a crash in between looked fresh for good. Publication
+  can't close them: retiring a claim or tag that lost its evidence is producer work.
+  - **Begin before the first write, finish after the last.** Under the write lock, before
+    superseding, claims and items record the document with its current claims or tags; synthesis
+    records the topic with the evidence fingerprint it commits. The record is removed only after
+    the graph, page, proposal and artifact writes, with the rest of publication already queued.
+    Publication retry never reads or clears it.
+  - **Scope survives repeated failures.** A resumed commit unions the saved ids with the document's
+    current ones (`begin`) and re-renders all of them, so a claim or tag the interrupted commit
+    orphaned is retired. A second interruption never shrinks the set to what the first left.
+  - **Never fresh while recorded.** The freshness shortcut skips a recorded subject. A synthesis
+    regeneration can come from the response cache, so it need not call the provider again.
+  - **Visible.** Run summaries carry `unfinished_commits` (synthesis also `unfinished_blocked` and
+    `journal_verified`; claims and items `journal_reconciled`). A run that attempted a recorded
+    subject and left it unfinished is `partial`. The scripts print the subjects and exit 1.
+    `scripts/validate_producer_journal.py` fails while any record exists.
+  - **Human decisions win.** A record bypasses freshness only. Replays still apply drops, blocks,
+    hides and deprecations, as every extraction does, and `--force` still never regenerates a hidden
+    synthesis.
+  - **Verified before cleared.** A synthesis record is first checked for completion, with no model
+    call. Each `begin` gets a new attempt id, and the commit stamps it on the artifact it writes
+    last (`commit_attempt`). A matching stamp means this attempt finished. Files from an earlier
+    complete commit of the same evidence never pass for it (second review round: a forced
+    regeneration interrupted after superseding its edges). Without a match (an older attempt, or a
+    record rebuilt by repair), the whole expected state must hold:
+    - the artifact's fingerprint;
+    - the node, with exactly the topic's active edges;
+    - a page that is exactly the artifact's rendering at the node's status (summary and body
+      both; third review round: a regeneration that kept the summary but rewrote the body left
+      its own page);
+    - the proposal, filed or decided.
+
+    If the commit isn't complete and an approval, a rejection or a hide rules out regenerating it,
+    the topic is **blocked**: it is reported and the record is kept.
+  - **Subjects that can't be redone.** A document that is deleted or no longer extractable is finished
+    from authority: its saved claims or tags are re-rendered (those without evidence retire). The
+    record is cleared only once none of them still stands without evidence and every claim or tag
+    it still has has a page. A claim whose wording was never written keeps it. A topic no longer
+    eligible is done once it never reached the graph or a page, or once step 3 retracted its
+    synthesis (node and page both `deprecated_candidate`).
+  - **Fail closed.** The file is schema-validated, replaced atomically and durably, and backed up
+    with `db/`. An unreadable journal raises `JournalCorrupt`: the three producers refuse (exit 5;
+    503 in the API), and the validator fails. `scripts/repair_producer_journal.py` (holding the three
+    run guards) keeps a copy of the damaged bytes, then rebuilds the records. The lost records can't
+    be told apart, and an interrupted first commit has no artifact yet. So the inventory is
+    conservative and draws on every trace a commit leaves (second review round):
+    - claims and items: every extracted document (manifest), every document with an artifact, and
+      every document the graph links claims or tags to. Each record holds the document's current
+      ids plus those its superseded relationships left without evidence (`graph.orphans`).
+    - synthesis: every active tag, plus every topic with an artifact, a synthesis page or a
+      synthesis node's topic link. Fingerprint and attempt are unknown, so the next run verifies
+      each against the whole expected state, and clears the topics that never reached the graph.
+- **Provisional widening** grows: a provisional entry's documents add the tags they mention and the
+  claims derived from them (then those tags' Source pages). A crash recovery therefore checks what the
+  interrupted commit may have written, and a page it never wrote is reported (`page_missing`, whose
+  hint now also says "rerun the extraction that creates it"), never skipped.
+- **Job results:** every run's summary carries `publication: {status, pending, still_pending}`,
+  `index_rebuilt` and `keyword_reindexed`. `publication.job_status` never reports `succeeded` while
+  publication is pending (`saved_publication_pending`, a new `jobs.sqlite` status). A `partial` run
+  stays `partial`. The scripts print the outcome and the pending pages, and exit 1 while anything is
+  pending.
+- **Docs:** Operations "Pipeline runs publish too"; Workflow, README and the UAT Guide drop the
+  `generate_wiki` / `reindex_keyword` / `rebuild_index` steps after the producers (they stay as manual
+  repairs).
+- **Alias accumulation (user decision, 2026-10-29).** Composing each document's tag pages inside
+  its commit made extraction union **every** document's body-checked aliases into a never-kept
+  candidate. The old end-of-run pass kept only the last document's, so a batch and per-document
+  runs disagreed. The union stays, now compared case-insensitively (`items._accumulate`, used only
+  where extraction's hints are merged):
+  - aliases are compared with `casefold()`; the spelling already stored is kept, and only genuinely
+    new aliases are appended, up to the same limit;
+  - kept tags and human-owned aliases are unchanged. A keep (even one that stopped after its ledger
+    write) still makes extraction add nothing.
+  - the shared `_union` keeps its exact comparison for human alias edits and their stale-form check.
+- **Tests:** `tests/test_producer_publication.py` (17) covers:
+  - extraction publishes Source pages and search before it reports success; a later run's new text
+    is searchable at once;
+  - a run refreshes `index.md` and search once, not per document;
+  - a failed end refresh is `saved_publication_pending` (job row too) and `republish.py` clears it;
+  - a crash mid-run leaves only the end refresh queued, and republish recovers;
+  - items: each document's Source page is published before the next model call, while only the
+    run entry is pending ("Search refresh pending");
+  - acceptance 3 and 5 during a run: a keep made during the model call publishes at once and
+    survives the run's later commit and end refresh;
+  - claims: a crash after the pages and before the artifact is recovered by republish, and the next
+    run redoes the document;
+  - a provisional document intent widens to its tags (a missing page is reported);
+  - `generate_wiki` tries a failed page once more and leaves it pending;
+  - contradiction and synthesis runs end with current pages and search; a standalone promotion
+    publishes every Source page that lists the tag, and inside Apply it publishes nothing itself;
+  - Apply: an approved promotion without a slug change publishes every Source page listing the tag;
+    a failed page is `saved_publication_pending`, and Retry publishes it;
+  - aliases: a batch and per-document runs accumulate the same aliases; `large language model` and
+    `Large Language Model` take one slot; re-extraction leaves a kept tag's aliases unchanged, and an
+    interrupted first keep's too.
+
+  `tests/test_producer_journal.py` (28) covers the journal:
+  - a forced re-extraction with fewer claims, killed right after superseding (its matching artifact
+    intact): retry reports the claims and keeps the record; the next ordinary run redoes the document
+    and retires the lost claim. The same for tags;
+  - two interruptions of the same document keep its original ids;
+  - a run that attempted a recorded document and left it unfinished (its text changed during the
+    model call) is `partial`;
+  - a document no longer extractable finishes its commit from authority;
+  - a drop between the interruption and the replay is respected;
+  - synthesis: a crash after the page and before the proposal is refiled by the next run without
+    `--force`, from the response cache; a fresh artifact with a record (the pre-fix layout) is
+    redone; a commit that finished before clearing its record is verified, with no model call; an
+    approval between the interruption and the replay is never overwritten; a decision that rules out
+    the replay reports the topic blocked;
+  - `generate_wiki`: another publication clears its marker between documents, the next page is
+    written and the process dies: recovery republishes it and search; each page is rendered once;
+  - second review round: a forced regeneration of the same evidence, interrupted after superseding
+    its edges, is never verified by the previous commit's files; an earlier attempt's stamp never
+    verifies a later attempt; a page with unreviewed new prose is never verified; `--force` with a
+    record still leaves a hidden synthesis alone; repair keeps interrupted first commits that have
+    no artifact (claims before any relationship, items, a synthesis after its page) and their next
+    runs finish them; repair finds a document only the graph still points at, and its claims are
+    never cleared while their pages are missing;
+  - a damaged journal refuses the producers until repaired, and the repair over-approximates;
+    invalid files are corrupt, never empty; writes need the lock; `db/` is backed up; the API's 503
+    names the repair;
+  - third review round: a forced regeneration that keeps the summary but rewrites the body, killed
+    after re-filing the proposal and before the artifact, is never verified; a repaired record of a
+    complete synthesis (no stamp) is verified by its exact page, with no model call.
+
+  Existing tests moved to the new contract. Five test builders that extract now copy `templates/`
+  (`tests/fixtures.copy_templates`), as a real vault has, because extraction publishes Source pages.
+  Six tests changed an assertion:
+  - the reindex failure is `saved_publication_pending` (two tests);
+  - a tag page's Source links now carry their titles (the Source pages exist);
+  - the contradiction rebuild count observes the shared rebuild;
+  - `generate-wiki` finds the extraction's page unchanged;
+  - a render-order test sees extraction's own publication render.
+
+  47 mutation checks were run, 27 of them on the journal (the substring check the third round
+  replaced fails the rewritten-body test). Two of the earlier checks needed a sharper
+  test before they were caught. Four journal mutants survive by design:
+  - a fresh attempt id per `begin` (verification always clears a matching record before the next
+    `begin`, so reusing the id has no effect today);
+  - two of the overlapping synthesis repair sources (each topic is also found by another);
+  - the "page without node" case of a retired topic (the node is written before the page). Only
+  extraction's first alias guard (`_emit` gives a live tag no hint aliases) survives on its own:
+  the final guard at the page write re-checks the same cases, so it is defence in depth.
 
 ## Consequences
 

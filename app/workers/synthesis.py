@@ -31,19 +31,18 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import subprocess
-import sys
 import uuid
 from pathlib import Path
 from typing import Any
 
 from app.backend import db, graph, write_lock
+from app.backend import producer_journal as journal
 from app.backend.manifests import get_provenance, independent_sources, iso_now, valid_manifests
 from app.backend.paths import safe_child
 from app.llm import prompts
 from app.llm.client import LLMClient, ParseError
 from app.workers import enrichment_artifact as art
-from app.workers import reviews
+from app.workers import publication, reviews
 from app.workers import labels
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter, render_synthesis_page
 
@@ -62,13 +61,6 @@ def synthesis_id(topic_node_id: str) -> str:
 def _review_subject(topic_node_id: str, fingerprint: str) -> dict[str, str]:
     """Fingerprint-scoped review identity, so each distinct evidence set is re-fileable."""
     return {"topic_node_id": topic_node_id, "fingerprint": fingerprint}
-
-
-def _rebuild_index(root: Path) -> bool:
-    script = root / "scripts" / "rebuild_index.py"
-    if not script.exists():
-        return False
-    return subprocess.run([sys.executable, str(script), str(root)]).returncode == 0
 
 
 def _read_fm_title(page_path: Path) -> str | None:
@@ -90,6 +82,7 @@ def _page_status(synthesis_dir: Path, syn_id: str) -> str | None:
 # `hidden` (ADR-0049 decision 1) and an evidence-derived `evidence_hidden` (a supporting claim is hidden,
 # decision 10). Both are visibility-suppression states the claim fan-out / hide-unhide executors own.
 _PRESERVED_GENERATE_STATUSES = ("hidden", "evidence_hidden")
+_PRODUCER = "generate_synthesis"            # its run guard and journal name
 
 
 def _evidence_hidden(gconn, syn_id: str) -> bool:
@@ -244,17 +237,9 @@ def _artifact_meta(enrichment_dir: Path, topic_node_id: str) -> dict[str, Any]:
         return {}
 
 
-def _render_page(gconn, *, syn_id, topic_node, title, summary, synthesis_text, confidence,
-                 status, review_status, synthesis_dir: Path, now: str) -> bool:
-    """Render a synthesis page (filename = syn_id, for cross-type uniqueness): prose from the
-    caller, claim links + disagreements from the graph, so the projection matches the graph.
-
-    CHANGE-DETECTING (ADR-0049): the page is byte-stable (no wall-clock; freshness in input_fingerprint),
-    so the file is rewritten only when its content differs and the graph node status mirror is upserted only
-    when it differs — a re-render of an already-current synthesis is a true no-op (no page churn / reindex,
-    so the claim fan-out can re-reconcile on every apply without steady-state churn). Returns True iff
-    ANYTHING changed — the page file OR the graph node-status mirror — so the caller still triggers a
-    reindex on a graph-mirror-only repair (e.g. a page-correct / graph-stale partial state)."""
+def _page_content(gconn, *, syn_id, topic_node, title, summary, synthesis_text, confidence,
+                  status, review_status, synthesis_dir: Path) -> str:
+    """The synthesis page for this prose and status: claim links + disagreements from the graph."""
     # ADR-0049: a hidden claim is suppressed from the rendered Supporting Evidence links AND the
     # derived_from frontmatter (both are default-discovery surfaces on a browsable synthesis page, like
     # Source-page Claims / contradiction sections) — uniformly, regardless of the synthesis's own status.
@@ -266,11 +251,27 @@ def _render_page(gconn, *, syn_id, topic_node, title, summary, synthesis_text, c
     # ADR-0060: page-local display labels for the claim links; renderer stays IO-free.
     link_labels = labels.display_labels(
         synthesis_dir.parent, [f"Claims/{cid}" for cid in claim_ids])
-    content = render_synthesis_page({
+    return render_synthesis_page({
         "synthesis_id": syn_id, "title": title, "status": status, "review_status": review_status,
         "confidence": confidence, "topic_node": topic_node, "summary": summary,
         "synthesis_text": synthesis_text, "claim_ids": claim_ids, "disagreements": disagreements,
     }, labels=link_labels)
+
+
+def _render_page(gconn, *, syn_id, topic_node, title, summary, synthesis_text, confidence,
+                 status, review_status, synthesis_dir: Path, now: str) -> bool:
+    """Render a synthesis page (filename = syn_id, for cross-type uniqueness): prose from the
+    caller, claim links + disagreements from the graph, so the projection matches the graph.
+
+    CHANGE-DETECTING (ADR-0049): the page is byte-stable (no wall-clock; freshness in input_fingerprint),
+    so the file is rewritten only when its content differs and the graph node status mirror is upserted only
+    when it differs — a re-render of an already-current synthesis is a true no-op (no page churn / reindex,
+    so the claim fan-out can re-reconcile on every apply without steady-state churn). Returns True iff
+    ANYTHING changed — the page file OR the graph node-status mirror — so the caller still triggers a
+    reindex on a graph-mirror-only repair (e.g. a page-correct / graph-stale partial state)."""
+    content = _page_content(gconn, syn_id=syn_id, topic_node=topic_node, title=title, summary=summary,
+                            synthesis_text=synthesis_text, confidence=confidence, status=status,
+                            review_status=review_status, synthesis_dir=synthesis_dir)
     synthesis_dir.mkdir(parents=True, exist_ok=True)
     page_path = synthesis_dir / f"{syn_id}.md"
     page_changed = (not page_path.exists()) or page_path.read_text(encoding="utf-8") != content
@@ -281,6 +282,57 @@ def _render_page(gconn, *, syn_id, topic_node, title, summary, synthesis_text, c
     if graph_changed:
         graph.upsert_node(gconn, node_id=syn_id, node_type="synthesis", slug=syn_id, status=status, now=now)
     return page_changed or graph_changed
+
+
+def _commit_complete(gconn, *, rec: dict[str, Any], topic: dict[str, Any], syn_id: str,
+                     meta: dict[str, Any], fp: str, synthesis_dir: Path, reviews_dir: Path) -> bool:
+    """Whether the commit a journal record names finished (ADR-0068 producer journal).
+
+    The commit writes the artifact last, stamped with the record's attempt id: a matching stamp
+    means every write of THIS attempt landed. Files from an earlier, complete commit of the same
+    evidence (a forced regeneration interrupted part-way) carry another stamp, so they never pass
+    for it. Without a match (an older attempt, or a record rebuilt by journal repair), the whole
+    expected state for evidence `fp` must hold: the artifact's fingerprint, the node, exactly the
+    topic's active edges, a page that is exactly the artifact's rendering at the node's status,
+    and the proposal (filed, possibly decided since)."""
+    if rec.get("attempt") and meta.get("commit_attempt") == rec["attempt"]:
+        return True
+    tid = topic["node_id"]
+    node = graph.get_node(gconn, syn_id)
+    if meta.get("input_fingerprint") != fp or node is None:
+        return False
+    edges = {(e["edge_type"], e["dst_id"]) for e in graph.outgoing_active(gconn, syn_id)
+             if e["edge_type"] in ("derived_from", "related_to")}
+    if edges != {("derived_from", c["claim_id"]) for c in topic["claims"]} | {("related_to", tid)}:
+        return False
+    page = synthesis_dir / f"{syn_id}.md"
+    text = page.read_text(encoding="utf-8") if page.exists() else ""
+    fm = parse_frontmatter(text) if text else {}
+    if fm.get("status") != node["status"]:
+        return False
+    # The page must be exactly the artifact's rendering (summary AND body), not merely mention its
+    # summary: an interrupted attempt that kept the summary but rewrote the body left its own page.
+    try:
+        expected = _page_content(gconn, syn_id=syn_id, topic_node=tid, title=meta.get("title", tid),
+                                 summary=meta.get("summary", ""), synthesis_text=meta.get("synthesis", ""),
+                                 confidence=meta.get("confidence", "low"), status=node["status"],
+                                 review_status=fm.get("review_status"), synthesis_dir=synthesis_dir)
+    except ValueError:                                   # an unrenderable review_status on the page
+        return False
+    if text != expected:
+        return False
+    rid = reviews.review_id("propose_synthesis", _review_subject(tid, fp))
+    return any((reviews_dir / d / f"{rid}.json").exists() for d in ("pending", "approved", "rejected"))
+
+
+def _retired_or_absent(gconn, *, syn_id: str, synthesis_dir: Path) -> bool:
+    """Whether an ineligible topic's unfinished commit needs nothing more: it never reached the graph
+    or a page, or step 3 retracted its synthesis (node and page both `deprecated_candidate`)."""
+    node = graph.get_node(gconn, syn_id)
+    page_status = _page_status(synthesis_dir, syn_id)
+    if node is None:
+        return not (synthesis_dir / f"{syn_id}.md").exists()
+    return node["status"] == "deprecated_candidate" and page_status == "deprecated_candidate"
 
 
 def _withdraw_stale_pending(reviews_dir: Path, topic_node_id: str, keep_fp: str | None, now: str) -> None:
@@ -603,9 +655,16 @@ def generate_syntheses(
         # (plain split, pre-resolution) drives sticky-to-chain freshness; resolve_run_model validates.
         chain_refs = [c.strip() for c in model_ref.split(",") if c.strip()]
         model_ref, has_key = client.resolve_run_model(model_ref)
-        # ADR-0068: steps 1-3 are deterministic and commit under the write lock in one phase.
+        # ADR-0068: steps 1-3 are deterministic and commit under the write lock in one phase, which
+        # records its intent first (`full`: the syntheses it changes are not known up front).
+        run = publication.Run(root, "generate_synthesis", search=rebuild_index, wiki_dir=wiki_dir)
         retracted = 0
+        # ADR-0068: topics whose commit an earlier run left unfinished (fails closed when damaged).
+        unfinished = journal.pending(root, _PRODUCER)
+        journal_verified: list[str] = []      # unfinished records found complete and cleared
+        blocked: list[str] = []               # ... a human decision keeps from being redone
         with write_lock.hold(reviews_dir):
+            intent = run.intent(full=True, refresh=False)
             # 1. Apply human decisions (deterministic; runs without a key).
             resolution = apply_resolved_syntheses(gconn, reviews_dir, synthesis_dir=synthesis_dir,
                                                   enrichment_dir=enrichment_dir, now=now)
@@ -633,6 +692,17 @@ def generate_syntheses(
                                          enrichment_dir=enrichment_dir,
                                          reason="topic no longer an eligible synthesis subject", now=now)
                     retracted += 1
+            # A topic no longer eligible is never regenerated: its record is done once step 3
+            # retracted the synthesis (or it never reached the graph); a hidden one stays blocked.
+            for tid in sorted(set(unfinished) - eligible_ids):
+                if _retired_or_absent(gconn, syn_id=synthesis_id(tid), synthesis_dir=synthesis_dir):
+                    journal.finish(root, _PRODUCER, tid)
+                    journal_verified.append(tid)
+                    del unfinished[tid]
+                else:
+                    blocked.append(tid)
+            run.publish(intent, refresh=bool(retracted or resolution["promoted"]
+                                             or resolution["rejected"]))
 
         considered = len(topics)
         written = skipped_fresh = skipped_reviewed = stale_active = changed_during_call = 0
@@ -645,16 +715,31 @@ def generate_syntheses(
                 fp = _fingerprint(t, model_ref)   # resolved-model fingerprint (used if we (re)generate)
                 node = graph.get_node(gconn, syn_id)
                 status = node["status"] if node else None
+                meta = _artifact_meta(enrichment_dir, tid)
+                # ADR-0068 producer journal: an unfinished commit whose writes all landed (it stopped
+                # just before clearing its record) is verified and cleared; otherwise it is redone.
+                rec = unfinished.get(tid)
+                if rec is not None and _commit_complete(
+                        gconn, rec=rec, topic=t, syn_id=syn_id, meta=meta,
+                        fp=rec["fingerprint"] or _fingerprint(t, meta.get("model_ref") or model_ref),
+                        synthesis_dir=synthesis_dir, reviews_dir=reviews_dir):
+                    with write_lock.hold(reviews_dir):
+                        journal.finish(root, _PRODUCER, tid)
+                    journal_verified.append(tid)
+                    rec = None
                 # ADR-0049: never regenerate a `hidden`/`evidence_hidden` synthesis (page authority OR graph
                 # mirror) — no LLM call, no node reset. Skip-only; the executor/claim fan-out owns drift.
                 if (status in _PRESERVED_GENERATE_STATUSES
                         or _page_status(synthesis_dir, syn_id) in _PRESERVED_GENERATE_STATUSES):
+                    if rec is not None:
+                        blocked.append(tid)            # a hide wins over replaying the commit
                     continue
                 # ADR-0063 sticky-to-chain: an existing artifact stays fresh while its recorded model is
                 # still a chain member and its own-model fingerprint matches, so an availability flip
                 # alone (heavy tier opted into a local chain) never re-nags or restales a reviewed node.
-                meta = _artifact_meta(enrichment_dir, tid)
-                fresh = art.chain_fresh(meta, chain_refs, lambda m, topic=t: _fingerprint(topic, m))
+                # An unfinished commit is never fresh: the artifact predates it (written last).
+                fresh = rec is None and art.chain_fresh(
+                    meta, chain_refs, lambda m, topic=t: _fingerprint(topic, m))
                 # The review identity keys on the CURRENT evidence's fingerprint. When chain-fresh, the
                 # current evidence is the one the RECORDED model produced, so the rejected/proposal lookup
                 # must use the recorded-model fingerprint — else an availability flip mints a new rid and
@@ -665,6 +750,9 @@ def generate_syntheses(
 
                 # Governance gate (Q1/Q2): never rewrite a reviewed synthesis in the normal pass.
                 if status == "active":
+                    if rec is not None and not force:
+                        blocked.append(tid)            # approved meanwhile: never overwritten
+                        continue
                     if fresh:
                         continue                       # approved & current — done
                     stale_active += 1                  # evidence changed since approval
@@ -672,6 +760,8 @@ def generate_syntheses(
                         continue                       # stays active (Q1); --force re-opens
                 elif rejected_current:
                     skipped_reviewed += 1              # this exact evidence was rejected — no re-nag
+                    if rec is not None:
+                        blocked.append(tid)
                     continue
                 elif status == "candidate" and fresh and not force:
                     skipped_fresh += 1                 # candidate already generated for this evidence
@@ -705,6 +795,8 @@ def generate_syntheses(
                     if (now_status in _PRESERVED_GENERATE_STATUSES
                             or _page_status(synthesis_dir, syn_id) in _PRESERVED_GENERATE_STATUSES
                             or (now_status == "active" and status != "active")):
+                        if rec is not None:
+                            blocked.append(tid)
                         continue
                     # The result is valid only for the evidence the model saw: the topic must still
                     # be eligible with the same claims, wording and anchors (a tag link dropped, a
@@ -720,7 +812,15 @@ def generate_syntheses(
                     if any((reviews_dir / d / f"{fresh_rid}.json").exists()
                            for d in ("approved", "rejected")):
                         skipped_reviewed += 1
+                        if rec is not None:
+                            blocked.append(tid)
                         continue
+                    # The commit writes the node, its edges, the page, the proposal and the artifact
+                    # last. Its journal record (with the evidence fingerprint it commits) keeps the
+                    # topic from looking fresh until all of them landed; a crash inside it also leaves
+                    # this synthesis queued for publication.
+                    topic_intent = run.intent(syntheses=[syn_id])
+                    attempt = journal.begin(root, _PRODUCER, tid, fingerprint=fp, now=now)["attempt"]
                     # Index the node candidate + (re)write grounded edges: supersede prior synthesis
                     # edges, then derived_from -> each contributing claim and related_to -> the topic.
                     graph.upsert_node(gconn, node_id=syn_id, node_type="synthesis", slug=syn_id,
@@ -735,16 +835,6 @@ def generate_syntheses(
                     graph.upsert_assertion(gconn, src_id=syn_id, dst_id=tid, edge_type="related_to",
                                            asserted_by="llm", status="active", job_id=job_id, now=now)
 
-                    apath = art.synthesis_artifact_path(enrichment_dir, tid)
-                    apath.parent.mkdir(parents=True, exist_ok=True)
-                    apath.write_text(json.dumps({
-                        "node_id": syn_id, "topic_node_id": tid, "title": t["title"],
-                        "summary": result["summary"], "synthesis": result["synthesis"],
-                        "confidence": confidence, "input_fingerprint": fp,
-                        "schema_version": art.SYNTHESIS_SCHEMA_VERSION, "model_ref": model_ref,
-                        "generation_status": "enriched", "generated_at": now,
-                    }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
                     _render_page(gconn, syn_id=syn_id, topic_node=tid, title=t["title"],
                                  summary=result["summary"], synthesis_text=result["synthesis"],
                                  confidence=confidence, status="candidate", review_status="pending",
@@ -757,17 +847,32 @@ def generate_syntheses(
                                   "claim_ids": [c["claim_id"] for c in t["claims"]],
                                   "summary": result["summary"]},
                         context={"node_type": t["node_type"]}, priority="medium", now=now)
+                    apath = art.synthesis_artifact_path(enrichment_dir, tid)
+                    apath.parent.mkdir(parents=True, exist_ok=True)
+                    apath.write_text(json.dumps({
+                        "node_id": syn_id, "topic_node_id": tid, "title": t["title"],
+                        "summary": result["summary"], "synthesis": result["synthesis"],
+                        "confidence": confidence, "input_fingerprint": fp,
+                        "schema_version": art.SYNTHESIS_SCHEMA_VERSION, "model_ref": model_ref,
+                        "generation_status": "enriched", "generated_at": now,
+                        "commit_attempt": attempt,       # the journal attempt this commit finished
+                    }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                    run.publish(topic_intent)             # the page was rendered above
+                    journal.finish(root, _PRODUCER, tid)
                     written += 1
 
-        changed = written or retracted or resolution["promoted"] or resolution["rejected"]
-        index_rebuilt = _rebuild_index(root) if (rebuild_index and changed) else False
+        pub = run.finish()                    # index.md + the keyword index, once (decision 5)
+        left = journal.pending(root, _PRODUCER)
+        # A topic this run attempted whose commit is still unfinished is never a clean success.
+        left_attempted = sorted(set(left) & {t["node_id"] for t in topics}) if has_key else []
 
-        if errors:
+        if errors or left_attempted:
             status = "partial"
         elif not has_key and considered > 0:
             status = "skipped"
         else:
             status = "succeeded"
+        status = publication.job_status(status, pub)
 
         summary: dict[str, Any] = {
             "job_id": job_id, "model_ref": model_ref, "status": status,
@@ -777,8 +882,14 @@ def generate_syntheses(
             "stale_active": stale_active, "retracted": retracted,
             "promoted": resolution["promoted"], "rejected": resolution["rejected"],
             "manifests_skipped_invalid": len(_skipped_invalid),
-            "index_rebuilt": index_rebuilt, "errors": len(errors), "error_details": errors,
-            "generated_at": now,
+            "index_rebuilt": bool(pub and pub["index_rebuilt"]),
+            "keyword_reindexed": bool(pub and pub["keyword_reindexed"]),
+            "publication": publication.summary(pub),
+            # ADR-0068 producer journal: topics whose commit is still unfinished, those a human
+            # decision keeps from being redone, and the ones verified complete and cleared.
+            "unfinished_commits": sorted(left), "unfinished_blocked": sorted(set(blocked)),
+            "journal_verified": journal_verified,
+            "errors": len(errors), "error_details": errors, "generated_at": now,
         }
         if conn is not None:
             db.update_job(conn, job_id, status=status, finished_at=iso_now(), metadata=summary)

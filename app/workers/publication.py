@@ -55,7 +55,8 @@ _CANONICAL = {"claims": re.compile(r"clm_[0-9a-f]{16}"), "syntheses": re.compile
 # Why a page stays pending, in the words a screen or script shows (the reason codes are in results).
 REASON_HINTS = {
     "page_missing": "the page is missing or unreadable; restore the page from backup (its title and "
-                    "description live only on the page, so publishing never recreates it)",
+                    "description live only on the page, so publishing never recreates it), or rerun "
+                    "the extraction that creates it if a run stopped before writing it",
     "node_missing": "the graph has no such tag and nothing records its deletion",
     "deletion_unfinished": "a deletion started and did not finish; run "
                            "`scripts/rebuild_tag_links.py --apply`",
@@ -148,7 +149,12 @@ def _scope(entry: dict[str, Any], gconn, wiki_dir: Path, extracted: set[str]) ->
                                       ("items", "item")):
                 scope[family] |= {n["node_id"] for n in graph.nodes_of_type(gconn, node_type)}
     if entry["provisional"] and gconn is not None:
-        for nid in entry["items"]:
+        for sid in entry["sources"]:              # the tags and claims its documents name
+            scope["items"] |= {r["dst_id"] for r in gconn.execute(
+                "SELECT DISTINCT dst_id FROM edges WHERE src_id = ? AND edge_type = 'mentions' "
+                "AND status = 'active'", (sid,))}
+            scope["claims"] |= set(graph.claims_for_source(gconn, sid))
+        for nid in scope["items"]:
             scope["sources"] |= set(graph.sources_for_node(gconn, nid))
     return scope
 
@@ -260,13 +266,17 @@ def _render_sources(root: Path, sids: list[str], *, documents: tuple[set[str], s
 
 def publish(root: Path, *, intent: str | None = None, sources: Any = (), items: Any = (),
             claims: Any = (), syntheses: Any = (), index: bool = False, keyword: bool = False,
-            full: bool = False, origin: str = "action", wiki_dir: Path | None = None,
+            full: bool = False, provisional: bool = False, own_only: bool = False,
+            origin: str = "action", wiki_dir: Path | None = None,
             templates_dir: Path | None = None, now: str | None = None) -> dict[str, Any]:
     """Publish the pending entries plus the current work; return the outcome.
 
     `intent` is the entry this writer recorded before its commit: its scope is replaced by the exact
-    work given here (`claims`, `syntheses`, `items`, `sources`, `index`, `keyword`, `full`). Without
-    one, the work is published directly, and queued only if a step fails. The result:
+    work given here (`claims`, `syntheses`, `items`, `sources`, `index`, `keyword`, `full`;
+    `provisional` widens it from authority like a recorded intent). Without one, the work is
+    published directly, and queued only if a step fails. `own_only` publishes this writer's entry
+    alone and leaves every other entry as it is: a bulk job's per-document step (:class:`Run`), whose
+    end refresh then publishes everything once. The result:
     `{"status": "published"|"saved_publication_pending", "pending": <outstanding>|None, "warnings",
     "failed": {family: {id: reason}}, "index_rebuilt", "keyword_reindexed", "sources_rendered",
     "sources_failed", "items_failed"}`. Warnings keep the names screens already show
@@ -278,9 +288,13 @@ def publish(root: Path, *, intent: str | None = None, sources: Any = (), items: 
     now = now or iso_now()
     with write_lock.hold(root / "reviews"):
         entries = queue.load(root)
+        others: list[dict[str, Any]] = []
+        if own_only:
+            others = [e for e in entries if e["id"] != intent]
+            entries = [e for e in entries if e["id"] == intent]
         work = queue.make_entry(origin=origin, sources=sources, items=items, claims=claims,
                                 syntheses=syntheses, index=index, keyword=keyword, full=full,
-                                provisional=False, now=now)
+                                provisional=provisional, now=now)
         for e in entries:
             if intent is not None and e["id"] == intent:
                 e.update({k: work[k] for k in (*FAMILIES, "index", "keyword", "full",
@@ -302,7 +316,7 @@ def publish(root: Path, *, intent: str | None = None, sources: Any = (), items: 
             out["warnings"] += ["graph_unavailable", "publication_pending"]
             remaining = [{**e, "id": e["id"] or queue.new_entry_id(),
                           "attempts": e["attempts"] + 1} for e in entries]
-            queue.save(root, remaining)
+            queue.save(root, others + remaining)
             out.update(status=PENDING, pending=queue.outstanding(remaining))
             return out
 
@@ -360,7 +374,7 @@ def publish(root: Path, *, intent: str | None = None, sources: Any = (), items: 
                               **{f: sorted(left[f]) for f in FAMILIES},
                               "index": left_index, "keyword": left_keyword,
                               "full": False, "provisional": False, "attempts": e["attempts"] + 1})
-        queue.save(root, remaining)
+        queue.save(root, others + remaining)
 
         for family, label in (("claims", "claim"), ("syntheses", "synthesis"), ("items", "item")):
             out["warnings"] += [f"{label}_page_refresh_failed:{i}" for i in sorted(failed[family])]
@@ -374,6 +388,112 @@ def publish(root: Path, *, intent: str | None = None, sources: Any = (), items: 
             out["pending"] = queue.outstanding(remaining)
             out["warnings"].append("publication_pending")
         return out
+
+
+def job_status(status: str, publication: dict[str, Any] | None) -> str:
+    """A job's final status: never "succeeded" while its publication is incomplete (decision 5)."""
+    if status == "succeeded" and publication and publication.get("status") == PENDING:
+        return PENDING
+    return status
+
+
+def summary(result: dict[str, Any] | None) -> dict[str, Any] | None:
+    """What a job's result reports about its publication: `{status, pending, still_pending}`."""
+    if result is None:
+        return None
+    return {"status": result["status"], "pending": result["pending"],
+            "still_pending": describe_failures(result)}
+
+
+def report(pub: dict[str, Any] | None) -> list[str]:
+    """A job script's lines about its publication (`summary` output; None prints nothing)."""
+    if not pub:
+        return []
+    if pub["status"] == PUBLISHED:
+        return ["Publication: published (pages, index.md and search are current)."]
+    return (["Publication: saved, publication incomplete. Retry with "
+             "`uv run python scripts/republish.py`."]
+            + [f"  pending: {line}" for line in pub.get("still_pending") or []])
+
+
+class Run:
+    """One bulk job's publication (ADR-0068 decision 5).
+
+    For each document, under the write lock: :meth:`intent` before its first write, then its commit,
+    then :meth:`publish`, which publishes **that document's** pages from its own entry only. The model
+    calls for the next document happen outside the lock. :meth:`finish` is the end refresh, once per
+    run: everything pending, the tags the run touched (their Source pages), `index.md` and the keyword
+    index. The job reports success only after it.
+
+    The run's own entry (origin `run_<producer>`, :func:`app.backend.publication_queue.extend`) is
+    queued before the first commit and kept queued before each later one, so a crash at any point
+    leaves the end refresh to retry. While the run is going, that entry is what screens show as
+    "search refresh pending". `search=False` is a producer called as a step of a caller that owns
+    the refresh (Apply, a test): it records and publishes each document's pages but no run entry,
+    and :meth:`finish` does nothing."""
+
+    def __init__(self, root: Path, producer: str, *, search: bool = True,
+                 wiki_dir: Path | None = None, templates_dir: Path | None = None) -> None:
+        self.root = Path(root)
+        self.origin = queue.RUN_PREFIX + producer
+        self.search = search
+        self.wiki_dir, self.templates_dir = wiki_dir, templates_dir
+        self.entry_id: str | None = None
+        self.items: set[str] = set()                  # tags whose Source pages the end refresh renders
+        self.committed = False
+        self.failed: dict[str, dict[str, str]] = {f: {} for f in FAMILIES}
+
+    def intent(self, *, sources: Any = (), items: Any = (), claims: Any = (),
+               syntheses: Any = (), full: bool = False, refresh: bool = True) -> str | None:
+        """Record intent before a commit (under the write lock): the run's end refresh, plus the
+        document's own provisional entry when it names pages (`full` when its scope is unknown).
+        `refresh=False` is a commit that may change no page: the end refresh is then needed only if
+        its :meth:`publish` says so."""
+        self.committed = self.committed or refresh
+        if self.search:
+            self.entry_id = queue.extend(self.root, self.entry_id, origin=self.origin,
+                                         items=self.items)
+        if not (full or any((sources, items, claims, syntheses))):
+            return None
+        return queue.record(self.root, origin=self.origin, sources=sources, items=items,
+                            claims=claims, syntheses=syntheses, full=full)
+
+    def publish(self, entry_id: str | None, *, sources: Any = (), items: Any = (), claims: Any = (),
+                syntheses: Any = (), later_items: Any = (),
+                refresh: bool = False) -> dict[str, Any] | None:
+        """After the commit, still under the lock: publish the document's own pages (`sources`,
+        `items`, `claims`, `syntheses`), and add `later_items` (tags whose other Source pages may
+        list them) to the end refresh. `refresh` says the commit changed pages after all."""
+        self.committed = self.committed or refresh
+        if later_items:
+            self.items |= set(later_items)
+            if self.search:
+                self.entry_id = queue.extend(self.root, self.entry_id, origin=self.origin,
+                                             items=self.items)
+        if entry_id is None:
+            return None
+        out = publish(self.root, intent=entry_id, sources=sources, items=items, claims=claims,
+                      syntheses=syntheses, own_only=True, origin=self.origin,
+                      wiki_dir=self.wiki_dir, templates_dir=self.templates_dir)
+        for family in FAMILIES:
+            self.failed[family].update(out["failed"][family])
+        return out
+
+    def done(self, entry_id: str | None) -> None:
+        """Acknowledge a document's entry whose pages the producer itself wrote (generate_wiki: the
+        Source page it just rendered), so they are not rendered twice. Under the write lock."""
+        if entry_id is not None:
+            queue.discard(self.root, entry_id)
+
+    def finish(self) -> dict[str, Any] | None:
+        """The end refresh. Returns the publication result, or None for a step."""
+        if not self.search:
+            return None
+        with write_lock.hold(self.root / "reviews"):
+            return publish(self.root, intent=self.entry_id, items=self.items,
+                           provisional=bool(self.items), index=self.committed,
+                           keyword=self.committed, origin=self.origin, wiki_dir=self.wiki_dir,
+                           templates_dir=self.templates_dir)
 
 
 def republish_all(root: Path, *, origin: str = "republish_all", wiki_dir: Path | None = None,

@@ -28,13 +28,18 @@ def _check(root: Path) -> list[str]:
     if not entries:
         return []
     left = publication_queue.outstanding(entries)
-    steps = [f"{len(left['sources'])} Source page(s)"] if left["sources"] else []
+    steps = [f"{len(left['claims'])} claim page(s)"] if left["claims"] else []
+    steps += [f"{len(left['syntheses'])} synthesis page(s)"] if left["syntheses"] else []
+    steps += [f"{len(left['sources'])} Source page(s)"] if left["sources"] else []
     steps += [f"{len(left['items'])} tag page(s)"] if left["items"] else []
     steps += ["every page (full republish)"] if left["full"] else []
     steps += ["wiki/index.md"] if left["index"] else []
     steps += ["the keyword index"] if left["keyword"] else []
+    # A bulk job's own entry is its end refresh (ADR-0068 decision 5): pending while it runs.
+    running = (f"; the end refresh of a {', '.join(left['runs'])} run (pending until it finishes)"
+               if left["runs"] else "")
     return [f"publication incomplete: {len(entries)} pending entr{'y' if len(entries) == 1 else 'ies'}"
-            f" ({', '.join(steps) or 'no steps'}) — retry with "
+            f" ({', '.join(steps) or 'no steps'}{running}) — retry with "
             "`uv run python scripts/republish.py`"]
 
 

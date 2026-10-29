@@ -25,7 +25,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.backend import (
-    apply_sandbox, db, embeddings, graph, graph_read, keyword_index, manifests, publication_queue,
+    apply_sandbox, db, embeddings, graph, graph_read, keyword_index, manifests, producer_journal,
+    publication_queue,
     review_html, review_read, run_guard, search, taxonomy, vault_lock, vector_index, write_lock,
 )
 from app.backend.config import get_settings
@@ -142,6 +143,17 @@ async def _publication_queue_corrupt(request: Request, exc: publication_queue.Qu
     a visible 503 that names the repair, on every route that tried to write."""
     detail = (f"publication_queue_corrupt ({exc.reason}): changes are refused until the queue is "
               "repaired — POST /publication/repair or `uv run python scripts/republish.py --repair`")
+    if request.url.path.startswith("/ui/"):
+        return HTMLResponse(review_html.render_error(503, detail), status_code=503)
+    return JSONResponse(status_code=503, content={"detail": detail})
+
+
+@app.exception_handler(producer_journal.JournalCorrupt)
+async def _producer_journal_corrupt(request: Request, exc: producer_journal.JournalCorrupt) -> Any:
+    """A damaged producer journal refuses claim, tag and synthesis extraction (an empty journal
+    would let an interrupted document look fresh): a visible 503 that names the repair."""
+    detail = (f"producer_journal_corrupt ({exc.reason}): claim, tag and synthesis extraction are "
+              "refused until it is repaired — `uv run python scripts/repair_producer_journal.py`")
     if request.url.path.startswith("/ui/"):
         return HTMLResponse(review_html.render_error(503, detail), status_code=503)
     return JSONResponse(status_code=503, content={"detail": detail})
@@ -983,7 +995,7 @@ def _run_apply(st: Any, intent: str | None = None) -> dict[str, Any]:
     merged: dict[str, Any] = {"applied": 0, "skipped": [], "changed_pages": [], "affected_sources": []}
     rekeyed: dict[str, Any] = {"applied": 0, "skipped": [], "changed_pages": [], "affected_sources": []}
     split_res: dict[str, Any] = {"applied": 0, "skipped": [], "changed_pages": [], "affected_sources": []}
-    promo = {"promoted": 0}
+    promo: dict[str, Any] = {"promoted": 0, "affected_sources": []}
 
     # ADR-0066 review round 10: the graph executors and promote rewrite item pages, so they run under
     # the ledger lock — taken BEFORE the first graph write, the same order as every tag action (ledger
@@ -1103,7 +1115,9 @@ def _run_apply(st: Any, intent: str | None = None) -> dict[str, Any]:
                               | set(claims_unhidden.get("affected_sources", []))
                               | set(merged.get("affected_sources", []))
                               | set(rekeyed.get("affected_sources", []))
-                              | set(split_res.get("affected_sources", [])))
+                              | set(split_res.get("affected_sources", []))
+                              # ADR-0068: an activation changes every Source page listing the tag
+                              | set(promo.get("affected_sources", [])))
     # Only re-render sources that actually have a Source page (nothing to suppress otherwise) — keeps a
     # minimal/degraded vault from failing the apply on a missing manifest/template.
     existing_sources = [sid for sid in claim_source_ids

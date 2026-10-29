@@ -41,7 +41,7 @@ headers and are unaffected.
 |---|---|---|---|
 | **Lint** | `POST /jobs/lint` | — | Structural validators + semantic checks (**unused tag** — report-only, uncited claim, **missing raw**; the single-source `under_supported_item` deprecation is retired by ADR-0066 and its pending items are withdrawn as `rule_retired`) + quality heuristics (**summary rot**, **stale claim citations**, **topic starvation**) → health report + governance review items. |
 | **Stale / retention** | `POST /jobs/stale-check` | — | Stale sources → `archive_source` candidates; ephemeral past window → `delete_raw_file` (record-only); **LLM-cache** over TTL/size → `purge_response_cache` (record-only). Reports **live cache stats** every run. |
-| **Reindex** | `POST /jobs/reindex` | `scripts/rebuild_index.py` + `scripts/reindex_keyword.py` | Rebuild `wiki/index.md` + refresh the keyword index. **Never the vector index.** |
+| **Reindex** | `POST /jobs/reindex` | `scripts/rebuild_index.py` + `scripts/reindex_keyword.py` | Rebuild `wiki/index.md` + refresh the keyword index, as a publication (it also retries pending work; ADR-0068). **Never the vector index.** |
 | **Backup** | — | `scripts/backup.py` | Snapshot manifests, db (incl. graph), wiki, reviews, policies. SQLite files are copied through SQLite's backup API, and the archive is written holding the vault writer lock (`db/.vault.lock`) exclusively — every running job, API write and write script holds it shared — so it is one consistent cut. Waits up to `--lock-timeout` (60 s) for running writers, then refuses (exit 2, nothing written); writers that start meanwhile wait. Stop the API before `--restore`. |
 | **Tag-link repair** | — | `scripts/rebuild_tag_links.py [--apply]` | ADR-0066: make the graph agree with the per-document tag ledgers (the authority) — re-assert missing keeps (after a graph rebuild/restore), finish an interrupted keep (activation with the recorded amendments, or an unused tag's revival), reject links of dropped tags and human links with no keep (an interrupted drop). Dry run by default; re-renders touched pages + refreshes `wiki/index.md` and the keyword index. **Never touches** a document whose ledger is damaged (reported, never overwritten — restore it from backup) or the tags of an interrupted merge/split (`reviews/in_flight/<review_id>.json`; the next `/reviews/apply` resumes it — run that first). While such a marker exists, keep/drop/undo/human-add/block on its tags are refused (`identity_operation_in_flight`, a banner on the document screen), Delete unused skips them and extraction skips the documents linked to them (`in_flight_sources`). Apply closes the marker only after the Source pages (every affected page rendered — a per-page render failure is reported as `source_page_refresh_failed`), `wiki/index.md` and the keyword index refreshed; on a refresh failure it stays (`identity_refresh_pending`, non-clean) and the next apply finishes the job. Exits non-zero while either remains. `validate_tag_links.py` (in `validate_all`) fails while they disagree. |
 | **Review reconciliation** | — | `scripts/reconcile_reviews.py` | Withdraw extraction-stale unresolved review items (ADR-0057): pending/deferred promotes for tombstoned/missing nodes, recompose-provenance deprecations for resurrected nodes. Idempotent, audited per withdrawal; never touches approved/rejected. **Preflight fail-closed** (exits non-zero, withdraws nothing) on missing/empty/schema-mismatched graph DB or graph↔wiki status drift over the reviewed nodes. |
@@ -76,6 +76,32 @@ pending. If the queue file itself is damaged, every change refuses (HTTP 503
 (`scripts/republish.py --repair`). Repair keeps a copy of the damaged file in `db/`, replaces the
 queue with one full-recovery entry, and republishes every page from the saved decisions. Reading and backups keep working meanwhile. The vector index is not part
 of publication; refresh it with `scripts/reindex_vector.py`.
+
+**Pipeline runs publish too (ADR-0068 decision 5).** Every producer (`extract_sources`, `generate_wiki`,
+`enrich`, `extract_claims`, `extract_items`, `promote`, `detect_contradictions`,
+`generate_synthesis`, the reindex job) saves each document as one commit and publishes that
+document's pages before it moves to the next, then refreshes `wiki/index.md` and the keyword index
+**once** at the end. There is no separate `generate_wiki` / `reindex_keyword` / `rebuild_index`
+step after a run any more (they stay as manual repairs). A run reports success only after that end
+refresh; if it fails, the job's status is `saved_publication_pending`, the script prints the
+pending pages and exits 1, and `scripts/republish.py` finishes it. While a run is going, review
+screens show **Search refresh pending** (and `validate_publication.py` fails) until it ends; if a
+run stopped part-way, Retry publishing finishes its refresh. Tagging stays available during a run's
+model calls, and a keep made meanwhile is published at once and never overwritten by the run.
+
+**Unfinished producer commits (ADR-0068 slice 3).** Claim, tag and synthesis extraction record
+each document or topic in `db/producer_journal.json` before they change it, and remove the record
+once all its writes are done. If a run is killed part-way, the record stays:
+`validate_producer_journal.py` fails and names the documents or topics. The next run of that
+producer redoes them even if they look up to date (from the response cache when the text is
+unchanged), and retires any claim or tag the interrupted run left without evidence. Retry
+publishing does not clear these records, because only the producer can finish the work. A
+synthesis topic that a human decision (approval, rejection, hide) keeps from being redone is
+reported as blocked. If the journal file is damaged, those three producers refuse to run (exit 5)
+until `uv run python scripts/repair_producer_journal.py` sets it aside and rebuilds it. The rebuild
+marks every extracted document and every possible synthesis topic, including work interrupted
+before its first result was saved. The next runs redo the documents, mostly from the cache. They
+check the topics and clear the ones that are already complete.
 
 ### Executor-backed review types (`POST /reviews/apply`)
 

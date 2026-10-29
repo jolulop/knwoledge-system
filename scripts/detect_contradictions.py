@@ -33,7 +33,7 @@ import validate_wikilinks  # noqa: E402
 from app.backend.config import get_settings
 from app.llm.cache import ResponseCache
 from app.llm.client import build_client
-from app.workers import contradictions
+from app.workers import contradictions, publication
 
 
 def main(argv: list[str]) -> int:
@@ -63,6 +63,8 @@ def main(argv: list[str]) -> int:
     print(f"Errors: {summary['errors']}")
     for err in summary["error_details"]:
         print(f"  - {err['pair']}: {err['error']}")
+    for line in publication.report(summary["publication"]):
+        print(line)
     print(f"Job: {summary['job_id']}")
 
     print("\nValidators:")
@@ -72,7 +74,8 @@ def main(argv: list[str]) -> int:
         validate_wikilinks.main([root]),
         validate_projection.main([root]),
     ]
-    return 0 if (not summary["errors"] and all(rc == 0 for rc in rcs)) else 1
+    published = (summary["publication"] or {}).get("status") != publication.PENDING
+    return 0 if (not summary["errors"] and all(rc == 0 for rc in rcs) and published) else 1
 
 
 if __name__ == "__main__":

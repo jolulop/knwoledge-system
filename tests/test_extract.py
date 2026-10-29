@@ -19,6 +19,7 @@ def _build_project(tmp_path: Path, *, with_pdf=True) -> Path:
     """Create raw/inbox fixtures and run intake so manifests exist, then return root."""
     inbox = tmp_path / "raw" / "inbox"
     inbox.mkdir(parents=True)
+    fixtures.copy_templates(tmp_path)
     fixtures.write_markdown(inbox / "doc.md")
     fixtures.write_html(inbox / "page.html")
     fixtures.write_csv(inbox / "data.csv")

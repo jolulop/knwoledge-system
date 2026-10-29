@@ -17,15 +17,13 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
-import sys
 import uuid
 from pathlib import Path
 from typing import Any
 
 from app.backend import db, graph, taxonomy
 from app.backend.manifests import iso_now, valid_manifests
-from app.workers import items, reviews, wiki
+from app.workers import items, publication, reviews
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter, render_item_page
 
 PROMOTABLE = ("item",)
@@ -141,11 +139,9 @@ def _apply_amendments(meta: dict[str, Any], amendments: dict[str, Any] | None) -
             "item_type": item_type}
 
 
-def _rebuild_index(root: Path) -> bool:
-    script = root / "scripts" / "rebuild_index.py"
-    if not script.exists():
-        return False
-    return subprocess.run([sys.executable, str(script), str(root)]).returncode == 0
+def _with_page(wiki_dir: Path, sources) -> list[str]:
+    """The given sources that have a Source page (only those are re-rendered)."""
+    return [s for s in sorted(sources) if (Path(wiki_dir) / "Sources" / f"{s}.md").exists()]
 
 
 def activate_node(gconn, *, node: dict[str, Any], wiki_dir: Path, reviews_dir: Path,
@@ -192,13 +188,13 @@ def activate_node(gconn, *, node: dict[str, Any], wiki_dir: Path, reviews_dir: P
         encoding="utf-8")
     graph.upsert_node(gconn, node_id=nid, node_type=node_type, slug=slug, status="active",
                       item_type=eff["item_type"], now=now)
-    affected: list[str] = []
+    # Every Source page that lists the tag changes on activation (its projection follows the status;
+    # suggestion lists show the title too), not only on a slug move: the caller publishes them all.
+    affected = list(sources) + list(suggested)
     if slug != node["slug"]:
         old_page.unlink(missing_ok=True)
-        # Inbound links hold the old slug: mentioning Source pages re-render via the caller fan-out
-        # (affected_sources); duplicate partners re-render here, AFTER the slug mirror update their
-        # ## Duplicates projection reads.
-        affected = list(sources) + list(suggested)   # suggestion lists show the title too
+        # Inbound links hold the old slug: the mentioning Source pages are in `affected`; duplicate
+        # partners re-render here, AFTER the slug mirror update their ## Duplicates projection reads.
         for dup in graph.active_duplicates(gconn, nid):
             items._recompose_node(gconn, node_id=dup["node_id"], wiki_dir=wiki_dir,
                                   reviews_dir=reviews_dir, now=now)
@@ -255,6 +251,10 @@ def _promote_candidates(
         db.insert_job(conn, job_id=job_id, job_type="promote", status="running",
                       created_at=now, started_at=now)
 
+    # ADR-0068 decision 5: a standalone run publishes each activation (its tag's Source pages) in
+    # its commit and ends with one refresh; inside Apply (`rebuild_index=False`) it is a step, and
+    # Apply's own intent and fan-out cover it.
+    run = publication.Run(root, "promote", wiki_dir=wiki_dir) if rebuild_index else None
     try:
         _valid, _skipped_invalid = valid_manifests(manifests_dir)
         considered = promoted_review = amended = 0
@@ -278,38 +278,43 @@ def _promote_candidates(
                         continue  # stays candidate (ADR-0066: only a keep or an approval promotes)
                     # ADR-0058 approve-with-amendments: the human's title/aliases/description ride the
                     # approved item; the executor applies them at flip-to-active.
+                    intent = run.intent(items=[nid], refresh=False) if run else None
                     out = activate_node(gconn, node=node, wiki_dir=wiki_dir, reviews_dir=reviews_dir,
                                         amendments=_read_amendments(reviews_dir, rid), now=now)
                     if out["outcome"] == "skipped":
+                        if run:
+                            run.publish(intent)           # nothing changed: clears the intent
                         if out["reason"] != "page_missing":
                             skipped.append({"review_id": rid, "reason": out["reason"]})
                         continue
                     amended += bool(out["amended"])
                     affected_sources.update(out["affected_sources"])
+                    if run:                       # every Source page that lists the tag
+                        run.publish(intent, sources=_with_page(wiki_dir, out["affected_sources"]),
+                                    refresh=True)
                     promoted_review += 1  # human-approved promotion; the ledger loop already closed
             finally:
                 gconn.close()
 
         promoted = promoted_review
-        # ADR-0058: an amended slug moved a page — re-render the mentioning Source pages so their
-        # [[Dir/slug]] links follow (the executor owns the whole move; validators stay green even
-        # on a standalone scripts/promote.py run). Only sources with an existing Source page.
-        fanout_sources = [s for s in sorted(affected_sources)
-                          if (wiki_dir / "Sources" / f"{s}.md").exists()]
-        if fanout_sources:
-            wiki.generate_wiki(root, source_ids=fanout_sources, rebuild_index=False,
-                               record_job=False)
-        index_rebuilt = _rebuild_index(root) if (rebuild_index and promoted) else False
+        # A run published each activation's Source pages above; as Apply's step it renders none and
+        # reports them (`affected_sources`, existing pages only) for Apply's one publication.
+        pub = run.finish() if run is not None else None  # index.md + keyword, once (decision 5)
+        affected_sources = set(_with_page(wiki_dir, affected_sources))
         summary = {
             "job_id": job_id, "candidates_considered": considered, "promoted": promoted,
             "promoted_by_review": promoted_review,
             "amended": amended, "skipped": skipped,
             "affected_sources": sorted(affected_sources),
             "manifests_skipped_invalid": len(_skipped_invalid),
-            "index_rebuilt": index_rebuilt, "promoted_at": now,
+            "index_rebuilt": bool(pub and pub["index_rebuilt"]),
+            "keyword_reindexed": bool(pub and pub["keyword_reindexed"]),
+            "publication": publication.summary(pub), "promoted_at": now,
         }
+        status = publication.job_status("succeeded", pub)
+        summary["status"] = status
         if conn is not None:
-            db.update_job(conn, job_id, status="succeeded", finished_at=iso_now(), metadata=summary)
+            db.update_job(conn, job_id, status=status, finished_at=iso_now(), metadata=summary)
         return summary
     except Exception as exc:
         if conn is not None:

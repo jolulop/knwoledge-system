@@ -126,11 +126,14 @@ def test_generate_wiki_endpoint_and_pages(client, tmp_path):
     shutil.copytree(ROOT / "templates", tmp_path / "templates")
     _seed(tmp_path, "doc.md", "# Title\n\nA solid opening paragraph of real prose text.\n")
     client.post("/jobs/intake-scan")
-    client.post("/jobs/extract")
+    ext = client.post("/jobs/extract").json()
+    # ADR-0068 decision 5: extraction publishes the Source page, index.md and search itself.
+    assert ext["status"] == "succeeded" and ext["publication"]["status"] == "published"
 
     gen = client.post("/jobs/generate-wiki")
     assert gen.status_code == 200
-    assert gen.json()["generated"] == 1
+    assert gen.json()["generated"] == 0 and gen.json()["skipped_unchanged"] == 1
+    assert client.post("/jobs/generate-wiki?force=true").json()["generated"] == 1
 
     listing = client.get("/wiki/pages")
     assert listing.status_code == 200

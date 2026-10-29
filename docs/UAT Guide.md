@@ -145,10 +145,7 @@ cp /path/to/your/test-file.md raw/inbox/
 
 ```bash
 uv run python scripts/scan_inbox.py
-uv run python scripts/extract_sources.py
-uv run python scripts/generate_wiki.py
-uv run python scripts/reindex_keyword.py
-uv run python scripts/rebuild_index.py
+uv run python scripts/extract_sources.py     # publishes each Source page, wiki/index.md and search
 uv run python scripts/validate_all.py
 ```
 
@@ -186,10 +183,11 @@ uv run python scripts/extract_items.py
 uv run python scripts/promote.py
 uv run python scripts/detect_contradictions.py
 uv run python scripts/generate_synthesis.py
-uv run python scripts/reindex_keyword.py
-uv run python scripts/rebuild_index.py
 uv run python scripts/validate_all.py
 ```
+
+Each producer publishes its pages, `wiki/index.md` and search before it reports success (ADR-0068).
+One that prints "publication incomplete" left work queued: run `uv run python scripts/republish.py`.
 
 > [!note] Contradictions and synthesis report 0 on a fresh vault
 > `detect_contradictions` and `generate_synthesis` consider only **active** items, and nothing
@@ -200,8 +198,6 @@ uv run python scripts/validate_all.py
 > ```bash
 > uv run python scripts/detect_contradictions.py
 > uv run python scripts/generate_synthesis.py
-> uv run python scripts/reindex_keyword.py
-> uv run python scripts/rebuild_index.py
 > uv run python scripts/validate_all.py
 > ```
 

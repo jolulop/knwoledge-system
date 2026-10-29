@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""CLI: enrich Source pages with an LLM summary + tags, then recompose the wiki (Phase 3.5a).
+"""CLI: enrich Source pages with an LLM summary + tags (Phase 3.5a).
 
 Usage:
-    uv run python scripts/enrich.py                # enrich pending sources, then recompose
+    uv run python scripts/enrich.py                # enrich pending sources
     uv run python scripts/enrich.py --force        # re-enrich all (busts the artifact cache)
-    uv run python scripts/enrich.py --no-compose   # write artifacts only; skip wiki rebuild
     uv run python scripts/enrich.py <source_id>    # one source (repeatable)
 
 Reads the tier-1 (light) model_ref and provider credentials from config/.env. With no API
 key for the configured provider, enrichment is skipped and sources stay summary_status: stub.
-Writes artifacts under normalized/enrichment/ and the response cache under db/; never touches
-raw/.
+Writes artifacts under normalized/enrichment/ and the response cache under db/; each source's
+commit publishes its Source page, and the run ends with one refresh of wiki/index.md and the
+keyword index (ADR-0068 decision 5; the old `--no-compose` switch is gone: a saved artifact is
+always published). Exit 1 on errors or an incomplete publication. Never touches raw/.
 """
 from __future__ import annotations
 
@@ -24,12 +25,11 @@ if str(ROOT) not in sys.path:
 from app.backend.config import get_settings
 from app.llm.cache import ResponseCache
 from app.llm.client import build_client
-from app.workers import enrich, wiki
+from app.workers import enrich, publication
 
 
 def main(argv: list[str]) -> int:
     force = "--force" in argv
-    compose = "--no-compose" not in argv
     source_ids = [a for a in argv if not a.startswith("--")]
 
     settings = get_settings()
@@ -59,24 +59,11 @@ def main(argv: list[str]) -> int:
     print(f"Errors (dropped): {summary['errors']}")
     for err in summary["error_details"]:
         print(f"  - {err['source_id']}: {err['error']}")
+    for line in publication.report(summary["publication"]):
+        print(line)
     print(f"Job: {summary['job_id']}")
-
-    if compose:
-        gen = wiki.generate_wiki(
-            settings.root,
-            source_ids=source_ids or None,
-            manifests_dir=settings.manifests_dir,
-            jobs_db=settings.jobs_db_path,
-            wiki_dir=settings.wiki_dir,
-            templates_dir=settings.templates_dir,
-            markdown_dir=settings.markdown_dir,
-            summary_max=settings.wiki_summary_max_chars,
-            summary_min=settings.wiki_summary_min_chars,
-        )
-        print(f"Recomposed wiki: generated {gen['generated']}, "
-              f"skipped_unchanged {gen['skipped_unchanged']}.")
-
-    return 1 if summary["errors"] else 0
+    published = (summary["publication"] or {}).get("status") != publication.PENDING
+    return 1 if summary["errors"] or not published else 0
 
 
 if __name__ == "__main__":

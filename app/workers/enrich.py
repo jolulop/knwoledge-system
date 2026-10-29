@@ -4,8 +4,9 @@
 For every extracted/partial source, build an untrusted-data prompt from its normalized
 Markdown, ask the LLM for a schema-valid summary + tags through `LLMClient.parse`, and write
 the result to the per-source enrichment artifact `normalized/enrichment/<source_id>.json`.
-The deterministic wiki worker composes that artifact into the Source page later — this worker
-never edits `wiki/`.
+The deterministic wiki worker composes that artifact into the Source page: each document's commit
+publishes its Source page under the write lock, and the run ends with one refresh of `index.md` and
+the keyword index (ADR-0068 decision 5, `app/workers/publication.py`).
 
 Supervised and synchronous, the same shape as the extract/wiki workers. Idempotent via the
 artifact's `input_fingerprint`. With no API key for the configured provider, enrichment is
@@ -24,6 +25,7 @@ from app.backend.manifests import iso_now, valid_manifests
 from app.llm import prompts
 from app.llm.client import LLMClient, ParseError
 from app.workers import enrichment_artifact as art
+from app.workers import publication
 from app.workers.wiki_render import title_from_filename
 
 _ENRICHABLE_STATUSES = {"extracted", "partial"}
@@ -62,6 +64,7 @@ def enrich_sources(
             created_at=now, started_at=now,
         )
 
+    run = publication.Run(root, "enrich")
     try:
         manifests, skipped_invalid = valid_manifests(manifests_dir)
         if source_ids is not None:
@@ -141,14 +144,17 @@ def enrich_sources(
             }
             # ADR-0068: the model call above ran outside the write lock; the commit takes it, and
             # writes nothing if a re-extraction installed new text meanwhile (the next run enriches it).
+            # Then it publishes the document's Source page before releasing the lock (decision 5).
             with write_lock.hold(root / "reviews"):
                 if (md_path.read_text(encoding="utf-8") if md_path.exists() else "") != normalized_markdown:
                     input_changed += 1
                     continue
+                intent = run.intent(sources=[source_id])
                 enrichment_dir.mkdir(parents=True, exist_ok=True)
                 artifact_path.write_text(
                     json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
                 )
+                run.publish(intent, sources=[source_id])
             enriched += 1
 
         summary: dict[str, Any] = {
@@ -175,6 +181,11 @@ def enrich_sources(
             status = "skipped"
         else:
             status = "succeeded"
+        pub = run.finish()                    # index.md + the keyword index, once (decision 5)
+        summary["index_rebuilt"] = bool(pub and pub["index_rebuilt"])
+        summary["keyword_reindexed"] = bool(pub and pub["keyword_reindexed"])
+        summary["publication"] = publication.summary(pub)
+        status = publication.job_status(status, pub)
 
         if conn is not None:
             db.update_job(

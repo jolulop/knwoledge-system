@@ -46,6 +46,7 @@ def _build(tmp_path: Path) -> Path:
     """Two extracted markdown sources with real prose (both enrichable)."""
     inbox = tmp_path / "raw" / "inbox"
     inbox.mkdir(parents=True)
+    fixtures.copy_templates(tmp_path)
     fixtures.write_markdown(inbox / "doc.md")
     (inbox / "doc2.md").write_text(
         "# Second Document\n\nA different opening paragraph with enough real prose to "

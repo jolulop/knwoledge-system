@@ -19,7 +19,7 @@ if str(ROOT) not in sys.path:
 
 from fastapi.testclient import TestClient
 
-from app.backend import graph, keyword_index, manifests, review_read, search
+from app.backend import graph, keyword_index, manifests, publication_queue, review_read, search
 from app.backend import main as main_module
 from app.backend.config import get_settings
 from app.workers import retention, wiki
@@ -440,12 +440,20 @@ def test_reindex_records_job_and_logs_no_vector(tmp_path):
     assert not (tmp_path / "indexes" / "vector").exists()
 
 
-def test_reindex_failure_records_failed(tmp_path, monkeypatch):
+def test_reindex_failure_stays_queued_and_the_next_reindex_clears_it(tmp_path, monkeypatch):
+    # ADR-0068: the reindex job is a publication — a failed step is saved_publication_pending, left
+    # in the queue, and the next reindex (or Retry publishing) publishes it.
+    real = retention.keyword_index.reindex
     monkeypatch.setattr(retention.keyword_index, "reindex",
                         lambda root, **kw: (_ for _ in ()).throw(RuntimeError("boom")))
     res = retention.run_reindex(tmp_path)
-    assert res["status"] == "failed" and res["keyword_reindexed"] is False
+    assert res["status"] == "saved_publication_pending" and res["keyword_reindexed"] is False
     assert any("keyword_reindex_failed" in w for w in res["warnings"])
+    (entry,) = publication_queue.load(tmp_path)
+    assert entry["keyword"] and entry["origin"] == "reindex"
+    monkeypatch.setattr(retention.keyword_index, "reindex", real)
+    assert retention.run_reindex(tmp_path)["status"] == "succeeded"
+    assert publication_queue.load(tmp_path) == []
 
 
 def test_api_reindex(client, tmp_path):
@@ -551,7 +559,7 @@ def test_reindex_warnings_persisted_to_job_row(tmp_path, monkeypatch):
     conn = main_module.db.connect(tmp_path / "db" / "jobs.sqlite")
     job = main_module.db.get_job(conn, res["job_id"])
     conn.close()
-    assert job["status"] == "failed"
+    assert job["status"] == "saved_publication_pending"
     assert any("keyword_reindex_failed" in w for w in job["warnings"])
 
 

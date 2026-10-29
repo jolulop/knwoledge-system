@@ -58,6 +58,7 @@ class FakeAdapter:
 def _build(tmp_path, extra=None):
     inbox = tmp_path / "raw" / "inbox"
     inbox.mkdir(parents=True)
+    fixtures.copy_templates(tmp_path)
     fixtures.write_markdown(inbox / "doc.md")
     if extra:
         for name, content in extra.items():
@@ -463,9 +464,8 @@ def test_item_aggregates_mentions_across_sources(tmp_path):
     assert "suggested on 2 document(s)" in page and "[[Sources/" not in page
     tagging.keep_all(tmp_path)
     page = page_path.read_text(encoding="utf-8")
-    # Bare links pinned: this fixture renders no Source pages, so no display label resolves —
-    # ADR-0060 keeps the link bare rather than inventing a label.
-    assert f"[[Sources/{a}]]" in page and f"[[Sources/{b}]]" in page
+    # Extraction published both Source pages (ADR-0068), so the links carry their titles (ADR-0060).
+    assert f"[[Sources/{a}|doc]]" in page and f"[[Sources/{b}|doc2]]" in page
     assert "mentioned by 2 source(s)" in page and "## Suggested On" not in page
 
 

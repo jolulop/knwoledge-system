@@ -10,7 +10,9 @@ unchanged source is skipped unless ``force`` is given. One ``extract`` job recor
 run summary; per-source detail lives on the manifest and in the extraction log.
 
 No raw file is ever modified; writes go only to ``normalized/``, ``raw/manifests/``,
-and ``db/jobs.sqlite``.
+and ``db/jobs.sqlite``, plus publication (ADR-0068 decision 5): each document's install publishes
+its Source page under the write lock, and the run ends with one refresh of ``wiki/index.md`` and
+the keyword index (`app/workers/publication.py`).
 """
 from __future__ import annotations
 
@@ -38,6 +40,7 @@ from app.backend.manifests import (
     valid_manifests,
 )
 from app.backend.paths import safe_under
+from app.workers import publication
 from app.workers.chunking import assemble
 # Only the lightweight Extraction dataclass is imported eagerly. The per-format
 # extractor modules (pypdf/python-docx/beautifulsoup4/pandas) are imported lazily in
@@ -422,6 +425,7 @@ def extract_sources(
             created_at=now, started_at=now,
         )
 
+    run = publication.Run(root, "extract")
     try:
         manifests, skipped_invalid = valid_manifests(manifests_dir)
         if source_ids is not None:
@@ -453,8 +457,10 @@ def extract_sources(
             )
             if persisted:
                 # ADR-0068: install the outputs, the log and the manifest fields together under the
-                # write lock, onto the manifest as it is now (a status changed meanwhile is kept).
+                # write lock, onto the manifest as it is now (a status changed meanwhile is kept),
+                # then publish the document's Source page before releasing it (decision 5).
                 with write_lock.hold(root / "reviews"):
+                    intent = run.intent(sources=[source_id])
                     if staged:
                         _install_outputs(dirs, source_id)
                     _write_log(dirs, source_id, log)
@@ -462,6 +468,7 @@ def extract_sources(
                     for key in EXTRACTION_FIELDS:
                         current[key] = manifest.get(key)
                     save_manifest(manifests_dir, current)
+                    run.publish(intent, sources=[source_id])
 
             status = log["status"]
             if status == "extracted":
@@ -493,11 +500,17 @@ def extract_sources(
             "forced": force,
             "extracted_at": now,
         }
+        # The end refresh (ADR-0068 decision 5): extraction changed searchable text, so the keyword
+        # index (and index.md) refresh once here; the job succeeds only after it.
+        pub = run.finish()
+        summary["index_rebuilt"] = bool(pub and pub["index_rebuilt"])
+        summary["keyword_reindexed"] = bool(pub and pub["keyword_reindexed"])
+        summary["publication"] = publication.summary(pub)
+        summary["status"] = publication.job_status("succeeded" if not errors else "partial", pub)
 
         if conn is not None:
             db.update_job(
-                conn, job_id,
-                status="succeeded" if not errors else "partial",
+                conn, job_id, status=summary["status"],
                 finished_at=iso_now(), metadata=summary, warnings=warnings,
             )
         return summary

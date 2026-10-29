@@ -30,8 +30,6 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
-import sys
 import uuid
 from pathlib import Path
 from typing import Any
@@ -40,17 +38,10 @@ from app.backend import db, graph, write_lock
 from app.backend.manifests import get_provenance, independent_sources, iso_now, valid_manifests
 from app.llm import prompts
 from app.llm.client import LLMClient, ParseError
-from app.workers import claims, reviews
+from app.workers import claims, publication, reviews
 from app.workers import enrichment_artifact as art
 
 _CLAIM_TEXT_RE = re.compile(r'(?m)^claim_text:\s*"(.*)"\s*$')
-
-
-def _rebuild_index(root: Path) -> bool:
-    script = root / "scripts" / "rebuild_index.py"
-    if not script.exists():
-        return False
-    return subprocess.run([sys.executable, str(script), str(root)]).returncode == 0
 
 
 # --- claim context (durable wording + reconstructed citations) -------------
@@ -322,10 +313,14 @@ def detect_contradictions(
         # marks the job failed and closes connections rather than orphaning a "running" job.
         model_ref, has_key = client.resolve_run_model(model_ref)
         affected: set[str] = set()  # claim ids whose page projection must be re-rendered
+        run = publication.Run(root, "detect_contradictions", search=rebuild_index,
+                              wiki_dir=wiki_dir)
 
-        # ADR-0068: steps 1-3 are deterministic and commit under the write lock in one phase.
+        # ADR-0068: steps 1-4 are deterministic and commit under the write lock in one phase, which
+        # records its intent first (`full`: the claims it changes are not known up front).
         stale = 0
         with write_lock.hold(reviews_dir):
+            intent = run.intent(full=True, refresh=False)
             # 1. Apply human decisions made since the last run (deterministic; runs without a key).
             resolution = apply_resolved_contradictions(
                 gconn, reviews_dir, claims_dir=claims_dir, markdown_dir=markdown_dir,
@@ -363,6 +358,15 @@ def detect_contradictions(
                     reviews.withdraw_review_item(reviews_dir, rid, reason=reason, now=now)
                     affected.update({a, b} & standing_claims)  # re-project the surviving claim(s)
                     stale += 1
+
+            # 4. Re-project Claim pages whose active contradiction backlinks changed (ADR-0031). Shared
+            #    with the Phase-6 apply_contradiction_decisions via _reproject_claim_pages (ADR-0035
+            #    A4). The verdicts below only file proposals, which no page shows, so this is the
+            #    run's only page change.
+            pages_reprojected = len(_reproject_claim_pages(
+                gconn, affected & active_claims, claims_dir=claims_dir, reviews_dir=reviews_dir,
+                markdown_dir=markdown_dir, now=now))
+            run.publish(intent, refresh=bool(pages_reprojected))
 
         considered = len(pairs)
         evaluated = proposed = not_contradiction = skipped_decided = changed_during_call = 0
@@ -446,13 +450,7 @@ def detect_contradictions(
                         priority="medium", now=now)
                     proposed += 1
 
-        # 4. Re-project Claim pages whose active contradiction backlinks changed (ADR-0031). Shared
-        #    with the Phase-6 apply_contradiction_decisions via _reproject_claim_pages (ADR-0035 A4).
-        with write_lock.hold(reviews_dir):
-            pages_reprojected = len(_reproject_claim_pages(
-                gconn, affected & active_claims, claims_dir=claims_dir, reviews_dir=reviews_dir,
-                markdown_dir=markdown_dir, now=now))
-        index_rebuilt = _rebuild_index(root) if (rebuild_index and pages_reprojected) else False
+        pub = run.finish()                    # index.md + the keyword index, once (decision 5)
 
         if errors:
             status = "partial"
@@ -460,6 +458,7 @@ def detect_contradictions(
             status = "skipped"
         else:
             status = "succeeded"
+        status = publication.job_status(status, pub)
 
         summary: dict[str, Any] = {
             "job_id": job_id, "model_ref": model_ref, "status": status,
@@ -467,7 +466,10 @@ def detect_contradictions(
             "contradictions_proposed": proposed, "not_contradiction": not_contradiction,
             "skipped_human_decided": skipped_decided, "superseded_stale": stale,
             "skipped_changed_during_call": changed_during_call,
-            "claim_pages_reprojected": pages_reprojected, "index_rebuilt": index_rebuilt,
+            "claim_pages_reprojected": pages_reprojected,
+            "index_rebuilt": bool(pub and pub["index_rebuilt"]),
+            "keyword_reindexed": bool(pub and pub["keyword_reindexed"]),
+            "publication": publication.summary(pub),
             "resolutions_acknowledged": resolution["acknowledged"],
             "resolutions_rejected": resolution["rejected"],
             "supersede_executed": resolution["superseded_executed"],

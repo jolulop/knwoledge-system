@@ -24,30 +24,32 @@ source's prior mentions are superseded **only once the run can produce the repla
 (after a successful parse, or deterministically for an empty source — the ADR-0055
 rollout-safety ordering), and affected node pages are recomposed from surviving `active`
 mentions (tombstoned if none).
-Source pages are assumed to exist (run `generate_wiki` first). Same operational shape as the
-claim worker.
+Each source commits under the write lock as one unit (ADR-0068 decision 5): the graph, its tag
+pages, then its artifact last, then its Source page is published; the run ends with one refresh of
+the other Source pages that list the tags it touched, `index.md` and the keyword index. Same
+operational shape as the claim worker.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import re
-import subprocess
-import sys
 import uuid
 from pathlib import Path
 from typing import Any
 
 from app.backend import db, graph, taxonomy
+from app.backend import producer_journal as journal
 from app.backend.manifests import get_status, iso_now, load_manifest, valid_manifests
 from app.llm import prompts
 from app.llm.client import CacheMiss, LLMClient, ParseError
-from app.workers import citations, reconcile, reviews
+from app.workers import citations, publication, reconcile, reviews
 from app.workers import enrichment_artifact as art
 from app.workers import labels
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter, render_item_page, title_from_filename
 
 _ENRICHABLE_STATUSES = {"extracted", "partial"}
+_PRODUCER = "extract_items"                  # its run guard and journal name
 _WS = re.compile(r"\s+")
 _TITLE_RE = re.compile(r'(?m)^title:\s*"(.*)"\s*$')
 
@@ -339,6 +341,21 @@ def plan_suggestions(raw_items: list[Any], *, md: str, gconn, vocab: dict[str, A
     return {"emit": emit, "filtered": filtered, "reference_cut_at": cut, "counts": counts}
 
 
+def _accumulate(existing: list[str], new: list[str]) -> list[str]:
+    """Extraction's automatic alias accumulation onto a never-kept candidate (ADR-0068 slice 3):
+    the stored list exactly as `_union` keeps it, then only the genuinely new aliases, compared with
+    `casefold()` (so `large language model` and `Large Language Model` take one slot, with the
+    spelling already stored), up to the same limit. Human alias edits and their stale-form check
+    keep `_union`'s exact comparison; a kept tag gets no hint aliases at all."""
+    out = _union(existing, [])
+    seen = {a.casefold() for a in out}
+    for x in new:
+        if x and x.casefold() not in seen:
+            seen.add(x.casefold())
+            out.append(x)
+    return out[:_MAX_ALIASES]
+
+
 def _union(existing: list[str], new: list[str]) -> list[str]:
     """Additive alias union (never auto-removes); identity-changing merges are review-gated."""
     out: list[str] = []
@@ -372,13 +389,6 @@ def _read_node_meta(page_path: Path) -> dict[str, Any] | None:
             "description": fm.get("description")}
 
 
-def _rebuild_index(root: Path) -> bool:
-    script = root / "scripts" / "rebuild_index.py"
-    if not script.exists():
-        return False
-    return subprocess.run([sys.executable, str(script), str(root)]).returncode == 0
-
-
 def _link_labels(wiki_dir: Path, source_ids, duplicates) -> dict[str, str]:
     """ADR-0060: page-local display labels for an item page's Mentioned-By and Duplicates
     links (worker-side IO; every item-page writer routes through this so the renderer stays pure)."""
@@ -393,7 +403,8 @@ def _recompose_node(gconn, *, node_id, wiki_dir, reviews_dir, now, text_hint=Non
     The existing page is the authority for the node's title, aliases, and item_type
     (ADR-0030/0059): the title and classification are preserved across re-extractions, and
     aliases are an additive union of what's on the page and what this run found — so a later
-    source cannot overwrite or drop aliases gathered from another (B1/Q4). With no active
+    source cannot overwrite or drop aliases gathered from another (B1/Q4). New hint aliases are
+    compared case-insensitively (`_accumulate`); the stored spellings are kept. With no active
     mentions the page is tombstoned (deprecated_candidate) and a `deprecate_wiki_page`
     review item is filed (B4). Either status flip also reconciles the node's unresolved
     review items (ADR-0057): tombstoning withdraws a pending promote, resurrection withdraws
@@ -421,7 +432,7 @@ def _recompose_node(gconn, *, node_id, wiki_dir, reviews_dir, now, text_hint=Non
     title = (existing["title"] if existing else None) or new_title  # page title is authority
     if title is None:
         return "skipped"
-    aliases = _union(existing["aliases"] if existing else [], new_aliases)
+    aliases = _accumulate(existing["aliases"] if existing else [], new_aliases)
     # Classification authority: existing page > graph mirror > this run's hint. A node whose
     # page and mirror both lack a type (drifted state) cannot render — skip, never guess.
     item_type = ((existing or {}).get("item_type") or node.get("item_type")
@@ -597,9 +608,29 @@ def extract_items(
     cache_miss_sources: list[str] = []
     in_flight_sources: list[dict[str, str]] = []
     input_changed_sources: list[str] = []
-    texts: dict[str, dict[str, Any]] = {}
-    touched: set[str] = set()
-    affected: set[str] = set()
+    texts: dict[str, dict[str, Any]] = {}     # one document's page hints, by node id
+    touched: set[str] = set()                  # the nodes one document's suggestions emit
+    page_outcomes: dict[str, str] = {}         # node id -> its last page outcome this run
+    journal_reconciled: list[str] = []         # unfinished commits finished from authority
+    aliases_withheld: set[str] = set()
+    run = publication.Run(root, "extract_items", search=rebuild_index, wiki_dir=wiki_dir)
+
+    def _compose(nids: set[str]) -> None:
+        """Render one document's tag pages inside its commit (statuses read and written under the
+        lock). Review round 8 follow-up: alias ownership is decided here, at the final write and
+        under the lock every keep takes — a keep made while this run was waiting on the model (or
+        one that stopped after its ledger write) must not get the buffered aliases unioned back."""
+        owned = tag_links.kept_anywhere(reviews_dir)
+        for nid in sorted(nids):
+            hint = texts.get(nid)
+            if hint and hint["aliases"]:
+                node = graph.get_node(gconn, nid) or {}
+                if owned is None and node.get("status") == "candidate":
+                    aliases_withheld.add(nid)             # a damaged ledger may hold its keep
+                if owned is None or nid in owned or node.get("status") != "candidate":
+                    hint = {**hint, "aliases": []}
+            page_outcomes[nid] = _recompose_node(gconn, node_id=nid, wiki_dir=wiki_dir,
+                                                 reviews_dir=reviews_dir, now=now, text_hint=hint)
 
     def _emit(sid, md, entry, source_nodes):
         """Write one planned suggestion (`plan_suggestions`) as an `llm` mention of its target."""
@@ -667,6 +698,29 @@ def extract_items(
         if source_ids is not None:
             wanted = set(source_ids)
             manifests = [m for m in manifests if m.get("source_id") in wanted]
+        # ADR-0068: commits an earlier run left unfinished (fails closed on a damaged journal).
+        unfinished = journal.pending(root, _PRODUCER)
+        eligible = {m["source_id"] for m in manifests
+                    if m.get("ingestion_status") in _ENRICHABLE_STATUSES}
+        for sid in sorted(unfinished):
+            if sid not in eligible and (source_ids is None or sid in source_ids):
+                # Deleted or no longer extractable: nothing will re-extract it, so finish the
+                # commit from authority — re-render its saved tags (one left unmentioned retires).
+                with tag_links.ledger_lock(reviews_dir):
+                    rec = journal.pending(root, _PRODUCER).get(sid)
+                    if rec is not None:
+                        texts, touched = {}, set()
+                        intent = run.intent(items=rec["items"])
+                        _compose(set(rec["items"]))
+                        run.publish(intent, later_items=rec["items"])
+                        # Cleared only once verified: none of its saved tags is left standing
+                        # without a mention, and every tag it still mentions has its page.
+                        ids = set(rec["items"]) | graph.item_ids_for_source(gconn, sid)
+                        if not (set(graph.orphans(gconn, edge_type="mentions", source_id=sid))
+                                & ids) and all(_has_page(wiki_dir, gconn, n) for n in ids):
+                            journal.finish(root, _PRODUCER, sid)
+                            journal_reconciled.append(sid)
+        attempted: set[str] = set()
 
         for manifest in manifests:
             sid = manifest["source_id"]
@@ -674,6 +728,7 @@ def extract_items(
                 skipped_not_extracted += 1
                 continue
             considered += 1
+            attempted.add(sid)
 
             md_path = markdown_dir / f"{sid}.md"
             md = md_path.read_text(encoding="utf-8") if md_path.exists() else ""
@@ -688,7 +743,8 @@ def extract_items(
                     existing = {}
             # ADR-0063 sticky-to-chain: fresh iff the recorded model is still a chain member and
             # its own-model fingerprint matches — an availability flip alone never restales.
-            if not force and existing and art.chain_fresh(
+            # An unfinished commit is never fresh: the artifact predates it (written last).
+            if not force and existing and sid not in unfinished and art.chain_fresh(
                     existing, chain_refs, lambda m: art.items_fingerprint(md, m, strategy_ref)):
                 skipped_fresh += 1
                 continue
@@ -718,9 +774,18 @@ def extract_items(
                 skipped_no_key += 1
                 continue
             if not md.strip():
-                affected.update(graph.supersede_mentions_for_source(gconn, sid, now=now))
+                with tag_links.ledger_lock(reviews_dir):
+                    rec = journal.begin(root, _PRODUCER, sid,
+                                        items=graph.item_ids_for_source(gconn, sid), now=now)
+                    intent = run.intent(sources=[sid], items=rec["items"])
+                    texts = {}
+                    affected = set(rec["items"]) | set(
+                        graph.supersede_mentions_for_source(gconn, sid, now=now))
+                    _compose(affected)
+                    _write_artifact(apath, sid, fingerprint, [], run_ref, now, strategy_ref)
+                    run.publish(intent, sources=[sid], later_items=affected)
+                    journal.finish(root, _PRODUCER, sid)
                 skipped_empty += 1
-                _write_artifact(apath, sid, fingerprint, [], run_ref, now, strategy_ref)
                 continue
 
             # ADR-0056: one full-document call up to the input cap; above-cap documents are
@@ -775,9 +840,20 @@ def extract_items(
                 if busy is not None:                          # nothing written for this document
                     in_flight_sources.append({"source_id": sid, "review_id": busy})
                     continue
+                # ADR-0068 decision 5: this document commits as one unit — the graph, its tag pages,
+                # then the artifact last (an interrupted commit leaves it stale, so the next run
+                # redoes it) — and publishes its Source page before releasing the lock.
+                # The journal record keeps every tag this commit may retire — the document's current
+                # ones, unioned with any an interrupted attempt saved — so superseding the mentions
+                # below can't lose them (the record goes only after the artifact).
+                rec = journal.begin(root, _PRODUCER, sid,
+                                    items=graph.item_ids_for_source(gconn, sid), now=now)
+                intent = run.intent(sources=[sid], items=rec["items"])
+                texts, touched = {}, set()
                 # Parse succeeded: retire the old mentions immediately before emitting replacements
                 # (supersede covers ALL active mentions for the source, so it must precede _emit).
-                affected.update(graph.supersede_mentions_for_source(gconn, sid, now=now))
+                affected = set(rec["items"]) | set(
+                    graph.supersede_mentions_for_source(gconn, sid, now=now))
 
                 # ADR-0068: the manifest read at the run's start may be stale (an archive applied
                 # during the model call) — mirror the status as it is now, under the lock.
@@ -792,9 +868,13 @@ def extract_items(
                 if not plan["counts"]["domains"]:
                     no_domain_sources.append(sid)
 
+                _compose(touched | affected)
                 _write_artifact(apath, sid, fingerprint, source_nodes, run_ref, now,
                                 strategy_ref, coverage, plan["filtered"],
                                 reference_cut_at=plan["reference_cut_at"], cap=cap)
+                # Other Source pages that list these tags are refreshed once, at the end.
+                run.publish(intent, sources=[sid], later_items=touched | affected)
+                journal.finish(root, _PRODUCER, sid)
                 nodes_written += len(source_nodes)
                 # ADR-0059: immediate operator feedback for the starvation failure signature (no
                 # thematic topic layer from a substantive source). Artifact/claim state only —
@@ -802,34 +882,22 @@ def extract_items(
                 if art.topic_starved(source_nodes, art.stored_claim_count(enrichment_dir, sid)):
                     topic_starved_sources.append(sid)
 
-        pages_written = pages_tombstoned = 0
-        aliases_withheld_damaged = 0
-        with tag_links.ledger_lock(reviews_dir):          # statuses read + written under the lock
-            # Review round 8 follow-up: alias ownership is decided HERE, at the final write and under
-            # the lock every keep takes — a keep made while this run was buffering (or one that
-            # stopped after its ledger write) must not get the buffered aliases unioned back in.
-            owned = tag_links.kept_anywhere(reviews_dir)
-            for nid in touched | affected:
-                hint = texts.get(nid)
-                if hint and hint["aliases"]:
-                    node = graph.get_node(gconn, nid) or {}
-                    if owned is None and node.get("status") == "candidate":
-                        aliases_withheld_damaged += 1     # a damaged ledger may hold its keep
-                    if owned is None or nid in owned or node.get("status") != "candidate":
-                        hint = {**hint, "aliases": []}
-                outcome = _recompose_node(gconn, node_id=nid, wiki_dir=wiki_dir,
-                                          reviews_dir=reviews_dir, now=now, text_hint=hint)
-                pages_written += outcome == "written"
-                pages_tombstoned += outcome == "tombstoned"
+        pages_written = sum(o == "written" for o in page_outcomes.values())
+        pages_tombstoned = sum(o == "tombstoned" for o in page_outcomes.values())
+        # The end refresh (decision 5): the Source pages of every tag touched, index.md and the
+        # keyword index, once — the job succeeds only after it.
+        pub = run.finish()
+        left = journal.pending(root, _PRODUCER)
+        # A document this run attempted whose commit is still unfinished is never a clean success.
+        left_attempted = sorted(set(left) & attempted)
 
-        index_rebuilt = _rebuild_index(root) if (rebuild_index and (touched or affected)) else False
-
-        if errors or cache_miss_sources or in_flight_sources:
+        if errors or cache_miss_sources or in_flight_sources or left_attempted:
             status = "partial"
         elif not has_key and not cache_only and considered > 0:
             status = "skipped"
         else:
             status = "succeeded"
+        status = publication.job_status(status, pub)
 
         summary: dict[str, Any] = {
             "job_id": job_id, "model_ref": model_ref, "status": status,
@@ -855,7 +923,7 @@ def extract_items(
             "suggestions_ambiguous": plan_totals["ambiguous"],
             "aliases_filtered": plan_totals["aliases_filtered"],
             # Candidates whose new aliases were not added because a damaged ledger may keep them.
-            "aliases_withheld_ledger_damaged": aliases_withheld_damaged,
+            "aliases_withheld_ledger_damaged": len(aliases_withheld),
             "no_domain": len(no_domain_sources),
             "no_domain_sources": sorted(no_domain_sources),
             "coverage_truncated": len(coverage_truncated_sources),
@@ -864,8 +932,13 @@ def extract_items(
             "cache_only": cache_only, "cache_misses": len(cache_miss_sources),
             "cache_miss_sources": sorted(cache_miss_sources),
             "in_flight_sources": in_flight_sources,
+            # ADR-0068 producer journal: documents whose commit is still unfinished (redone by the
+            # next run that reaches them), and the ones finished here from authority.
+            "unfinished_commits": sorted(left), "journal_reconciled": journal_reconciled,
             "input_changed_sources": input_changed_sources,
-            "index_rebuilt": index_rebuilt, "extracted_at": now,
+            "index_rebuilt": bool(pub and pub["index_rebuilt"]),
+            "keyword_reindexed": bool(pub and pub["keyword_reindexed"]),
+            "publication": publication.summary(pub), "extracted_at": now,
         }
         if conn is not None:
             db.update_job(conn, job_id, status=status, finished_at=iso_now(), metadata=summary)
@@ -878,6 +951,12 @@ def extract_items(
         gconn.close()
         if conn is not None:
             conn.close()
+
+
+def _has_page(wiki_dir: Path, gconn, nid: str) -> bool:
+    """Whether a tag has its page (a tag deleted meanwhile needs none)."""
+    node = graph.get_node(gconn, nid)
+    return node is None or (Path(wiki_dir) / NODE_DIR["item"] / f"{node['slug']}.md").exists()
 
 
 def _write_artifact(apath, sid, fingerprint, source_nodes, model_ref, now,

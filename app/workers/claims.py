@@ -25,9 +25,12 @@ empty set. (This supersedes the earlier retract-first ordering.) A claim left wi
 `active` edges becomes a **tombstone** page (`deprecated_candidate`, pending review); it is
 never hard-deleted (CLAUDE.md rule 9) and its node stays page-backed (ADR-0030).
 
-Source pages are assumed to already exist (run `generate_wiki` first). Supervised and
-synchronous, the 3.5a shape: fingerprint-idempotent per source; no API key → the run is a
-`skipped` job (stale sources still retracted).
+Each source commits under the write lock as one unit (ADR-0068 decision 5): the graph, then its
+claim pages, then its artifact last (so an interrupted commit leaves the source stale and the next
+run redoes it), then its Source page is published. The run ends with one refresh of `index.md` and
+the keyword index (`app/workers/publication.py`). Supervised and synchronous, the 3.5a shape:
+fingerprint-idempotent per source; no API key → the run is a `skipped` job (stale sources still
+retracted).
 """
 from __future__ import annotations
 
@@ -35,23 +38,23 @@ import hashlib
 import html
 import json
 import re
-import subprocess
-import sys
 import uuid
 from pathlib import Path
 from typing import Any
 
 from app.backend import db, graph, write_lock
+from app.backend import producer_journal as journal
 from app.backend.manifests import get_status, iso_now, load_manifest, valid_manifests
 from app.llm import prompts
 from app.llm.client import LLMClient, ParseError
-from app.workers import citations, reviews
+from app.workers import citations, publication, reviews
 from app.workers import enrichment_artifact as art
 from app.workers import labels
 from app.workers.wiki_render import (REVIEW_STATUSES, parse_frontmatter, render_claim_page,
                                      title_from_filename)
 
 _ENRICHABLE_STATUSES = {"extracted", "partial"}
+_PRODUCER = "extract_claims"                 # its run guard and journal name
 _WS = re.compile(r"\s+")
 _CLAIM_TEXT_RE = re.compile(r'(?m)^claim_text:\s*"(.*)"\s*$')
 _STATUS_RE = re.compile(r"(?m)^status:\s*(\S+)\s*$")
@@ -91,13 +94,6 @@ def _read_claim_text(page_path: Path) -> str | None:
         return None
     m = _CLAIM_TEXT_RE.search(page_path.read_text(encoding="utf-8", errors="replace"))
     return re.sub(r"\\(.)", r"\1", m.group(1)) if m else None
-
-
-def _rebuild_index(root: Path) -> bool:
-    script = root / "scripts" / "rebuild_index.py"
-    if not script.exists():
-        return False
-    return subprocess.run([sys.executable, str(script), str(root)]).returncode == 0
 
 
 # --- claim windows (ADR-0056, `chunk-greedy-v1`) ----------------------------
@@ -356,9 +352,25 @@ def extract_claims(
     claim_windows = claim_window_over_budget = 0
     replacement_not_applied = stale_claim_layer_preserved = input_changed = 0
     errors: list[dict[str, Any]] = []
-    texts: dict[str, str] = {}     # cid -> claim_text for claims (re)asserted this run
-    touched: set[str] = set()
-    affected: set[str] = set()     # claims whose edges were superseded this run
+    page_outcomes: dict[str, str] = {}   # cid -> the last page outcome this run
+    journal_reconciled: list[str] = []   # unfinished commits finished from authority
+    run = publication.Run(root, "extract_claims", search=rebuild_index, wiki_dir=claims_dir.parent)
+
+    def _compose(cids: set[str], texts: dict[str, str]) -> None:
+        """Render one document's claim pages inside its commit (pages read their status authority
+        here), then the surviving endpoints of any contradiction superseded by it, so their pages
+        drop the now-dead backlink (the claim CLI stays valid without a contradiction pass)."""
+        contradiction_affected: set[str] = set()
+        for cid in sorted(cids):
+            page_outcomes[cid] = recompose_claim(
+                gconn, cid=cid, claims_dir=claims_dir, reviews_dir=reviews_dir,
+                markdown_dir=markdown_dir, now=now, text_hint=texts.get(cid),
+                contradiction_affected=contradiction_affected)
+        for cid in sorted(contradiction_affected):
+            node = graph.get_node(gconn, cid)
+            if node and node["status"] == "active":
+                recompose_claim(gconn, cid=cid, claims_dir=claims_dir, reviews_dir=reviews_dir,
+                                markdown_dir=markdown_dir, now=now)
 
     try:
         # ADR-0063: resolve the tier chain INSIDE the protected block so a malformed-chain ConfigError
@@ -370,6 +382,30 @@ def extract_claims(
         if source_ids is not None:
             wanted = set(source_ids)
             manifests = [m for m in manifests if m.get("source_id") in wanted]
+        # ADR-0068: commits an earlier run left unfinished (fails closed on a damaged journal).
+        unfinished = journal.pending(root, _PRODUCER)
+        eligible = {m["source_id"] for m in manifests
+                    if m.get("ingestion_status") in _ENRICHABLE_STATUSES}
+        for sid in sorted(unfinished):
+            if sid not in eligible and (source_ids is None or sid in source_ids):
+                # Deleted or no longer extractable: nothing will re-extract it, so finish the
+                # commit from authority — re-render its saved claims (one without evidence retires).
+                with write_lock.hold(reviews_dir):
+                    rec = journal.pending(root, _PRODUCER).get(sid)
+                    if rec is not None:
+                        intent = run.intent(claims=rec["claims"])
+                        _compose(set(rec["claims"]), {})
+                        run.publish(intent)
+                        # Cleared only once verified: none of its saved claims is left standing
+                        # without evidence, and every claim it still derives has its page (a claim
+                        # whose wording was never written can't be rendered: the record stays).
+                        ids = set(rec["claims"]) | set(graph.claims_for_source(gconn, sid))
+                        if not (set(graph.orphans(gconn, edge_type="derived_from", source_id=sid))
+                                & ids) and all((claims_dir / f"{c}.md").exists()
+                                            or graph.get_node(gconn, c) is None for c in ids):
+                            journal.finish(root, _PRODUCER, sid)
+                            journal_reconciled.append(sid)
+        attempted: set[str] = set()
 
         for manifest in manifests:
             sid = manifest["source_id"]
@@ -377,11 +413,13 @@ def extract_claims(
                 skipped_not_extracted += 1
                 continue
             considered += 1
+            attempted.add(sid)
 
             md_path = markdown_dir / f"{sid}.md"
             md = md_path.read_text(encoding="utf-8") if md_path.exists() else ""
             apath = art.claims_artifact_path(enrichment_dir, sid)
-            if not force and apath.exists():
+            # An unfinished commit is never fresh: the artifact predates it (written last).
+            if not force and apath.exists() and sid not in unfinished:
                 try:
                     existing = json.loads(apath.read_text(encoding="utf-8"))
                 except (OSError, json.JSONDecodeError):
@@ -408,8 +446,14 @@ def extract_claims(
             if not md.strip():
                 # Empty Markdown IS a deterministic complete replacement (ADR-0056).
                 with write_lock.hold(reviews_dir):
-                    affected.update(graph.supersede_source_edges(gconn, sid, now=now))
+                    rec = journal.begin(root, _PRODUCER, sid,
+                                        claims=graph.claims_for_source(gconn, sid), now=now)
+                    intent = run.intent(sources=[sid], claims=rec["claims"])
+                    superseded = graph.supersede_source_edges(gconn, sid, now=now)
+                    _compose(set(rec["claims"]) | set(superseded), {})
                     _write_source_artifact(apath, sid, fingerprint, [], model_ref, now, strategy_ref)
+                    run.publish(intent, sources=[sid])
+                    journal.finish(root, _PRODUCER, sid)
                 skipped_empty += 1
                 continue
 
@@ -460,7 +504,9 @@ def extract_claims(
 
             # ADR-0068: the model calls above ran outside the write lock; this commit takes it and
             # re-reads what may have changed meanwhile (the source's lifecycle status, a claim
-            # hidden or deprecated by a human).
+            # hidden or deprecated by a human). It writes the graph, then the document's claim
+            # pages, then the artifact last (an interrupted commit leaves the document stale, so the
+            # next run redoes it), and publishes the Source page before releasing the lock.
             with write_lock.hold(reviews_dir):
                 # The claims are grounded in the text the model read; a re-extraction installed
                 # meanwhile makes them stale — write nothing, the next run extracts the new text.
@@ -468,8 +514,15 @@ def extract_claims(
                     input_changed += 1
                     replacement_not_applied += 1
                     continue
+                # The journal record keeps every claim this commit may retire — the document's
+                # current ones, unioned with any an interrupted attempt saved — so superseding their
+                # evidence below can't lose them (the record goes only after the artifact).
+                rec = journal.begin(root, _PRODUCER, sid,
+                                    claims=graph.claims_for_source(gconn, sid), now=now)
+                intent = run.intent(sources=[sid], claims=rec["claims"])
+                texts: dict[str, str] = {}     # cid -> claim_text for the claims (re)asserted here
                 # Replacement staged in full: NOW retire the prior evidence and emit it.
-                affected.update(graph.supersede_source_edges(gconn, sid, now=now))
+                affected = set(rec["claims"]) | set(graph.supersede_source_edges(gconn, sid, now=now))
                 graph.upsert_node(
                     gconn, node_id=sid, node_type="source", slug=sid,
                     status=get_status(load_manifest(manifests_dir, sid) or manifest), now=now)
@@ -505,7 +558,6 @@ def extract_claims(
                         seen.add((cid, start, end))
                         source_claims.append({"claim_id": cid, "claim_text": text, "citation": citation})
                         texts[cid] = text
-                        touched.add(cid)
                         graph.upsert_node(gconn, node_id=cid, node_type="claim", slug=cid,
                                           status=_reasserted_status(gconn, cid), now=now)
                         graph.upsert_assertion(
@@ -514,39 +566,28 @@ def extract_claims(
                             evidence_char_end=end, job_id=job_id, now=now,
                         )
 
+                _compose(set(texts) | affected, texts)
                 _write_source_artifact(apath, sid, fingerprint, source_claims, model_ref, now, strategy_ref)
+                run.publish(intent, sources=[sid])
+                journal.finish(root, _PRODUCER, sid)
             claims_written += len(source_claims)
             if source_claims:
                 sources_with_claims += 1
 
-        pages_written = pages_tombstoned = 0
-        contradiction_affected: set[str] = set()  # surviving endpoints of superseded contradictions
-        with write_lock.hold(reviews_dir):                # pages read their status authority here
-            for cid in touched | affected:
-                outcome = recompose_claim(gconn, cid=cid, claims_dir=claims_dir,
-                                          reviews_dir=reviews_dir, markdown_dir=markdown_dir, now=now,
-                                          text_hint=texts.get(cid),
-                                          contradiction_affected=contradiction_affected)
-                pages_written += outcome == "written"
-                pages_tombstoned += outcome == "tombstoned"
+        pages_written = sum(o == "written" for o in page_outcomes.values())
+        pages_tombstoned = sum(o == "tombstoned" for o in page_outcomes.values())
+        pub = run.finish()                    # index.md + the keyword index, once (decision 5)
+        left = journal.pending(root, _PRODUCER)
+        # A document this run attempted whose commit is still unfinished is never a clean success.
+        left_attempted = sorted(set(left) & attempted)
 
-            # Re-render the surviving endpoints of any contradiction superseded above so their pages
-            # drop the now-dead backlink (the claim CLI stays valid without a contradiction pass).
-            for cid in sorted(contradiction_affected):
-                node = graph.get_node(gconn, cid)
-                if node and node["status"] == "active":
-                    recompose_claim(gconn, cid=cid, claims_dir=claims_dir, reviews_dir=reviews_dir,
-                                    markdown_dir=markdown_dir, now=now)
-
-        index_rebuilt = _rebuild_index(root) if (
-            rebuild_index and (touched or affected or contradiction_affected)) else False
-
-        if errors:
+        if errors or left_attempted:
             status = "partial"
         elif not has_key and considered > 0:
             status = "skipped"
         else:
             status = "succeeded"
+        status = publication.job_status(status, pub)
 
         summary: dict[str, Any] = {
             "job_id": job_id, "model_ref": model_ref, "status": status,
@@ -567,7 +608,12 @@ def extract_claims(
             "skipped_empty": skipped_empty, "skipped_no_key": skipped_no_key,
             "manifests_skipped_invalid": len(skipped_invalid),
             "errors": len(errors), "error_details": errors,
-            "index_rebuilt": index_rebuilt, "extracted_at": now,
+            # ADR-0068 producer journal: documents whose commit is still unfinished (redone by the
+            # next run that reaches them), and the ones finished here from authority.
+            "unfinished_commits": sorted(left), "journal_reconciled": journal_reconciled,
+            "index_rebuilt": bool(pub and pub["index_rebuilt"]),
+            "keyword_reindexed": bool(pub and pub["keyword_reindexed"]),
+            "publication": publication.summary(pub), "extracted_at": now,
         }
         if conn is not None:
             db.update_job(conn, job_id, status=status, finished_at=iso_now(), metadata=summary)

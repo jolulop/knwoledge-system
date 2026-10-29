@@ -86,6 +86,12 @@ def _publication_banner() -> str:
                 "</button></form></p>")
     if st.get("state") != "pending":
         return ""
+    if st.get("only_runs"):                   # a bulk job's end refresh, still to come (decision 5)
+        return ("<p class='banner'><strong>Search refresh pending.</strong> A "
+                + _h(", ".join(st.get("runs") or [])) + " run saved documents; the index page and "
+                "search update when it finishes. If no run is in progress (it stopped), retry. "
+                "<form class='decide' method='post' action='/ui/publication/retry'><button "
+                "type='submit'>Retry publishing</button></form></p>")
     steps = [f"{len(st.get(k) or [])} {label} page(s)"
              for k, label in (("claims", "claim"), ("syntheses", "synthesis"), ("items", "tag"),
                               ("sources", "Source")) if st.get(k)]

@@ -6,7 +6,16 @@ DOCX is built with python-docx (already a declared extraction dependency).
 """
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
+
+TEMPLATES = Path(__file__).resolve().parents[1] / "templates"
+
+
+def copy_templates(root: Path) -> None:
+    """Give a test vault the templates a real vault has: extraction publishes each Source page
+    (ADR-0068 decision 5), which needs `templates/source.md`."""
+    shutil.copytree(TEMPLATES, Path(root) / "templates", dirs_exist_ok=True)
 
 
 def write_markdown(path: Path) -> Path:

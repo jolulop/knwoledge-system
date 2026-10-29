@@ -181,8 +181,36 @@ def record(root: Path, *, origin: str, sources: Any = (), items: Any = (), claim
     return entry["id"]
 
 
+RUN_PREFIX = "run_"                                        # the origin of a running job's own entry
+
+
+def extend(root: Path, entry_id: str | None, *, origin: str, items: Any = (),
+           now: str | None = None) -> str:
+    """Make sure a bulk job's own entry is queued, and return its id (ADR-0068 decision 5).
+
+    The entry holds the run's end refresh (`index.md` and the keyword index) plus the tags whose
+    Source pages that refresh re-renders (provisional). It is the same entry when it is still queued
+    (`items` are added to it); a new one when another publication already published and cleared it.
+    Called under the write lock before each of the run's commits, so a crash at any point leaves the
+    end refresh queued."""
+    _require_lock()
+    wanted = {i for i in items if isinstance(i, str) and _ITEM_ID.fullmatch(i)}
+    entries = load(root)
+    for e in entries:
+        if e["id"] == entry_id:
+            merged = sorted(set(e["items"]) | wanted)
+            if merged != e["items"] or not (e["index"] and e["keyword"]) or (
+                    wanted and not e["provisional"]):
+                e.update(items=merged, index=True, keyword=True,
+                         provisional=e["provisional"] or bool(wanted))
+                save(root, entries)
+            return e["id"]
+    return record(root, origin=origin, items=wanted, now=now)
+
+
 def discard(root: Path, entry_id: str) -> None:
-    """Remove one entry whose writer changed nothing (it refused before its first write)."""
+    """Remove one entry whose writer changed nothing (it refused before its first write), or whose
+    only pages that writer just wrote itself (a Source page generate_wiki rendered)."""
     entries = load(root)
     kept = [e for e in entries if e["id"] != entry_id]
     if len(kept) != len(entries):
@@ -198,7 +226,12 @@ def outstanding(entries: list[dict[str, Any]]) -> dict[str, Any]:
             "items": sorted({i for e in entries for i in e["items"]}),
             "sources": sorted({s for e in entries for s in e["sources"]}),
             "index": any(e["index"] for e in entries),
-            "keyword": any(e["keyword"] for e in entries)}
+            "keyword": any(e["keyword"] for e in entries),
+            # the producers whose run entries these are (their end refresh is still to come)
+            "runs": sorted({e["origin"][len(RUN_PREFIX):] for e in entries
+                            if e["origin"].startswith(RUN_PREFIX)}),
+            "only_runs": bool(entries) and all(e["origin"].startswith(RUN_PREFIX)
+                                               for e in entries)}
 
 
 def status(root: Path) -> dict[str, Any]:

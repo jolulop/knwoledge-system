@@ -18,7 +18,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.backend.config import get_settings
-from app.workers import wiki
+from app.workers import publication, wiki
 
 
 def main(argv: list[str]) -> int:
@@ -48,8 +48,11 @@ def main(argv: list[str]) -> int:
     if summary["error_details"]:
         for err in summary["error_details"]:
             print(f"  - {err['source_id']}: {err['error']}")
+    for line in publication.report(summary["publication"]):
+        print(line)
     print(f"Job: {summary['job_id']}")
-    return 1 if summary["errors"] else 0
+    published = (summary["publication"] or {}).get("status") != publication.PENDING
+    return 1 if summary["errors"] or not published else 0
 
 
 if __name__ == "__main__":

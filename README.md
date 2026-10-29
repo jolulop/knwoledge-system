@@ -65,12 +65,9 @@ directory skeletons only; generated vault state is local runtime data.
 ## Day-to-day workflow
 
 ```bash
-# deterministic ingest/build
+# deterministic ingest/build — extraction publishes each Source page, wiki/index.md and search
 uv run python scripts/scan_inbox.py
 uv run python scripts/extract_sources.py
-uv run python scripts/generate_wiki.py
-uv run python scripts/reindex_keyword.py
-uv run python scripts/rebuild_index.py
 uv run python scripts/validate_all.py
 
 # LLM-backed semantic layer, if a hosted key or local model chain is configured
@@ -80,10 +77,8 @@ uv run python scripts/extract_items.py
 uv run python scripts/promote.py
 uv run python scripts/detect_contradictions.py
 uv run python scripts/generate_synthesis.py
-# the semantic producers rebuild wiki/index.md but NOT the keyword index — refresh it so new
-# Item/Claim/Synthesis pages reach /search navigation, then re-validate
-uv run python scripts/reindex_keyword.py
-uv run python scripts/rebuild_index.py
+# each producer publishes its pages, wiki/index.md and search before it reports success (ADR-0068);
+# one that prints "publication incomplete" left work queued: uv run python scripts/republish.py
 uv run python scripts/validate_all.py
 
 # serve loopback UI/API

@@ -10,14 +10,16 @@ Usage:
                                    # provider calls; a cache miss leaves the document untouched.
                                    # Also re-cuts at a changed ENRICH_ITEMS_CAP (ADR-0066 P1).
 
-Precondition: run scripts/generate_wiki.py first — item pages link to Source pages
-and the Source pages project these mentions, so the Source pages must already exist.
+Item pages link to Source pages and the Source pages project these mentions; extraction publishes
+each Source page (ADR-0068), so they exist once a document is extracted.
 
 Uses the tier-2 (standard) model_ref and provider credentials from config/.env. With no API
 key, extraction is skipped (recorded as a 'skipped' job) and no nodes are written. Writes
 candidate item pages under wiki/Items/, items artifacts under normalized/enrichment/, and
-active mentions edges into db/graph.sqlite; rebuilds wiki/index.md, refreshes Source pages
-via generate_wiki, and runs the validators. Never touches raw/.
+active mentions edges into db/graph.sqlite; publishes each source's Source page in its commit and
+ends with one refresh of the other Source pages listing the tags it touched, wiki/index.md and the
+keyword index (ADR-0068 decision 5), then runs the validators. Exit 1 on errors, cache misses,
+unfinished merges, a failed validator or an incomplete publication. Never touches raw/.
 """
 from __future__ import annotations
 
@@ -40,7 +42,7 @@ import validate_wikilinks  # noqa: E402
 from app.backend.config import get_settings
 from app.llm.cache import ResponseCache
 from app.llm.client import build_client
-from app.workers import items, wiki
+from app.workers import items, publication
 
 
 def main(argv: list[str]) -> int:
@@ -106,21 +108,12 @@ def main(argv: list[str]) -> int:
     print(f"Errors: {summary['errors']}")
     for err in summary["error_details"]:
         print(f"  - {err['source_id']}: {err['error']}")
+    for line in publication.report(summary["publication"]):
+        print(line)
+    if summary["unfinished_commits"]:
+        print(f"Unfinished commits: {len(summary['unfinished_commits'])} "
+              f"({', '.join(summary['unfinished_commits'])}) — the next run redoes them.")
     print(f"Job: {summary['job_id']}")
-
-    # Refresh Source pages so their Items section reflects the new mentions.
-    gen = wiki.generate_wiki(
-        settings.root,
-        manifests_dir=settings.manifests_dir,
-        jobs_db=settings.jobs_db_path,
-        wiki_dir=settings.wiki_dir,
-        templates_dir=settings.templates_dir,
-        markdown_dir=settings.markdown_dir,
-        summary_max=settings.wiki_summary_max_chars,
-        summary_min=settings.wiki_summary_min_chars,
-    )
-    print(f"Source pages refreshed: generated {gen['generated']}, "
-          f"skipped_unchanged {gen['skipped_unchanged']}.")
 
     root = str(settings.root)
     print("\nValidators:")
@@ -131,8 +124,10 @@ def main(argv: list[str]) -> int:
         validate_wikilinks.main([root]),
         validate_projection.main([root]),
     ]
+    published = (summary["publication"] or {}).get("status") != publication.PENDING
+    published = published and not summary["unfinished_commits"]
     return 0 if (not summary["errors"] and not summary["cache_misses"] and not summary["in_flight_sources"]
-                 and all(rc == 0 for rc in rcs)) else 1
+                 and all(rc == 0 for rc in rcs) and published) else 1
 
 
 if __name__ == "__main__":

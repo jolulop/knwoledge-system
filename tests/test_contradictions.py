@@ -19,6 +19,7 @@ from app.llm.cache import ResponseCache  # noqa: E402
 from app.llm.client import LLMClient  # noqa: E402
 from app.workers import claims, contradictions, extract, intake, items, reviews, wiki  # noqa: E402
 from app.workers.wiki_render import render_claim_page  # noqa: E402
+from tests import fixtures  # noqa: E402
 
 TEMPLATES = ROOT / "templates"
 CLAIM_MODEL = "anthropic:claude-sonnet-4-6"
@@ -116,6 +117,7 @@ def _sid(tmp_path, name):
 def _build_graph(tmp_path, *, independent=True, claim_adapter=None, item_adapter=None):
     """Ingest two sources, extract claims + items, optionally mark them independent."""
     jobs = tmp_path / "db" / "jobs.sqlite"
+    fixtures.copy_templates(tmp_path)         # extraction publishes Source pages (ADR-0068)
     _ingest(tmp_path, "a.md", DOC_A)
     _ingest(tmp_path, "b.md", DOC_B)
     intake.scan_inbox(tmp_path, jobs_db=jobs)
@@ -543,8 +545,10 @@ def test_reprojection_rebuilds_index(tmp_path, monkeypatch):
     # it rebuilds wiki/index.md exactly when it re-projects Claim pages, and not otherwise. The
     # real rebuild script lives in the repo, not tmp_path, so the call itself is monkeypatched.
     calls = []
-    monkeypatch.setattr(contradictions, "_rebuild_index", lambda root: bool(calls.append(root)) or True)
+    monkeypatch.setattr(contradictions.publication, "_rebuild_index_status",
+                        lambda root: bool(calls.append(root)) or "rebuilt")
     jobs = _build_graph(tmp_path)
+    calls.clear()                             # extraction's own end refresh (ADR-0068) ran above
     _detect(tmp_path, ContradictionAdapter(verdict=True), jobs)
     rid = next(json.loads(p.read_text())["review_id"]
                for p in (tmp_path / "reviews" / "pending").glob("*.json")

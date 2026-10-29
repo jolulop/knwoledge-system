@@ -28,7 +28,7 @@ import validate_projection  # noqa: E402
 import validate_wikilinks  # noqa: E402
 
 from app.backend.config import get_settings
-from app.workers import promote
+from app.workers import promote, publication
 
 
 def main(argv: list[str]) -> int:
@@ -43,6 +43,8 @@ def main(argv: list[str]) -> int:
     print(f"Candidates considered: {summary['candidates_considered']}")
     print(f"Promoted to active: {summary['promoted']}")
     print(f"Index rebuilt: {summary['index_rebuilt']}")
+    for line in publication.report(summary["publication"]):
+        print(line)
     print(f"Job: {summary['job_id']}")
 
     root = str(settings.root)
@@ -53,7 +55,8 @@ def main(argv: list[str]) -> int:
         validate_projection.main([root]),
         validate_wikilinks.main([root]),
     ]
-    return 0 if all(rc == 0 for rc in rcs) else 1
+    published = (summary["publication"] or {}).get("status") != publication.PENDING
+    return 0 if all(rc == 0 for rc in rcs) and published else 1
 
 
 if __name__ == "__main__":

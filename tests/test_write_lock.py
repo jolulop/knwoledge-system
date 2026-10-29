@@ -650,7 +650,7 @@ def test_a_forced_re_extraction_installs_only_after_a_source_page_render(tmp_pat
     real_render = wiki_render.render_source_page
 
     def slow_render(template, manifest, markdown, **kwargs):
-        seen["markdown"] = markdown
+        seen.setdefault("markdown", []).append(markdown)
         rendering.set()
         assert go.wait(10)
         return real_render(template, manifest, markdown, **kwargs)
@@ -667,7 +667,11 @@ def test_a_forced_re_extraction_installs_only_after_a_source_page_render(tmp_pat
     t_gen.join(30)
     t_ext.join(30)
     assert "error" not in gen and "error" not in ext
-    assert seen["markdown"] == old_md                     # the page rendered the old text whole
+    # The page rendered the old text whole; then the extraction's own publication (ADR-0068 decision
+    # 5) rendered the new text, after its install.
+    first, *later = seen["markdown"]
+    assert first == old_md
+    assert later and later[-1].endswith("Re-extracted paragraph.\n")
     assert md_path.read_text(encoding="utf-8").endswith("Re-extracted paragraph.\n")
     assert not (tmp_path / "normalized" / ".staging" / sid).exists()
 

@@ -18,8 +18,6 @@ Two halves, both deterministic and key-free:
 """
 from __future__ import annotations
 
-import subprocess
-import sys
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -373,8 +371,10 @@ def run_reindex(
 
     **Index + keyword only — never the vector index** (that stays the explicit `reindex_vector.py`,
     ADR-0033, so maintenance triggers no embedding-server side effect). Job-recorded, appends `wiki/log.md`.
-    A genuine sub-step failure (script present and non-zero, or a keyword reindex error) yields
-    `status: "failed"` with a warning — not a silent success.
+    ADR-0068: it is a publication (`app/workers/publication.py`), so it also retries whatever is
+    pending. A genuine sub-step failure (script present and non-zero, or a keyword reindex error)
+    stays queued and yields `status: "saved_publication_pending"` with a warning — not a silent
+    success.
     """
     root = Path(root).resolve()
     jobs_db = Path(jobs_db) if jobs_db else root / "db" / "jobs.sqlite"
@@ -390,22 +390,12 @@ def run_reindex(
         db.insert_job(conn, job_id=job_id, job_type="reindex", status="running",
                       created_at=now, started_at=now)
     try:
-        script = root / "scripts" / "rebuild_index.py"
-        if script.exists():
-            index_rebuilt = subprocess.run(
-                [sys.executable, str(script), str(root)]).returncode == 0
-            if not index_rebuilt:
-                warnings.append("index_rebuild_failed")  # script present but non-zero
-        else:
-            index_rebuilt = False  # missing script (degraded/test env) is not a failure
-        try:
-            keyword_index.reindex(root)
-            keyword_reindexed = True
-        except Exception as exc:  # noqa: BLE001 - report, don't crash the maintenance pass
-            keyword_reindexed = False
-            warnings.append(f"keyword_reindex_failed:{type(exc).__name__}")
-
-        status = "failed" if warnings else "succeeded"
+        from app.workers import publication              # lazy: publication renders through wiki
+        pub = publication.publish(root, index=True, keyword=True, origin="reindex",
+                                  wiki_dir=wiki_dir, now=now)
+        index_rebuilt, keyword_reindexed = pub["index_rebuilt"], pub["keyword_reindexed"]
+        warnings = pub["warnings"]
+        status = publication.job_status("succeeded", pub)
         _append_log(wiki_dir, f"reindex: {status} (index_rebuilt={index_rebuilt}, "
                               f"keyword={keyword_reindexed}) [{job_id}]")
         if conn is not None:
@@ -413,7 +403,8 @@ def run_reindex(
                           metadata={"index_rebuilt": index_rebuilt,
                                     "keyword_reindexed": keyword_reindexed, "warnings": warnings})
         return {"job_id": job_id, "status": status, "index_rebuilt": index_rebuilt,
-                "keyword_reindexed": keyword_reindexed, "warnings": warnings}
+                "keyword_reindexed": keyword_reindexed, "warnings": warnings,
+                "publication": publication.summary(pub)}
     except Exception as exc:
         if conn is not None:
             db.update_job(conn, job_id, status="failed", finished_at=iso_now(), error_message=str(exc))

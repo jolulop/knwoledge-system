@@ -654,6 +654,29 @@ def claims_with_active_evidence(conn: sqlite3.Connection) -> set[str]:
     }
 
 
+def orphans(conn: sqlite3.Connection, *, edge_type: str, source_id: str | None = None) -> list[str]:
+    """Claims (`derived_from`) or tags (`mentions`) that a source's relationship was superseded from
+    and that have no active one left while the node still stands (`active`, or a `candidate` tag):
+    what a re-extraction interrupted between superseding and re-rendering leaves behind (ADR-0068
+    slice 3). With `source_id`, only the ones that source's superseded relationships reach."""
+    if edge_type == "derived_from":
+        node, src, node_type, statuses = "src_id", "dst_id", "claim", ("active",)
+    elif edge_type == "mentions":
+        node, src, node_type, statuses = "dst_id", "src_id", "item", ("active", "candidate")
+    else:
+        raise ValueError(f"no orphans for edge type {edge_type!r}")
+    where = f" AND e.{src} = ?" if source_id is not None else ""
+    marks = ",".join("?" for _ in statuses)
+    return [r[0] for r in conn.execute(
+        f"SELECT DISTINCT e.{node} FROM edges e JOIN nodes n ON n.node_id = e.{node} "
+        f"WHERE e.edge_type = ? AND e.status = 'superseded'{where} AND n.node_type = ? "
+        f"AND n.status IN ({marks}) AND NOT EXISTS (SELECT 1 FROM edges a WHERE "
+        f"a.{node} = e.{node} AND a.edge_type = ? AND a.status = 'active') ORDER BY 1",
+        (edge_type, *([source_id] if source_id is not None else []), node_type, *statuses,
+         edge_type),
+    )]
+
+
 def supersede_contradictions_for_claim(
     conn: sqlite3.Connection, claim_id: str, *, now: str | None = None
 ) -> list[dict[str, Any]]:

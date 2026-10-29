@@ -27,10 +27,13 @@ JOB_TYPES = frozenset(
      # a fake CI fixture, so a real-vault eval is deferred (decision 14).
      "lint", "reindex", "stale_check"}
 )
+# `saved_publication_pending` (ADR-0068 decision 5): the run's work is saved but its publication
+# (pages, index.md, keyword search) is incomplete and queued in db/publication_pending.json.
 JOB_STATUSES = frozenset(
-    {"pending", "running", "succeeded", "failed", "partial", "skipped"}
+    {"pending", "running", "succeeded", "failed", "partial", "skipped", "saved_publication_pending"}
 )
-_TERMINAL_STATUSES = frozenset({"succeeded", "failed", "partial", "skipped"})
+_TERMINAL_STATUSES = frozenset({"succeeded", "failed", "partial", "skipped",
+                                "saved_publication_pending"})
 _JOB_LOCKS: dict[str, Any] = {}                           # job_id -> vault writer-lock handle
 _JOB_LOCKS_GUARD = threading.Lock()
 

@@ -54,6 +54,7 @@ class FakeAdapter:
 def _build(tmp_path: Path) -> Path:
     inbox = tmp_path / "raw" / "inbox"
     inbox.mkdir(parents=True)
+    fixtures.copy_templates(tmp_path)
     fixtures.write_markdown(inbox / "doc.md")
     intake.scan_inbox(tmp_path, jobs_db=tmp_path / "db" / "jobs.sqlite")
     extract.extract_sources(tmp_path, jobs_db=tmp_path / "db" / "jobs.sqlite")

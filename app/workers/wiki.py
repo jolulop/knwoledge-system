@@ -2,20 +2,19 @@
 """Phase 3 wiki worker: generate deterministic Source pages from the normalized layer.
 
 For every source whose manifest reports `extracted`/`partial`, render
-`wiki/Sources/<source_id>.md` from `templates/source.md` (ADR-0015/0016), rebuild
-`wiki/index.md` (reusing scripts/rebuild_index.py), append `wiki/log.md`, and record a
-`generate_wiki` job. Deterministic and offline: identical inputs yield byte-identical
+`wiki/Sources/<source_id>.md` from `templates/source.md` (ADR-0015/0016), publish the run's end
+refresh (`wiki/index.md` via scripts/rebuild_index.py and the keyword index, ADR-0068 decision 5),
+append `wiki/log.md`, and record a `generate_wiki` job. Deterministic and offline: identical inputs yield byte-identical
 pages. Idempotent — a page whose recomputed input_fingerprint matches the stored one is
 skipped unless `force` is given (ADR-0023).
 
-The wiki layer is mutable local data (ADR-0014); this worker writes only under wiki/ and
-db/jobs.sqlite, never under raw/ or normalized/.
+The wiki layer is mutable local data (ADR-0014); this worker writes only under wiki/,
+db/jobs.sqlite and, through publication, the keyword index and db/publication_pending.json, never
+under raw/ or normalized/.
 """
 from __future__ import annotations
 
 import re
-import subprocess
-import sys
 import uuid
 from pathlib import Path
 from typing import Any
@@ -83,15 +82,6 @@ def _append_log(wiki_dir: Path, now: str, summary: dict[str, Any]) -> None:
         fh.write(entry)
 
 
-def _rebuild_index(root: Path) -> bool:
-    """Rebuild wiki/index.md via the existing deterministic script. Best-effort."""
-    script = root / "scripts" / "rebuild_index.py"
-    if not script.exists():
-        return False
-    result = subprocess.run([sys.executable, str(script), str(root)])
-    return result.returncode == 0
-
-
 def generate_wiki(
     root: Path,
     *,
@@ -109,7 +99,12 @@ def generate_wiki(
     rebuild_index: bool = True,
     record_job: bool = True,
 ) -> dict[str, Any]:
-    """Generate Source pages for pending (or selected) sources; return a run summary."""
+    """Generate Source pages for pending (or selected) sources; return a run summary.
+
+    As a run (`rebuild_index=True`, ADR-0068 decision 5) it records its end refresh first and ends
+    with one publication: `index.md`, the keyword index, everything already pending and one more try
+    of any page that failed. With `rebuild_index=False` it is a step of a caller that publishes
+    (publication itself, Apply), so it renders the pages and nothing else."""
     root = Path(root).resolve()
     manifests_dir = Path(manifests_dir) if manifests_dir else root / "raw" / "manifests"
     jobs_db = Path(jobs_db) if jobs_db else root / "db" / "jobs.sqlite"
@@ -140,7 +135,14 @@ def generate_wiki(
             created_at=now, started_at=now,
         )
 
+    run = None
     try:
+        if rebuild_index:
+            from app.workers import publication          # lazy: publication renders through here
+            run = publication.Run(root, "generate_wiki", wiki_dir=wiki_dir,
+                                  templates_dir=templates_dir)
+            with write_lock.hold(root / "reviews"):
+                run.intent()                              # the end refresh, queued first
         manifests, skipped_invalid = valid_manifests(manifests_dir)
         if source_ids is not None:
             wanted = set(source_ids)
@@ -224,7 +226,13 @@ def generate_wiki(
                 continue
             considered += 1
             with write_lock.hold(root / "reviews"):
+                # ADR-0068: record the page (renewing the run's end refresh, which another
+                # publication may have cleared meanwhile) before writing it, and acknowledge it once
+                # written; a page that failed stays queued for the end refresh to retry.
+                entry = run.intent(sources=[source_id]) if run is not None else None
                 outcome = _render_one(load_manifest(manifests_dir, source_id) or manifest)
+                if run is not None and not isinstance(outcome, dict):
+                    run.done(entry)
             if isinstance(outcome, dict):
                 errors.append(outcome)
             elif outcome == "unchanged":
@@ -244,15 +252,19 @@ def generate_wiki(
             "generated_at": now,
         }
 
-        if rebuild_index:
-            summary["index_rebuilt"] = _rebuild_index(root)
+        status = "succeeded" if not errors else "partial"
+        if run is not None:
+            pub = run.finish()
+            summary["index_rebuilt"] = pub["index_rebuilt"]
+            summary["keyword_reindexed"] = pub["keyword_reindexed"]
+            summary["publication"] = publication.summary(pub)
+            status = publication.job_status(status, pub)
+        summary["status"] = status
         _append_log(wiki_dir, now, summary)
 
         if conn is not None:
             db.update_job(
-                conn, job_id,
-                status="succeeded" if not errors else "partial",
-                finished_at=iso_now(), metadata=summary,
+                conn, job_id, status=status, finished_at=iso_now(), metadata=summary,
             )
         return summary
     except Exception as exc:
