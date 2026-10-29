@@ -79,6 +79,7 @@ INCLUDE_FILES = ["CLAUDE.md", "AGENTS.md", "README.md", "pyproject.toml", "docke
 # The response cache is backed up by default (ADR-0027); set BACKUP_EXCLUDE_LLM_CACHE to a
 # truthy value to opt out (trading reproducibility for a smaller backup footprint).
 _CACHE_FILENAME = "llm_cache.sqlite"
+_AUTHORIZATIONS_FILENAME = "apply_authorizations.json"   # never backed up (ADR-0068 decision 6)
 
 # The vector index is derived/regenerable; include it only on explicit opt-in (ADR-0032 §7) to
 # save re-embedding cost. The keyword index is never backed up (cheap full rebuild from chunks).
@@ -178,10 +179,26 @@ def _writer_exclusion(root: Path):
     """Hold the write lock (ADR-0068) while the archive is written: every commit phase takes it, so
     files and graph rows are captured together. The vault lock is already held exclusively here, so
     the write lock is taken without it (``vault=False``). A backup changes no authority, so it still
-    runs while the publication queue is damaged (``authority=False``)."""
+    runs while the publication queue is damaged (``authority=False``) and leaves the vault revision
+    alone (``changes=False``, ADR-0068 decision 6)."""
     from app.backend import write_lock
-    with write_lock.hold(Path(root) / "reviews", vault=False, authority=False):
+    with write_lock.hold(Path(root) / "reviews", vault=False, authority=False, changes=False):
         yield
+
+
+# Never restored, from any archive (older ones carry db/revision.json): restore keeps the epoch it
+# generated and the authorizations it cleared, so no earlier preview token can match (ADR-0068).
+_NEVER_RESTORED = {"db/revision.json", "db/apply_authorizations.json"}
+
+
+def _new_epoch(root: Path) -> None:
+    """Durably start a new vault-revision epoch and drop every Apply authorization (ADR-0068
+    decision 6), so no preview taken before the restore can ever match. The vault lock is held
+    exclusively, so the write lock is taken without it."""
+    from app.backend import apply_authorization, revision, write_lock
+    with write_lock.hold(Path(root) / "reviews", vault=False, authority=False, changes=False):
+        apply_authorization.clear(root)
+        revision.new_epoch(root)
 
 
 # Durable, non-regenerable state whose overwrite must be called out on restore (ADR-0039 decision 3):
@@ -334,6 +351,8 @@ def _create_backup_report(root: Path) -> BackupReport:
                     continue
                 if path.name.endswith(_SQLITE_SIDE_SUFFIXES) or _is_lock_file(path.name):
                     continue  # transient SQLite side files / the lock files themselves
+                if path.name == _AUTHORIZATIONS_FILENAME:
+                    continue  # ADR-0068: a restore must never bring back Apply authorizations
                 if path.name == _CACHE_FILENAME:
                     if exclude_cache:
                         continue  # opt-out: skip the LLM response cache
@@ -429,7 +448,13 @@ def restore_backup(archive: Path, root: Path, *, force: bool = False,
     if dry_run:                                           # writes nothing: no exclusion needed
         return _restore_backup(archive, root, force=force, dry_run=True)
     with _vault_exclusive(root, "restore", lock_timeout):
-        return _restore_backup(archive, root, force=force, dry_run=False)
+        # A new epoch before the first file is written and again after the last (the archive may
+        # carry an older db/revision.json), so a restore interrupted anywhere never revives a token.
+        _new_epoch(root)
+        try:
+            return _restore_backup(archive, root, force=force, dry_run=False)
+        finally:
+            _new_epoch(root)
 
 
 def _restore_backup(archive: Path, root: Path, *, force: bool, dry_run: bool) -> RestoreReport:
@@ -449,7 +474,7 @@ def _restore_backup(archive: Path, root: Path, *, force: bool, dry_run: bool) ->
         # Pre-resolve every target with safe_under to block zip-slip BEFORE touching disk.
         targets: dict[str, Path] = {}
         for name in members:
-            if name.endswith("/"):
+            if name.endswith("/") or name in _NEVER_RESTORED:
                 continue
             dest = safe_under(root, root, name)
             if dest is None:

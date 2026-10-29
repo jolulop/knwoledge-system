@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 from app.backend import graph, keyword_index
 from app.backend import main as main_module
 from app.backend.config import get_settings
+from tests import fixtures
 
 
 @pytest.fixture
@@ -1171,7 +1172,7 @@ def _approved_concept_deprecation(tmp_path):
 
 
 def test_apply_empty_is_clean(client, tmp_path):
-    body = client.post("/reviews/apply").json()
+    body = fixtures.apply(client).json()
     assert body["status"] == "applied" and body["applied"] is True
     assert body["validators_ok"] is True and body["failed_validators"] == []
     assert body["summary"]["deprecations"] == {"applied": 0, "normalized": 0, "skipped": []}
@@ -1180,7 +1181,7 @@ def test_apply_empty_is_clean(client, tmp_path):
 
 def test_apply_runs_deprecation_executor_and_summary(client, tmp_path):
     page = _approved_concept_deprecation(tmp_path)
-    body = client.post("/reviews/apply").json()
+    body = fixtures.apply(client).json()
     assert body["applied"] is True
     assert body["summary"]["deprecations"]["applied"] == 1
     fm = main_module.parse_frontmatter(page.read_text(encoding="utf-8"))
@@ -1191,8 +1192,8 @@ def test_apply_runs_deprecation_executor_and_summary(client, tmp_path):
 
 def test_apply_is_idempotent(client, tmp_path):
     _approved_concept_deprecation(tmp_path)
-    client.post("/reviews/apply")
-    again = client.post("/reviews/apply").json()
+    fixtures.apply(client)
+    again = fixtures.apply(client).json()
     assert again["summary"]["deprecations"] == {"applied": 0, "normalized": 0, "skipped": []}
 
 
@@ -1200,7 +1201,7 @@ def test_apply_reports_unapplied_record_only_types(client, tmp_path):
     _write_review(tmp_path, "approved", {
         "review_id": "rev_m", "type": "delete_raw_file", "status": "approved",
         "subject": {"source_id": "src_0123456789abcdef"}, "proposal": {}, "context": {}})
-    body = client.post("/reviews/apply").json()
+    body = fixtures.apply(client).json()
     assert {"type": "delete_raw_file", "count": 1, "reason": "no_executor_in_phase_6"} \
         in body["summary"]["unapplied"]
 
@@ -1208,7 +1209,7 @@ def test_apply_reports_unapplied_record_only_types(client, tmp_path):
 def test_apply_validator_failure_is_200_not_500(client, tmp_path, monkeypatch):
     monkeypatch.setattr(main_module, "_run_all_validators", lambda root: [
         {"name": "validate_projection.py", "returncode": 1, "stdout_tail": "boom", "stderr_tail": ""}])
-    resp = client.post("/reviews/apply")
+    resp = fixtures.apply(client)
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "validation_failed" and body["validators_ok"] is False
@@ -1218,7 +1219,7 @@ def test_apply_validator_failure_is_200_not_500(client, tmp_path, monkeypatch):
 
 def test_apply_no_server_path_leak(client, tmp_path):
     _approved_concept_deprecation(tmp_path)
-    assert str(tmp_path) not in client.post("/reviews/apply").text
+    assert str(tmp_path) not in fixtures.apply(client).text
 
 
 def test_apply_graph_missing_with_approved_items_is_503(client, tmp_path):
@@ -1228,13 +1229,13 @@ def test_apply_graph_missing_with_approved_items_is_503(client, tmp_path):
         "review_id": "rev_d", "type": "deprecate_wiki_page", "status": "approved",
         "subject": {"node_id": "itm_x", "page": "Items/thing.md"},
         "proposal": {"to_status": "deprecated_candidate"}, "context": {"node_type": "item"}})
-    assert client.post("/reviews/apply").status_code == 503
+    assert fixtures.apply(client).status_code == 503
 
 
 def test_apply_index_rebuild_failure_warns(client, tmp_path, monkeypatch):
     _approved_concept_deprecation(tmp_path)
     monkeypatch.setattr(main_module.publication, "_rebuild_index_status", lambda root: "failed")
-    body = client.post("/reviews/apply").json()
+    body = fixtures.apply(client).json()
     assert body["summary"]["deprecations"]["applied"] == 1   # the change happened
     assert "index_rebuild_failed" in body["warnings"]
     assert body["summary"]["index_rebuilt"] is False

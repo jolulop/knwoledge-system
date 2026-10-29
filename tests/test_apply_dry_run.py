@@ -26,6 +26,7 @@ from app.backend import apply_sandbox, graph
 from app.backend import main as main_module
 from app.backend.config import get_settings
 from app.workers import wiki
+from tests import fixtures
 
 
 # --- fixtures / helpers -----------------------------------------------------
@@ -102,10 +103,13 @@ def _approve_archive(tmp_path: Path, sid: str, rid: str = "rev_arch") -> None:
 
 def _tree_hash(root: Path) -> dict[str, str]:
     """Map every file (rel path) under root to a content hash — for a live-unchanged assertion. The
-    empty vault writer-lock file (ADR-0039 amendment) is coordination state, not vault content."""
+    empty vault writer-lock file (ADR-0039 amendment) is coordination state, not vault content, and so
+    is the Apply authorization a clean preview records (ADR-0068 decision 6). The vault revision is
+    hashed: a preview must leave it alone."""
     out: dict[str, str] = {}
     for p in sorted(root.rglob("*")):
-        if p.is_file() and not p.is_symlink() and p.name != ".vault.lock":
+        if (p.is_file() and not p.is_symlink()
+                and p.name not in (".vault.lock", "apply_authorizations.json")):
             out[str(p.relative_to(root))] = hashlib.sha256(p.read_bytes()).hexdigest()
     return out
 
@@ -242,7 +246,7 @@ def test_dry_run_parity_with_real_apply(client, tmp_path):
     dry = client.post("/reviews/apply/dry-run").json()
     predicted = dry["diff"]["manifests"]
     # Now actually apply, and confirm the real mutation matches the prediction.
-    applied = client.post("/reviews/apply").json()
+    applied = fixtures.apply(client).json()
     assert applied["summary"]["archives"]["applied"] == 1
     md = tmp_path / "raw" / "manifests" / "src_0000000000000b22.json"
     assert json.loads(md.read_text())["status"] == "archive_candidate"
@@ -267,7 +271,7 @@ def test_dry_run_graph_unavailable_blocked_mirrors_503(client, tmp_path):
     assert any(n["review_id"] == "rev_d" and n["reason"] == "graph_unavailable"
                for n in dry["not_appliable"])
     # live apply refuses identically
-    assert client.post("/reviews/apply").status_code == 503
+    assert fixtures.apply(client).status_code == 503
 
 
 def test_dry_run_not_appliable_record_only(client, tmp_path):
@@ -333,16 +337,18 @@ def test_dry_run_contradiction_reject_shows_edge_status_change(client, tmp_path)
                for c in changes), dry["diff"]["graph"]
 
 
-def test_dry_run_sandbox_build_failure_is_structured(client, monkeypatch):
-    # A sandbox build failure is an inability to produce a preview, not a 500 (ADR-0040 #6).
-    def boom(_settings):
+@pytest.mark.parametrize("step", ["copy_state", "copy_code_and_raw"])
+def test_dry_run_sandbox_build_failure_is_structured(client, monkeypatch, step):
+    # A sandbox build failure is an inability to produce a preview, not a 500 (ADR-0040 #6), and a
+    # failed copy never authorizes Apply (ADR-0068 decision 6).
+    def boom(*_args):
         raise OSError("disk full")
-    monkeypatch.setattr(main_module.apply_sandbox, "build_sandbox", boom)
+    monkeypatch.setattr(main_module.apply_sandbox, step, boom)
     resp = client.post("/reviews/apply/dry-run")
     assert resp.status_code == 200
     dry = resp.json()
-    assert dry["status"] == "failed" and dry["reason"] == "sandbox_build_error"
-    assert "OSError" in dry["error"] and dry["diff"] is None
+    assert dry["status"] == "failed" and dry["reason"] == "copy_failed"
+    assert "OSError" in dry["error"] and dry["diff"] is None and dry["preview_token"] is None
 
 
 def test_dry_run_raw_integrity_passes_and_live_raw_unchanged(client, tmp_path):

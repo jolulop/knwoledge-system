@@ -28,6 +28,7 @@ from app.backend import review_read
 from app.backend.config import get_settings
 from app.workers import claims, deprecations, wiki
 from app.workers.wiki_render import parse_frontmatter
+from tests import fixtures
 
 CX = "clm_aaaaaaaaaaaaaaaa"
 CY = "clm_bbbbbbbbbbbbbbbb"
@@ -298,10 +299,10 @@ def test_api_claim_hide_unhide_rerenders_source_page(client, tmp_path, monkeypat
     src = tmp_path / "wiki" / "Sources" / f"{SID}.md"
     assert CX in src.read_text()
     _approve(tmp_path, "hide_claim", CX, to_status="hidden")
-    assert client.post("/reviews/apply").json()["status"] == "applied"
+    assert fixtures.apply(client).json()["status"] == "applied"
     assert CX not in src.read_text()                              # apply re-rendered the Source page
     _approve(tmp_path, "unhide_claim", CX, to_status="active", rid="rev_u")
-    assert client.post("/reviews/apply").json()["status"] == "applied"
+    assert fixtures.apply(client).json()["status"] == "applied"
     assert CX in src.read_text()                                  # unhide (evidence stands) restores it
 
 
@@ -315,7 +316,7 @@ def test_unhide_after_evidence_lost_tombstones_not_restored_to_source_page(clien
     conn.close()
     src = tmp_path / "wiki" / "Sources" / f"{SID}.md"
     _approve(tmp_path, "hide_claim", CX, to_status="hidden")
-    client.post("/reviews/apply")
+    fixtures.apply(client)
     assert CX not in src.read_text()
     # evidence lost while hidden + recompose (preservation): stays hidden with citations []
     conn = graph.connect(tmp_path / "db" / "graph.sqlite")
@@ -328,7 +329,7 @@ def test_unhide_after_evidence_lost_tombstones_not_restored_to_source_page(clien
     conn.close()
     assert _claim_fm(tmp_path, CX)["status"] == "hidden"
     _approve(tmp_path, "unhide_claim", CX, to_status="active", rid="rev_u")
-    client.post("/reviews/apply")
+    fixtures.apply(client)
     assert _claim_fm(tmp_path, CX)["status"] == "deprecated_candidate"   # re-derived tombstone, not active
     assert CX not in src.read_text()                                    # not restored (no active evidence)
 
@@ -479,14 +480,14 @@ def test_api_apply_hides_claim_with_summary(client, tmp_path, monkeypatch):
     conn.commit()
     conn.close()
     _approve(tmp_path, "hide_claim", CX, to_status="hidden")
-    body = client.post("/reviews/apply").json()
+    body = fixtures.apply(client).json()
     assert body["status"] == "applied" and body["summary"]["claims_hidden"]["applied"] == 1
 
 
 def test_api_claim_hide_graph_required_503(client, tmp_path):
     _approve(tmp_path, "hide_claim", CX, to_status="hidden")
     assert not (tmp_path / "db" / "graph.sqlite").exists()
-    assert client.post("/reviews/apply").status_code == 503
+    assert fixtures.apply(client).status_code == 503
 
 
 def test_api_claim_hide_reindex_failure_is_non_clean(client, tmp_path, monkeypatch):
@@ -498,7 +499,7 @@ def test_api_claim_hide_reindex_failure_is_non_clean(client, tmp_path, monkeypat
     conn.commit()
     conn.close()
     _approve(tmp_path, "hide_claim", CX, to_status="hidden")
-    body = client.post("/reviews/apply").json()
+    body = fixtures.apply(client).json()
     assert body["status"] == "saved_publication_pending"
     assert "claim_hide_retrieval_suppression_not_guaranteed" in body["warnings"]
 

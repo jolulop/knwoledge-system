@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 from app.backend import graph
 from app.backend import main as main_module
 from app.backend.config import get_settings
+from tests import fixtures
 
 
 @pytest.fixture
@@ -151,12 +152,13 @@ def _approved_concept_deprecation(tmp_path):
 
 
 def test_apply_confirm_shows_dry_run_preview(client, tmp_path):
-    # ADR-0040: GET /ui/reviews/apply now renders the dry-run mutation preview, not a scope-count page.
+    # ADR-0040: the preview renders the dry-run mutation preview; ADR-0068 decision 6 moved it to the
+    # origin-guarded POST /ui/reviews/apply/preview (GET is the read-only scope page).
     _approved_concept_deprecation(tmp_path)
     _write_review(tmp_path, "approved", {
         "review_id": "rev_m", "type": "split_entity", "status": "approved",
         "subject": {}, "proposal": {}, "context": {}})
-    body = client.get("/ui/reviews/apply").text
+    body = client.post("/ui/reviews/apply/preview").text
     assert "deprecate_wiki_page" in body          # executor-backed item / blocked
     assert "split_entity" in body                 # executor-backed; empty subject/proposal -> scope-guard skip -> not appliable
     assert "no live state was changed" in body    # framed as a dry-run preview
@@ -165,7 +167,7 @@ def test_apply_confirm_shows_dry_run_preview(client, tmp_path):
 
 def test_apply_post_renders_summary(client, tmp_path):
     _approved_concept_deprecation(tmp_path)
-    resp = client.post("/ui/reviews/apply")
+    resp = fixtures.apply_ui(client)
     assert resp.status_code == 200
     assert "Apply result" in resp.text and "deprecations" in resp.text
     # ADR-0059 review round: the summary shows the RETYPED counts (the old rekeyed key is gone).
@@ -177,7 +179,7 @@ def test_apply_graph_missing_is_html_503(client, tmp_path):
         "review_id": "rev_d", "type": "deprecate_wiki_page", "status": "approved",
         "subject": {"node_id": "itm_x", "page": "Items/thing.md"},
         "proposal": {"to_status": "deprecated_candidate"}, "context": {"node_type": "item"}})
-    resp = client.post("/ui/reviews/apply")
+    resp = fixtures.apply_ui(client)
     assert resp.status_code == 503
     assert "Error 503" in resp.text
 
@@ -268,4 +270,4 @@ def test_no_server_path_leak_in_ui(client, tmp_path):
     _approved_concept_deprecation(tmp_path)
     for url in ("/ui/reviews", "/ui/reviews/rev_d", "/ui/reviews/apply"):
         assert str(tmp_path) not in client.get(url).text
-    assert str(tmp_path) not in client.post("/ui/reviews/apply").text
+    assert str(tmp_path) not in fixtures.apply_ui(client).text

@@ -510,7 +510,7 @@ def test_apply_promotion_without_a_slug_change_publishes_listing_pages_and_retri
 
     import unittest.mock
     with unittest.mock.patch.object(wiki, "generate_wiki", render):
-        body = client.post("/reviews/apply").json()
+        body = fixtures.apply(client).json()
     assert body["summary"]["promotions"]["promoted"] == 1 and page.exists()
     assert body["status"] == publication.PENDING                # never "applied" with stale pages
     assert body["publication"]["pending"]["sources"] == [sids["a.md"]]

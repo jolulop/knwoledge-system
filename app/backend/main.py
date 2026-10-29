@@ -14,7 +14,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import anyio
-from fastapi import FastAPI, Form, HTTPException, Query, Request
+from fastapi import FastAPI, Form, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 
 logger = logging.getLogger(__name__)
@@ -25,8 +25,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.backend import (
-    apply_sandbox, db, embeddings, graph, graph_read, keyword_index, manifests, producer_journal,
-    publication_queue,
+    apply_gate, apply_sandbox, db, embeddings, graph, graph_read, keyword_index, manifests, producer_journal,
+    publication_queue, revision,
     review_html, review_read, run_guard, search, taxonomy, vault_lock, vector_index, write_lock,
 )
 from app.backend.config import get_settings
@@ -49,6 +49,7 @@ from app.backend.models import (
     EvalRunRequest,
     EvalRunResponse,
     EvalResultsResponse,
+    ReviewApplyRequest,
     ReviewApplyResponse,
     ReviewDryRunResponse,
     ReviewDecisionRequest,
@@ -114,6 +115,10 @@ def assert_safe_bind(host: str, allow_insecure: bool) -> None:
 
 settings = get_settings()
 assert_safe_bind(settings.app_host, os.environ.get("KS_ALLOW_INSECURE_BIND") == "1")
+# ADR-0068 decision 6: the code this process imported. Previews and Apply refuse with
+# `restart_required` while the code on disk differs (a fingerprint of files cannot vouch for
+# modules already in memory).
+LOADED_CODE = apply_gate.code_fingerprint(PROJECT_ROOT)
 
 
 @contextlib.asynccontextmanager
@@ -157,6 +162,25 @@ async def _producer_journal_corrupt(request: Request, exc: producer_journal.Jour
     if request.url.path.startswith("/ui/"):
         return HTMLResponse(review_html.render_error(503, detail), status_code=503)
     return JSONResponse(status_code=503, content={"detail": detail})
+
+
+@app.exception_handler(revision.RevisionUnavailable)
+async def _revision_unavailable(request: Request, exc: revision.RevisionUnavailable) -> Any:
+    """The vault revision could not be read or advanced (an I/O failure): the change is refused
+    before any write (ADR-0068 decision 6)."""
+    detail = f"revision_unavailable: {exc}"
+    if request.url.path.startswith("/ui/"):
+        return HTMLResponse(review_html.render_error(503, detail), status_code=503)
+    return JSONResponse(status_code=503, content={"detail": detail})
+
+
+@app.exception_handler(apply_gate.ApplyRefused)
+async def _apply_refused(request: Request, exc: apply_gate.ApplyRefused) -> Any:
+    """A refused preview or Apply (ADR-0068 decision 6): nothing changed, no token consumed."""
+    if request.url.path.startswith("/ui/"):
+        return HTMLResponse(review_html.render_apply_refused(exc.reason, exc.action),
+                            status_code=exc.status_code)
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail()})
 
 
 # --- Request-origin guard (ADR-0067; amends ADR-0009's CSRF deferral) ---------------------------
@@ -1342,11 +1366,15 @@ def _run_apply(st: Any, intent: str | None = None) -> dict[str, Any]:
 
 
 @app.post("/reviews/apply", response_model=ReviewApplyResponse)
-def apply_reviews() -> dict[str, Any]:
-    """Apply approved review decisions on the live vault (ADR-0035). Thin wrapper over the shared
-    `run_apply` orchestration; maps the in-orchestration graph gate to HTTP 503."""
+@_producer_run("apply")
+def apply_reviews(req: ReviewApplyRequest | None = None) -> dict[str, Any]:
+    """Apply approved review decisions on the live vault (ADR-0035), under the token of a clean
+    preview (ADR-0068 decision 6): `apply_gate.apply` refuses a missing, unknown or stale token
+    before any write, then runs the shared `run_apply` orchestration. Maps the in-orchestration
+    graph gate to HTTP 503."""
     try:
-        return run_apply(settings)
+        return apply_gate.apply(settings, req.preview_token if req else None, run_apply=run_apply,
+                                loaded_code=LOADED_CODE, repo=PROJECT_ROOT)
     except GraphUnavailable:
         raise HTTPException(
             status_code=503,
@@ -1393,64 +1421,67 @@ def _attribute_effects(item: dict[str, Any], diff: dict[str, Any]) -> list[str]:
 
 
 @app.post("/reviews/apply/dry-run", response_model=ReviewDryRunResponse)
-def dry_run_apply() -> dict[str, Any]:
-    """Preview what `POST /reviews/apply` would change, with **no** live writes (ADR-0040).
+def dry_run_route(response: Response) -> dict[str, Any]:
+    """`POST /reviews/apply/dry-run`: :func:`dry_run_apply`, never cached (it may carry a token)."""
+    response.headers["Cache-Control"] = "no-store"
+    return dry_run_apply()
 
-    Builds a fully self-contained sandbox copy, runs the **same** `run_apply` against it, diffs
-    sandbox-vs-live into a semantic mutation plan, and discards the sandbox. The graph gate inside
+
+def dry_run_apply() -> dict[str, Any]:
+    """Preview what `POST /reviews/apply` would change, with **no** live authority writes
+    (ADR-0040), and authorize it (ADR-0068 decision 6).
+
+    `apply_gate.preview` copies the vault state under the write lock (with its revision), runs the
+    **same** `run_apply` on the copy outside the lock (:func:`_evaluate_preview`), and only for a
+    clean result records an authorization and returns its `preview_token`. The graph gate inside
     `run_apply` makes this refuse on exactly the conditions live apply 503s on — surfaced here as a
-    structured `blocked` preview. A sandbox executor failure is a structured `failed` preview, never a
-    500; the UI offers Apply only when `status == "ok"`.
+    structured `blocked` preview. A copy or executor failure is a structured `failed` preview, never
+    a 500; the UI offers Apply only when `status == "ok"`, with the token.
     """
+    return apply_gate.preview(settings, evaluate=_evaluate_preview, loaded_code=LOADED_CODE,
+                              repo=PROJECT_ROOT)
+
+
+def _evaluate_preview(sandbox: Any) -> dict[str, Any]:
+    """Run Apply on a sandbox copy and return the preview: the semantic diff, provenance, validators."""
+    approved = _approved_appliable_items(sandbox.reviews_dir)
+    not_appliable = [{"review_id": it["review_id"], "type": it["type"],
+                      "reason": "no_executor_in_phase_6"}
+                     for it in approved if not it["appliable"]]
+    before = apply_sandbox.snapshot_state(sandbox)
     try:
-        tmp_root, sandbox = apply_sandbox.build_sandbox(settings)
-    except Exception as exc:  # noqa: BLE001 - inability to produce a preview, not a 500 (ADR-0040 #6)
+        result = run_apply(sandbox)
+    except GraphUnavailable:
+        blocked = [{"review_id": it["review_id"], "type": it["type"], "reason": "graph_unavailable"}
+                   for it in approved if it["appliable"] and it["type"] in _GRAPH_REQUIRED_TYPES]
         return {
-            "status": "failed", "reason": "sandbox_build_error",
-            "error": f"{type(exc).__name__}: {exc}", "diff": None, "items": [], "not_appliable": [],
-            "validators": {"passed": False, "failures": []}, "warnings": ["sandbox_build_error"],
+            "status": "blocked", "reason": "graph_unavailable",
+            "diff": {"graph": apply_sandbox.empty_graph_diff(), "wiki": [], "reviews": [],
+                     "manifests": []},
+            "items": [], "not_appliable": not_appliable + blocked,
+            "validators": {"passed": False, "failures": []},
+            "warnings": ["graph_unavailable"],
         }
-    try:
-        approved = _approved_appliable_items(sandbox.reviews_dir)
-        not_appliable = [{"review_id": it["review_id"], "type": it["type"],
-                          "reason": "no_executor_in_phase_6"}
-                         for it in approved if not it["appliable"]]
-        before = apply_sandbox.snapshot_state(sandbox)
-        try:
-            result = run_apply(sandbox)
-        except GraphUnavailable:
-            blocked = [{"review_id": it["review_id"], "type": it["type"], "reason": "graph_unavailable"}
-                       for it in approved if it["appliable"] and it["type"] in _GRAPH_REQUIRED_TYPES]
-            return {
-                "status": "blocked", "reason": "graph_unavailable",
-                "diff": {"graph": apply_sandbox.empty_graph_diff(), "wiki": [], "reviews": [],
-                         "manifests": []},
-                "items": [], "not_appliable": not_appliable + blocked,
-                "validators": {"passed": False, "failures": []},
-                "warnings": ["graph_unavailable"],
-            }
-        except Exception as exc:  # noqa: BLE001 - a sandbox failure is a failed preview, not a 500
-            return {
-                "status": "failed", "reason": "executor_error", "error": f"{type(exc).__name__}: {exc}",
-                "diff": None, "items": [], "not_appliable": not_appliable,
-                "validators": {"passed": False, "failures": []}, "warnings": ["executor_error"],
-            }
-        after = apply_sandbox.snapshot_state(sandbox)
-        diff = apply_sandbox.diff_states(before, after)
-        items = [{"review_id": it["review_id"], "type": it["type"], "targets": it["targets"],
-                  "effects": _attribute_effects(it, diff)} for it in approved if it["appliable"]]
-        # Overall cleanliness uses run_apply's status (validators AND the ADR-0043 hide-reindex-stale
-        # gate), not just validators_ok — so a sandbox reindex failure on a hide previews as non-clean.
-        clean = result["status"] == "applied"
+    except Exception as exc:  # noqa: BLE001 - a sandbox failure is a failed preview, not a 500
         return {
-            "status": "ok" if clean else "validation_failed",
-            "diff": diff, "items": items, "not_appliable": not_appliable,
-            "validators": {"passed": result["validators_ok"], "failures": result["failed_validators"]},
-            "warnings": result["warnings"],
-            "summary": result["summary"],
+            "status": "failed", "reason": "executor_error", "error": f"{type(exc).__name__}: {exc}",
+            "diff": None, "items": [], "not_appliable": not_appliable,
+            "validators": {"passed": False, "failures": []}, "warnings": ["executor_error"],
         }
-    finally:
-        apply_sandbox.cleanup_sandbox(tmp_root)
+    after = apply_sandbox.snapshot_state(sandbox)
+    diff = apply_sandbox.diff_states(before, after)
+    items = [{"review_id": it["review_id"], "type": it["type"], "targets": it["targets"],
+              "effects": _attribute_effects(it, diff)} for it in approved if it["appliable"]]
+    # Overall cleanliness uses run_apply's status (validators AND the ADR-0043 hide-reindex-stale
+    # gate), not just validators_ok — so a sandbox reindex failure on a hide previews as non-clean.
+    clean = result["status"] == "applied"
+    return {
+        "status": "ok" if clean else "validation_failed",
+        "diff": diff, "items": items, "not_appliable": not_appliable,
+        "validators": {"passed": result["validators_ok"], "failures": result["failed_validators"]},
+        "warnings": result["warnings"],
+        "summary": result["summary"],
+    }
 
 
 # --- Phase 7 maintenance passes (detect-and-propose; ADR-0036) -------------
@@ -1536,18 +1567,30 @@ def ui_review_queue(
 
 @app.get("/ui/reviews/apply", response_class=HTMLResponse)
 def ui_apply_confirm() -> HTMLResponse:
+    """The Apply page: read-only scope counts and a **Preview** button (ADR-0068 decision 6). It
+    never runs the sandbox nor writes the revision or authorization files; the preview runs on the
+    origin-guarded POST below."""
+    return HTMLResponse(review_html.render_apply_confirm(
+        review_read.apply_scope_counts(settings.reviews_dir)))
+
+
+@app.post("/ui/reviews/apply/preview", response_class=HTMLResponse)
+def ui_apply_preview() -> HTMLResponse:
     """Two-step apply, step 1: the dry-run mutation preview (ADR-0040). Renders the semantic diff and
-    offers Apply only when the preview is clean (`status == "ok"`)."""
+    offers Apply only when the preview is clean, with its token in the form (ADR-0068). Never cached:
+    the page carries a token."""
     scope = review_read.apply_scope_counts(settings.reviews_dir)
     dry = dry_run_apply()
-    return HTMLResponse(review_html.render_apply_dry_run(scope, dry))
+    return HTMLResponse(review_html.render_apply_dry_run(scope, dry),
+                        headers={"Cache-Control": "no-store"})
 
 
 @app.post("/ui/reviews/apply", response_class=HTMLResponse)
-def ui_apply() -> HTMLResponse:
-    """Two-step apply, step 2: execute via the same logic as POST /reviews/apply, render the summary."""
+def ui_apply(preview_token: str = Form("")) -> HTMLResponse:
+    """Two-step apply, step 2: execute via the same logic as POST /reviews/apply, render the summary.
+    A refused token renders its reason and next action (the `ApplyRefused` handler)."""
     try:
-        result = apply_reviews()
+        result = apply_reviews(ReviewApplyRequest(preview_token=preview_token or None))
     except HTTPException as exc:
         return _html_error(exc)
     return HTMLResponse(review_html.render_apply_result(result))

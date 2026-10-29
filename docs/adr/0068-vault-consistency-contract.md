@@ -5,8 +5,8 @@
   **Slice 2 (decision 4: the publication function and pending queue, for screen actions and
   Apply) implemented 2026-10-29** (see "Implementation — slice 2"). **Slice 3 (decision 5:
   producers publish per document and refresh search once per run) implemented 2026-10-29** (see
-  "Implementation — slice 3"). Slice 4 (previews + token) design-locked by its own grill
-  2026-10-29 (decision 6, Q1–Q8), not yet implemented.
+  "Implementation — slice 3"). **Slice 4 (decision 6: previews + token, design-locked by its own
+  grill, Q1–Q8) implemented 2026-10-29** (see "Implementation — slice 4").
 - **Date:** 2026-10-28
 - **Drivers:** an external architecture review after ADR-0066 part 3's grill. It found three
   blocking issues and four non-blocking ones; the user answered four framing questions and five
@@ -795,6 +795,100 @@ Static review found four issues and one test gap; the user chose the structural 
   - the "page without node" case of a retired topic (the node is written before the page). Only
   extraction's first alias guard (`_emit` gives a live tag no hint aliases) survives on its own:
   the final guard at the page write re-checks the same cases, so it is defence in depth.
+
+## Implementation — slice 4 (2026-10-29)
+
+Decision 6 as design-locked by the slice-4 grill (Q1–Q8).
+- **The revision** (`app/backend/revision.py`, `db/revision.json`, backed up): `current` initializes
+  a missing file and recovers a malformed one (copy the bytes to `revision.damaged-*.json`, flush,
+  then atomic replace with a new random epoch); `advance`; `new_epoch`. Every write is atomic and
+  durable. An I/O failure raises `RevisionUnavailable` (API 503 `revision_unavailable`; script exit
+  9).
+- **The write lock** (`write_lock.hold(..., changes=True)`): the outermost hold advances the revision
+  after taking the lock and **before yielding**, once per outermost hold; a mutating hold nested in
+  a `changes=False` hold advances it on entry; `write_lock.invalidate()` lets Apply do it after its
+  token check. Opted out: the preview's two holds and backup. Restore starts a new epoch before its
+  first file and again after its last (the archive may carry an older `revision.json`), under the
+  exclusive vault lock. Publication, journal repair and every other holder keep the default.
+- **Authorizations** (`app/backend/apply_authorization.py`, `db/apply_authorizations.json`, never
+  backed up): `issue` (prunes records of other revisions), `find`, `consume`; malformed contents are
+  kept as `apply_authorizations.damaged-*.json` and replaced with an empty set; an I/O failure
+  raises `StoreUnavailable`. Tokens are `apa_` + 32 hex.
+- **The gate** (`app/backend/apply_gate.py`), shared by the API and `scripts/apply_reviews.py`:
+  `preview` (state copy + revision under the lock, code and raw after it, the sandbox run outside
+  it, then the code-fingerprint check and, under the lock again, the revision check and the record)
+  and `apply` (record, revision, code, settings and options checked under the lock; consume;
+  invalidate; `run_apply`). `ApplyRefused` carries the reason, HTTP status and action of Q8.
+  - The code fingerprint hashes relative paths and contents of `app/`, `scripts/`, `templates/`,
+    without `__pycache__/` and compiled files. The API computes the fingerprint of its own code at
+    import (`main.LOADED_CODE`); `restart_required` while the disk differs.
+  - **The settings fingerprint leaves out settings Apply never reads** (model, embedding, eval and
+    extraction settings, and secrets): Apply is key-free and deterministic. It keeps the paths
+    (relative to the vault root), the rendering knobs and **`APP_HOST`/`APP_PORT`**, which Source
+    pages read for their raw-view links (review round 1 below). A test pins this.
+  - A recovered revision or store adds the preview warning `revision_recovered` /
+    `authorization_store_recovered`; `scripts/validate_revision.py` lists the kept copies and always
+    exits 0.
+- **The sandbox** (`apply_sandbox.copy_state` under the lock, `copy_code_and_raw` after it, from the
+  copied manifests): SQLite files through the online backup; `-wal`/`-shm`/`-journal`, lock files,
+  the LLM cache and the authorizations are never copied; code is copied without `__pycache__`.
+  `build_sandbox` keeps its signature (the two steps under a `changes=False` hold). A failed copy is
+  `status: failed, reason: copy_failed` (was `sandbox_build_error`).
+- **Routes:** `POST /reviews/apply` takes `{"preview_token"}` and holds the new `apply` run guard;
+  `POST /reviews/apply/dry-run` returns `preview_token`/`token_withheld` with `Cache-Control:
+  no-store`; `GET /ui/reviews/apply` is the read-only scope page with a **Preview** button;
+  `POST /ui/reviews/apply/preview` renders the diff and the token-bound form (`no-store`); a refusal
+  renders its reason and action, with a Preview button except for `restart_required`.
+- **`scripts/apply_reviews.py`** `preview [--json]` / `apply --token <id>`, exit codes 0–9
+  (`docs/Operations.md`, *Apply tokens*).
+- **Tests:** `tests/test_apply_token.py` (38 at first; 44 after review round 1) covers every test the grill required. Existing tests
+  that exercise Apply's executors take a token from `tests/fixtures.authorize_apply` (recorded
+  directly, so Apply still runs where the preview would not be clean); 16 files changed only that
+  way. Three assertions changed: the dry-run's live-unchanged hash ignores the authorization
+  record (the revision stays hashed); the sandbox-failure test expects `copy_failed` for both copy
+  steps; the UI preview test posts to the new route.
+- **Verification:** 1700 passed + 2 skipped; ruff and `git diff --check` clean; 15 validators pass
+  on the repo. 28 mutation checks were run, all caught (two needed a sharper test first: a store
+  that exists before the sandbox copy, and a backup that must leave the revision alone).
+- **Cost:** a mutating hold now takes about 3.3 ms (two fsyncs: the file and its directory), against
+  0.03 ms for a read-only one. Negligible per commit; the test suite, which takes thousands of
+  holds, went from about 3 to about 4 minutes.
+- **Review round 1 on slice 4 (2 P1s, fixed):**
+  1. *An interrupted restore could revive an old token:* extraction overwrote the new epoch with the
+     archived `db/revision.json`, and a kill after that skipped the final reset, while earlier
+     authorizations survived. Now restore **never writes `db/revision.json` or
+     `db/apply_authorizations.json` from any archive** (older ones included), and its first step
+     drops every authorization and starts the new epoch, which then holds throughout. Tests: a
+     restore subprocess killed at the first member after the archived revision leaves a new epoch
+     and refuses the earlier token; a restore of an archive carrying both files writes neither.
+  2. *The sandbox ran with other settings than the live vault:* it read no `.env`, so its Source
+     pages linked port 18000 while live used 19001, and the fingerprint excluded `app_*` anyway.
+     Now the preview **carries the live `.env` into the sandbox** (secrets and absolute `*_DIR` /
+     `*_PATH` keys dropped; every vault path is root-derived), and refuses (`status: failed,
+     reason: settings_not_carried`) when the copy's settings still differ. The bound fingerprint is
+     `effective_settings_fingerprint`: the caller's settings **and** those workers load afresh from
+     the vault root (`.env` and the environment), with `APP_HOST`/`APP_PORT` included, so an API and
+     a shell that would render different links never share a token. Tests: a preview with a `.env`
+     port of 19001 shows and applies 19001 links; changing that port before Apply refuses the
+     token (a key change alone does not); a sandbox that could not take the `.env` is a failed
+     preview; the carried `.env` holds no secrets or absolute paths.
+  7 mutation checks on these fixes, all caught. `tests/test_apply_token.py` now has 44 tests.
+- **Review round 2 on slice 4 (1 P1, 1 P2, fixed):**
+  1. *Settings could change during the preview and still be authorized:* the record stored a
+     fingerprint computed after the sandbox run. Now the preview **captures the settings with the
+     snapshot**, under the first lock; the sandbox must reproduce exactly the captured settings
+     (else `settings_not_carried`), the authorization lock checks them again (else
+     `token_withheld: settings_changed`), and the record stores the captured value. Tests: `.env`
+     edited during the run withholds the token; a key rotated during the run still authorizes; an
+     edit made after the capture and undone before the check (A-B-A) fails the preview.
+  2. *The restore crash test died during the CRC check* (`testzip` opens every member too). It now
+     kills the process only once extraction has begun, at a member after `db/revision.json`, and
+     asserts that a page edited after the backup was already restored before the kill.
+  4 mutation checks: 3 caught; storing the fresh fingerprint instead of the captured one survives
+  as an equivalent mutant (the check just before guarantees they are equal). 47 tests.
+- **Seen in practice:** editing code while the suite ran made every later API Apply in that run
+  refuse with `restart_required` — the rule working as intended; install code only while nothing
+  previews or applies.
 
 ## Consequences
 

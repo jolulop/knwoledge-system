@@ -26,6 +26,7 @@ from app.backend import review_read
 from app.backend.config import get_settings
 from app.workers import deprecations
 from app.workers.wiki_render import parse_frontmatter, render_item_page
+from tests import fixtures
 
 NID = "itm_aaaaaaaaaaaaaaaa"
 ITEM_TYPE = "method_technique"
@@ -312,7 +313,7 @@ def test_api_apply_hides_semantic_page_and_reports_summary(client, tmp_path, mon
     monkeypatch.setattr(main_module.publication.keyword_index, "reindex", lambda root: None)
     _live_item(tmp_path)
     _approve_hide(tmp_path)
-    body = client.post("/reviews/apply").json()
+    body = fixtures.apply(client).json()
     assert body["status"] == "applied"
     assert body["summary"]["semantic_hidden"]["applied"] == 1
     assert _page_status(tmp_path) == ("hidden", "approved")
@@ -325,7 +326,7 @@ def test_graph_only_hide_completion_triggers_reindex(client, tmp_path, monkeypat
     called = []
     monkeypatch.setattr(main_module.publication.keyword_index, "reindex", lambda root: called.append(root))
     _setup_state(tmp_path, page_status="hidden", page_review="approved", graph_status="active")
-    body = client.post("/reviews/apply").json()
+    body = fixtures.apply(client).json()
     assert body["summary"]["semantic_hidden"]["applied"] == 1   # graph-only completion (page already hidden)
     assert called                                                # reindex attempted despite no page write
 
@@ -337,7 +338,7 @@ def test_graph_only_hide_completion_reindex_failure_is_non_clean(client, tmp_pat
         raise RuntimeError("reindex blew up")
     monkeypatch.setattr(main_module.publication.keyword_index, "reindex", boom)
     _setup_state(tmp_path, page_status="hidden", page_review="approved", graph_status="active")
-    body = client.post("/reviews/apply").json()
+    body = fixtures.apply(client).json()
     assert body["status"] == "saved_publication_pending"
     assert "semantic_hide_retrieval_suppression_not_guaranteed" in body["warnings"]
 
@@ -346,7 +347,7 @@ def test_api_apply_graph_required_503_when_graph_absent(client, tmp_path):
     # approved hide_semantic_page with NO graph -> graph-required gate -> 503
     _approve_hide(tmp_path)
     assert not (tmp_path / "db" / "graph.sqlite").exists()
-    assert client.post("/reviews/apply").status_code == 503
+    assert fixtures.apply(client).status_code == 503
 
 
 def test_hidden_semantic_page_index_row_is_suppressed(client, tmp_path):
@@ -371,7 +372,7 @@ def test_hidden_semantic_page_index_row_is_suppressed(client, tmp_path):
 
     assert nav_row() == ("active", "1")          # baseline: discoverable + citable
     _approve_hide(tmp_path)                       # apply runs the real reindex_keyword
-    assert client.post("/reviews/apply").json()["status"] == "applied"
+    assert fixtures.apply(client).json()["status"] == "applied"
     assert nav_row() == ("hidden", "0")          # status-filtered out of default retrieval + answer-ineligible
     gconn = graph.connect(tmp_path / "db" / "graph.sqlite")
     assert graph.get_node(gconn, NID)["status"] == "hidden"   # raw graph inspection still returns it
@@ -388,7 +389,7 @@ def test_hidden_semantic_page_excluded_from_search_navigation_end_to_end(client,
     q = {"q": "Thing", "mode": "navigation"}
     assert NID in nav(client.get("/search", params=q))                         # baseline (title "Thing")
     _approve_hide(tmp_path)
-    assert client.post("/reviews/apply").json()["status"] == "applied"          # runs the real reindex
+    assert fixtures.apply(client).json()["status"] == "applied"          # runs the real reindex
     assert NID not in nav(client.get("/search", params=q))                      # default excludes it
     explicit = client.get("/search", params={**q, "node_status": "hidden"})
     assert NID in nav(explicit)                                                 # explicit node_status surfaces it
@@ -408,7 +409,7 @@ def test_hidden_semantic_node_excluded_from_search_graph_channel(client, tmp_pat
     conn.commit()
     conn.close()
     _approve_hide(tmp_path)
-    assert client.post("/reviews/apply").json()["status"] == "applied"          # NID -> hidden
+    assert fixtures.apply(client).json()["status"] == "applied"          # NID -> hidden
     gconn = graph.connect(tmp_path / "db" / "graph.sqlite")
     default = graph_read.search_subgraph(gconn, [seed], depth=1,
                                          node_statuses=search.RETENTION_DEFAULT_STATUSES,
@@ -427,7 +428,7 @@ def test_api_reindex_failure_makes_semantic_hide_non_clean(client, tmp_path, mon
     monkeypatch.setattr(main_module.publication.keyword_index, "reindex", boom)
     _live_item(tmp_path)
     _approve_hide(tmp_path)
-    body = client.post("/reviews/apply").json()
+    body = fixtures.apply(client).json()
     assert body["status"] == "saved_publication_pending"
     assert "semantic_hide_retrieval_suppression_not_guaranteed" in body["warnings"]
     assert _page_status(tmp_path) == ("hidden", "approved")   # mutation still written

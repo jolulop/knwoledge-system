@@ -25,6 +25,7 @@ from app.backend import main as main_module
 from app.backend.config import get_settings
 from app.workers import duplicates, items
 from app.workers.wiki_render import parse_frontmatter, render_item_page
+from tests import fixtures
 
 
 # --- helpers ---------------------------------------------------------------
@@ -410,8 +411,8 @@ def test_apply_and_dry_run_end_to_end(client, tmp_path):
     assert "## Duplicates" not in (tmp_path / "wiki/Items/alpha.md").read_text()  # not yet applied
 
     # real apply lands it
-    applied = client.post("/reviews/apply").json()
+    applied = fixtures.apply(client).json()
     assert applied["summary"]["duplicates"]["applied"] == 1
     assert "## Duplicates" in (tmp_path / "wiki/Items/alpha.md").read_text()
     # the HTML apply result surfaces the duplicates summary (review_html)
-    assert "duplicates" in client.post("/ui/reviews/apply").text
+    assert "duplicates" in fixtures.apply_ui(client).text

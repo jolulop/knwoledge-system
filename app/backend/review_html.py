@@ -371,10 +371,23 @@ def render_apply_confirm(scope: dict[str, Any]) -> str:
         errs.append(f"{scope['schema_errors']} malformed")
     if errs:
         body.append(f"<p class='banner'>Approved-queue files skipped: {_h(', '.join(errs))}.</p>")
-    body.append(
-        "<form method='post' action='/ui/reviews/apply'>"
-        "<button type='submit'>Apply now</button></form>")
+    # ADR-0068 decision 6: this page is read-only; the preview (which records the authorization
+    # Apply needs) runs on an origin-guarded POST.
+    body.append(_PREVIEW_FORM)
     return _page("Apply reviews", "".join(body))
+
+
+_PREVIEW_FORM = ("<form method='post' action='/ui/reviews/apply/preview'>"
+                 "<button type='submit'>Preview</button></form>")
+
+# ADR-0068 decision 6: why an otherwise clean preview got no token, and what to do.
+_WITHHELD = {
+    "revision_changed": "The vault changed while the preview ran. Preview again.",
+    "code_changed": "The code changed while the preview ran. Restart the API, then preview again.",
+    "settings_changed": "The settings (<code>.env</code>) changed while the preview ran. Preview again.",
+    "authorization_write_failed": ("The preview could not be saved as an authorization (check "
+                                   "<code>db/</code> permissions and free space). Preview again."),
+}
 
 
 def render_apply_dry_run(scope: dict[str, Any], dry: dict[str, Any]) -> str:
@@ -415,14 +428,38 @@ def render_apply_dry_run(scope: dict[str, Any], dry: dict[str, Any]) -> str:
     if dry.get("warnings"):
         body.append(f"<p class='banner'>warnings: {_render_value(dry['warnings'])}</p>")
 
-    if status == "ok":
+    token = dry.get("preview_token")
+    if status == "ok" and token:
         body.append(
             "<form method='post' action='/ui/reviews/apply'>"
+            f"<input type='hidden' name='preview_token' value='{_h(token)}'>"
             "<button type='submit'>Apply now</button></form>")
+    elif status == "ok":
+        reason = dry.get("token_withheld") or ""
+        body.append(f"<p class='err'>Apply is withheld: {_WITHHELD.get(reason, 'Preview again.')}"
+                    "</p>" + _PREVIEW_FORM)
     else:
         body.append("<p class='err'>Apply is withheld: the preview is not clean "
                     f"(status <code>{_h(status)}</code>). Resolve the cause before applying.</p>")
     return _page("Apply preview", "".join(body))
+
+
+def render_apply_refused(reason: str, action: str) -> str:
+    """Apply (or a preview) was refused before any change (ADR-0068 decision 6): name the reason
+    and the specific action it needs."""
+    headline = {
+        "stale_preview": "The vault, code or settings changed since the preview.",
+        "unknown_preview": "This preview is no longer valid (already used, or replaced).",
+        "preview_required": "Apply needs a preview first.",
+        "restart_required": "The API is running older code than what is on disk.",
+        "authorization_store_unavailable": "The preview authorization could not be read or saved.",
+    }.get(reason, "Apply was refused.")
+    body = [_nav(), "<h1>Apply refused — nothing was changed</h1>",
+            f"<p class='banner'><strong>{_h(headline)}</strong> <code>{_h(reason)}</code></p>",
+            f"<p>Next: {_h(action)}.</p>"]
+    if reason != "restart_required":
+        body.append(_PREVIEW_FORM)
+    return _page("Apply refused", "".join(body))
 
 
 def render_apply_result(result: dict[str, Any]) -> str:

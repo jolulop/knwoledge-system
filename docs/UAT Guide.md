@@ -360,15 +360,21 @@ curl -fsS -X POST "$APP/reviews/<review_id>/approve" \
 Re-run the dry-run and **verify `items[]` lists exactly the item(s) you intend — nothing else**:
 
 ```bash
-curl -fsS -X POST "$APP/reviews/apply/dry-run" | python3 -m json.tool
+curl -fsS -X POST "$APP/reviews/apply/dry-run" | tee /tmp/ks-preview.json | python3 -m json.tool
 ```
 
-Only if the queue scope is exactly as expected:
+Only if the queue scope is exactly as expected, apply **that** preview with its token (ADR-0068: a
+token works once, and any change since the preview refuses it — then preview again):
 
 ```bash
-curl -fsS -X POST "$APP/reviews/apply" | python3 -m json.tool
+TOKEN=$(python3 -c 'import json; print(json.load(open("/tmp/ks-preview.json"))["preview_token"])')
+curl -fsS -X POST "$APP/reviews/apply" -H 'content-type: application/json' \
+  -d "{\"preview_token\": \"$TOKEN\"}" | python3 -m json.tool
 uv run python scripts/validate_all.py
 ```
+
+Or from the command line, with the API stopped or running: `uv run python scripts/apply_reviews.py
+preview`, read it, then `uv run python scripts/apply_reviews.py apply --token <id>`.
 
 ## 10. Maintenance jobs
 
@@ -449,8 +455,8 @@ Run this **after** you have kept tags in §9.0: lint proposes merges only betwee
    incomplete (e.g. a missing page or an interrupted merge) and Apply re-checks it:
 
    ```bash
-   curl -fsS -X POST "$APP/reviews/apply/dry-run" | python3 -m json.tool
-   curl -fsS -X POST "$APP/reviews/apply" | python3 -m json.tool
+   uv run python scripts/apply_reviews.py preview          # read it: exactly the merges you intend?
+   uv run python scripts/apply_reviews.py apply --token <id>
    uv run python scripts/validate_all.py
    ```
 

@@ -45,8 +45,8 @@ headers and are unaffected.
 | **Backup** | — | `scripts/backup.py` | Snapshot manifests, db (incl. graph), wiki, reviews, policies. SQLite files are copied through SQLite's backup API, and the archive is written holding the vault writer lock (`db/.vault.lock`) exclusively — every running job, API write and write script holds it shared — so it is one consistent cut. Waits up to `--lock-timeout` (60 s) for running writers, then refuses (exit 2, nothing written); writers that start meanwhile wait. Stop the API before `--restore`. |
 | **Tag-link repair** | — | `scripts/rebuild_tag_links.py [--apply]` | ADR-0066: make the graph agree with the per-document tag ledgers (the authority) — re-assert missing keeps (after a graph rebuild/restore), finish an interrupted keep (activation with the recorded amendments, or an unused tag's revival), reject links of dropped tags and human links with no keep (an interrupted drop). Dry run by default; re-renders touched pages + refreshes `wiki/index.md` and the keyword index. **Never touches** a document whose ledger is damaged (reported, never overwritten — restore it from backup) or the tags of an interrupted merge/split (`reviews/in_flight/<review_id>.json`; the next `/reviews/apply` resumes it — run that first). While such a marker exists, keep/drop/undo/human-add/block on its tags are refused (`identity_operation_in_flight`, a banner on the document screen), Delete unused skips them and extraction skips the documents linked to them (`in_flight_sources`). Apply closes the marker only after the Source pages (every affected page rendered — a per-page render failure is reported as `source_page_refresh_failed`), `wiki/index.md` and the keyword index refreshed; on a refresh failure it stays (`identity_refresh_pending`, non-clean) and the next apply finishes the job. Exits non-zero while either remains. `validate_tag_links.py` (in `validate_all`) fails while they disagree. |
 | **Review reconciliation** | — | `scripts/reconcile_reviews.py` | Withdraw extraction-stale unresolved review items (ADR-0057): pending/deferred promotes for tombstoned/missing nodes, recompose-provenance deprecations for resurrected nodes. Idempotent, audited per withdrawal; never touches approved/rejected. **Preflight fail-closed** (exits non-zero, withdraws nothing) on missing/empty/schema-mismatched graph DB or graph↔wiki status drift over the reviewed nodes. |
-| **Apply** (human-gated) | `POST /reviews/apply` | — | Deterministically apply *approved* decisions: promotion, contradiction, synthesis, deprecation, **archive** (`active→archive_candidate`), **duplicate annotation** (`mark_semantic_duplicate` → `## Duplicates`, ADR-0041), the **visibility family** — hide/unhide for sources (`hide_content`/`unhide_content`, ADR-0043/0047), semantic pages (`hide_semantic_page`/`unhide_semantic_page`, ADR-0046/0047), claims (ADR-0048) and synthesis (ADR-0049, `evidence_hidden`) — the **identity-surgery family** — `merge_items` (ADR-0050/0059) and `split_item` (ADR-0052/0059) — and the non-rekeying **`change_item_type`** classification flip (ADR-0059). |
-| **Apply preview** (dry-run) | `POST /reviews/apply/dry-run` | — | Apply-on-a-copy preview (ADR-0040): runs the same executors against a throwaway sandbox and returns the semantic mutation diff (graph/wiki/reviews/manifests) **without touching live state**. `GET /ui/reviews/apply` renders it before enabling Apply. |
+| **Apply** (human-gated) | `POST /reviews/apply` `{"preview_token"}` | `scripts/apply_reviews.py apply --token <id>` | Needs the token of a clean preview (ADR-0068 decision 6; see *Apply tokens* below). Deterministically apply *approved* decisions: promotion, contradiction, synthesis, deprecation, **archive** (`active→archive_candidate`), **duplicate annotation** (`mark_semantic_duplicate` → `## Duplicates`, ADR-0041), the **visibility family** — hide/unhide for sources (`hide_content`/`unhide_content`, ADR-0043/0047), semantic pages (`hide_semantic_page`/`unhide_semantic_page`, ADR-0046/0047), claims (ADR-0048) and synthesis (ADR-0049, `evidence_hidden`) — the **identity-surgery family** — `merge_items` (ADR-0050/0059) and `split_item` (ADR-0052/0059) — and the non-rekeying **`change_item_type`** classification flip (ADR-0059). |
+| **Apply preview** (dry-run) | `POST /reviews/apply/dry-run` | `scripts/apply_reviews.py preview [--json]` | Apply-on-a-copy preview (ADR-0040): runs the same executors against a throwaway sandbox and returns the semantic mutation diff (graph/wiki/reviews/manifests) **without touching live state**. Only a clean (`ok`) preview returns a `preview_token`. In the UI, `GET /ui/reviews/apply` is read-only; its **Preview** button (`POST /ui/reviews/apply/preview`) renders the diff and, when clean, the Apply form. |
 
 Maintenance passes are **key-free**. Only the LLM *producers* (claims/items/contradictions/synthesis)
 and `POST /query` need `ANTHROPIC_API_KEY`.
@@ -88,6 +88,35 @@ pending pages and exits 1, and `scripts/republish.py` finishes it. While a run i
 screens show **Search refresh pending** (and `validate_publication.py` fails) until it ends; if a
 run stopped part-way, Retry publishing finishes its refresh. Tagging stays available during a run's
 model calls, and a keep made meanwhile is published at once and never overwritten by the run.
+
+**Apply tokens (ADR-0068 slice 4).** Every Apply applies exactly one clean preview. The preview
+copies the vault under the write lock, runs Apply on the copy, and returns a token; Apply checks it
+before writing anything and spends it. A token is refused, with nothing changed, when:
+- it is missing (`preview_required`, 422) or unknown, already used or replaced (`unknown_preview`,
+  409): preview again;
+- anything that could change the outcome moved since the preview (`stale_preview`, 409): any write
+  to the vault (a keep, a decision, a producer commit — so a preview taken during an ingest goes
+  stale quickly), the code, or the settings Apply uses (including `APP_HOST`/`APP_PORT` in `.env`
+  or the environment: Source pages link the raw view through them). Editing `.env` while a
+  preview runs withholds its token (`settings_changed`). Preview again and read the new result: scripts never
+  re-preview by themselves;
+- the API runs older code than what is on disk (`restart_required`, 503): restart the API, then
+  preview. **Install code (`git pull`, `uv sync`) only while no preview or Apply is running**, and
+  restart the API afterwards;
+- `db/apply_authorizations.json` can't be read or written (`authorization_store_unavailable`, 503).
+
+`db/revision.json` tracks the vault's revision. Every restore starts a new epoch, so no earlier token
+survives it. A damaged revision file or authorization store repairs itself: the bad bytes are kept as
+`db/revision.damaged-*.json` / `db/apply_authorizations.damaged-*.json` (the preview warns
+`revision_recovered` / `authorization_store_recovered`; delete the copies once inspected), and
+outstanding tokens are refused. If either file can't be read or written at all (permissions, a full
+disk), writes refuse with `revision_unavailable` (503). The authorization store is never backed up,
+and a restore never writes `db/revision.json` or `db/apply_authorizations.json` from an archive.
+`scripts/apply_reviews.py` exit codes: 0 applied (or a token issued); 1 Apply ran but is not clean
+(`validation_failed`, `saved_publication_pending`) or no token; 2 usage; 3 another Apply is running;
+4 queue unreadable; 5 journal unreadable; 6 `preview_required`/`unknown_preview`/`stale_preview`;
+7 `restart_required` (API callers only); 8 `authorization_store_unavailable`; 9
+`revision_unavailable`.
 
 **Unfinished producer commits (ADR-0068 slice 3).** Claim, tag and synthesis extraction record
 each document or topic in `db/producer_journal.json` before they change it, and remove the record

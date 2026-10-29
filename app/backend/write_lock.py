@@ -26,6 +26,14 @@ take the write lock with ``vault=False``.
 outermost hold checks that `db/publication_pending.json` is readable and raises
 :class:`~app.backend.publication_queue.QueueCorrupt` if not. Holders that change no authority (backup,
 restore, the queue repair itself) pass ``authority=False``.
+
+**Every hold may change authority unless it says ``changes=False``** (ADR-0068 decision 6,
+conservative invalidation): before yielding, the lock durably advances the vault revision
+(`app/backend/revision.py`), once per outermost hold, so any Apply preview taken earlier is stale
+even if the holder dies mid-write. A mutating hold nested in a ``changes=False`` hold advances it on
+entry. If the increment cannot be persisted the hold raises before yielding, so nothing is written.
+``changes=False`` is only for holders that cannot change any preview input: the preview snapshot
+and its authorization, and backup.
 """
 from __future__ import annotations
 
@@ -34,7 +42,7 @@ import threading
 from collections.abc import Iterator
 from pathlib import Path
 
-from app.backend import publication_queue, vault_lock
+from app.backend import publication_queue, revision, vault_lock
 
 try:
     import fcntl
@@ -53,15 +61,19 @@ def lock_path(reviews_dir: Path) -> Path:
 
 
 @contextlib.contextmanager
-def hold(reviews_dir: Path, *, vault: bool = True, authority: bool = True) -> Iterator[None]:
+def hold(reviews_dir: Path, *, vault: bool = True, authority: bool = True,
+         changes: bool = True) -> Iterator[None]:
     """Hold the write lock for one commit phase. Re-entrant per thread.
 
     The outermost hold takes, in this order, the vault lock shared (``vault=False`` only for a
     holder of the exclusive vault lock), the process lock, then the `flock`. Taking the vault lock
     before the process lock means a writer never holds the process lock while it waits for a backup,
     so a backup running in a thread of the same process can still take the write lock. With
-    ``authority`` (the default) it then refuses if the publication queue is unreadable."""
+    ``authority`` (the default) it then refuses if the publication queue is unreadable. With
+    ``changes`` (the default) it advances the vault revision before yielding."""
     if getattr(_held, "depth", 0):                        # thread-local: this thread holds it all
+        if changes:
+            invalidate()
         _held.depth += 1
         try:
             yield
@@ -78,7 +90,11 @@ def hold(reviews_dir: Path, *, vault: bool = True, authority: bool = True) -> It
             if authority:
                 publication_queue.check_readable(Path(reviews_dir).parent)
             _held.depth = 1
+            _held.root = Path(reviews_dir).parent
+            _held.invalidated = False
             try:
+                if changes:
+                    invalidate()
                 yield
             finally:
                 _held.depth = 0
@@ -91,3 +107,13 @@ def hold(reviews_dir: Path, *, vault: bool = True, authority: bool = True) -> It
 def held() -> bool:
     """Whether this thread holds the write lock."""
     return bool(getattr(_held, "depth", 0))
+
+
+def invalidate() -> None:
+    """Durably advance the vault revision once for this outermost hold (the caller holds the lock).
+    Apply calls it itself, after checking its preview token, under a ``changes=False`` hold."""
+    if not held():
+        raise RuntimeError("write_lock.invalidate() needs the write lock")
+    if not _held.invalidated:
+        revision.advance(_held.root)
+        _held.invalidated = True

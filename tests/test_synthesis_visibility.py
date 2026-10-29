@@ -30,6 +30,7 @@ from app.backend import review_read
 from app.backend.config import get_settings
 from app.workers import claims, deprecations, synthesis
 from app.workers.wiki_render import parse_frontmatter
+from tests import fixtures
 
 TOPIC = "itm_aaaaaaaaaaaaaaaa"
 SYN = synthesis.synthesis_id(TOPIC)
@@ -456,7 +457,7 @@ def test_api_apply_hides_synthesis_with_summary(client, tmp_path, monkeypatch):
     conn.commit()
     conn.close()
     _approve(tmp_path, "hide_synthesis", to_status="hidden")
-    body = client.post("/reviews/apply").json()
+    body = fixtures.apply(client).json()
     assert body["status"] == "applied"
     assert body["summary"]["synthesis_hidden"]["applied"] == 1
 
@@ -464,7 +465,7 @@ def test_api_apply_hides_synthesis_with_summary(client, tmp_path, monkeypatch):
 def test_api_synthesis_hide_graph_required_503(client, tmp_path):
     _approve(tmp_path, "hide_synthesis", to_status="hidden")
     assert not (tmp_path / "db" / "graph.sqlite").exists()
-    assert client.post("/reviews/apply").status_code == 503
+    assert fixtures.apply(client).status_code == 503
 
 
 def test_api_synthesis_hide_reindex_failure_is_non_clean(client, tmp_path, monkeypatch):
@@ -476,7 +477,7 @@ def test_api_synthesis_hide_reindex_failure_is_non_clean(client, tmp_path, monke
     conn.commit()
     conn.close()
     _approve(tmp_path, "hide_synthesis", to_status="hidden")
-    body = client.post("/reviews/apply").json()
+    body = fixtures.apply(client).json()
     assert body["status"] == "saved_publication_pending"
     assert "synthesis_hide_discovery_suppression_not_guaranteed" in body["warnings"]
 
@@ -506,7 +507,7 @@ def test_api_unhide_synthesis_reindex_failure_is_non_clean(client, tmp_path, mon
     monkeypatch.setattr(main_module.publication.keyword_index, "reindex", boom)
     (tmp_path / "reviews" / "approved" / "rev_s.json").unlink()   # drop the hide review (effected)
     _approve(tmp_path, "unhide_synthesis", to_status="active", rid="rev_u")
-    body = client.post("/reviews/apply").json()
+    body = fixtures.apply(client).json()
     assert body["status"] == "saved_publication_pending"
     assert "synthesis_unhide_discovery_restoration_not_guaranteed" in body["warnings"]
     assert _syn_fm(tmp_path)["status"] == "active"       # mutation still written
@@ -557,7 +558,7 @@ def test_api_hide_claim_rerenders_citing_synthesis(client, tmp_path, monkeypatch
         "review_id": "rev_c", "type": "hide_claim", "status": "approved",
         "subject": {"node_id": CX, "page": f"Claims/{CX}.md"},
         "proposal": {"to_status": "hidden"}, "context": {"node_type": "claim"}}), encoding="utf-8")
-    body = client.post("/reviews/apply").json()
+    body = fixtures.apply(client).json()
     assert body["status"] == "applied"                   # validators pass (projection now filters hidden)
     txt = (tmp_path / "wiki" / "Synthesis" / f"{SYN}.md").read_text()
     assert f"[[Claims/{CX}" not in txt                  # fan-out dropped the hidden claim
@@ -717,7 +718,7 @@ def test_api_claim_hide_suppresses_synthesis_and_audits_it(client, tmp_path):
         "review_id": "hc", "type": "hide_claim", "status": "approved",
         "subject": {"node_id": CX, "page": f"Claims/{CX}.md"},
         "proposal": {"to_status": "hidden"}, "context": {"node_type": "claim"}}), encoding="utf-8")
-    body = client.post("/reviews/apply").json()
+    body = fixtures.apply(client).json()
     assert body["status"] == "applied"
     assert body["summary"]["synthesis_evidence"]["suppressed"] == 1   # audited in the apply summary
     assert nav_row() == ("evidence_hidden", "0")         # not a normal active answer-eligible page anymore
@@ -741,7 +742,7 @@ def test_apply_batch_hide_claim_and_hide_synthesis_operator_wins(client, tmp_pat
     conn.close()
     _approve_hide_claim(tmp_path, CX)
     _approve(tmp_path, "hide_synthesis", to_status="hidden")    # SAME batch
-    body = client.post("/reviews/apply").json()
+    body = fixtures.apply(client).json()
     assert body["status"] == "applied"
     assert body["summary"]["synthesis_hidden"]["applied"] == 1  # operator hide applied
     gconn = graph.connect(tmp_path / "db" / "graph.sqlite")
@@ -762,7 +763,7 @@ def test_apply_batch_hide_claim_and_unhide_synthesis_lands_evidence_hidden(clien
     (tmp_path / "reviews" / "approved" / "rev_s.json").unlink()  # the hide is now effected/old
     _approve_hide_claim(tmp_path, CX)
     _approve(tmp_path, "unhide_synthesis", to_status="active", rid="rev_u")
-    body = client.post("/reviews/apply").json()
+    body = fixtures.apply(client).json()
     assert body["status"] == "applied"
     gconn = graph.connect(tmp_path / "db" / "graph.sqlite")
     assert graph.get_node(gconn, SYN)["status"] == "evidence_hidden"   # unhid operator, evidence still hidden
@@ -779,7 +780,7 @@ def test_claim_hide_fanout_missing_artifact_is_non_clean_and_stale(client, tmp_p
     conn.close()
     (tmp_path / "normalized" / "enrichment" / f"{TOPIC}.synthesis.json").unlink()  # artifact gone
     _approve_hide_claim(tmp_path, CX)
-    body = client.post("/reviews/apply").json()
+    body = fixtures.apply(client).json()
     assert body["status"] == "validation_failed"
     assert "synthesis_evidence_suppression_not_guaranteed" in body["warnings"]
     assert body["summary"]["synthesis_evidence"]["unreconciled"] == 1
@@ -803,14 +804,14 @@ def test_repair_then_rerun_reconciles_unreconciled_synthesis(client, tmp_path, m
     art.unlink()                                         # artifact gone -> first fan-out can't reconcile
     _approve_hide_claim(tmp_path, CX)
 
-    b1 = client.post("/reviews/apply").json()            # 1. claim hidden, synthesis unreconcilable
+    b1 = fixtures.apply(client).json()            # 1. claim hidden, synthesis unreconcilable
     assert b1["status"] == "validation_failed"
     assert b1["summary"]["synthesis_evidence"]["unreconciled"] == 1
     assert "synthesis_evidence_suppression_not_guaranteed" in b1["warnings"]
     assert "status: active" in (tmp_path / "wiki" / "Synthesis" / f"{SYN}.md").read_text()
 
     art.write_text(saved, encoding="utf-8")              # 2. repair + rerun (claim hide still approved)
-    b2 = client.post("/reviews/apply").json()
+    b2 = fixtures.apply(client).json()
     assert b2["status"] == "applied"
     assert b2["summary"]["synthesis_evidence"] == {"suppressed": 1, "restored": 0, "unreconciled": 0}
     assert "synthesis_evidence_suppression_not_guaranteed" not in b2["warnings"]
@@ -821,7 +822,7 @@ def test_repair_then_rerun_reconciles_unreconciled_synthesis(client, tmp_path, m
     gconn.close()
 
     n = len(reindex_calls)
-    b3 = client.post("/reviews/apply").json()            # 3. steady state: clean, no churn
+    b3 = fixtures.apply(client).json()            # 3. steady state: clean, no churn
     assert b3["status"] == "applied"
     assert b3["summary"]["synthesis_evidence"] == {"suppressed": 0, "restored": 0, "unreconciled": 0}
     assert len(reindex_calls) == n                       # no reindex on a no-op steady-state apply
@@ -854,7 +855,7 @@ def test_fanout_graph_only_repair_triggers_reindex_and_is_clean(client, tmp_path
     conn.commit()
     conn.close()
     n = len(reindex_calls)
-    body = client.post("/reviews/apply").json()                # hide_claim still approved -> fan-out retries
+    body = fixtures.apply(client).json()                # hide_claim still approved -> fan-out retries
     assert body["status"] == "applied"
     assert len(reindex_calls) > n                              # graph-mirror repair still triggered reindex
     gconn = graph.connect(tmp_path / "db" / "graph.sqlite")
@@ -872,7 +873,7 @@ def test_fanout_graph_only_repair_reindex_failure_is_non_clean(client, tmp_path,
     conn.commit()
     conn.close()
     monkeypatch.setattr(main_module.publication.keyword_index, "reindex", boom)
-    body = client.post("/reviews/apply").json()
+    body = fixtures.apply(client).json()
     assert body["status"] == "saved_publication_pending"              # clean only AFTER the index refresh
     assert "synthesis_evidence_suppression_not_guaranteed" in body["warnings"]
     gconn = graph.connect(tmp_path / "db" / "graph.sqlite")
@@ -904,7 +905,7 @@ def test_hidden_synthesis_nav_row_suppressed(client, tmp_path):
 
     assert nav_row() == ("active", "1")                  # baseline: discoverable + answer-eligible
     _approve(tmp_path, "hide_synthesis", to_status="hidden")
-    assert client.post("/reviews/apply").json()["status"] == "applied"   # runs real reindex
+    assert fixtures.apply(client).json()["status"] == "applied"   # runs real reindex
     assert nav_row() == ("hidden", "0")                  # status-filtered + answer-ineligible
     gconn = graph.connect(tmp_path / "db" / "graph.sqlite")
     assert graph.get_node(gconn, SYN)["status"] == "hidden"   # raw graph still returns it
@@ -922,7 +923,7 @@ def test_hidden_synthesis_excluded_from_search_navigation_end_to_end(client, tmp
     q = {"q": "Solar", "mode": "navigation"}
     assert SYN in nav(client.get("/search", params=q))                  # baseline (title "Solar trends")
     _approve(tmp_path, "hide_synthesis", to_status="hidden")
-    assert client.post("/reviews/apply").json()["status"] == "applied"
+    assert fixtures.apply(client).json()["status"] == "applied"
     assert SYN not in nav(client.get("/search", params=q))              # default excludes hidden
     explicit = client.get("/search", params={**q, "node_status": "hidden"})
     assert SYN in nav(explicit)                                          # explicit node_status surfaces it
@@ -947,11 +948,11 @@ def test_unhide_synthesis_restores_nav_row_and_answer_eligible(client, tmp_path)
 
     keyword_index.reindex(tmp_path, force=True)
     _approve(tmp_path, "hide_synthesis", to_status="hidden")
-    client.post("/reviews/apply")
+    fixtures.apply(client)
     (tmp_path / "reviews" / "approved" / "rev_s.json").unlink()
     assert nav_row() == ("hidden", "0")
     _approve(tmp_path, "unhide_synthesis", to_status="active", rid="rev_u")
-    assert client.post("/reviews/apply").json()["status"] == "applied"
+    assert fixtures.apply(client).json()["status"] == "applied"
     assert nav_row() == ("active", "1")                  # discovery + answer-eligibility restored
 
 
@@ -962,7 +963,7 @@ def test_hidden_synthesis_excluded_from_search_graph_channel(client, tmp_path):
     conn.commit()
     conn.close()
     _approve(tmp_path, "hide_synthesis", to_status="hidden")
-    assert client.post("/reviews/apply").json()["status"] == "applied"   # SYN -> hidden
+    assert fixtures.apply(client).json()["status"] == "applied"   # SYN -> hidden
     gconn = graph.connect(tmp_path / "db" / "graph.sqlite")
     default = graph_read.search_subgraph(gconn, [TOPIC], depth=1,
                                          node_statuses=search.RETENTION_DEFAULT_STATUSES,

@@ -13,13 +13,18 @@ and the **manifest-referenced** raw bytes only (`relative_raw_path` + every
 `occurrences[].relative_path`; un-manifested `raw/inbox/` staging is never copied). A catalogued raw
 file absent live is simply not copied, so `validate_raw_integrity` in the sandbox reports the same
 condition live apply would (the dry-run predicts live; it is not its own integrity bar). Not copied:
-`indexes/` (regenerated in-sandbox, excluded from the diff), the vector DB, `llm_cache`.
+`indexes/` (regenerated in-sandbox, excluded from the diff), the vector DB, `llm_cache`, the Apply
+authorizations.
+
+ADR-0068 decision 6: the vault state is copied under the write lock (SQLite through the online
+backup), the code and the raw bytes after it, from the copied manifests.
 """
 from __future__ import annotations
 
 import difflib
 import json
 import shutil
+import sqlite3
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,12 +34,14 @@ from app.backend import graph
 from app.backend.config import Settings, get_settings
 from app.backend.paths import safe_under
 
-_CACHE_FILENAME = "llm_cache.sqlite"
 # Writable domains (executors mutate these) + read-only inputs/code the orchestration needs. `app/`
 # and `scripts/` are required because the subprocess validators + rebuild_index.py import `app` and
 # self-bootstrap from their own directory (sys.path[0] = sandbox), so they must resolve from the copy.
-_COPY_WRITABLE = ("reviews", "wiki", "raw/manifests")
-_COPY_READONLY = ("scripts", "templates", "policies", "normalized", "app")
+# ADR-0068 decision 6: what a writer can change is copied under the write lock; code after it.
+_COPY_STATE = ("reviews", "wiki", "raw/manifests", "normalized", "policies")
+_COPY_CODE = ("app", "scripts", "templates")
+_DB_NEVER_COPIED = {"llm_cache.sqlite", "apply_authorizations.json"}
+_SQLITE_SIDE = ("-wal", "-shm", "-journal")
 # wiki/index.md is wholesale-regenerated navigation (derived churn) — excluded from the page diff.
 _WIKI_DIFF_EXCLUDE = {"wiki/index.md"}
 
@@ -65,42 +72,94 @@ def _catalogued_raw_rels(manifests_dir: Path) -> set[str]:
 def build_sandbox(settings: Settings) -> tuple[Path, Settings]:
     """Build a throwaway sandbox copy and return (tmp_root, sandbox_settings).
 
-    Owns cleanup of its own partial temp dir on failure (callers get a usable sandbox or an exception,
-    never a half-built tree to clean up). Untrusted manifest raw paths are containment-checked with
-    ``safe_under`` (ADR-0009) before any stat/copy, so a tampered absolute/`..` path can neither probe
-    outside ``raw/`` nor write outside the sandbox.
-    """
+    The vault state is copied under the write lock (:func:`copy_state`), the code and raw bytes
+    after it (:func:`copy_code_and_raw`); the preview (`app/backend/apply_gate.py`) runs the two
+    steps itself, so it can read the vault revision in the same hold."""
+    from app.backend import write_lock
+    with write_lock.hold(settings.reviews_dir, authority=False, changes=False):
+        tmp_root = copy_state(settings)
+    try:
+        copy_code_and_raw(settings, tmp_root)
+    except Exception:
+        cleanup_sandbox(tmp_root)
+        raise
+    return tmp_root, get_settings(tmp_root)
+
+
+def _is_sqlite(path: Path) -> bool:
+    try:
+        with path.open("rb") as fh:
+            return fh.read(16) == b"SQLite format 3\x00"
+    except OSError:
+        return False
+
+
+def _copy_sqlite(src: Path, dst: Path) -> None:
+    """A consistent copy through SQLite's online backup (ADR-0068 decision 6), as backups take."""
+    source = sqlite3.connect(src)
+    try:
+        target = sqlite3.connect(dst)
+        try:
+            source.backup(target)
+        finally:
+            target.close()
+    finally:
+        source.close()
+
+
+def copy_state(settings: Settings) -> Path:
+    """Copy what a writer can change into a new temp dir and return it. The caller holds the write
+    lock (``changes=False``), so the copy is one coherent state: `db/` (SQLite files through the
+    online backup; their `-wal`/`-shm`/`-journal` side files, lock files, the LLM cache and the Apply
+    authorizations never), `reviews/`, `wiki/`, `raw/manifests/`, `normalized/` and `policies/`.
+
+    Owns cleanup of its own partial temp dir on failure."""
     root = settings.root
     tmp_root = Path(tempfile.mkdtemp(prefix="ks-dryrun-"))
     try:
-        # db/ minus the LLM cache (cost-saver, not correctness; never needed to predict apply).
         db_src = root / "db"
         if db_src.exists():
             (tmp_root / "db").mkdir(parents=True, exist_ok=True)
             for p in db_src.iterdir():
-                if p.is_file() and p.name != _CACHE_FILENAME:
+                if (not p.is_file() or p.name in _DB_NEVER_COPIED or p.name.endswith(_SQLITE_SIDE)
+                        or p.name.endswith(".lock")):
+                    continue
+                if _is_sqlite(p):
+                    _copy_sqlite(p, tmp_root / "db" / p.name)
+                else:
                     shutil.copy2(p, tmp_root / "db" / p.name)
-
-        for rel in (*_COPY_WRITABLE, *_COPY_READONLY):
+        for rel in _COPY_STATE:
             src = root / rel
             if src.exists():
                 shutil.copytree(src, tmp_root / rel, dirs_exist_ok=True)
-
-        # Manifest-referenced raw bytes only. safe_under rejects absolute/`..`/escaping paths (untrusted
-        # manifest); a catalogued file absent live is simply skipped (reflect live, never invent).
-        raw_base = root / "raw"
-        for rel in _catalogued_raw_rels(settings.manifests_dir):
-            src = safe_under(root, raw_base, rel)
-            if src is None or not src.is_file():
-                continue
-            dest = tmp_root / rel  # rel passed safe_under (no abs/.. ) so this stays under tmp_root
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dest)
-
-        return tmp_root, get_settings(tmp_root)
+        return tmp_root
     except Exception:
         cleanup_sandbox(tmp_root)
         raise
+
+
+def copy_code_and_raw(settings: Settings, tmp_root: Path) -> None:
+    """After the lock: copy the code (`app/`, `scripts/`, `templates/`) and the raw bytes the
+    **copied** manifests name, never the live ones (an approved deletion or a restore may change the
+    live catalogue meanwhile; the preview's revision check catches it). Raw files are never edited.
+
+    Untrusted manifest raw paths are containment-checked with ``safe_under`` (ADR-0009) before any
+    stat/copy, so a tampered absolute/`..` path can neither probe outside ``raw/`` nor write outside
+    the sandbox. A catalogued file absent live is skipped (reflect live, never invent)."""
+    root = settings.root
+    for rel in _COPY_CODE:
+        src = root / rel
+        if src.exists():
+            shutil.copytree(src, tmp_root / rel, dirs_exist_ok=True,
+                            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    raw_base = root / "raw"
+    for rel in _catalogued_raw_rels(tmp_root / "raw" / "manifests"):
+        src = safe_under(root, raw_base, rel)
+        if src is None or not src.is_file():
+            continue
+        dest = tmp_root / rel  # rel passed safe_under (no abs/.. ) so this stays under tmp_root
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dest)
 
 
 def cleanup_sandbox(tmp_root: Path) -> None:

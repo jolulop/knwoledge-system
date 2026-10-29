@@ -85,8 +85,8 @@ This is the Phase-6 surface — **decide and apply are deliberately decoupled**:
 1. **Decide** (record-only): in the UI or API, **Approve / Reject / Defer** an item. This only moves
    the item between `reviews/pending|approved|rejected/` and writes an `audit_log/` entry — **no effect
    yet**. Defer keeps it in `pending/` flagged `deferred`.
-2. **Apply** (explicit, deterministic, key-free): `POST /reviews/apply` (or the UI's **Apply** page)
-   runs the verified executors over `approved/` — promotions, contradiction resolutions, synthesis
+2. **Apply** (explicit, deterministic, key-free): preview first, then `POST /reviews/apply` with the
+   preview's token (or the UI's **Apply** page, or `scripts/apply_reviews.py`; ADR-0068) runs the verified executors over `approved/` — promotions, contradiction resolutions, synthesis
    activations, scoped page **deprecations**, source **archive**, **duplicate annotation**, and the
    **visibility family** (hide/unhide across sources, semantic pages, claims, and synthesis) — then
    re-renders pages, mirrors the graph, rebuilds `wiki/index.md`, and runs validators. It's
@@ -109,7 +109,8 @@ uv run python -m app.backend        # or: uv run python scripts/serve.py
 - **`/ui/reviews`** — the queue (filter by status; counts by type).
 - **`/ui/reviews/{id}`** — an item's **Preview** + full **Stored proposal** + the decision buttons.
   Terminal (approved/rejected) items show the recorded decision instead of buttons.
-- **`/ui/reviews/apply`** — two-step apply: a confirm page with scope counts → **Apply now** → summary.
+- **`/ui/reviews/apply`** — two-step apply: scope counts → **Preview** (the dry-run diff) → **Apply now**
+  (enabled only for a clean preview, which it applies exactly) → summary.
 
 The HTML UI is **never authority** — it calls the same primitives as the JSON API (`GET /reviews`,
 `POST /reviews/{id}/approve|reject|defer`, `POST /reviews/apply`), and all untrusted content is escaped.

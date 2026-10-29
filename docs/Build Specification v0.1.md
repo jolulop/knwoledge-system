@@ -628,6 +628,7 @@ POST   /reviews/apply
 POST   /reviews/apply/dry-run
 GET    /ui/reviews
 GET    /ui/reviews/apply
+POST   /ui/reviews/apply/preview
 POST   /ui/reviews/apply
 GET    /ui/reviews/sources
 GET    /ui/reviews/sources/{source_id}

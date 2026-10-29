@@ -111,3 +111,27 @@ def make_pdf_bytes(pages: list[str | list[str]]) -> bytes:
 def write_pdf(path: Path, pages: list[str | list[str]]) -> Path:
     path.write_bytes(make_pdf_bytes(pages))
     return path
+
+
+def authorize_apply(st=None) -> str:
+    """An Apply token for the API's current settings, recorded directly (ADR-0068 decision 6).
+
+    For tests of what Apply's executors do, not of the preview gate (`tests/test_apply_token.py`
+    covers that): those tests need Apply to run even where the preview would not be clean."""
+    from app.backend import apply_authorization, apply_gate, revision, write_lock
+    from app.backend import main as main_module
+    st = st or main_module.settings
+    with write_lock.hold(st.reviews_dir, authority=False, changes=False):
+        return apply_authorization.issue(
+            st.root, rev=revision.current(st.root), code=apply_gate.code_fingerprint(st.root),
+            settings=apply_gate.effective_settings_fingerprint(st), options={})
+
+
+def apply(client, **kw):
+    """`POST /reviews/apply` with a token from :func:`authorize_apply`."""
+    return client.post("/reviews/apply", json={"preview_token": authorize_apply()}, **kw)
+
+
+def apply_ui(client, **kw):
+    """`POST /ui/reviews/apply` with a token from :func:`authorize_apply`."""
+    return client.post("/ui/reviews/apply", data={"preview_token": authorize_apply()}, **kw)

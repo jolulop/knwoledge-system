@@ -24,6 +24,7 @@ from app.backend import graph
 from app.backend import main as main_module
 from app.backend.config import get_settings
 from app.workers import retypes, tag_links
+from tests import fixtures
 from tests.test_tag_suggestions import _page_fm
 from tests.test_uat_round8 import _retype, _two_docs
 
@@ -119,5 +120,5 @@ def test_apply_takes_the_ledger_lock_before_its_first_graph_write(tmp_path, monk
         return real(*args, **kwargs)
 
     monkeypatch.setattr(main_module.synthesis, "apply_resolved_syntheses", first_executor)
-    TestClient(main_module.app).post("/reviews/apply")
+    fixtures.apply(TestClient(main_module.app))
     assert seen and seen[0] >= 1

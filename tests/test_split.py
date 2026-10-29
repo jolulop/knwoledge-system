@@ -28,6 +28,7 @@ from app.backend.config import get_settings
 from app.workers import items, merges, reviews, splits, wiki
 import tagging  # noqa: E402
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter, render_item_page
+from tests import fixtures
 
 A = items.node_id("Washington")
 SPINOFF = "George Washington"
@@ -551,7 +552,7 @@ def test_api_apply_split_summary(client, tmp_path, monkeypatch):
     _full(tmp_path, conn)
     conn.close()
     _approve(tmp_path, sources=[S3])
-    body = client.post("/reviews/apply").json()
+    body = fixtures.apply(client).json()
     assert body["status"] == "applied" and body["summary"]["split"]["applied"] == 1
     conn2 = graph.connect(tmp_path / "db" / "graph.sqlite")
     assert conn2.execute("SELECT status FROM nodes WHERE node_id=?", (B,)).fetchone()["status"] in (
@@ -561,7 +562,7 @@ def test_api_apply_split_summary(client, tmp_path, monkeypatch):
 def test_api_split_graph_required_503(client, tmp_path):
     _approve(tmp_path, sources=[S3])
     assert not (tmp_path / "db" / "graph.sqlite").exists()
-    assert client.post("/reviews/apply").status_code == 503
+    assert fixtures.apply(client).status_code == 503
 
 
 def test_api_split_reindex_failure_is_non_clean(client, tmp_path, monkeypatch):
@@ -573,6 +574,6 @@ def test_api_split_reindex_failure_is_non_clean(client, tmp_path, monkeypatch):
     _full(tmp_path, conn)
     conn.close()
     _approve(tmp_path, sources=[S3])
-    body = client.post("/reviews/apply").json()
+    body = fixtures.apply(client).json()
     assert body["status"] == "saved_publication_pending"
     assert "split_discovery_reindex_not_guaranteed" in body["warnings"]

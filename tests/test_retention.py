@@ -24,6 +24,7 @@ from app.backend import main as main_module
 from app.backend.config import get_settings
 from app.workers import retention, wiki
 from app.workers.wiki_render import parse_frontmatter, render_source_page
+from tests import fixtures
 
 NOW = "2026-06-23T00:00:00+00:00"
 OLD = "2022-01-01T00:00:00+00:00"        # ~4.5 years before NOW -> archive candidate
@@ -247,7 +248,7 @@ def test_api_apply_archives_source(client, tmp_path):
     _setup_rendered_source(tmp_path, "src_000000000000000a")
     _approve_archive(tmp_path, "src_000000000000000a")
     raw_before = (tmp_path / "raw" / "inbox" / "src_000000000000000a.md").read_bytes()
-    body = client.post("/reviews/apply").json()
+    body = fixtures.apply(client).json()
     assert body["summary"]["archives"]["applied"] == 1
     page = tmp_path / "wiki" / "Sources" / "src_000000000000000a.md"
     assert parse_frontmatter(page.read_text())["status"] == "archive_candidate"
@@ -342,7 +343,7 @@ def test_api_archive_only_proceeds_on_schema_drift(client, tmp_path):
     _setup_rendered_source(tmp_path, "src_000000000000000a")
     _approve_archive(tmp_path, "src_000000000000000a")
     _drift_graph(tmp_path)
-    body = client.post("/reviews/apply").json()
+    body = fixtures.apply(client).json()
     assert body["summary"]["archives"]["applied"] == 1   # archive proceeds despite graph drift
     assert parse_frontmatter((tmp_path / "wiki" / "Sources" / "src_000000000000000a.md").read_text())["status"] \
         == "archive_candidate"
@@ -361,7 +362,7 @@ def test_api_graph_required_still_503_on_schema_drift(client, tmp_path):
         "review_id": "rev_p", "type": "promote_candidate_node", "status": "approved",
         "subject": {"node_id": "cpt_1"}, "proposal": {"to_status": "active"}, "context": {}}),
         encoding="utf-8")
-    assert client.post("/reviews/apply").status_code == 503
+    assert fixtures.apply(client).status_code == 503
 
 
 def test_api_stale_check_appends_log(client, tmp_path):
@@ -522,7 +523,7 @@ def test_purge_response_cache_unapplied_by_reviews_apply(client, tmp_path):
     data["status"] = "approved"
     (appr / purge.name).write_text(json.dumps(data), encoding="utf-8")
     purge.unlink()
-    body = client.post("/reviews/apply").json()
+    body = fixtures.apply(client).json()
     # purge_response_cache has no executor -> reported as unapplied, never actioned
     assert {"type": "purge_response_cache", "count": 1, "reason": "no_executor_in_phase_6"} \
         in body["summary"]["unapplied"]

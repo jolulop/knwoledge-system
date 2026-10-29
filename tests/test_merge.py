@@ -30,6 +30,7 @@ from app.backend.config import get_settings
 from app.workers import items, merges
 import tagging  # noqa: E402
 from app.workers.wiki_render import parse_frontmatter, render_item_page
+from tests import fixtures
 
 A = items.node_id("Alpha")
 B = items.node_id("Beta")
@@ -543,14 +544,14 @@ def test_api_apply_merges_with_summary(client, tmp_path, monkeypatch):
     conn.commit()
     conn.close()
     _approve(tmp_path)
-    body = client.post("/reviews/apply").json()
+    body = fixtures.apply(client).json()
     assert body["status"] == "applied" and body["summary"]["merged"]["applied"] == 1
 
 
 def test_api_merge_graph_required_503(client, tmp_path):
     _approve(tmp_path)
     assert not (tmp_path / "db" / "graph.sqlite").exists()
-    assert client.post("/reviews/apply").status_code == 503
+    assert fixtures.apply(client).status_code == 503
 
 
 def test_api_merge_reindex_failure_is_non_clean(client, tmp_path, monkeypatch):
@@ -563,7 +564,7 @@ def test_api_merge_reindex_failure_is_non_clean(client, tmp_path, monkeypatch):
     conn.commit()
     conn.close()
     _approve(tmp_path)
-    body = client.post("/reviews/apply").json()
+    body = fixtures.apply(client).json()
     assert body["status"] == "saved_publication_pending"
     assert "merge_discovery_reindex_not_guaranteed" in body["warnings"]
     assert graph.connect(tmp_path / "db" / "graph.sqlite").execute(
@@ -600,7 +601,7 @@ def test_merged_excluded_from_search_nav_e2e(client, tmp_path):
     q = {"q": "Beta", "mode": "navigation"}
     assert B in nav(client.get("/search", params=q))                     # baseline
     _approve(tmp_path)
-    assert client.post("/reviews/apply").json()["status"] == "applied"
+    assert fixtures.apply(client).json()["status"] == "applied"
     assert B not in nav(client.get("/search", params=q))                 # merged -> excluded by default
     assert B in nav(client.get("/search", params={**q, "node_status": "merged"}))   # explicit surfaces it
 
@@ -613,6 +614,6 @@ def test_api_reopen_blocked_after_merge(client, tmp_path, monkeypatch):
     conn.commit()
     conn.close()
     _approve(tmp_path)
-    client.post("/reviews/apply")
+    fixtures.apply(client)
     r = client.post("/reviews/rev_m/reopen", json={"reason": "undo"})
     assert r.status_code == 409 and "already_applied" in r.json()["detail"]   # forward-only

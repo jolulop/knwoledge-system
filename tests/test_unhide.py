@@ -27,6 +27,7 @@ from app.backend import review_read
 from app.backend.config import get_settings
 from app.workers import deprecations, retention, wiki
 from app.workers.wiki_render import parse_frontmatter, render_item_page
+from tests import fixtures
 
 SID = "src_0123456789abcdef"
 OLD = "2000-01-01T00:00:00+00:00"
@@ -294,7 +295,7 @@ def test_api_apply_unhides_source_and_semantic_with_summary(client, tmp_path, mo
     conn.commit()
     conn.close()
     _approve_unhide_semantic(tmp_path, rid="rev_usem")
-    body = client.post("/reviews/apply").json()
+    body = fixtures.apply(client).json()
     assert body["status"] == "applied"
     assert body["summary"]["unhidden"]["applied"] == 1
     assert body["summary"]["semantic_unhidden"]["applied"] == 1
@@ -312,7 +313,7 @@ def test_graph_only_unhide_completion_triggers_reindex(client, tmp_path, monkeyp
     conn.commit()
     conn.close()
     _approve_unhide_semantic(tmp_path)
-    body = client.post("/reviews/apply").json()
+    body = fixtures.apply(client).json()
     assert body["summary"]["semantic_unhidden"]["applied"] == 1   # graph-only completion (page already active)
     assert called                                                 # reindex attempted despite no page write
     gconn = graph.connect(tmp_path / "db" / "graph.sqlite")
@@ -323,7 +324,7 @@ def test_graph_only_unhide_completion_triggers_reindex(client, tmp_path, monkeyp
 def test_api_semantic_unhide_graph_required_503(client, tmp_path):
     _approve_unhide_semantic(tmp_path)
     assert not (tmp_path / "db" / "graph.sqlite").exists()
-    assert client.post("/reviews/apply").status_code == 503
+    assert fixtures.apply(client).status_code == 503
 
 
 def test_api_unhide_reindex_failure_is_non_clean(client, tmp_path, monkeypatch):
@@ -335,7 +336,7 @@ def test_api_unhide_reindex_failure_is_non_clean(client, tmp_path, monkeypatch):
     conn.commit()
     conn.close()
     _approve_unhide_semantic(tmp_path)
-    body = client.post("/reviews/apply").json()
+    body = fixtures.apply(client).json()
     assert body["status"] == "saved_publication_pending"
     assert "unhide_discovery_restoration_not_guaranteed" in body["warnings"]
 
@@ -351,7 +352,7 @@ def test_unhidden_semantic_page_reenters_search_navigation(client, tmp_path):
     q = {"q": "Thing", "mode": "navigation"}
     assert NID not in nav(client.get("/search", params=q))            # baseline: hidden, excluded
     _approve_unhide_semantic(tmp_path)
-    assert client.post("/reviews/apply").json()["status"] == "applied"
+    assert fixtures.apply(client).json()["status"] == "applied"
     assert NID in nav(client.get("/search", params=q))                # unhidden -> back in default nav
 
 
@@ -379,7 +380,7 @@ def test_unhidden_semantic_node_reenters_search_graph_channel(client, tmp_path):
 
     assert NID not in adjacent()                                      # hidden, excluded from graph channel
     _approve_unhide_semantic(tmp_path)
-    assert client.post("/reviews/apply").json()["status"] == "applied"
+    assert fixtures.apply(client).json()["status"] == "applied"
     assert NID in adjacent()                                          # unhidden -> re-enters graph channel
 
 
@@ -399,7 +400,7 @@ def test_unhidden_source_reenters_search_evidence(client, tmp_path):
     q = {"q": "alpha bravo discovery"}
     assert SID not in cited(client.get("/search", params=q))          # hidden source -> no evidence
     _approve_unhide_source(tmp_path)
-    assert client.post("/reviews/apply").json()["status"] == "applied"
+    assert fixtures.apply(client).json()["status"] == "applied"
     assert SID in cited(client.get("/search", params=q))              # unhidden -> evidence re-enters
 
 

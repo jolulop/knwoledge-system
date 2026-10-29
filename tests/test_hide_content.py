@@ -25,6 +25,7 @@ from app.backend import main as main_module
 from app.backend.config import get_settings
 from app.workers import retention, wiki
 from app.workers.wiki_render import parse_frontmatter
+from tests import fixtures
 
 SID = "src_000000000000000a"
 OLD = "2020-01-01T00:00:00+00:00"
@@ -266,7 +267,7 @@ def test_preview_hide_reflects_current_status(tmp_path, ms, effect, warn):
 def test_api_apply_hides_source_and_summary(client, tmp_path):
     _rendered_source(tmp_path)
     _approve_hide(tmp_path)
-    body = client.post("/reviews/apply").json()
+    body = fixtures.apply(client).json()
     assert body["summary"]["hidden"]["applied"] == 1
     md = tmp_path / "raw" / "manifests"
     assert manifests.get_status(manifests.load_manifest(md, SID)) == "hidden"
@@ -286,7 +287,7 @@ def test_dry_run_previews_hide_and_leaves_live_unchanged(client, tmp_path):
 def test_html_apply_result_shows_hidden_summary(client, tmp_path):
     _rendered_source(tmp_path)
     _approve_hide(tmp_path)
-    assert "hidden" in client.post("/ui/reviews/apply").text   # operator UI surfaces the hide result
+    assert "hidden" in fixtures.apply_ui(client).text   # operator UI surfaces the hide result
 
 
 def test_hide_with_reindex_failure_is_not_clean(client, tmp_path, monkeypatch):
@@ -298,7 +299,7 @@ def test_hide_with_reindex_failure_is_not_clean(client, tmp_path, monkeypatch):
     def boom(root):
         raise RuntimeError("reindex blew up")
     monkeypatch.setattr(main_module.publication.keyword_index, "reindex", boom)
-    body = client.post("/reviews/apply").json()
+    body = fixtures.apply(client).json()
     assert body["summary"]["hidden"]["applied"] == 1                 # the mutation still happened
     assert body["status"] == "saved_publication_pending"
     assert "hide_retrieval_suppression_not_guaranteed" in body["warnings"]

@@ -319,7 +319,7 @@ def test_an_apply_refused_before_its_first_write_leaves_no_intent(client, tmp_pa
     approved.mkdir(parents=True)
     (approved / "rev_0000000000000001.json").write_text(
         json.dumps({"review_id": "rev_0000000000000001", "type": "merge_items"}), encoding="utf-8")
-    assert client.post("/reviews/apply").status_code == 503          # graph-required, no graph
+    assert fixtures.apply(client).status_code == 503          # graph-required, no graph
     assert _queue(tmp_path) == []
 
 
@@ -327,6 +327,7 @@ def test_an_apply_refused_before_its_first_write_leaves_no_intent(client, tmp_pa
 
 from app.workers import claims, identity_journal, synthesis  # noqa: E402
 from app.workers.wiki_render import parse_frontmatter, render_item_page  # noqa: E402
+from tests import fixtures  # noqa: E402
 
 _DURABLE = ("title", "aliases", "item_type", "status", "review_status", "confidence", "description",
             "split_from", "split_review_id")
@@ -464,7 +465,7 @@ def test_a_crash_inside_apply_after_hiding_a_claim_is_fully_recovered(client, tm
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(claims, "recompose_claim", crash_after_the_hide)
         with pytest.raises(RuntimeError):
-            client.post("/reviews/apply")
+            fixtures.apply(client)
     assert parse_frontmatter(_page(tmp_path, f"Claims/{CY}.md"))["status"] == "hidden"
     assert f"Claims/{CY}" in _page(tmp_path, f"Claims/{CX}.md")      # partner not refreshed
     (entry,) = _queue(tmp_path)

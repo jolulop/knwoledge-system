@@ -30,6 +30,7 @@ from app.llm.cache import ResponseCache
 from app.llm.client import LLMClient
 from app.workers import extract, human_add, intake, items, merges, tag_links, wiki
 from app.workers.wiki_render import parse_frontmatter
+from tests import fixtures
 import tagging  # noqa: E402
 
 MODEL_REF = "anthropic:claude-sonnet-4-6"
@@ -1209,7 +1210,7 @@ def test_apply_keeps_the_marker_until_its_refreshes_succeed(client, tmp_path, mo
             mp.setattr(main_module.wiki, "generate_wiki", crash)
         else:
             mp.setattr(main_module.publication.keyword_index, "reindex", crash)
-        body = client.post("/reviews/apply").json()
+        body = fixtures.apply(client).json()
         assert body["status"] == "saved_publication_pending"
         assert {"identity_refresh_pending", "publication_pending"} <= set(body["warnings"])
     # The executor finished (B tombstoned) but the marker survives, so the refresh is still owed.
@@ -1217,13 +1218,13 @@ def test_apply_keeps_the_marker_until_its_refreshes_succeed(client, tmp_path, mo
     assert identity_journal.is_open(tmp_path / "reviews", "rev_m")
     assert _drop(tmp_path, b, "Survivor")["reason"] == "identity_operation_in_flight"
 
-    body = client.post("/reviews/apply").json()                       # resumes + refreshes
+    body = fixtures.apply(client).json()                       # resumes + refreshes
     assert body["status"] == "applied", body.get("failed_validators")
     assert body["summary"]["merged"]["applied"] == 1
     assert not identity_journal.is_open(tmp_path / "reviews", "rev_m")
     assert validate_projection.main([str(tmp_path)]) == 0            # Source pages re-rendered
     assert _consistent(tmp_path) == []
-    assert client.post("/reviews/apply").json()["summary"]["merged"]["applied"] == 0   # done
+    assert fixtures.apply(client).json()["summary"]["merged"]["applied"] == 0   # done
 
 
 # --- review round 5 (2026-10-25) ------------------------------------------------------------------
@@ -1248,14 +1249,14 @@ def test_a_reported_source_page_failure_keeps_the_marker(client, tmp_path):
     a, b = _merge_fixture(tmp_path)
     with pytest.MonkeyPatch.context() as mp:     # scoped: keep the client fixture's settings patch
         _fail_rendering(mp, b)
-        body = client.post("/reviews/apply").json()
+        body = fixtures.apply(client).json()
     assert body["summary"]["merged"]["applied"] == 1
     assert body["status"] == "saved_publication_pending"
     assert {"source_page_refresh_failed", "identity_refresh_pending"} <= set(body["warnings"])
     assert identity_journal.is_open(tmp_path / "reviews", "rev_m")      # the refresh is still owed
     assert validate_projection.main([str(tmp_path)]) == 1                # b's page is stale
 
-    body = client.post("/reviews/apply").json()                         # resumes + refreshes
+    body = fixtures.apply(client).json()                         # resumes + refreshes
     assert body["status"] == "applied", body.get("failed_validators")
     assert not identity_journal.is_open(tmp_path / "reviews", "rev_m")
     assert validate_projection.main([str(tmp_path)]) == 0

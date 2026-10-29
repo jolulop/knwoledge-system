@@ -416,6 +416,11 @@ class ReviewDetailResponse(BaseModel):
     preview: ReviewPreview
 
 
+class ReviewApplyRequest(BaseModel):
+    # POST /reviews/apply (ADR-0068 decision 6): the token of a clean preview. Every Apply needs one.
+    preview_token: str | None = None
+
+
 class ReviewDecisionRequest(BaseModel):
     # Optional body for the decision endpoints (Phase 6 slice 6-2). Loopback single-user, so the
     # decider is server-fixed ("human"); only an optional free-text note is accepted.
@@ -604,3 +609,8 @@ class ReviewDryRunResponse(BaseModel):
     validators: dict[str, Any] = {}
     warnings: list[str] = []
     summary: dict[str, Any] | None = None
+    # ADR-0068 decision 6: the token that authorizes Apply — a string only for an `ok` preview.
+    # `token_withheld` says why an otherwise clean result got none (code_changed / revision_changed /
+    # settings_changed / authorization_write_failed).
+    preview_token: str | None = None
+    token_withheld: str | None = None
