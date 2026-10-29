@@ -14,7 +14,9 @@
   every prompt, Enrich tags as suggestions, tick-box confirmation) design-locked by grill-phase
   2026-10-28** (see "Part 3 — implementation decisions") and fitted onto ADR-0068 by **implementation
   grill 2** (2026-10-29: suggestions in the Enrich artifact, Authors pages in publication's index
-  step, name identity and filenames, the Details save model, four slices). Item
+  step, name identity and filenames, the Details save model, four slices). **Slice 1 implemented
+  2026-10-29**; **slice 2 design-locked by its grill 2026-10-29** (plan freshness and the stored raw
+  list, the both-lists match, `keywords:`). Item
   consolidation Part B ("Slice A" of the post-UAT-r6 plan); follows ADR-0064 (Part A). **Review
   round 1 applied 2026-10-24** (see the section at the end): durable keep ledger, merge/split and
   unused-status rules, ambiguous-match path, sentinel gate, confirmed-vs-suggested metadata, the
@@ -756,6 +758,91 @@ before the next:
      fallback title carrying `[[itm_…|…]]` and `[[Items/x]]` render as plain text.
   5 mutation checks on these fixes, all caught. `tests/test_titles.py` now has 31 tests; one
   existing claim-windows test now passes the current prompt title. Gate: 1778 passed + 2 skipped.
+
+## Part 3 slice 2 — grill (2026-10-29): Enrich tags into the suggestions
+
+Part 3 Q3 fixed the design (one list, Enrich first, combined cap of 15, the same resolution and
+filters, `origin`, a name in both lists takes the items type and aliases). This pass settles how it
+stays fresh and deterministic.
+
+**Q1. Model freshness and plan freshness are separate; the raw model output is kept.**
+- **The items artifact stores the validated raw `items` list** as the model returned it, before
+  merging, capping or any human decision. Every re-plan reapplies the current keep/drop/block
+  rules, the alias protections and the cap to it.
+- **`merge_input`:** a hash of the canonical, ordered Enrich tags the plan actually used, their
+  types included, beside a deterministic **merge-version marker** (a change to the merge rules
+  bumps the marker, never a prompt version). Absent or stale Enrich output is an explicit empty
+  input, so Enrich tags disappearing also triggers a re-plan.
+- **Re-plan without a model call:** when `input_fingerprint` is fresh but `merge_input` or the
+  merge version differs, the run re-plans from the stored raw list. That needs neither the
+  provider nor the response cache. It is an ordinary per-document commit: the write lock, the
+  producer journal record, publication, and the same filters.
+- **Under the commit lock,** before any write, both the model inputs (slice 1) and the merge input
+  are recomputed; if either changed during the run, nothing is written.
+- **The raw list survives recovery:** it stays in the artifact through journal recovery and
+  repeated interruptions (a replayed commit re-plans from it).
+- **A valid empty raw list is not missing data.** An older artifact without the raw list (or a
+  malformed one) never re-plans from `[]`, which would withdraw every suggestion: the run reports
+  that regeneration is needed, and a `--cache-only` replay recovers it where the cache still has
+  the response.
+- **Required tests:** a tag-only Enrich change re-plans with the response cache unavailable and an
+  adapter that fails if called, and keeps, drops and blocks survive it; Enrich tags removed;
+  their order changed; a legacy artifact without the raw list; the merge input changing during a
+  run.
+
+**Q2. "The same name in both lists" is matched before resolution; the items name is kept.**
+- **Matching:** an Enrich tag matches an items suggestion when its `tag_key` (the `merge_key`
+  fold used for keep/drop and block keys) equals that suggestion's name key or the key of one of
+  its **body-checked** aliases (aliases the P4 check rejected never match). Example: Enrich "LLM"
+  and items "Large Language Model" with the body alias "LLM".
+- **When:** the merge completes before resolution and before the combined cap.
+- **The merged entry:** at the Enrich position, with the items suggestion's name, type and
+  aliases, and `origin: both`. Unmatched Enrich tags keep their own name and type, no aliases,
+  `origin: enrich`; items-only suggestions are `origin: items`.
+- **The matched items entry is consumed:** it doesn't appear again in the items tail. Several
+  Enrich forms matching the same items entry yield one result, at their earliest Enrich position.
+  An Enrich tag matching several items suggestions merges with the first in items order; the
+  others go through normal resolution.
+- **Every contributing name key is checked against the decisions:** keep/drop/block filters see
+  the Enrich form's key as well as the items name's, so taking the items name never bypasses a
+  drop or block recorded against the original form.
+- **After resolution,** entries that collapse to one existing tag union their origins. The
+  existing ambiguity checks and governed-type protections are unchanged: a suggested items type
+  never silently retypes an existing tag (a differing production type files `change_item_type`,
+  as today).
+- **Required tests:** acronym matching through an alias; a rejected alias never matches; several
+  Enrich forms matching one item; several items matching one Enrich tag; a drop and a block
+  recorded under the Enrich form.
+
+**Q3. A `keywords:` property replaces the Source page's `tags:`** (clarifies part 3 Q3's
+"search loses nothing"). The keyword index's navigation row reads only the title, `aliases`,
+`tags` and the summary callout, never the body's Suggested section, so dropping `tags:` alone
+would have removed the Enrich tag names from search.
+- **What it holds:** the names from the same projection the document screen uses: every kept
+  tag (all keeps are preserved, so the list can exceed the suggestion cap) plus the current
+  eligible suggestions, capped by the existing rule. Dropped, blocked, hidden and over-cap
+  suggestions are excluded. Names are de-duplicated deterministically, in the agreed order.
+- **The index:** for Source pages, `keywords` is read into the existing tags column whenever the
+  property exists, **even when empty**; the legacy `tags` is read only when `keywords` is
+  absent, so an intentional empty list can never revive old terms. Other page types keep their
+  `tags` indexing unchanged. No schema change.
+- **Obsidian:** `keywords:` is an ordinary property, not a tag, so unreviewed names stay out of
+  the tag pane.
+- **"Search loses nothing" means:** every eligible displayed name stays searchable; a name
+  deliberately filtered or removed disappears from the index.
+- **Required tests:** a keyword-only match finds the document; filtered names are not indexed;
+  the legacy `tags` fallback; an empty `keywords` overriding legacy tags; a keep or drop
+  updating search at once (through publication's keyword refresh).
+
+**Implementation notes (from part 3's wording, not new decisions):**
+- The domains-first move (P2) applies to the items tail only; Enrich's tags keep their own order
+  at the head ("then the items suggestions in their P2 order (domains first)").
+- The raw cap on the model's items list (`_MAX_ITEMS`) applies to that list before the merge, so
+  the Enrich head never pushes items suggestions out of the raw list; the combined list is then
+  cut by the suggestion cap as today.
+- An Enrich-origin suggestion is navigation, not a factual claim: like any suggestion it carries
+  an evidence anchor only when its name is mechanically locatable (CLAUDE.md rule 3 does not
+  apply, part 3 Q3).
 
 ## Consequences
 
