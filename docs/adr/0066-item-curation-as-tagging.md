@@ -12,7 +12,9 @@
   round 10** (Apply serialized with tagging; the applied column uses the executors' checks).
   Decisions 6, 10 and 11 are not implemented. **Part 3 (decision 6, extended: effective title in
   every prompt, Enrich tags as suggestions, tick-box confirmation) design-locked by grill-phase
-  2026-10-28** (see "Part 3 — implementation decisions"). Item
+  2026-10-28** (see "Part 3 — implementation decisions") and fitted onto ADR-0068 by **implementation
+  grill 2** (2026-10-29: suggestions in the Enrich artifact, Authors pages in publication's index
+  step, name identity and filenames, the Details save model, four slices). Item
   consolidation Part B ("Slice A" of the post-UAT-r6 plan); follows ADR-0064 (Part A). **Review
   round 1 applied 2026-10-24** (see the section at the end): durable keep ledger, merge/split and
   unused-status rules, ambiguous-match path, sentinel gate, confirmed-vs-suggested metadata, the
@@ -194,7 +196,8 @@ ADR-0059 decision 8 stands: people are never knowledge items, and the manifest i
 authority.
 - **Enrich extracts** the document's **title, author(s) and publisher** from the text, with PDF
   metadata as a hint, and renders them on the Source page.
-- **Two authority layers in the manifest:**
+- **Two authority layers in the manifest:** *(amended 2026-10-29, implementation grill 2 Q1: the
+  suggestions live in the Enrich artifact, not the manifest)*
   - `provenance_suggested`: the Enrich output. Rewritten on every re-enrichment.
   - `provenance`: the values the user **confirmed or corrected** on the document screen (the
     existing ADR-0018 fields). **Re-enrichment never overwrites it**; a human correction always
@@ -229,7 +232,9 @@ authority.
   - **Kept-name storage:** the "show as page" flag lives with the confirmed name in the manifest.
   - **Safe filenames:** the slug comes from the existing slugifier plus the ADR-0009
     path-containment check. A raw extracted name never becomes a filesystem path. Two names that
-    slug alike get a short hash suffix of the folded name.
+    slug alike get a short hash suffix of the folded name. *(Amended 2026-10-29, implementation
+    grill 2 Q3: a dedicated name fold, a reserved `--<hash>` suffix for lossy names only, the
+    identity stored in the page.)*
   - **Rebuild:** the `wiki/Authors/` folder is code-owned and fully rebuilt on each wiki pass. A
     correction moves the document to the new name's page. A page nothing references any more
     disappears on the next rebuild (a derived projection, not a human-curated page).
@@ -548,6 +553,147 @@ are often the best tags for a bookmark.
 
 **Versions:** the Enrich schema and prompt version and the claims and items prompt versions all
 bump (new outputs, new title input).
+
+## Part 3 — implementation grill 2 (2026-10-29, after ADR-0068)
+
+ADR-0068 (one write lock, local publication, preview tokens, the producer journal) landed between
+part 3's design and its implementation. This pass fits part 3 onto it.
+
+**Q1. Suggested provenance lives in the Enrich artifact** (amends decision 6, "two authority
+layers in the manifest"). The suggested title, ordered authors and publisher are written to
+`normalized/enrichment/<sid>.json`, beside the summary and the typed tags; there is no
+`provenance_suggested` in the manifest. Confirmed `provenance` stays manifest authority.
+- **The boundary:**
+  - Enrich replaces its suggestions only with a successful, validated result; a failed run keeps
+    the previous artifact.
+  - **Producers never overwrite confirmed provenance**, and re-enrichment never clears a human
+    confirmation. (Manifests do receive producer-written extraction and lifecycle fields; the
+    rule is about confirmed provenance, not about who may write a manifest.)
+  - Confirming copies the selected values into the manifest through `set_provenance`, under the
+    write lock.
+  - Authors pages derive from confirmed provenance only, never from suggestions.
+  - The artifact's canonical typed-tag list is the only copy; the suggestions carry no second
+    tag list.
+- **Why:** the Enrich commit stays a single artifact write (no artifact/manifest pair to keep
+  consistent across a crash, so no journal record), and the suggestions are regenerable output
+  (from the response cache). The "Enrich now suggests …" note compares the artifact with the
+  manifest at render time.
+- **Required tests:** re-enrichment preserves a confirmation; a failed Enrich keeps the previous
+  artifact; Authors pages exclude unconfirmed suggestions.
+
+**Q2. `wiki/Authors/` is rebuilt in publication's `index` step** (ADR-0068 decision 4), as a
+whole-folder pass beside `wiki/index.md`; no new queue field (a Details save records a provisional
+intent for its document, with `index=True`).
+- **One inventory:** a single validated inventory built from confirmed provenance and the
+  show-page choices; the Authors pages and the `index.md` "Authors & publishers" section both
+  render from it.
+- **Order:** Authors pages → `index.md` → keyword search. If the Authors or index part fails, the
+  entry keeps both its index and keyword work, so a retry can't leave search stale.
+- **Pruning only what code owns:** a page is removed only if it carries the dedicated generator
+  marker and schema of an Authors page (not just ordinary frontmatter fields) and nothing in the
+  inventory references it any more. Removing a wholly generated, unreferenced page is projection
+  cleanup and needs no governance review (CLAUDE.md rule 9 concerns content, not regenerable
+  projections).
+- **Handwritten pages are never overwritten:** a filename collision with a page that lacks the
+  marker is reported as a conflict, and the publication stays pending.
+- **Fail before pruning:** if the manifests can't be read reliably, the step fails before
+  removing anything; an unreadable manifest never looks like a removed reference.
+- Writes are suppressed when content is unchanged.
+- **Required tests:** a rename or an unticked "show page" removes the old generated page; a name
+  shared by several documents stays while any references it; a handwritten page is preserved,
+  including on a filename collision; a malformed manifest prevents pruning; recovery after a
+  partial render failure.
+
+**Q3. Page identity is the normalized name; filenames never depend on other names** (amends
+decision 6's "two names that slug alike get a short hash suffix").
+- **A dedicated name fold, not `merge_key`:** NFKC, casefold and whitespace normalization only.
+  `merge_key` singularizes the last token ("Robin Woods" and "Robin Wood" would share a page),
+  which is wrong for names. Accents and non-Latin characters stay in the identity.
+- **Pages per normalized name, across the author and publisher roles** (a page lists each role's
+  documents). Not "per person": an identical name doesn't establish that two people or
+  institutions are the same referent. "D. C. Dennett" vs "Daniel C. Dennett" stay two pages
+  (author aliases remain deferred).
+- **Filename:** the plain slug when the fold is lossless (only `a–z`, `0–9` and spaces, which slug
+  one-to-one); otherwise `<slug>--<8 hex of sha256(fold)>`, with an empty slug as `unnamed`. The
+  `--` separator is reserved: a plain slug can never contain it (the slugifier collapses runs of
+  separators), so the plain and hashed namespaces never collide. (Without it, "José" →
+  `jos-d994e1d0` and the ASCII name "jos d994e1d0" would share a filename.)
+- **The full folded identity is stored in the page's generated frontmatter.** Eight hex characters
+  can still collide: a page whose stored identity differs from the name being rendered refuses
+  publication (a reported conflict, publication pending). Names are never combined, and a page
+  is never overwritten, because filenames match.
+- **Title:** the most common confirmed spelling among the page's documents (ties: the first
+  alphabetically); every confirmed spelling goes into `aliases` (ADR-0060 quick switcher).
+- **Required tests:** "Robin Woods" / "Robin Wood" get two pages; accented names; non-Latin names;
+  a plain slug against a hashed one; a forced hash collision refuses rather than merges; adding
+  names never renames an existing page.
+
+**Q4. A Details save is one validated commit; confirmation is never silently undone.**
+- **One commit for the whole Save** (ADR-0068 screen action: one hold, one publication intent,
+  `sources=[sid]`, `index=True`). Tag decisions and details are validated together: title not
+  empty, each name non-empty and normalizable, no duplicate normalized names among the authors.
+  Any error writes **nothing**, and the form shows the errors with the values kept.
+- **Revalidated under the lock against what the form displayed:** the source's lifecycle, its tag
+  decisions and its existing confirmation. A concurrent Details edit (or tag change) since the
+  form was rendered refuses the save as a stale form, never overwriting it. The form carries
+  what it showed, so the stored artifact fingerprint is **the one the human saw**, not whichever
+  artifact is newest at commit time.
+- **A confirmation stores** (through `set_provenance`): `title`; `authors` as an ordered list of
+  `{name, show_page}`; `publisher` as `{name, show_page}` or none; `confirmed_at`;
+  `confirmed_from_artifact` (the Enrich fingerprint shown, for "Enrich now suggests …").
+- **No silent un-confirming:** a Save without the tick never changes or clears an existing
+  confirmation; changing confirmed details needs the tick again.
+- **Clear confirmed details** is an explicit button and its own commit phase. It removes the
+  confirmed title, authors, publisher and the confirmation metadata, and keeps every unrelated
+  manifest field. `report_family` and `canonical_url` still take part in independence (ADR-0018,
+  unchanged), so after a Clear independence rests on whatever confirmed fields remain; it is not
+  necessarily unknown.
+- **Independence with several authors** (adapts `manifests.independent_sources`): authors compare
+  as sets of normalized identities (Q3's fold), ignoring order, spelling variants and
+  `show_page`. Sharing any author means the author field can't prove independence; disjoint sets
+  can. Merely unequal lists are not enough. The publisher compares by its normalized identity.
+  Confirmation timestamps and artifact fingerprints never affect independence.
+- **Producers reconsider on their next run, visibly:** a save never re-runs synthesis or
+  contradiction detection. Their freshness checks include the independence inputs (the involved
+  sources' confirmed, normalized provenance), so a provenance change is never skipped as
+  "fresh"; results whose recorded inputs differ from the current ones are reported as awaiting
+  reconciliation (on the document screen after the save, and by the maintenance report) until
+  that run. A topic that becomes ineligible is retracted by synthesis step 3.
+- **Legacy manifests:** a string `author` is read as a one-name list; manifests are not
+  rewritten (the clean restart follows).
+- **Required tests:** combined validation failure writes nothing; concurrent Details saves (the
+  second is a stale form); re-enrichment between display and Save stores the fingerprint shown;
+  a Save without the tick preserves a confirmation; Clear with remaining `report_family` /
+  `canonical_url`; reordered and overlapping author lists; synthesis and contradiction detection
+  reconsider after a provenance change.
+
+**Q5. Four slices, then one UAT, then the clean restart.** Each slice is reviewed and committed
+before the next:
+1. **Title and Enrich output:** the PDF metadata hint in the extraction log with the deterministic
+   title filter; the effective-title chain; **every prompt bump of part 3** (Enrich: title,
+   authors, publisher, typed tags ≤ 7, stored in the artifact per Q1; claims and items: the Enrich
+   title as input, included in their freshness checks).
+2. **Enrich tags as suggestions:** the merge in `extract_items` (origin, order, combined cap of
+   15) and the removal of the Source page's free-text `tags:`.
+3. **Details confirmation:** the screen section, the save model and Clear (Q4), independence with
+   author lists, the independence freshness inputs and the awaiting-reconciliation report.
+4. **Authors pages:** the inventory, pages and index section in the `index` step (Q2) with the
+   identity and filename rules (Q3), `validate_wiki` coverage, and the Obsidian `path:Authors`
+   colour group in the docs.
+
+- **One prompt-bump round holds only if** slice 1 fixes the final prompt and response contracts,
+  and slice 2's merging, origin tracking, ordering and cap are deterministic processing. If later
+  work changes a prompt's meaning anyway, that prompt's version bumps again; an inaccurate cache
+  identity is never kept.
+- **Display corrections stay apart from extraction inputs:** claims and items freshness includes
+  the Enrich title they receive; confirming a different display title never restales them.
+  Independence changes get their own freshness inputs (slice 3).
+- **Paid calls:** none during development (fake adapters; the main `wiki/` is empty). **UAT** runs
+  once, after all four slices pass review and their gates, on the `/tmp/ks-uat` clone: first the
+  deterministic extraction, so the logs carry the new PDF hints, then the paid stages
+  (estimated ~12 Enrich, ~73 claims, ~12 items calls; retries and windowing change the totals).
+  The resulting response cache is preserved (as on 2026-10-28, under `~/ks-saved/<date>/`) before
+  decision 10's backup-gated clean restart, which bills the real corpus once more.
 
 ## Consequences
 
