@@ -5,7 +5,8 @@
   **Slice 2 (decision 4: the publication function and pending queue, for screen actions and
   Apply) implemented 2026-10-29** (see "Implementation — slice 2"). **Slice 3 (decision 5:
   producers publish per document and refresh search once per run) implemented 2026-10-29** (see
-  "Implementation — slice 3"). Slice 4 (previews + token) not yet.
+  "Implementation — slice 3"). Slice 4 (previews + token) design-locked by its own grill
+  2026-10-29 (decision 6, Q1–Q8), not yet implemented.
 - **Date:** 2026-10-28
 - **Drivers:** an external architecture review after ADR-0066 part 3's grill. It found three
   blocking issues and four non-blocking ones; the user answered four framing questions and five
@@ -151,24 +152,188 @@ A page can hold both durable fields and generated sections. Authority is declare
 - If the end-refresh fails, the job's result is `saved_publication_pending`, with the work left in
   the queue.
 
-### 6. Consistent previews and a revision token
+### 6. Consistent previews and a preview token
 
 - **The snapshot:** `build_sandbox` copies the vault **under the write lock**, with SQLite's online
   backup method for every SQLite file (as backups do) and plain copies for the rest. The sandbox
-  Apply then runs on the copy, outside the lock.
+  Apply then runs on the copy, outside the lock. What is copied under the lock and what after it
+  is set out below ("What the snapshot copies, and when").
 - **The revision:** `(epoch, counter)` in `db/`, backed up.
-  - The write lock itself increments `counter` when a holder committed a change to authority
-    (graph, ledgers, reviews, manifests, policies, durable page fields), so no writer can forget it.
-  - Read-only holders (the snapshot build), job records, cache writes, the publication queue and
-    derived indexes do not bump it.
-  - **Every restore generates a new `epoch`**, so two histories that diverge after a restore can
-    never share a token.
-- **The token:** the preview returns the revision it snapshotted. Apply checks it **under the write
-  lock, before its first mutation**, and refuses a stale one with `stale_preview` ("changed since
-  the preview, run it again") and **no mutations**.
+  - **Conservative invalidation, not change detection** (slice-4 grill, Q1). The lock cannot see
+    what a holder wrote, so `counter` tracks *potential* authority changes (graph, ledgers,
+    reviews, manifests, policies, durable page fields). Every write-lock hold is mutating by
+    default and invalidates outstanding tokens; a holder opts out explicitly with
+    `changes=False`. A missed opt-out only costs an unnecessary preview refresh, never a stale
+    preview accepted.
+  - **Invalidate before writing, not on release.** The increment is persisted (atomic, durable
+    write) *before* the lock yields to a mutating holder. A process that changes authority and
+    dies before its `finally` runs therefore cannot leave the old token valid. One increment per
+    outermost hold is enough: no snapshot can be taken while the lock is held.
+  - **Nested mutating holds invalidate too.** A mutating hold nested inside an outer
+    `changes=False` hold increments on entry (once per outermost hold).
+  - **`changes=False` is reserved for paths that cannot change any preview input:** the
+    snapshot build, backup, job records, cache writes, the publication-queue file itself and
+    derived indexes. **Publication keeps the default** (it can sync claim statuses and move a tag
+    between in-use and unused); any other opt-out must show it touches no preview input.
+  - **Failure to persist the increment refuses the mutation:** the hold raises before yielding,
+    and nothing is written.
+  - **Every restore durably establishes a new `epoch`** before any later preview or write, so two
+    histories that diverge after a restore can never share a token.
+  - **Self-healing, not fail-closed** (slice-4 grill, Q2). Unlike the queue and the journal, the
+    revision records no recovery work: replacing its epoch only makes every outstanding token
+    stale, which can never accept a wrong Apply. The epoch is a random 32-hex id, never a
+    timestamp. All initialization and recovery runs under the exclusive write lock, so
+    concurrent processes observe the same replacement epoch.
+    - **Missing file** (a new vault, a restore of a pre-slice-4 backup): durably initialize a new
+      epoch with `counter = 0` before returning a preview or permitting writes.
+    - **Malformed contents:** copy the damaged bytes to `revision.damaged-<ts>.json` and flush
+      them, then atomically and durably replace the active file with a new epoch and
+      `counter = 0`. Copy-then-replace, not move-away-first, so the evidence survives a crash at
+      any point.
+    - **I/O failure refuses:** if reading, preserving or replacing fails (permissions, storage),
+      the hold raises and nothing is written. Only unparseable or schema-invalid contents count
+      as malformed.
+    - `counter = 0` is only the initialization value; a mutating hold then increments before
+      writing, per the rules above.
+    - **Apply after recovery** still compares the submitted token, now against the new epoch, and
+      returns `stale_preview`. Recovery never bypasses the comparison.
+    - **Visible, not blocking:** a preserved damaged copy is reported as a warning (revision
+      status and validator output) that never fails validation, so it cannot block Apply or
+      normal work; the operator deletes it when done.
+  - **Required tests:** concurrent initialization yields one epoch; corrupt-file recovery
+    rejects an old token; a crash at each step of the replacement leaves either the old or the
+    new file plus the evidence; a persistence failure prevents authority writes.
+- **The token** (slice-4 grill, Q3): an **opaque random preview id**, not the revision itself. A
+  bare `<epoch>.<counter>` identifies a state but proves no successful preview happened: a caller
+  could construct it, or reuse it with other Apply options.
+  - **Only an `ok` preview authorizes Apply.** That preview creates a server-side authorization
+    record bound to the revision it snapshotted **and** the exact Apply inputs and options that
+    affect execution (none today beyond the vault state; the binding keeps any future option
+    from diverging between preview and Apply). The rule lives on the server and is shared by
+    the UI, the JSON route and scripts.
+  - A non-clean preview (`blocked`, `failed`, `validation_failed`) returns `preview_token: null`
+    and creates no record.
+  - **Apply, under the write lock and before its first mutation:** look up the record (missing or
+    unrecognized token → refused), check it matches the submitted options, compare its revision
+    with the current one (mismatch → `stale_preview`), then durably invalidate, then write. Every
+    refusal writes nothing.
+  - **Single-use:** once Apply passes these checks and advances the revision, the token is spent,
+    even if Apply then fails. Of two concurrent submissions of one token, at most one proceeds:
+    the lock serializes them, and the second sees the advanced revision.
+- **Authorization records** (slice-4 grill, Q4) live in **`db/apply_authorizations.json`**: durable,
+  so they survive an API restart and are shared by the API and scripts.
+  - **Recorded only after the sandbox preview succeeds**, never at snapshot time:
+    1. under the lock with `changes=False`, capture the snapshot and its revision;
+    2. run the sandbox outside the lock;
+    3. if the result is `ok`, take the lock again (`changes=False`), check that revision is still
+       current, and durably record the authorization bound to the exact Apply inputs;
+    4. return the token only after that write succeeds. If the revision moved meanwhile, return
+       no token and ask for another preview.
+  - **At Apply,** under the lock: validate the record, the inputs and the revision, then durably
+    consume the record and advance the revision, then write authority. A crash between consumption
+    and execution only requires another preview, which is safe.
+  - Each write prunes records whose revision is no longer current. Apply rejects a stale record
+    on its own, whether or not it was pruned yet.
+  - **Malformed file:** keep a copy of the damaged bytes, then replace it with an empty set, so
+    outstanding tokens are refused as unrecognized. **I/O failure refuses:** a preview that
+    cannot save its record returns no token; an Apply that cannot read or consume one refuses.
+  - **Not backed up:** a restore must never bring back old records (its new epoch would refuse
+    them anyway).
+  - **Required tests:** restart survival; a revision change during the sandbox run yields no
+    token; an authorization-write failure yields no token; a crash after consumption but before
+    execution leaves the token spent and Apply needing a new preview.
+- **What the snapshot copies, and when** (slice-4 grill, Q5). The lock is held only for what a
+  writer can change:
+  - **Under the lock:** `db/*.sqlite` through SQLite's online backup (their `-wal`/`-shm` and lock
+    files are never copied); the other `db/` files (queue, journal, revision); `reviews/`, `wiki/`,
+    `raw/manifests/`, `normalized/` and `policies/`.
+  - **Never copied:** `db/apply_authorizations.json` and the LLM cache.
+  - **After the lock:** the code (`app/`, `scripts/`, `templates/`) and the raw bytes named by the
+    **copied** manifests, never the live ones. Raw files are never edited, but an approved
+    deletion or a restore can remove or replace one; Q4's revision check before authorization
+    catches any such operation in between. A failed copy never yields an authorized preview.
+  - **Bound inputs beyond the revision:**
+    - a **code fingerprint**: a hash over the relative paths and contents of the sandbox's copied
+      `app/`, `scripts/` and `templates/`, so added and deleted files count; generated files
+      (`__pycache__/`, `*.pyc`) are excluded. It is compared with the live code before the
+      authorization is issued and again before Apply; a mismatch is `stale_preview`;
+    - a **settings fingerprint**: the effective settings that affect execution and are not
+      already covered by `policies/` or the other bound inputs (API keys and other secrets
+      excluded).
+  - **Code changes require an API restart.** A disk fingerprint cannot prove that already-imported
+    modules match the files, so the API records the fingerprint of the code it started with and
+    refuses previews and Apply with `restart_required` while the disk differs. Installing code
+    (`git pull`, `uv sync`) stays outside any running preview or Apply; the write lock does not
+    serialize it, so this is an operating rule (`docs/Operations.md`).
+  - **Required tests:** a deletion or restore during the raw copy yields no token; a code change
+    during sandbox construction yields no token; an added or a deleted code file changes the
+    fingerprint; a code change between authorization and Apply refuses Apply.
+- **Required tests (slice 4):** process termination after an authority write leaves the old token
+  stale; a nested mutating hold inside a `changes=False` hold invalidates; a stale Apply is
+  refused before any write; a read-only snapshot leaves the revision unchanged; a direct JSON
+  Apply without a successful preview, with changed options, or with a non-clean preview's
+  (absent) token is refused; concurrent reuse of one token lets at most one Apply proceed.
+- **Accepted:** previews taken during an ingest go stale quickly, because each per-document commit
+  invalidates.
 - **Every Apply requires a preview token**, from every entry point: the UI form, the JSON route and
   scripts. There is no unpreviewed Apply.
-  - **Scripts** request a preview, inspect its result, then submit its token.
+  - **Scripts** request a preview, inspect its result, then submit its token. That entry point is
+    **`scripts/apply_reviews.py`** with two separate commands (slice-4 grill, Q6):
+    - `preview` prints the result (diff summary, validators, warnings) and a token only for an
+      `ok` preview, otherwise why none was issued;
+    - `apply --token <id>` submits it and **never previews again by itself**;
+    - **refusals** (`stale_preview`, `restart_required`, an unrecognized token), **partial results
+      and `saved_publication_pending` exit non-zero** with the reason printed.
+
+    The script is thin: it **runs the shared implementation directly** (preview, authorization
+    store, input binding, revision checks and the Apply run guard are one module used by both the
+    API and the script), so a fresh script process always runs current code and never sees
+    `restart_required` for itself. Tokens are interchangeable between the two entry points.
+    Preview holds neither the write lock nor the Apply run guard while the sandbox runs. Required
+    tests: an API-issued token applied through the CLI and a CLI-issued one through the API;
+    concurrent Apply attempts; a stale token refused.
+  - **The JSON contract** (slice-4 grill, Q8):
+    - `POST /reviews/apply/dry-run` returns `preview_token`: a string only for `ok`, else `null`.
+      When an otherwise successful sandbox result gets no token, `token_withheld` says why:
+      `revision_changed` or `authorization_write_failed`. A failed copy is a **failed preview**
+      (`status: failed`, `reason: copy_failed`, `preview_token: null`), never `ok`.
+    - `POST /reviews/apply` requires `{"preview_token": "<id>"}` (a breaking change; today's
+      JSON callers are tests and `curl`). Refusals:
+
+      | Case | HTTP | `detail.reason` |
+      |---|---|---|
+      | body or token missing | 422 | `preview_required` |
+      | no record: unknown, consumed, or pruned as stale | 409 | `unknown_preview` |
+      | record present, a bound value differs (revision, code, settings, options) | 409 | `stale_preview` |
+      | the store cannot be read, or the record cannot be durably consumed | 503 | `authorization_store_unavailable` |
+      | the API's code differs from disk (also on the dry-run route) | 503 | `restart_required` |
+
+    - Each refusal carries `{"reason", "action"}` with the specific action: "preview again";
+      "restart the API, then preview again" for `restart_required`; "retry; check `db/`" for a
+      store failure. A storage failure never looks like an unknown token.
+    - **"Writes nothing" on refusal** means no authority change and no authorization consumed.
+      Housekeeping under the rules above (revision initialization or recovery, store repair, the
+      pruning of stale records) may still write.
+    - **`scripts/apply_reviews.py` exit codes** are numeric, print the same reason strings, and
+      the mapping is documented in `docs/Operations.md`. They extend `run_guard`'s 3/4/5:
+      `0` applied; `1` partial, `validation_failed` or `saved_publication_pending`; `2` usage; `3`
+      busy; `4` queue corrupt; `5` journal corrupt; `6` `preview_required`/`unknown_preview`/
+      `stale_preview`; `7` `restart_required` (reserved: the script runs current code itself, so only an API caller sees it); `8`
+      `authorization_store_unavailable`; for `preview`, `1` when no token was issued.
+  - **The UI preview is a `POST`** (slice-4 grill, Q7). A preview writes the authorization store
+    (and may initialize the revision), so it must not run on a safe method or outside ADR-0067's
+    origin guard. `GET /ui/reviews/apply` becomes read-only: the scope counts and a **Preview**
+    button, so the existing links still land there; it never runs the sandbox nor writes the
+    revision or authorization files. The button posts to `POST /ui/reviews/apply/preview`,
+    which renders the diff and, for an `ok` preview, the Apply form with the token in a hidden
+    field.
+    - **Distinct refusal messages:** `stale_preview` → "changed since the preview, preview
+      again"; `restart_required` → "restart the API, then preview"; an unrecognized token →
+      "preview again". Each carries the action it needs, not a generic "changed".
+    - Responses carrying a token send `Cache-Control: no-store`. Reloading a preview only ever
+      re-previews; resubmitting a spent token is refused as stale, so nothing applies twice.
+    - Required tests: `GET` runs no sandbox and writes neither file; a cross-origin preview
+      `POST` is refused before any work; a clean preview `POST` renders the token-bound form.
   - **On a mismatch** the operation is refused with no writes. A script must **not** silently
     preview again and apply: changed effects deserve review.
   - **Scope:** the token applies to Apply only. Immediate keep/drop and the other screen actions
