@@ -21,6 +21,11 @@ promotion-vs-backup deadlock of ADR-0068 review round 1. A shared take nested in
 shared hold never waits. The vault lock is also taken before the process lock, so the order holds
 for threads of one process too. Backup and restore, which already hold the vault lock exclusively,
 take the write lock with ``vault=False``.
+
+**A corrupt publication queue refuses authority changes** (ADR-0068 decision 4, fail-closed): the
+outermost hold checks that `db/publication_pending.json` is readable and raises
+:class:`~app.backend.publication_queue.QueueCorrupt` if not. Holders that change no authority (backup,
+restore, the queue repair itself) pass ``authority=False``.
 """
 from __future__ import annotations
 
@@ -29,7 +34,7 @@ import threading
 from collections.abc import Iterator
 from pathlib import Path
 
-from app.backend import vault_lock
+from app.backend import publication_queue, vault_lock
 
 try:
     import fcntl
@@ -48,13 +53,14 @@ def lock_path(reviews_dir: Path) -> Path:
 
 
 @contextlib.contextmanager
-def hold(reviews_dir: Path, *, vault: bool = True) -> Iterator[None]:
+def hold(reviews_dir: Path, *, vault: bool = True, authority: bool = True) -> Iterator[None]:
     """Hold the write lock for one commit phase. Re-entrant per thread.
 
     The outermost hold takes, in this order, the vault lock shared (``vault=False`` only for a
     holder of the exclusive vault lock), the process lock, then the `flock`. Taking the vault lock
     before the process lock means a writer never holds the process lock while it waits for a backup,
-    so a backup running in a thread of the same process can still take the write lock."""
+    so a backup running in a thread of the same process can still take the write lock. With
+    ``authority`` (the default) it then refuses if the publication queue is unreadable."""
     if getattr(_held, "depth", 0):                        # thread-local: this thread holds it all
         _held.depth += 1
         try:
@@ -69,6 +75,8 @@ def hold(reviews_dir: Path, *, vault: bool = True) -> Iterator[None]:
         with _PROCESS_LOCK, open(path, "a", encoding="utf-8") as fh:
             if fcntl is not None:
                 fcntl.flock(fh, fcntl.LOCK_EX)
+            if authority:
+                publication_queue.check_readable(Path(reviews_dir).parent)
             _held.depth = 1
             try:
                 yield

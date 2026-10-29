@@ -1,9 +1,10 @@
 # ADR-0068 — Vault consistency contract: one write lock, local publication, consistent previews
 
 - **Status:** accepted — design-locked by grill-phase 2026-10-28. **Slice 1 (decisions 2–3: write
-  lock, run guards, commit phases) implemented 2026-10-28** (see "Implementation — slice 1");
-  slices 2–4 (publication + queue, producer publication + keyword refresh, previews + token) not
-  yet.
+  lock, run guards, commit phases) implemented 2026-10-28** (see "Implementation — slice 1").
+  **Slice 2 (decision 4: the publication function and pending queue, for screen actions and
+  Apply) implemented 2026-10-29** (see "Implementation — slice 2"). Slices 3–4 (producer
+  publication + keyword refresh, previews + token) not yet.
 - **Date:** 2026-10-28
 - **Drivers:** an external architecture review after ADR-0066 part 3's grill. It found three
   blocking issues and four non-blocking ones; the user answered four framing questions and five
@@ -50,6 +51,12 @@ A page can hold both durable fields and generated sections. Authority is declare
 | Claim (`wiki/Claims/`) | `status` (`hidden`, `deprecated_candidate`) | projection |
 | Synthesis (`wiki/Synthesis/`) | `status` (`hidden`) | projection |
 | Source pages, `index.md`, `wiki/Authors/` (ADR-0066 part 3), backlink and list sections everywhere, summary callouts, `generation_status`, `input_fingerprint` | — | **pure projection**, rebuildable at any time |
+
+- **One exception, for publication only** (slice 2 review round, user 2026-10-29): publication
+  copies every saved item field, `status` included, except that it may move a tag between `active`
+  and `unused` per its saved keep/drop decisions (the ADR-0066 rule). Those decisions are the
+  authority for that one choice. Every other status (`candidate`, `hidden`, `merged`, deprecated and
+  retired) is copied as saved.
 
 - **Where else authority lives** is unchanged: `raw/` and `raw/manifests/` (including `status` and
   `provenance`), `reviews/` (review items, tag ledgers, audit log, journals), `policies/`,
@@ -277,6 +284,149 @@ Static review found four issues and one test gap; the user chose the structural 
 - **Per-topic re-check:** `eligible_topics` is now a loop over `topic_for(node_id)`, which the commit
   check calls for its one topic instead of rescanning every topic under the write lock.
 - `tests/test_write_lock.py`: 32 tests; both new checks mutation-tested.
+
+## Implementation — slice 2 (2026-10-29)
+
+- **`app/backend/publication_queue.py`:** the queue file, plain IO. `load` (no file = empty; an
+  unparseable file, a wrong `schema_version` or an invalid entry raises `QueueCorrupt`), `save`
+  (atomic replace, flushed to disk before and after the rename), `record` (refuses outside the
+  write lock), `discard`, `status` (for screens, never raises), `preserve_damaged`,
+  `replace_with_recovery`. An entry: `{id, origin, created_at, claims, syntheses, items, sources,
+  index, keyword, full, provisional, attempts}`: ids and step flags only, never content.
+- **`app/workers/publication.py`:** the one publication function, `publish(root, intent=…,
+  claims, syntheses, items, sources, index, keyword, full)`. Under the write lock it loads every
+  pending entry, replaces the caller's provisional entry with its exact work, and widens what
+  remains provisional from current authority:
+  - a **provisional** entry adds every Source page that links its tags;
+  - a **full** entry means every page of every kind. That is each existing page (claim, synthesis
+    and Source pages by name, tag pages by the `item_id` in their frontmatter, canonical ids only),
+    plus each id the graph and the manifests name, so missing Source pages are recreated. A page
+    whose node or manifest is gone is still checked and stays pending (`node_missing`,
+    `manifest_missing`, `manifest_unreadable`), never overlooked or taken as a deletion. Saved Query pages are
+    answers and are never regenerated. Authors pages (ADR-0066 part 3) join when implemented.
+
+  Then it runs each step once, in dependency order:
+  1. claim pages, after copying each page's saved status into the graph mirror;
+  2. synthesis pages (`rerender_synthesis_page`);
+  3. tag pages;
+  4. Source pages (`generate_wiki`);
+  5. `index.md`;
+  6. the keyword index.
+
+  Also here: `republish_all` and `repair`.
+- **Projection only** (slice 2 review round). Publication renders from saved authority. It never
+  retracts a relationship, changes a governed status, or files or reconciles a review.
+  - Claims render with `recompose_claim(project_only=True)`, which keeps the saved status and
+    review status. A claim whose evidence is gone while its page is not a tombstone stays pending
+    (`evidence_gone`); tombstoning is producer work.
+  - Tag pages render with `tag_links.project_page`, which copies every saved field (decision 1's
+    exception aside) and never tombstones or promotes. An interrupted first keep is the tag-link
+    repair's to finish.
+- **What counts as published.** A page is acknowledged only when it was rendered, or when it is
+  legitimately no longer needed:
+  - a tag whose deletion is audited;
+  - a merged redirect page, preserved as it is;
+  - a document with a valid manifest that isn't extracted yet.
+
+  Everything else stays pending, with a reason the result screen and `republish.py` explain:
+  - `page_missing`: restore the page from backup; its metadata is never fabricated;
+  - `node_missing`: a missing graph node alone is not proof of deletion;
+  - `deletion_unfinished`, `identity_operation_in_flight`, `ledger_corrupt`,
+    `tag_links_repair_needed` (ledgers and graph disagree), `status_disagrees`;
+  - `evidence_gone`, `page_or_artifact_missing`, `manifest_missing`, `manifest_unreadable`;
+  - `graph_missing`, and an unopenable graph (`graph_unavailable`), which leaves every entry
+    untouched.
+- **Downstream closure, across entries.** A page rendered from a failed upstream page is not
+  complete:
+  - a failed claim holds its contradiction partners, the syntheses citing it and its Source pages;
+  - a failed tag page holds the Source pages that list it;
+  - any pending page holds `index.md` and search.
+
+  This applies whichever entry asked for the downstream page, and the failure's owner also keeps
+  its dependents. Entries whose steps all succeeded are cleared. The rest keep only their
+  outstanding steps with `attempts + 1`, and the result is `saved_publication_pending`. The
+  existing warning names stay, and new ones are added: `claim_page_refresh_failed:<id>`,
+  `synthesis_page_refresh_failed:<id>`, `graph_unavailable`, `publication_pending`.
+- **Repair never leaves the vault unguarded.** It runs in three steps:
+  1. copy the damaged bytes to `db/publication_pending.damaged-<stamp>-<id>.json`, flushed to disk.
+     The damaged file stays in place, so writes stay refused.
+  2. Atomically and durably replace the queue with one full-recovery entry.
+  3. Publish it.
+
+  A crash after step 1 leaves writes refused; rerun repair. A crash after step 2 leaves a full
+  entry pending.
+- **Intent recorded first.** Provisional intent (the document plus the tags it names) is recorded
+  before the first write by:
+  - every source-screen tag action: the batch's link rows and alias edits, the JSON link route and
+    undo-drop;
+  - human-add;
+  - Delete unused and the tag repair script (`full`, because the scope is unknown up front);
+  - Apply (`full`, recorded in `run_apply` before `_run_apply`; discarded if Apply refuses with
+    `GraphUnavailable` before its first write).
+
+  Each then publishes through `tag_links.finish`, now a thin adapter over `publish`, or directly in
+  Apply. Every publish also retries whatever was already pending.
+- **Apply's status:** `validation_failed` only for a validator other than `validate_publication`
+  failing, or for a synthesis the fan-out could not re-render. A refresh failure (Source pages,
+  index or keyword, including the per-surface `…_not_guaranteed` gates and
+  `identity_refresh_pending`) is `saved_publication_pending`. The response carries
+  `publication: {status, pending}`. The dry-run preview still maps anything other than `applied` to
+  a not-clean preview.
+- **Fail-closed queue:** the outermost `write_lock.hold()` checks that the queue is readable, so
+  every authority change refuses while the queue is damaged:
+  - API routes: 503 `publication_queue_corrupt`, with an HTML page for `/ui/`;
+  - scripts: `run_guard.run_cli` exits with code **4**.
+
+  Holders that change no authority pass `authority=False`: backup (and restore, through its writer
+  exclusion) and the repair itself. Reads keep working.
+- **Retry and repair surfaces:** `GET /publication`, `POST /publication/retry`, `POST
+  /publication/repair` (both under the `republish` run guard) and their `/ui/` forms. Every review
+  screen's nav shows the retry banner ("Saved; publication incomplete … Retry publishing") while
+  entries are pending, and a repair banner when the queue is unreadable. CLI:
+  `scripts/republish.py [ROOT] [--all|--repair]` (exit codes: 0 published, 1 still pending,
+  3 busy, 4 unreadable queue).
+- **`scripts/validate_publication.py`:** read-only, auto-wired into `validate_all`. It fails while
+  any entry is pending or the queue is unreadable.
+- **Not yet (slice 3):** the producers (`generate_wiki`, extraction, claims, items, enrich, the
+  reindex job) still refresh on their own and record no intent. Apply's claim and synthesis
+  re-renders stay in its executors. Only an interrupted Apply's full entry publishes those pages.
+- **Tests:** `tests/test_publication.py` (15) covers:
+  - the queue's fail-closed reads (3 corruptions) and intent under the lock;
+  - acceptance test 4: a keep publishes the Source page and leaves search consistent;
+  - a failed refresh is `saved_publication_pending`, shows the banner, and Retry clears it;
+  - the next action also publishes pending work;
+  - a retry publishes current authority;
+  - acceptance test 7: a crash after a keep's commit keeps the decision and `republish.py`
+    recovers it; a crash inside Apply leaves a full entry that republishes;
+  - acceptance test 3: a keep and a drop that overlap publish the final state;
+  - a damaged queue refuses route writes and producer commits, keeps reads and the backup hold,
+    and repairs without losing the damaged file;
+  - provisional widening;
+  - a refused Apply leaves no intent.
+
+  The review rounds added 20:
+  - a failed Source page keeps index and search pending until its retry;
+  - a failed claim holds dependent work of another entry;
+  - a crash inside Apply after a real claim hide, before its partner and synthesis refresh, is
+    fully recovered. The hidden claim sorts after its partner, and the graph mirror is rolled back.
+  - publication files no review and retracts nothing;
+  - missing pages stay pending:
+    - a missing tag page, until it is restored;
+    - a missing node with no deletion evidence;
+    - no graph, and an unavailable graph;
+  - merged redirect pages are preserved;
+  - every declared item field survives for active, candidate and hidden tags;
+  - unused moves to active from saved keeps, and a kept candidate is not promoted;
+  - an unfinished identity operation, a damaged ledger, or ledgers that disagree with the graph
+    each keep the tag pending;
+  - repair's crash windows;
+  - a crash inside `republish_all`;
+  - pages a full republish finds on disk, not in the queue: a tag page whose graph node is gone,
+    and, through queue repair, a Source page whose manifest is invalid.
+
+  Fifteen existing tests moved to the new seams or statuses. 30 mutation checks were run, and
+  every new rule is caught. A full republish of a copy of the UAT vault (12 documents, 151 tags,
+  979 claims) reported `published` and changed no page except `log.md`.
 
 ## Consequences
 

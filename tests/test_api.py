@@ -1230,7 +1230,7 @@ def test_apply_graph_missing_with_approved_items_is_503(client, tmp_path):
 
 def test_apply_index_rebuild_failure_warns(client, tmp_path, monkeypatch):
     _approved_concept_deprecation(tmp_path)
-    monkeypatch.setattr(main_module, "_rebuild_index_status", lambda root: "failed")
+    monkeypatch.setattr(main_module.publication, "_rebuild_index_status", lambda root: "failed")
     body = client.post("/reviews/apply").json()
     assert body["summary"]["deprecations"]["applied"] == 1   # the change happened
     assert "index_rebuild_failed" in body["warnings"]

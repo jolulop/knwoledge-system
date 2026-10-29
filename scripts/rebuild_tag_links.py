@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.backend import graph
+from app.backend import graph, publication_queue, write_lock
 from app.workers import tag_links
 
 
@@ -34,11 +34,20 @@ def main(argv: list[str]) -> int:
     apply = "--apply" in argv
     positional = [a for a in argv if not a.startswith("-")]
     root = Path(positional[0]).resolve() if positional else Path.cwd()
-    db_path = root / "db" / "graph.sqlite"
-    if not db_path.exists():
+    if not (root / "db" / "graph.sqlite").exists():
         print("No graph database — nothing to repair.")
         return 0
-    conn = graph.connect(db_path)
+    if not apply:
+        return _repair(root, apply=False, intent=None)
+    # ADR-0068: one commit phase; its publication intent is recorded first (a crash mid-repair
+    # republishes from authority).
+    with write_lock.hold(root / "reviews"):
+        intent = publication_queue.record(root, origin="tag_repair", full=True)
+        return _repair(root, apply=True, intent=intent)
+
+
+def _repair(root: Path, *, apply: bool, intent: str | None) -> int:
+    conn = graph.connect(root / "db" / "graph.sqlite")
     try:
         out = tag_links.repair(conn, reviews_dir=root / "reviews", wiki_dir=root / "wiki",
                                policies_dir=root / "policies", apply=apply)
@@ -68,9 +77,10 @@ def main(argv: list[str]) -> int:
         print(f"  DEFERRED merge/split {rid} is in flight — run /reviews/apply to finish it first")
     for b in out["activation_blocked"]:
         print(f"  activation of {b['node_id']} still blocked: {b['reason']}")
-    if apply and (out["affected_sources"] or out["pages_changed"]):
+    if apply:
         refresh = tag_links.finish(root, out["affected_sources"], wiki_dir=root / "wiki",
-                                   pages_changed=out["pages_changed"])
+                                   pages_changed=out["pages_changed"], intent=intent,
+                                   origin="tag_repair")
         for w in refresh["warnings"]:
             print(f"  warning: {w}")
     elif not apply and any(out[k] for k in tag_links._PLAN_KEYS if k not in tag_links._REPORT_ONLY):

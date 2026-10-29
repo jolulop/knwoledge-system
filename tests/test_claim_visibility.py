@@ -290,7 +290,7 @@ def test_source_page_render_omits_hidden_claim(tmp_path):
 
 
 def test_api_claim_hide_unhide_rerenders_source_page(client, tmp_path, monkeypatch):
-    monkeypatch.setattr(main_module.retention, "reindex_keyword", lambda root: None)
+    monkeypatch.setattr(main_module.publication.keyword_index, "reindex", lambda root: None)
     conn = _graph(tmp_path)
     _source_with_claim(tmp_path, conn)
     conn.commit()
@@ -308,7 +308,7 @@ def test_api_claim_hide_unhide_rerenders_source_page(client, tmp_path, monkeypat
 def test_unhide_after_evidence_lost_tombstones_not_restored_to_source_page(client, tmp_path, monkeypatch):
     # cross-path: hide -> lose evidence while hidden (recompose preserves hidden + citations []) -> unhide
     # re-derives a TOMBSTONE, and the claim is NOT restored to the Source-page Claims section.
-    monkeypatch.setattr(main_module.retention, "reindex_keyword", lambda root: None)
+    monkeypatch.setattr(main_module.publication.keyword_index, "reindex", lambda root: None)
     conn = _graph(tmp_path)
     _source_with_claim(tmp_path, conn)
     conn.commit()
@@ -473,7 +473,7 @@ def test_reopen_blocked_for_partial_claim_hide(client, tmp_path):
 
 
 def test_api_apply_hides_claim_with_summary(client, tmp_path, monkeypatch):
-    monkeypatch.setattr(main_module.retention, "reindex_keyword", lambda root: None)
+    monkeypatch.setattr(main_module.publication.keyword_index, "reindex", lambda root: None)
     conn = _graph(tmp_path)
     _active_claim(tmp_path, conn, CX, text="The sky is blue today.")
     conn.commit()
@@ -492,14 +492,14 @@ def test_api_claim_hide_graph_required_503(client, tmp_path):
 def test_api_claim_hide_reindex_failure_is_non_clean(client, tmp_path, monkeypatch):
     def boom(root):
         raise RuntimeError("reindex blew up")
-    monkeypatch.setattr(main_module.retention, "reindex_keyword", boom)
+    monkeypatch.setattr(main_module.publication.keyword_index, "reindex", boom)
     conn = _graph(tmp_path)
     _active_claim(tmp_path, conn, CX, text="The sky is blue today.")
     conn.commit()
     conn.close()
     _approve(tmp_path, "hide_claim", CX, to_status="hidden")
     body = client.post("/reviews/apply").json()
-    assert body["status"] == "validation_failed"
+    assert body["status"] == "saved_publication_pending"
     assert "claim_hide_retrieval_suppression_not_guaranteed" in body["warnings"]
 
 

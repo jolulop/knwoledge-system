@@ -48,10 +48,10 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from app.backend import graph, keyword_index, taxonomy, write_lock
+from app.backend import graph, taxonomy, write_lock
 from app.backend.manifests import is_source_id, iso_now
-from app.workers import identity_journal, items, merge_candidates, merges, promote, wiki
-from app.workers.wiki_render import NODE_DIR, parse_frontmatter
+from app.workers import identity_journal, items, merge_candidates, merges, promote
+from app.workers.wiki_render import NODE_DIR, REVIEW_STATUSES, parse_frontmatter
 
 LEDGER_DIR = "tag_links"
 LOCK_NAME = ".lock"
@@ -306,6 +306,74 @@ def _refresh_page(gconn, *, node_id: str, wiki_dir: Path, reviews_dir: Path, now
                                                   status=status, review_status="none", now=now)
     return items._recompose_node(gconn, node_id=node_id, wiki_dir=wiki_dir,
                                  reviews_dir=reviews_dir, now=now)
+
+
+PROJECTED = frozenset({"written", "unchanged", "removed", "merged"})
+
+
+def ledger_keeps(reviews_dir: Path) -> tuple[dict[str, set[str]], set[str]]:
+    """`({node_id: {source ids whose ledger keeps it}}, {source ids whose ledger is damaged})`."""
+    keeps: dict[str, set[str]] = {}
+    damaged: set[str] = set()
+    for sid in _ledger_ids(reviews_dir):
+        try:
+            ledger = load_ledger(reviews_dir, sid)
+        except LedgerCorrupt:
+            damaged.add(sid)
+            continue
+        for nid in ledger["kept"]:
+            keeps.setdefault(nid, set()).add(sid)
+    return keeps, damaged
+
+
+def _deletion_audited(reviews_dir: Path, node_id: str) -> bool:
+    d = Path(reviews_dir) / "audit_log"
+    return d.is_dir() and any(d.glob(f"{node_id}-tag-deleted-*.json"))
+
+
+def project_page(gconn, *, node_id: str, wiki_dir: Path, reviews_dir: Path,
+                 keeps: dict[str, set[str]], damaged: set[str], now: str) -> str:
+    """Publication's tag-page refresh (ADR-0068 decision 4): re-render the lists from current
+    authority and copy every saved field from the page — status, review_status, confidence,
+    description, split lineage, aliases, type. It never files or reconciles a review, never tombstones
+    and never promotes a candidate (an interrupted first keep is the tag-link repair's).
+
+    The one exception to copying the saved status: an `active`/`unused` tag is reconciled between those
+    two from the saved keep/drop decisions (`keeps`, from :func:`ledger_keeps`), the ADR-0066 rule.
+
+    Returns an outcome in :data:`PROJECTED` (`removed`: a deletion is audited; `merged`: the redirect
+    page is preserved as it is), or why the page stays pending: `node_missing` (no evidence the tag was
+    removed), `deletion_unfinished`, `page_missing` (restore the page from backup — its title and
+    description live only there), `identity_operation_in_flight`, `ledger_corrupt`,
+    `tag_links_repair_needed` (the ledgers and the graph disagree) or `status_disagrees`."""
+    node = _item_node(gconn, node_id)
+    if node is None:
+        if _deletion_audited(reviews_dir, node_id):
+            return "removed"
+        return "deletion_unfinished" if node_id in deletion_intents(reviews_dir) else "node_missing"
+    meta = _node_meta(wiki_dir, node)
+    if meta is None or not taxonomy.is_item_type(meta.get("item_type") or node.get("item_type")):
+        return "page_missing"
+    if node["status"] == "merged":
+        return "merged"
+    if identity_journal.operation_for(reviews_dir, [node_id]) is not None:
+        return "identity_operation_in_flight"
+    status = node["status"]
+    if meta["status"] in ("active", "unused") and status in ("active", "unused"):
+        linked = {r["src_id"] for r in gconn.execute(
+            "SELECT DISTINCT src_id FROM edges WHERE dst_id = ? AND edge_type = 'mentions'",
+            (node_id,))}
+        if linked & damaged:
+            return "ledger_corrupt"
+        if keeps.get(node_id, set()) != set(graph.kept_sources_for_node(gconn, node_id)):
+            return "tag_links_repair_needed"
+        status = implied_status(gconn, node_id, status)
+    elif meta["status"] != status:
+        return "status_disagrees"
+    review_status = meta.get("review_status")
+    return items.recompose_semantic_node_page(
+        gconn, node_id=node_id, wiki_dir=Path(wiki_dir), status=status,
+        review_status=review_status if review_status in REVIEW_STATUSES else None, now=now)
 
 
 def _active_mention_edges(gconn, source_id: str, node_id: str) -> list[dict[str, Any]]:
@@ -1328,28 +1396,18 @@ def repair(gconn, *, reviews_dir: Path, wiki_dir: Path, policies_dir: Path | Non
 
 
 def finish(root: Path, affected_sources: set[str] | list[str], *, wiki_dir: Path,
-           pages_changed: bool = False, templates_dir: Path | None = None) -> dict[str, Any]:
-    """Re-render the affected Source pages (their Items projection), then rebuild `wiki/index.md`
-    and refresh the keyword/navigation index once (whenever a source was affected or
-    `pages_changed` says item pages moved/vanished), so search never advertises a stale title,
-    status or deleted page. Returns `{index_rebuilt, keyword_reindexed, warnings}`; a refresh
-    failure (a Source page that failed to render, or the keyword index) is a warning the caller
-    shows, never swallowed."""
-    sources = sorted(s for s in set(affected_sources)
-                     if is_source_id(s) and (Path(wiki_dir) / "Sources" / f"{s}.md").exists())
-    out: dict[str, Any] = {"index_rebuilt": False, "keyword_reindexed": False, "warnings": []}
-    if sources:
-        gen = wiki.generate_wiki(Path(root), source_ids=sources, rebuild_index=False,
-                                 record_job=False, templates_dir=templates_dir)
-        # generate_wiki REPORTS a per-page render failure (never raises) — surface it (round 5).
-        out["warnings"] += [f"source_page_refresh_failed:{e.get('source_id')}"
-                            for e in gen.get("error_details") or []]
-    if not (affected_sources or pages_changed):
-        return out
-    out["index_rebuilt"] = items._rebuild_index(Path(root))
-    try:
-        keyword_index.reindex(Path(root))
-        out["keyword_reindexed"] = True
-    except Exception as exc:  # noqa: BLE001 - reported to the caller, who shows it
-        out["warnings"].append(f"keyword_reindex_failed:{type(exc).__name__}")
-    return out
+           pages_changed: bool = False, templates_dir: Path | None = None,
+           intent: str | None = None, origin: str = "tag_action") -> dict[str, Any]:
+    """Publish a tag action's effects through the one publication function (ADR-0068 decision 4):
+    the affected Source pages (their Items projection), then `wiki/index.md` and the keyword index
+    once (whenever a source was affected or `pages_changed` says tag pages moved/vanished), together
+    with any publication still pending. `intent` is the entry the caller recorded before its commit.
+    Returns `{index_rebuilt, keyword_reindexed, warnings, publication}`; a refresh failure is a
+    warning the caller shows, and stays queued for retry."""
+    from app.workers import publication
+    changed = bool(affected_sources) or pages_changed
+    out = publication.publish(Path(root), intent=intent, sources=affected_sources, index=changed,
+                              keyword=changed, origin=origin, wiki_dir=wiki_dir,
+                              templates_dir=templates_dir)
+    return {"index_rebuilt": out["index_rebuilt"], "keyword_reindexed": out["keyword_reindexed"],
+            "warnings": out["warnings"], "publication": out}

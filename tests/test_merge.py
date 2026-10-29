@@ -536,7 +536,7 @@ def client(tmp_path, monkeypatch):
 
 
 def test_api_apply_merges_with_summary(client, tmp_path, monkeypatch):
-    monkeypatch.setattr(main_module.retention, "reindex_keyword", lambda root: None)
+    monkeypatch.setattr(main_module.publication.keyword_index, "reindex", lambda root: None)
     conn = _graph(tmp_path)
     _item(tmp_path, conn, A, "Alpha")
     _item(tmp_path, conn, B, "Beta")
@@ -556,7 +556,7 @@ def test_api_merge_graph_required_503(client, tmp_path):
 def test_api_merge_reindex_failure_is_non_clean(client, tmp_path, monkeypatch):
     def boom(root):
         raise RuntimeError("reindex blew up")
-    monkeypatch.setattr(main_module.retention, "reindex_keyword", boom)
+    monkeypatch.setattr(main_module.publication.keyword_index, "reindex", boom)
     conn = _graph(tmp_path)
     _item(tmp_path, conn, A, "Alpha")
     _item(tmp_path, conn, B, "Beta")
@@ -564,7 +564,7 @@ def test_api_merge_reindex_failure_is_non_clean(client, tmp_path, monkeypatch):
     conn.close()
     _approve(tmp_path)
     body = client.post("/reviews/apply").json()
-    assert body["status"] == "validation_failed"
+    assert body["status"] == "saved_publication_pending"
     assert "merge_discovery_reindex_not_guaranteed" in body["warnings"]
     assert graph.connect(tmp_path / "db" / "graph.sqlite").execute(
         "SELECT status FROM nodes WHERE node_id=?", (B,)).fetchone()["status"] == "merged"
@@ -606,7 +606,7 @@ def test_merged_excluded_from_search_nav_e2e(client, tmp_path):
 
 
 def test_api_reopen_blocked_after_merge(client, tmp_path, monkeypatch):
-    monkeypatch.setattr(main_module.retention, "reindex_keyword", lambda root: None)
+    monkeypatch.setattr(main_module.publication.keyword_index, "reindex", lambda root: None)
     conn = _graph(tmp_path)
     _item(tmp_path, conn, A, "Alpha")
     _item(tmp_path, conn, B, "Beta")

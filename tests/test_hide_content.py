@@ -297,10 +297,10 @@ def test_hide_with_reindex_failure_is_not_clean(client, tmp_path, monkeypatch):
 
     def boom(root):
         raise RuntimeError("reindex blew up")
-    monkeypatch.setattr(main_module.retention, "reindex_keyword", boom)
+    monkeypatch.setattr(main_module.publication.keyword_index, "reindex", boom)
     body = client.post("/reviews/apply").json()
     assert body["summary"]["hidden"]["applied"] == 1                 # the mutation still happened
-    assert body["status"] == "validation_failed"
+    assert body["status"] == "saved_publication_pending"
     assert "hide_retrieval_suppression_not_guaranteed" in body["warnings"]
     assert manifests.get_status(manifests.load_manifest(
         tmp_path / "raw" / "manifests", SID)) == "hidden"            # manifest authority is correct
@@ -416,7 +416,7 @@ def test_dry_run_hide_reindex_failure_is_not_clean(client, tmp_path, monkeypatch
 
     def boom(root):
         raise RuntimeError("sandbox reindex blew up")
-    monkeypatch.setattr(main_module.retention, "reindex_keyword", boom)
+    monkeypatch.setattr(main_module.publication.keyword_index, "reindex", boom)
     dry = client.post("/reviews/apply/dry-run").json()
     assert dry["status"] == "validation_failed"
     assert {"source_id": SID, "field": "status", "from": "active", "to": "hidden"} in dry["diff"]["manifests"]

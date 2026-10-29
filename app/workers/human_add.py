@@ -26,7 +26,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from app.backend import graph, taxonomy
+from app.backend import graph, publication_queue, taxonomy
 from app.backend.manifests import iso_now
 from app.workers import identity_journal, items, reviews, tag_links
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter
@@ -120,6 +120,10 @@ def add_candidate(
             if fm.get("item_id") != nid:
                 return _blocked("slug_collision", slug=slug,
                                 existing_node_id=fm.get("item_id"))
+    # ADR-0068 decision 4: record the publication intent before the first write.
+    intent = publication_queue.record(root, origin="tag_action", sources=[source_id], items=[nid],
+                                      now=now)
+    if node_created:
         graph.upsert_node(gconn, node_id=nid, node_type="item", slug=slug,
                           status="candidate", item_type=used_type, now=now)
         if description:
@@ -136,6 +140,8 @@ def add_candidate(
     kept = tag_links.keep(gconn, source_id=source_id, node_id=nid, wiki_dir=wiki_dir,
                           reviews_dir=reviews_dir, amendments=amendments or None, now=now)
     if kept["outcome"] == "blocked":
+        gconn.commit()                                    # a created node is published, not lost
+        tag_links.finish(Path(root), [source_id], wiki_dir=wiki_dir, intent=intent)
         return kept
 
     if routed_retype is not None:
@@ -160,7 +166,8 @@ def add_candidate(
     }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     # Producer contract: re-render the Source page (its Items projection) and rebuild the index.
-    refresh = tag_links.finish(Path(root), kept["affected_sources"], wiki_dir=wiki_dir)
+    refresh = tag_links.finish(Path(root), kept["affected_sources"], wiki_dir=wiki_dir,
+                               intent=intent)
 
     outcome = ("routed_retype" if routed_retype
                else "created" if node_created

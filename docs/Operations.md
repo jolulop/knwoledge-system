@@ -60,6 +60,23 @@ a script exits with code **3** ("Refused: … is already running"), a `POST /job
 **409** `already_running: <producer>`. Wait for the first run to finish, then start again. Different
 producers may run side by side. The lock files hold no state and are never backed up.
 
+**Publication and Retry publishing (ADR-0068).** After a change is saved, its claim, synthesis, tag
+and Source pages, `wiki/index.md` and the keyword index are refreshed before the action returns. If a refresh fails,
+the change stays saved and the outstanding work stays in `db/publication_pending.json`. The result
+says **`saved_publication_pending`** ("Saved; publication incomplete"), and every review screen
+shows a **Retry publishing** banner. Don't repeat the decision. Retry with the button,
+`POST /publication/retry` or `uv run python scripts/republish.py` (`--all` republishes every page
+from the saved decisions; saved Query pages are never regenerated). The next action also retries
+automatically. Publishing never changes a saved decision, except that it can move a tag between
+in use and unused to match its saved keeps. A page that can't be published stays pending, with the
+reason shown on the result screen and by the script. For example, a missing tag page says
+**Restore the page from backup**; publishing never recreates one. `validate_publication.py` fails while anything is
+pending. If the queue file itself is damaged, every change refuses (HTTP 503
+`publication_queue_corrupt`, script exit code 4) until you run **Repair publication queue**
+(`scripts/republish.py --repair`). Repair keeps a copy of the damaged file in `db/`, replaces the
+queue with one full-recovery entry, and republishes every page from the saved decisions. Reading and backups keep working meanwhile. The vector index is not part
+of publication; refresh it with `scripts/reindex_vector.py`.
+
 ### Executor-backed review types (`POST /reviews/apply`)
 
 Every review type below has a deterministic, key-free executor (the canonical set is `_APPLY_TYPES` in

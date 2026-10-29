@@ -547,14 +547,17 @@ class LintResponse(BaseModel):
 
 class ReviewApplyResponse(BaseModel):
     # POST /reviews/apply (ADR-0035 A4/A6). Non-transactional: effects are written, then validators run
-    # once. status is "applied" (clean) or "validation_failed" (apply ran; the vault now reports an
-    # inconsistency to resolve) — a validator failure is HTTP 200, not 500. `summary` carries the typed
+    # once. status is "applied" (clean), "saved_publication_pending" (decisions saved, pages or search
+    # not yet refreshed — retry publishing, never re-decide; ADR-0068) or "validation_failed" (apply
+    # ran; the vault now reports an inconsistency to resolve) — a validator failure is HTTP 200, not 500. `summary` carries the typed
     # per-executor counts + honest `unapplied` (approved types with no Phase-6 executor).
     status: str
     applied: bool
     validators_ok: bool
     failed_validators: list[FailedValidator] = []
     warnings: list[str] = []  # non-fatal post-apply issues, e.g. "index_rebuild_failed"
+    # ADR-0068 decision 4: {"status": "published"|"saved_publication_pending", "pending": ...}
+    publication: dict[str, Any] | None = None
     summary: dict[str, Any]
 
 

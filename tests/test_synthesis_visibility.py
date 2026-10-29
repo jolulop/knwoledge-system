@@ -450,7 +450,7 @@ def client(tmp_path, monkeypatch):
 
 
 def test_api_apply_hides_synthesis_with_summary(client, tmp_path, monkeypatch):
-    monkeypatch.setattr(main_module.retention, "reindex_keyword", lambda root: None)
+    monkeypatch.setattr(main_module.publication.keyword_index, "reindex", lambda root: None)
     conn = _graph(tmp_path)
     _active_synthesis(tmp_path, conn)
     conn.commit()
@@ -470,14 +470,14 @@ def test_api_synthesis_hide_graph_required_503(client, tmp_path):
 def test_api_synthesis_hide_reindex_failure_is_non_clean(client, tmp_path, monkeypatch):
     def boom(root):
         raise RuntimeError("reindex blew up")
-    monkeypatch.setattr(main_module.retention, "reindex_keyword", boom)
+    monkeypatch.setattr(main_module.publication.keyword_index, "reindex", boom)
     conn = _graph(tmp_path)
     _active_synthesis(tmp_path, conn)
     conn.commit()
     conn.close()
     _approve(tmp_path, "hide_synthesis", to_status="hidden")
     body = client.post("/reviews/apply").json()
-    assert body["status"] == "validation_failed"
+    assert body["status"] == "saved_publication_pending"
     assert "synthesis_hide_discovery_suppression_not_guaranteed" in body["warnings"]
 
 
@@ -503,11 +503,11 @@ def test_api_unhide_synthesis_reindex_failure_is_non_clean(client, tmp_path, mon
     _apply_hide(tmp_path, conn)                          # synthesis now hidden (page+graph)
     conn.commit()
     conn.close()
-    monkeypatch.setattr(main_module.retention, "reindex_keyword", boom)
+    monkeypatch.setattr(main_module.publication.keyword_index, "reindex", boom)
     (tmp_path / "reviews" / "approved" / "rev_s.json").unlink()   # drop the hide review (effected)
     _approve(tmp_path, "unhide_synthesis", to_status="active", rid="rev_u")
     body = client.post("/reviews/apply").json()
-    assert body["status"] == "validation_failed"
+    assert body["status"] == "saved_publication_pending"
     assert "synthesis_unhide_discovery_restoration_not_guaranteed" in body["warnings"]
     assert _syn_fm(tmp_path)["status"] == "active"       # mutation still written
 
@@ -547,7 +547,7 @@ def test_hide_claim_fans_out_to_citing_synthesis(tmp_path):
 
 
 def test_api_hide_claim_rerenders_citing_synthesis(client, tmp_path, monkeypatch):
-    monkeypatch.setattr(main_module.retention, "reindex_keyword", lambda root: None)
+    monkeypatch.setattr(main_module.publication.keyword_index, "reindex", lambda root: None)
     conn = _graph(tmp_path)
     _active_synthesis(tmp_path, conn, claim_ids=(CX,))
     conn.commit()
@@ -734,7 +734,7 @@ def _approve_hide_claim(tmp_path, cid, *, rid="hc"):
 def test_apply_batch_hide_claim_and_hide_synthesis_operator_wins(client, tmp_path, monkeypatch):
     # Apply ORDER: explicit hide_synthesis runs after the claim flip but BEFORE the claim fan-out, so an
     # operator hide lands on the still-active synthesis and the fan-out preserves `hidden` (decision 10).
-    monkeypatch.setattr(main_module.retention, "reindex_keyword", lambda root: None)
+    monkeypatch.setattr(main_module.publication.keyword_index, "reindex", lambda root: None)
     conn = _graph(tmp_path)
     _active_synthesis(tmp_path, conn, claim_ids=(CX,))
     conn.commit()
@@ -752,7 +752,7 @@ def test_apply_batch_hide_claim_and_hide_synthesis_operator_wins(client, tmp_pat
 def test_apply_batch_hide_claim_and_unhide_synthesis_lands_evidence_hidden(client, tmp_path, monkeypatch):
     # Operator unhide of an operator-hidden synthesis whose evidence is being hidden in the SAME batch ->
     # lands on evidence_hidden (the evidence suppression outlives the operator unhide).
-    monkeypatch.setattr(main_module.retention, "reindex_keyword", lambda root: None)
+    monkeypatch.setattr(main_module.publication.keyword_index, "reindex", lambda root: None)
     conn = _graph(tmp_path)
     _active_synthesis(tmp_path, conn, claim_ids=(CX,))
     _approve(tmp_path, "hide_synthesis", to_status="hidden")
@@ -772,7 +772,7 @@ def test_apply_batch_hide_claim_and_unhide_synthesis_lands_evidence_hidden(clien
 def test_claim_hide_fanout_missing_artifact_is_non_clean_and_stale(client, tmp_path, monkeypatch):
     # The fan-out can't re-render a synthesis whose artifact is gone -> non-clean (suppression not
     # guaranteed) + a structured `unreconciled` audit; the synthesis page is left stale (active + link).
-    monkeypatch.setattr(main_module.retention, "reindex_keyword", lambda root: None)
+    monkeypatch.setattr(main_module.publication.keyword_index, "reindex", lambda root: None)
     conn = _graph(tmp_path)
     _active_synthesis(tmp_path, conn, claim_ids=(CX,))
     conn.commit()
@@ -792,7 +792,7 @@ def test_repair_then_rerun_reconciles_unreconciled_synthesis(client, tmp_path, m
     # of the still-approved claim hide (affected_syntheses recomputed even for an effected claim), and a
     # steady-state apply afterwards is clean with NO page churn / reindex (change-detecting rerender).
     reindex_calls = []
-    monkeypatch.setattr(main_module.retention, "reindex_keyword",
+    monkeypatch.setattr(main_module.publication.keyword_index, "reindex",
                         lambda root: reindex_calls.append(root))
     conn = _graph(tmp_path)
     _active_synthesis(tmp_path, conn, claim_ids=(CX,))
@@ -845,7 +845,7 @@ def test_fanout_graph_only_repair_triggers_reindex_and_is_clean(client, tmp_path
     # page already evidence_hidden, graph drifted back to active: a rerun repairs the graph mirror AND
     # triggers reindex (a graph-mirror-only change still reindexes), and is clean once the index refreshes.
     reindex_calls = []
-    monkeypatch.setattr(main_module.retention, "reindex_keyword", lambda root: reindex_calls.append(root))
+    monkeypatch.setattr(main_module.publication.keyword_index, "reindex", lambda root: reindex_calls.append(root))
     conn = _graph(tmp_path)
     _active_synthesis(tmp_path, conn, claim_ids=(CX,))
     _hide_claim_and_fanout(tmp_path, conn, CX)                 # page + graph -> evidence_hidden
@@ -871,9 +871,9 @@ def test_fanout_graph_only_repair_reindex_failure_is_non_clean(client, tmp_path,
     graph.upsert_node(conn, node_id=SYN, node_type="synthesis", slug=SYN, status="active")  # graph drift
     conn.commit()
     conn.close()
-    monkeypatch.setattr(main_module.retention, "reindex_keyword", boom)
+    monkeypatch.setattr(main_module.publication.keyword_index, "reindex", boom)
     body = client.post("/reviews/apply").json()
-    assert body["status"] == "validation_failed"              # clean only AFTER the index refresh
+    assert body["status"] == "saved_publication_pending"              # clean only AFTER the index refresh
     assert "synthesis_evidence_suppression_not_guaranteed" in body["warnings"]
     gconn = graph.connect(tmp_path / "db" / "graph.sqlite")
     assert graph.get_node(gconn, SYN)["status"] == "evidence_hidden"   # mutation written before validation
@@ -978,7 +978,7 @@ def test_dry_run_synthesis_hide_reindex_failure_is_non_clean_and_live_unchanged(
         client, tmp_path, monkeypatch):
     def boom(root):
         raise RuntimeError("reindex blew up")
-    monkeypatch.setattr(main_module.retention, "reindex_keyword", boom)
+    monkeypatch.setattr(main_module.publication.keyword_index, "reindex", boom)
     conn = _graph(tmp_path)
     _active_synthesis(tmp_path, conn)
     conn.commit()

@@ -716,7 +716,7 @@ def test_failed_index_refresh_is_shown_not_swallowed(client, tmp_path, monkeypat
     assert _titles(_view(tmp_path, a)["kept"]) == ["Tag"]          # the decision itself stands
     resp = client.post(f"/reviews/sources/{a}/links",
                        json={"node_id": items.node_id("Tag"), "action": "drop"})
-    assert resp.json()["warnings"] == ["keyword_reindex_failed:OSError"]
+    assert resp.json()["warnings"] == ["keyword_reindex_failed:OSError", "publication_pending"]
 
 
 def test_unblock_finds_documents_extracted_while_blocked_and_cache_only_replays(tmp_path):
@@ -1204,15 +1204,14 @@ def test_apply_keeps_the_marker_until_its_refreshes_succeed(client, tmp_path, mo
         raise RuntimeError("crash during refresh")
 
     with pytest.MonkeyPatch.context() as mp:     # scoped: keep the client fixture's settings patch
+        # ADR-0068: publication catches the failure, queues the work, and the result says so.
         if fail_at == "source_pages":
             mp.setattr(main_module.wiki, "generate_wiki", crash)
-            with pytest.raises(RuntimeError):
-                client.post("/reviews/apply")
         else:
-            mp.setattr(main_module.retention, "reindex_keyword", crash)
-            body = client.post("/reviews/apply").json()
-            assert body["status"] == "validation_failed"
-            assert "identity_refresh_pending" in body["warnings"]
+            mp.setattr(main_module.publication.keyword_index, "reindex", crash)
+        body = client.post("/reviews/apply").json()
+        assert body["status"] == "saved_publication_pending"
+        assert {"identity_refresh_pending", "publication_pending"} <= set(body["warnings"])
     # The executor finished (B tombstoned) but the marker survives, so the refresh is still owed.
     assert _node(tmp_path, "Absorbed")["status"] == "merged"
     assert identity_journal.is_open(tmp_path / "reviews", "rev_m")
@@ -1251,7 +1250,7 @@ def test_a_reported_source_page_failure_keeps_the_marker(client, tmp_path):
         _fail_rendering(mp, b)
         body = client.post("/reviews/apply").json()
     assert body["summary"]["merged"]["applied"] == 1
-    assert body["status"] == "validation_failed"
+    assert body["status"] == "saved_publication_pending"
     assert {"source_page_refresh_failed", "identity_refresh_pending"} <= set(body["warnings"])
     assert identity_journal.is_open(tmp_path / "reviews", "rev_m")      # the refresh is still owed
     assert validate_projection.main([str(tmp_path)]) == 1                # b's page is stale
@@ -1273,7 +1272,7 @@ def test_a_reported_source_page_failure_after_a_keep_is_shown(client, tmp_path):
         assert resp.status_code == 200 and f"source_page_refresh_failed:{a}" in resp.text
         resp = client.post(f"/reviews/sources/{a}/links",
                            json={"node_id": items.node_id("Two"), "action": "keep"})
-        assert resp.json()["warnings"] == [f"source_page_refresh_failed:{a}"]
+        assert resp.json()["warnings"] == [f"source_page_refresh_failed:{a}", "publication_pending"]
     assert _titles(_view(tmp_path, a)["kept"]) == ["One", "Two"]          # the decisions stand
 
 

@@ -286,7 +286,7 @@ def test_reopen_allowed_for_fully_hidden_unhide(client, tmp_path):
 
 
 def test_api_apply_unhides_source_and_semantic_with_summary(client, tmp_path, monkeypatch):
-    monkeypatch.setattr(main_module.retention, "reindex_keyword", lambda root: None)
+    monkeypatch.setattr(main_module.publication.keyword_index, "reindex", lambda root: None)
     _hidden_source(tmp_path)
     _approve_unhide_source(tmp_path, rid="rev_us")
     conn = _graph(tmp_path)
@@ -305,7 +305,7 @@ def test_graph_only_unhide_completion_triggers_reindex(client, tmp_path, monkeyp
     # ONLY the graph node (page render unchanged -> empty changed_pages). Reindex must STILL run, else a
     # stale nav index keeps hiding the now-active node. Proven by the reindex spy being called.
     called = []
-    monkeypatch.setattr(main_module.retention, "reindex_keyword", lambda root: called.append(root))
+    monkeypatch.setattr(main_module.publication.keyword_index, "reindex", lambda root: called.append(root))
     conn = _graph(tmp_path)
     _write_item(tmp_path, conn, node_status="active", review_status="none")   # page already active
     graph.upsert_node(conn, node_id=NID, node_type="item", slug=SLUG, status="hidden")  # graph hidden
@@ -329,14 +329,14 @@ def test_api_semantic_unhide_graph_required_503(client, tmp_path):
 def test_api_unhide_reindex_failure_is_non_clean(client, tmp_path, monkeypatch):
     def boom(root):
         raise RuntimeError("reindex blew up")
-    monkeypatch.setattr(main_module.retention, "reindex_keyword", boom)
+    monkeypatch.setattr(main_module.publication.keyword_index, "reindex", boom)
     conn = _graph(tmp_path)
     _write_item(tmp_path, conn, node_status="hidden", review_status="approved")
     conn.commit()
     conn.close()
     _approve_unhide_semantic(tmp_path)
     body = client.post("/reviews/apply").json()
-    assert body["status"] == "validation_failed"
+    assert body["status"] == "saved_publication_pending"
     assert "unhide_discovery_restoration_not_guaranteed" in body["warnings"]
 
 
@@ -406,7 +406,7 @@ def test_unhidden_source_reenters_search_evidence(client, tmp_path):
 def test_dry_run_unhide_reindex_failure_is_non_clean(client, tmp_path, monkeypatch):
     def boom(root):
         raise RuntimeError("reindex blew up")
-    monkeypatch.setattr(main_module.retention, "reindex_keyword", boom)
+    monkeypatch.setattr(main_module.publication.keyword_index, "reindex", boom)
     conn = _graph(tmp_path)
     _write_item(tmp_path, conn, node_status="hidden", review_status="approved")
     conn.commit()

@@ -545,7 +545,7 @@ def client(tmp_path, monkeypatch):
 
 
 def test_api_apply_split_summary(client, tmp_path, monkeypatch):
-    monkeypatch.setattr(main_module.retention, "reindex_keyword", lambda root: None)
+    monkeypatch.setattr(main_module.publication.keyword_index, "reindex", lambda root: None)
     monkeypatch.setattr(main_module, "_run_all_validators", lambda root: [])   # source pages out of scope here
     conn = _graph(tmp_path)
     _full(tmp_path, conn)
@@ -567,12 +567,12 @@ def test_api_split_graph_required_503(client, tmp_path):
 def test_api_split_reindex_failure_is_non_clean(client, tmp_path, monkeypatch):
     def boom(root):
         raise RuntimeError("reindex blew up")
-    monkeypatch.setattr(main_module.retention, "reindex_keyword", boom)
+    monkeypatch.setattr(main_module.publication.keyword_index, "reindex", boom)
     monkeypatch.setattr(main_module, "_run_all_validators", lambda root: [])
     conn = _graph(tmp_path)
     _full(tmp_path, conn)
     conn.close()
     _approve(tmp_path, sources=[S3])
     body = client.post("/reviews/apply").json()
-    assert body["status"] == "validation_failed"
+    assert body["status"] == "saved_publication_pending"
     assert "split_discovery_reindex_not_guaranteed" in body["warnings"]

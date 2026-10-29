@@ -309,7 +309,7 @@ def test_reopen_allowed_for_cleanly_unapplied_hide(client, tmp_path):
 
 
 def test_api_apply_hides_semantic_page_and_reports_summary(client, tmp_path, monkeypatch):
-    monkeypatch.setattr(main_module.retention, "reindex_keyword", lambda root: None)
+    monkeypatch.setattr(main_module.publication.keyword_index, "reindex", lambda root: None)
     _live_item(tmp_path)
     _approve_hide(tmp_path)
     body = client.post("/reviews/apply").json()
@@ -323,7 +323,7 @@ def test_graph_only_hide_completion_triggers_reindex(client, tmp_path, monkeypat
     # unchanged -> empty changed_pages). Reindex must STILL run (else a stale nav index keeps surfacing
     # the now-hidden node). Proven by the reindex spy being called despite no page write.
     called = []
-    monkeypatch.setattr(main_module.retention, "reindex_keyword", lambda root: called.append(root))
+    monkeypatch.setattr(main_module.publication.keyword_index, "reindex", lambda root: called.append(root))
     _setup_state(tmp_path, page_status="hidden", page_review="approved", graph_status="active")
     body = client.post("/reviews/apply").json()
     assert body["summary"]["semantic_hidden"]["applied"] == 1   # graph-only completion (page already hidden)
@@ -335,10 +335,10 @@ def test_graph_only_hide_completion_reindex_failure_is_non_clean(client, tmp_pat
     # only fire because reindex was ATTEMPTED — the bug was that it was skipped, hiding the staleness).
     def boom(root):
         raise RuntimeError("reindex blew up")
-    monkeypatch.setattr(main_module.retention, "reindex_keyword", boom)
+    monkeypatch.setattr(main_module.publication.keyword_index, "reindex", boom)
     _setup_state(tmp_path, page_status="hidden", page_review="approved", graph_status="active")
     body = client.post("/reviews/apply").json()
-    assert body["status"] == "validation_failed"
+    assert body["status"] == "saved_publication_pending"
     assert "semantic_hide_retrieval_suppression_not_guaranteed" in body["warnings"]
 
 
@@ -424,10 +424,10 @@ def test_hidden_semantic_node_excluded_from_search_graph_channel(client, tmp_pat
 def test_api_reindex_failure_makes_semantic_hide_non_clean(client, tmp_path, monkeypatch):
     def boom(root):
         raise RuntimeError("reindex blew up")
-    monkeypatch.setattr(main_module.retention, "reindex_keyword", boom)
+    monkeypatch.setattr(main_module.publication.keyword_index, "reindex", boom)
     _live_item(tmp_path)
     _approve_hide(tmp_path)
     body = client.post("/reviews/apply").json()
-    assert body["status"] == "validation_failed"
+    assert body["status"] == "saved_publication_pending"
     assert "semantic_hide_retrieval_suppression_not_guaranteed" in body["warnings"]
     assert _page_status(tmp_path) == ("hidden", "approved")   # mutation still written

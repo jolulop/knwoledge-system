@@ -177,9 +177,10 @@ def _snapshot_sqlite(src: Path, tmp_dir: Path) -> Path:
 def _writer_exclusion(root: Path):
     """Hold the write lock (ADR-0068) while the archive is written: every commit phase takes it, so
     files and graph rows are captured together. The vault lock is already held exclusively here, so
-    the write lock is taken without it (``vault=False``)."""
+    the write lock is taken without it (``vault=False``). A backup changes no authority, so it still
+    runs while the publication queue is damaged (``authority=False``)."""
     from app.backend import write_lock
-    with write_lock.hold(Path(root) / "reviews", vault=False):
+    with write_lock.hold(Path(root) / "reviews", vault=False, authority=False):
         yield
 
 

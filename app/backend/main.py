@@ -8,7 +8,6 @@ import logging
 import mimetypes
 import os
 import re
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -26,8 +25,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.backend import (
-    apply_sandbox, db, embeddings, graph, graph_read, keyword_index, manifests, review_html,
-    review_read, run_guard, search, taxonomy, vault_lock, vector_index, write_lock,
+    apply_sandbox, db, embeddings, graph, graph_read, keyword_index, manifests, publication_queue,
+    review_html, review_read, run_guard, search, taxonomy, vault_lock, vector_index, write_lock,
 )
 from app.backend.config import get_settings
 from app.backend.paths import safe_under
@@ -69,8 +68,8 @@ from app.llm.cache import ResponseCache
 from app.llm.client import ConfigError, ParseError, build_client
 from app.workers import (
     claims, contradictions, deprecations, duplicates, eval_answers, extract, human_add,
-    human_merge, identity_journal, intake, lint, merges, promote, query, retention, retypes, reviews,
-    splits, synthesis, tag_links, wiki,
+    human_merge, identity_journal, intake, lint, merges, promote, publication, query, retention,
+    retypes, reviews, splits, synthesis, tag_links, wiki,
 )
 from app.workers import labels
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter, render_query_page
@@ -132,6 +131,20 @@ async def _lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Knowledge System", version=settings.app_version, lifespan=_lifespan)
+
+# ADR-0068 decision 4: every review screen shows the publication queue's state (retry / repair).
+review_html.set_publication_status(lambda: publication_queue.status(settings.root))
+
+
+@app.exception_handler(publication_queue.QueueCorrupt)
+async def _publication_queue_corrupt(request: Request, exc: publication_queue.QueueCorrupt) -> Any:
+    """A damaged publication queue refuses authority changes (fail-closed, never an empty queue):
+    a visible 503 that names the repair, on every route that tried to write."""
+    detail = (f"publication_queue_corrupt ({exc.reason}): changes are refused until the queue is "
+              "repaired — POST /publication/repair or `uv run python scripts/republish.py --repair`")
+    if request.url.path.startswith("/ui/"):
+        return HTMLResponse(review_html.render_error(503, detail), status_code=503)
+    return JSONResponse(status_code=503, content={"detail": detail})
 
 
 # --- Request-origin guard (ADR-0067; amends ADR-0009's CSRF deferral) ---------------------------
@@ -258,6 +271,14 @@ def _commit_phase(fn):
         with write_lock.hold(settings.reviews_dir):
             return fn(*args, **kwargs)
     return wrapper
+
+
+def _publication_intent(origin: str, *, sources: Any = (), items: Any = (),
+                        full: bool = False) -> str:
+    """Record a provisional publication intent before a commit (ADR-0068 decision 4): the document
+    and tags the action names. Its publish call then replaces it with the exact work."""
+    return publication_queue.record(settings.root, origin=origin, sources=sources, items=items,
+                                    full=full)
 
 
 def _producer_run(producer: str):
@@ -850,16 +871,7 @@ _APPLY_TYPES = frozenset({
 _GRAPH_REQUIRED_TYPES = _APPLY_TYPES - {"archive_source", "hide_content", "unhide_content"}
 
 
-def _rebuild_index_status(root: Path) -> str:
-    """Rebuild wiki/index.md (caller owns the single rebuild). "rebuilt"|"failed"|"missing".
-
-    `missing` (no script — a degraded/test env) is distinct from `failed` (script ran, non-zero) so
-    only a genuine failure after real changes is surfaced as a warning (ADR-0035 review round)."""
-    script = root / "scripts" / "rebuild_index.py"
-    if not script.exists():
-        return "missing"
-    return "rebuilt" if subprocess.run(
-        [sys.executable, str(script), str(root)]).returncode == 0 else "failed"
+_PUBLICATION_VALIDATOR = "validate_publication.py"
 
 
 def _run_all_validators(root: Path) -> list[dict[str, Any]]:
@@ -923,10 +935,17 @@ def run_apply(st: Any) -> dict[str, Any]:
     `approved/`, every executor, the index rebuild and the validators — holds the write lock, so a
     reopen, a decision or a tag action never interleaves with it."""
     with write_lock.hold(Path(st.reviews_dir)):
-        return _run_apply(st)
+        # ADR-0068 decision 4: the publication intent comes first. Its scope is unknown until the
+        # executors ran, so a crash mid-Apply republishes everything from authority.
+        intent = publication_queue.record(st.root, origin="apply", full=True)
+        try:
+            return _run_apply(st, intent)
+        except GraphUnavailable:
+            publication_queue.discard(st.root, intent)    # refused before its first write
+            raise
 
 
-def _run_apply(st: Any) -> dict[str, Any]:
+def _run_apply(st: Any, intent: str | None = None) -> dict[str, Any]:
     """The shared apply orchestration (ADR-0035 A4/A6, extracted per ADR-0040). Key-free, raw/-free.
 
     Composes the existing key-free executors — `apply_resolved_syntheses`,
@@ -1088,18 +1107,11 @@ def _run_apply(st: Any) -> dict[str, Any]:
     # Only re-render sources that actually have a Source page (nothing to suppress otherwise) — keeps a
     # minimal/degraded vault from failing the apply on a missing manifest/template.
     existing_sources = [sid for sid in claim_source_ids
-                        if (wiki_dir / "Sources" / f"{sid}.md").exists()]
-    claim_source_pages: list[str] = []
-    source_refresh_failed: set[str] = set()   # ADR-0066 review round 5: a per-page render failure
-    if existing_sources and graph_available:
-        gen = wiki.generate_wiki(root, source_ids=existing_sources, rebuild_index=False,
-                                 record_job=False)
-        source_refresh_failed = {str(e.get("source_id")) for e in gen.get("error_details") or []}
-        claim_source_pages = [f"Sources/{sid}.md" for sid in existing_sources
-                              if sid not in source_refresh_failed]
+                        if (wiki_dir / "Sources" / f"{sid}.md").exists()] if graph_available else []
 
     # pages_changed counts every page write: contradiction re-projections, deprecations, the synthesis
-    # pages apply_resolved_syntheses re-rendered, the item pages promotion rewrote, archives.
+    # pages apply_resolved_syntheses re-rendered, the item pages promotion rewrote, archives (the
+    # re-rendered Source pages are added after publication, below).
     pages_changed = (len(contra["changed_pages"]) + len(deprec["changed_pages"])
                      + len(archive["changed_pages"]) + len(hidden["changed_pages"])
                      + len(unhidden["changed_pages"])
@@ -1108,7 +1120,7 @@ def _run_apply(st: Any) -> dict[str, Any]:
                      + len(syn_hidden["changed_pages"]) + len(syn_unhidden["changed_pages"])
                      + len(claim_syn_pages) + len(merged["changed_pages"]) + len(rekeyed["changed_pages"])
                      + len(split_res["changed_pages"])
-                     + len(claim_source_pages) + len(dups["changed_pages"])
+                     + len(dups["changed_pages"])
                      + syntheses["promoted"] + syntheses["rejected"] + promo["promoted"])
     # Reindex/index-refresh eligibility: page writes AND status transitions that may NOT re-render a page
     # but still affect retrieval — notably a semantic hide/unhide that only flips the graph node when the
@@ -1124,28 +1136,35 @@ def _run_apply(st: Any) -> dict[str, Any]:
     merge_work = merged["applied"]
     rekey_work = rekeyed["applied"]
     split_work = split_res["applied"]
-    changed = bool(pages_changed or contra["resolution"]["acknowledged"]
+    changed = bool(pages_changed or existing_sources or contra["resolution"]["acknowledged"]
                    or contra["resolution"]["rejected"] or contra["resolution"]["superseded_executed"]
                    or semantic_hide_work or semantic_unhide_work
                    or claim_hide_work or claim_unhide_work
                    or synthesis_hide_work or synthesis_unhide_work or merge_work or rekey_work
                    or split_work)
 
+    # ADR-0068 decision 4: one publication — the Source pages whose Claims/Items sections changed
+    # (ADR-0048 claim hide/unhide; ADR-0050/0052/0059 merges, splits, retypes re-point mentions), then
+    # wiki/index.md and the keyword/navigation index (so status changes reach the retrieval filter),
+    # with any publication still pending. It runs after the graph block committed, so the renderers
+    # see the new statuses. What fails stays queued and the result says saved_publication_pending.
+    pub = publication.publish(root, intent=intent, sources=existing_sources, index=changed,
+                              keyword=changed, origin="apply", wiki_dir=wiki_dir)
+    source_refresh_failed = set(pub["sources_failed"])   # ADR-0066 review round 5
+    claim_source_pages = [f"Sources/{sid}.md" for sid in existing_sources
+                          if sid in pub["sources_rendered"]]
+    pages_changed += len(claim_source_pages)
+    index_failed = "index_rebuild_failed" in pub["warnings"]
+    reindex_failed = any(w.startswith("keyword_reindex_failed") for w in pub["warnings"])
     warnings: list[str] = []
-    if source_refresh_failed:                 # reported (generate_wiki returns it, never raises)
+    if source_refresh_failed:
         warnings.append("source_page_refresh_failed")
-    index_status = _rebuild_index_status(root) if changed else "skipped"
-    if index_status == "failed":  # script present but non-zero after real changes — surface it
+    if index_failed:
         warnings.append("index_rebuild_failed")
-    # Refresh the keyword/navigation index so page status changes (archive, deprecation) reach the
-    # retrieval filter (an archived source must drop out of default retrieval). Caller-owned reindex.
-    reindex_failed = False
-    if changed:
-        try:
-            retention.reindex_keyword(root)
-        except Exception:  # noqa: BLE001 - a reindex failure is a warning (except for hide, below)
-            warnings.append("keyword_reindex_failed")
-            reindex_failed = True
+    if reindex_failed:
+        warnings.append("keyword_reindex_failed")
+    if pub["status"] == publication.PENDING:
+        warnings.append("publication_pending")
 
     # ADR-0066 review rounds 4–5: a merge/split's in-flight marker is closed only HERE — after its Source
     # pages (every affected page rendered; generate_wiki REPORTS a per-page failure rather than raising),
@@ -1156,7 +1175,7 @@ def _run_apply(st: Any) -> dict[str, Any]:
     journaled = sorted(set(merged.get("journaled", [])) | set(split_res.get("journaled", [])))
     identity_sources = set(merged.get("affected_sources", [])) | set(split_res.get("affected_sources", []))
     identity_refresh_pending = bool(journaled) and (
-        index_status == "failed" or reindex_failed or bool(source_refresh_failed & identity_sources))
+        index_failed or reindex_failed or bool(source_refresh_failed & identity_sources))
     if identity_refresh_pending:
         warnings.append("identity_refresh_pending")
     else:
@@ -1236,18 +1255,33 @@ def _run_apply(st: Any) -> dict[str, Any]:
     validators = _run_all_validators(root)
     failed = [v for v in validators if v["returncode"] != 0]
     validators_ok = not failed
-    clean = (validators_ok and not hide_retrieval_stale and not semantic_hide_stale
-             and not unhide_discovery_stale and not claim_hide_stale and not claim_unhide_stale
-             and not synthesis_hide_stale and not synthesis_unhide_stale
-             and not synthesis_evidence_stale and not merge_stale and not rekey_stale and not split_stale
-             and not identity_refresh_pending)
+    # ADR-0068 decision 4: the stale-index gates above, the identity markers kept open and the
+    # publication validator all fail because publication is incomplete — that is
+    # `saved_publication_pending` ("saved; publication incomplete"), never a validation failure that
+    # would invite repeating a committed decision. Any other validator failure, or a synthesis the
+    # fan-out could not re-render at all, stays `validation_failed`.
+    publication_pending = pub["status"] == publication.PENDING
+    other_failed = [v for v in failed if v["name"] != _PUBLICATION_VALIDATOR]
+    unclean = bool(other_failed) or syn_fanout_unreconciled > 0
+    publication_stale = (hide_retrieval_stale or semantic_hide_stale or unhide_discovery_stale
+                         or claim_hide_stale or claim_unhide_stale or synthesis_hide_stale
+                         or synthesis_unhide_stale or synthesis_evidence_stale or merge_stale
+                         or rekey_stale or split_stale or identity_refresh_pending
+                         or bool(failed) and not other_failed)
+    if unclean:
+        status = "validation_failed"
+    elif publication_pending or publication_stale:
+        status = publication.PENDING
+    else:
+        status = "applied"
 
     return {
-        "status": "applied" if clean else "validation_failed",
+        "status": status,
         "applied": True,
         "validators_ok": validators_ok,
         "failed_validators": failed,
         "warnings": warnings,
+        "publication": {"status": pub["status"], "pending": pub["pending"]},
         "summary": {
             "syntheses": {"promoted": syntheses["promoted"], "rejected": syntheses["rejected"]},
             "promotions": {"promoted": promo["promoted"]},
@@ -1287,7 +1321,7 @@ def _run_apply(st: Any) -> dict[str, Any]:
             "retyped": {"applied": rekeyed["applied"], "skipped": rekeyed["skipped"]},
             "split": {"applied": split_res["applied"], "skipped": split_res["skipped"]},
             "pages_changed": pages_changed,
-            "index_rebuilt": index_status == "rebuilt",
+            "index_rebuilt": pub["index_rebuilt"],
             "unapplied": _unapplied_by_type(reviews_dir),
         },
     }
@@ -1503,6 +1537,49 @@ def ui_apply() -> HTMLResponse:
     except HTTPException as exc:
         return _html_error(exc)
     return HTMLResponse(review_html.render_apply_result(result))
+
+
+# --- publication retry and queue repair (ADR-0068 decision 4) ----------------
+
+
+@app.get("/publication")
+def publication_status() -> dict[str, Any]:
+    """The publication queue: `{"state": "empty"|"pending"|"corrupt", ...outstanding work}`."""
+    return publication_queue.status(settings.root)
+
+
+@app.post("/publication/retry")
+@_producer_run("republish")
+def publication_retry() -> dict[str, Any]:
+    """Retry publishing: run every pending entry once, from current authority."""
+    return publication.publish(settings.root, origin="retry", wiki_dir=settings.wiki_dir)
+
+
+@app.post("/publication/repair")
+@_producer_run("republish")
+def publication_repair() -> dict[str, Any]:
+    """Repair an unreadable queue: keep the damaged file aside, republish everything from
+    authority. On a readable queue it is a full republish."""
+    return publication.repair(settings.root, wiki_dir=settings.wiki_dir)
+
+
+@app.post("/ui/publication/retry", response_class=HTMLResponse)
+def ui_publication_retry() -> HTMLResponse:
+    try:
+        result = publication_retry()
+    except HTTPException as exc:
+        return _html_error(exc)
+    return HTMLResponse(review_html.render_publication_result(result))
+
+
+@app.post("/ui/publication/repair", response_class=HTMLResponse)
+def ui_publication_repair() -> HTMLResponse:
+    try:
+        result = publication_repair()
+    except HTTPException as exc:
+        return _html_error(exc)
+    return HTMLResponse(review_html.render_publication_result(result,
+                                                              repaired=result.get("set_aside")))
 
 
 # --- per-source review flow (ADR-0058) — declared before /ui/reviews/{review_id} so
@@ -1727,6 +1804,10 @@ def _source_decide(source_id: str, form: dict[str, Any]) -> HTMLResponse:
         if gconn is None:
             return _source_flow_unavailable()
         affected: set[str] = set()
+        named = [str(k)[len("link_"):] for k in link_keys]
+        named += [str(form.get(k))[len("use:"):] for k in link_keys
+                  if str(form.get(k) or "").startswith("use:")]
+        intent = _publication_intent("tag_action", sources=[source_id], items=named)
         try:
             for key in link_keys:
                 nid = str(key)[len("link_"):]
@@ -1768,7 +1849,8 @@ def _source_decide(source_id: str, form: dict[str, Any]) -> HTMLResponse:
                                           "status": out.get("effect") or out["outcome"]})
         finally:
             gconn.close()
-        warnings += tag_links.finish(settings.root, affected, wiki_dir=settings.wiki_dir)["warnings"]
+        warnings += tag_links.finish(settings.root, affected, wiki_dir=settings.wiki_dir,
+                                     intent=intent)["warnings"]
 
     # UAT round 8: alias edits on kept tags (a changed `edit_aliases_<id>` box). A row dropped in
     # this same submit is not edited. Review round 9: a box counts as edited only when it differs
@@ -1797,6 +1879,8 @@ def _source_decide(source_id: str, form: dict[str, Any]) -> HTMLResponse:
         if gconn is None:
             return _source_flow_unavailable()
         affected = set()
+        intent = _publication_intent("tag_action", sources=[source_id],
+                                     items=[e[0] for e in edits])
         try:
             for nid, target, new_aliases, shown in edits:
                 row = {"node_id": nid, "action": "edit aliases", "recorded": False,
@@ -1817,7 +1901,8 @@ def _source_decide(source_id: str, form: dict[str, Any]) -> HTMLResponse:
                                           "status": out.get("effect") or out["outcome"]})
         finally:
             gconn.close()
-        warnings += tag_links.finish(settings.root, affected, wiki_dir=settings.wiki_dir)["warnings"]
+        warnings += tag_links.finish(settings.root, affected, wiki_dir=settings.wiki_dir,
+                                     intent=intent)["warnings"]
 
     for key in sorted(k for k in form.keys() if str(k).startswith("decision_")):
         rid = str(key)[len("decision_"):]
@@ -1926,6 +2011,8 @@ def post_source_link(source_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     gconn = _open_graph_safe()
     if gconn is None:
         raise HTTPException(status_code=503, detail="graph unavailable")
+    intent = _publication_intent("tag_action", sources=[source_id],
+                                 items=[nid] + ([chosen] if chosen else []))
     try:
         if new_aliases is not None:
             out = tag_links.edit_aliases(gconn, source_id=source_id, node_id=nid, aliases=new_aliases,
@@ -1935,10 +2022,10 @@ def post_source_link(source_id: str, payload: dict[str, Any]) -> dict[str, Any]:
             out = _apply_link_action(gconn, source_id, nid, action, amendments, chosen)
     finally:
         gconn.close()
+    refresh = tag_links.finish(settings.root, out.get("affected_sources") or [],
+                               wiki_dir=settings.wiki_dir, intent=intent)
     if out["outcome"] == "blocked":
         raise HTTPException(status_code=409, detail=out["reason"])
-    refresh = tag_links.finish(settings.root, out.get("affected_sources") or [],
-                               wiki_dir=settings.wiki_dir)
     return out | refresh
 
 
@@ -1952,17 +2039,18 @@ def ui_review_source_undrop(source_id: str, key: str = Form("")) -> HTMLResponse
     gconn = _open_graph_safe()
     if gconn is None:
         return _source_flow_unavailable()
+    intent = _publication_intent("tag_action", sources=[source_id])
     try:
         out = tag_links.undo_drop(gconn, source_id=source_id, key=key.strip(),
                                   wiki_dir=settings.wiki_dir, reviews_dir=settings.reviews_dir)
     finally:
         gconn.close()
+    warnings = tag_links.finish(settings.root, out.get("affected_sources") or [],
+                                wiki_dir=settings.wiki_dir, intent=intent)["warnings"]
     if out["outcome"] == "blocked":
         code = 409 if out["reason"] == "ledger_corrupt" else 404
         return HTMLResponse(review_html.render_error(code, f"undo blocked: {out['reason']}"),
                             status_code=code)
-    warnings = tag_links.finish(settings.root, out["affected_sources"],
-                                wiki_dir=settings.wiki_dir)["warnings"]
     if warnings:                                          # show the refresh failure, don't hide it
         return HTMLResponse(review_html.render_source_decide_result(
             source_id, [{"node_id": key.strip(), "action": "undo drop", "recorded": True,
@@ -1990,6 +2078,7 @@ def ui_delete_unused_tags() -> HTMLResponse:
     gconn = _open_graph_safe()
     if gconn is None:
         return _source_flow_unavailable()
+    intent = _publication_intent("tag_deletion", full=True)   # crash: republish from authority
     try:
         result = tag_links.delete_unused(gconn, wiki_dir=settings.wiki_dir,
                                          reviews_dir=settings.reviews_dir)
@@ -1998,7 +2087,8 @@ def ui_delete_unused_tags() -> HTMLResponse:
         gconn.close()
     result["warnings"] = tag_links.finish(settings.root, result["affected_sources"],
                                           wiki_dir=settings.wiki_dir,
-                                          pages_changed=bool(result["deleted"]))["warnings"]
+                                          pages_changed=bool(result["deleted"]),
+                                          intent=intent, origin="tag_deletion")["warnings"]
     return HTMLResponse(review_html.render_unused_tags(rows, result=result))
 
 

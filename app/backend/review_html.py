@@ -59,6 +59,46 @@ def _render_value(value: Any) -> str:
     return _h(value)
 
 
+# The publication queue's state for the banner every review screen shows (ADR-0068 decision 4).
+# The app sets it (`set_publication_status`); unset (a bare renderer in tests) shows no banner.
+_publication_status: Any = None
+
+
+def set_publication_status(provider: Any) -> None:
+    """Register a zero-argument callable returning `publication_queue.status(...)`."""
+    global _publication_status
+    _publication_status = provider
+
+
+def _publication_banner() -> str:
+    if _publication_status is None:
+        return ""
+    try:
+        st = _publication_status()
+    except Exception:  # noqa: BLE001 - a banner must never break a screen
+        return ""
+    if st.get("state") == "corrupt":
+        return ("<p class='err'><strong>The publication queue is unreadable</strong> ("
+                + _h(st.get("reason")) + "). Changes are refused until it is repaired; reading "
+                "and backup still work. Repair keeps the damaged file and republishes every page "
+                "from the saved decisions. <form class='decide' method='post' "
+                "action='/ui/publication/repair'><button type='submit'>Repair publication queue"
+                "</button></form></p>")
+    if st.get("state") != "pending":
+        return ""
+    steps = [f"{len(st.get(k) or [])} {label} page(s)"
+             for k, label in (("claims", "claim"), ("syntheses", "synthesis"), ("items", "tag"),
+                              ("sources", "Source")) if st.get(k)]
+    steps += ["every page"] if st.get("full") else []
+    steps += ["the index page"] if st.get("index") else []
+    steps += ["search"] if st.get("keyword") else []
+    return ("<p class='banner'><strong>Saved; publication incomplete.</strong> Decisions are "
+            "saved, but " + _h(", ".join(steps) or "some pages") + " still show the old state. "
+            "Don't repeat the decisions. <form class='decide' method='post' "
+            "action='/ui/publication/retry'><button type='submit'>Retry publishing</button>"
+            "</form></p>")
+
+
 def _nav() -> str:
     return ("<nav>"
             "<a href='/ui/reviews'>Queue</a>"
@@ -67,7 +107,26 @@ def _nav() -> str:
             "<a href='/ui/reviews/apply'>Apply…</a>"
             "<a href='/ui/reviews/tags/unused'>Unused tags</a>"
             "<a href='/ui/reviews/tags/blocked'>Blocked tags</a>"
-            "</nav>")
+            "</nav>" + _publication_banner())
+
+
+def render_publication_result(result: dict[str, Any], *, repaired: str | None = None) -> str:
+    """The Retry publishing / Repair result (ADR-0068 decision 4)."""
+    done = result.get("status") == "published"
+    body = [_nav(), "<h1>Publication " + ("complete" if done else "still incomplete") + "</h1>"]
+    if repaired:
+        body.append(f"<p>The damaged queue was kept as <code>db/{_h(repaired)}</code>.</p>")
+    body.append(_render_value({"Source pages rendered": len(result.get("sources_rendered") or []),
+                               "index page rebuilt": result.get("index_rebuilt"),
+                               "search refreshed": result.get("keyword_reindexed")}))
+    if result.get("warnings"):
+        body.append(f"<p class='banner'>warnings: {_render_value(result['warnings'])}</p>")
+    from app.workers import publication
+    if lines := publication.describe_failures(result):
+        body.append("<p>Still pending:</p><ul>" + "".join(f"<li>{_h(x)}</li>" for x in lines)
+                    + "</ul>")
+    body.append("<p><a href='/ui/reviews'>Back to the queue</a></p>")
+    return _page("Publication", "".join(body))
 
 
 # --- queue -----------------------------------------------------------------
@@ -365,6 +424,12 @@ def render_apply_result(result: dict[str, Any]) -> str:
     body = [
         _nav(),
         f"<h1>Apply result — {_h(result.get('status'))}</h1>",
+    ]
+    if result.get("status") == "saved_publication_pending":
+        body.append("<p class='banner'><strong>Saved; publication incomplete.</strong> The approved "
+                    "decisions were applied; some pages or search still need refreshing. Use "
+                    "<strong>Retry publishing</strong>, and don't apply or decide again.</p>")
+    body += [
         f"<p>validators_ok: <code>{_h(result.get('validators_ok'))}</code></p>",
     ]
     if result.get("warnings"):
@@ -688,13 +753,14 @@ def render_source_screen(data: dict[str, Any]) -> str:
 
 
 def _refresh_warnings(warnings: list[str] | None) -> str:
-    """The banner for a failed post-action refresh (ADR-0066 review round 2: never swallowed)."""
+    """The banner for a failed post-action refresh (ADR-0066 review round 2: never swallowed).
+    ADR-0068: the work stays queued, so the fix is Retry publishing, never repeating a decision."""
     if not warnings:
         return ""
     return ("<p class='banner'><strong>Pages or search index not refreshed</strong> ("
             + _h(", ".join(warnings)) + "): the decisions are saved, but Source pages or search may "
-            "show old titles or statuses until you run <code>uv run python scripts/generate_wiki.py"
-            "</code> and <code>uv run python scripts/reindex_keyword.py</code>.</p>")
+            "show old titles or statuses until publishing succeeds. Use <strong>Retry publishing"
+            "</strong> (or <code>uv run python scripts/republish.py</code>).</p>")
 
 
 def render_source_decide_result(source_id: str, results: list[dict[str, Any]], *,

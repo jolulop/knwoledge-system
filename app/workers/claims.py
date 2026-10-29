@@ -48,7 +48,8 @@ from app.llm.client import LLMClient, ParseError
 from app.workers import citations, reviews
 from app.workers import enrichment_artifact as art
 from app.workers import labels
-from app.workers.wiki_render import render_claim_page, title_from_filename
+from app.workers.wiki_render import (REVIEW_STATUSES, parse_frontmatter, render_claim_page,
+                                     title_from_filename)
 
 _ENRICHABLE_STATUSES = {"extracted", "partial"}
 _WS = re.compile(r"\s+")
@@ -188,9 +189,24 @@ def _write_source_artifact(apath, sid, fingerprint, source_claims, model_ref, no
     }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+_MIRRORED_PAGE_STATUSES = frozenset({"active", "hidden", "deprecated_candidate"})
+
+
+def mirror_page_status(gconn, *, cid: str, claims_dir: Path, now: str) -> bool:
+    """Copy a Claim page's saved status (the authority, ADR-0022) into the graph's node mirror.
+    Returns False when there is no page or no recognised status (nothing copied). Publication runs it
+    on every claim before rendering, so partner sections, syntheses and Source pages read the saved
+    visibility even after a crash rolled the graph back."""
+    status = _read_status(Path(claims_dir) / f"{cid}.md")
+    if status not in _MIRRORED_PAGE_STATUSES or graph.get_node(gconn, cid) is None:
+        return False
+    graph.upsert_node(gconn, node_id=cid, node_type="claim", slug=cid, status=status, now=now)
+    return True
+
+
 def recompose_claim(gconn, *, cid, claims_dir, reviews_dir, now, markdown_dir, text_hint=None,
                     contradiction_affected=None, deprecate=False, review_status=None,
-                    hide=False, unhide=False) -> str:
+                    hide=False, unhide=False, project_only=False) -> str:
     """Render a Claim page from its `active` derived_from edges (tombstone if none).
 
     The single, shared claim renderer (used by the claim worker and the contradiction worker):
@@ -208,7 +224,12 @@ def recompose_claim(gconn, *, cid, claims_dir, reviews_dir, now, markdown_dir, t
     clears it and re-derives, and by default the page's current `hidden` is **preserved** across re-render
     (exactly like `deprecated_candidate`) — a later evidence-driven recompose never silently un-hides. A
     hidden **partner** claim is omitted from the rendered Contradicting Claims section (discovery surface;
-    the edge stays active in the graph)."""
+    the edge stays active in the graph).
+
+    ADR-0068 `project_only` (publication): render the page from saved authority and nothing else — the
+    saved status and review_status are kept, and a claim whose evidence is gone while its page is not
+    a tombstone returns `"evidence_gone"` unwritten (tombstoning retracts relationships and files a
+    review: producer work, never publication's)."""
     edges = [e for e in graph.outgoing_active(gconn, cid) if e["edge_type"] == "derived_from"]
     page_path = claims_dir / f"{cid}.md"
     claim_text = text_hint or _read_claim_text(page_path)
@@ -239,6 +260,12 @@ def recompose_claim(gconn, *, cid, claims_dir, reviews_dir, now, markdown_dir, t
     # (ADR-0022) — a re-extraction must not silently resurrect a deprecated loser to `active`. A hidden
     # claim is never also deprecated (hide is active-only; hidden has precedence).
     deprecated = bool(cites) and not hidden and (deprecate or current_status == "deprecated_candidate")
+    if project_only:
+        if not cites and not hidden and current_status != "deprecated_candidate":
+            return "evidence_gone"
+        saved = parse_frontmatter(page_path.read_text(encoding="utf-8", errors="replace")) \
+            .get("review_status") if page_path.exists() else None
+        review_status = saved if saved in REVIEW_STATUSES else None
     claims_dir.mkdir(parents=True, exist_ok=True)
     # ADR-0060: resolve display labels worker-side (page-local) for the evidence-table source
     # links and contradicting-claim backlinks; the renderer stays IO-free.
@@ -255,7 +282,7 @@ def recompose_claim(gconn, *, cid, claims_dir, reviews_dir, now, markdown_dir, t
     # Mirror the page's status into the derived node index (hidden > deprecated/tombstone > active).
     node_status = "hidden" if hidden else ("deprecated_candidate" if (deprecated or not cites) else "active")
     graph.upsert_node(gconn, node_id=cid, node_type="claim", slug=cid, status=node_status, now=now)
-    if not cites and not hidden:
+    if not cites and not hidden and not project_only:
         # Endpoint invariant (ADR-0031): a tombstoned claim can no longer anchor a contradiction,
         # so supersede any contradicts assertions touching it (even an acknowledged/active one)
         # and withdraw their pending reviews. Surviving endpoints are recorded so the caller
