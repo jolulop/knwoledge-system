@@ -1,6 +1,6 @@
 # REANCHOR — session status
 
-_Last updated: 2026-10-28. **Reanchor command:** "read REANCHOR.md and reanchor". Read this
+_Last updated: 2026-10-30. **Reanchor command:** "read REANCHOR.md and reanchor". Read this
 first after an app restart, then `wiki/index.md` if working in the vault._
 
 > [!warning] This is a periodically-refreshed snapshot and can lag the live state. The authoritative
@@ -12,18 +12,20 @@ first after an app restart, then `wiki/index.md` if working in the vault._
 
 Local-first **LLM Wiki** knowledge-system. Immutable `raw/` → derived `normalized/` →
 generated `wiki/` (gitignored, regenerable) → `db/` SQLite (graph, jobs, llm_cache) →
-`reviews/`, `policies/`. ADR-driven (`docs/adr/0001–0067`). See `CLAUDE.md` for the
+`reviews/`, `policies/`. ADR-driven (`docs/adr/0001–0068`). See `CLAUDE.md` for the
 critical rules and `CONTEXT.md` for the glossary.
 
 ## Where we are
 
-- **Branch:** `main` — tip `df34311` (Obsidian GPU launch docs; before it `b0b3494`, `19c720a`
-  open-original link + Source trim, `20f6885` UAT round 8 fixes + review rounds 9–10), **pushed, in
-  sync with `origin/main`**; the ADR-0066 part-3 grill docs are the only uncommitted change.
-  **Demo held 2026-10-28** (nothing new); the demo and old UAT clones were deleted and the paid LLM
-  responses saved to `~/ks-saved/2026-10-28/`. A fresh `/tmp/ks-uat` (12 PDFs, built at `df34311`
-  from that cache, zero cost; contradictions/synthesis not run) is ready for the Obsidian test and
-  re-tagging. Obsidian's own local drift in `wiki/.obsidian/graph.json`
+- **Branch:** `main` — tip `1bab3c0` (UAT Guide part-3 steps; before it `0d218b9` ADR-0066 part 3
+  slice 4 Authors pages), **pushed, in sync with `origin/main`**, tree clean except the user's
+  `.vscode/`. **ADR-0068 (all slices + decision 7) and ADR-0066 part 3 (slices 1–4) are complete
+  and pushed** (bullets below). The main repo's `wiki/` is empty. **Next = a fresh-start part-3
+  UAT following `docs/UAT Guide.md` from §1**: `rm -rf /tmp/ks-uat` first (§1 clones into that
+  path; its `db/llm_cache.sqlite` is byte-identical to the saved
+  `~/ks-saved/2026-10-28/llm_cache.ks-demo.sqlite`, so nothing is lost), then
+  `uv sync --all-extras` + the pinned cu128 torch overlay, optionally seed `db/` with the saved
+  cache. The user chose to skip the old-clone upgrade UAT. Obsidian's own local drift in `wiki/.obsidian/graph.json`
   (zoom, trailing newline) is never committed — only intended preset changes are (the current preset
   `-path:Claims -file:index -file:log` went in with `20f6885`). `.vscode/`, `docs/UAT Guide.html`
   and `.env (UAT)` are the user's untracked files. Run `git status --short` /
@@ -240,9 +242,9 @@ critical rules and `CONTEXT.md` for the glossary.
   - Tooling: `scripts/validate_tag_links.py` (the **12th validator**) and
     `scripts/rebuild_tag_links.py` (repair from ledgers; dry-run by default; skips damaged ledgers,
     defers in-flight nodes).
-  - Decisions 7–8 followed in part 2 (bullet below). **Still open:** decision 6 (Enrich
-    title/author/publisher, `provenance_suggested` vs confirmed `provenance`, Authors pages), 10
-    (clean restart at the new prompt versions), 11 (`scripts/eval_item_tags.py` scorer).
+  - Decisions 7–8 followed in part 2, decision 6 in part 3 (bullets below). **Still open:** 10
+    (clean restart at the new prompt versions), 11 (`scripts/eval_item_tags.py` scorer — not
+    written yet).
 - **UAT round 7 (2026-10-25/26, fresh clone at `d17e7a7`, complete):** per-document keep/drop
   worked — 76 active tags over 9 documents, McKinsey one tag kept on 3 documents, far fewer
   candidates. Lint filed no merge candidate (the user had dropped the duplicate names). It led to
@@ -306,8 +308,77 @@ critical rules and `CONTEXT.md` for the glossary.
     2026-10-28).
   - **Clone after the fixes:** `/tmp/ks-uat` pulled to `20f6885`; aliases cleaned (AI Agent →
     [agent], Agentic AI → [agentic systems]); 12 validators pass, `rebuild_tag_links` dry-run clean.
-- **Tests/lint green (2026-10-28):** `1549 passed, 2 skipped` (opt-in `gpu`/`model` marks), ruff
-  clean, all 12 validators pass. ADR-0066 coverage: `tests/test_tag_links.py` + helper
+- **2026-10-28 extras:** `19c720a` (Source pages link **open original** via the API
+  `/raw/<source_id>`; Source Details trimmed; `SOURCE_SCHEMA_VERSION` `wiki-source-v2`), the
+  Obsidian WSLg GPU launch docs, and the demo (held 2026-10-28; paid responses saved to
+  `~/ks-saved/2026-10-28/`, demo and UAT clones deleted afterwards).
+- **ADR-0068 — vault consistency contract (2026-10-28/29, complete + pushed):** from an external
+  architecture review after the part-3 grill. Commits: `4ed3e13` slice 1 · `0d75234` slice 2 ·
+  `e3558c6` slice 3 · `5b44f06`/`b13f513` slice 4 · `37320a6`/`d11945b` decision 7.
+  - **Slice 1 — one exclusive write lock** (`app/backend/write_lock.py`, a widening of the
+    tag-ledger lock) for every commit phase (screen/API actions, Apply and executors, every
+    producer's commit, review filers, repair scripts). Model calls stay outside it; producers
+    re-validate under it. **Lock order: vault lock → write lock → SQLite transaction.** The vault
+    lock (`vault_lock.py`) now only coordinates writers with backup/restore. **Per-producer run
+    guards** (`run_guard.py`): a second instance refuses with "already running".
+  - **Slice 2 — publication + pending queue** (`publication_queue.py`, `app/workers/publication.py`):
+    success means local publication (Source/item/claim pages, backlinks, removals, `index.md`,
+    keyword index) inside the lock; intent recorded first in `db/publication_pending.json`; one
+    automatic retry; result **`saved_publication_pending`** + a **Retry publishing** banner;
+    `scripts/republish.py`; `validate_publication` fails while the queue is non-empty; a corrupt
+    queue is fail-closed (repair keeps the damaged file and re-derives the work). The vector index
+    stays explicitly eventual.
+  - **Slice 3 — producers commit per document** and refresh `index.md` + keyword once per run;
+    **producer commit journal** `db/producer_journal.json` (`producer_journal.py`,
+    `scripts/validate_producer_journal.py`, `scripts/repair_producer_journal.py`); the fallback
+    synthesis completion check compares the full rendered page with the artifact.
+  - **Slice 4 — consistent previews + preview tokens:** revision `(epoch, counter)` in
+    `db/revision.json` (`revision.py`; every outermost mutating hold advances it **before
+    yielding**; `changes=False` opt-out only for preview/backup/bookkeeping); the dry-run copies
+    state under the lock (SQLite online backup) and returns a **`preview_token`** (`apa_…`, kept in
+    `db/apply_authorizations.json`, never backed up); `POST /reviews/apply` needs it and the gate
+    (`apply_gate.py`, shared with `scripts/apply_reviews.py`) checks revision, **code fingerprint**
+    (`main.LOADED_CODE`; `restart_required` when `app/`/`scripts/`/`templates/` on disk differ from
+    what the API loaded) and a settings fingerprint. `scripts/validate_revision.py`.
+  - **Decision 7 — bounded graph traversal:** a per-frontier-node fan-out cap with indexed
+    `LIMIT k + 1` fetches (query plan checked), round-robin admission in ranked order, metadata only
+    for retained candidates, the topic-less disagreement seed list bounded before lookup.
+  - **Test gotcha:** editing `app/`, `scripts/` or `templates/` while a pytest run is going makes
+    the Apply tests fail with `restart_required` (the code fingerprint changed) — rerun after edits.
+- **ADR-0066 part 3 — decision 6, titles/provenance/Authors (2026-10-29/30, complete + pushed):**
+  grill 2 `bd99dba` (after ADR-0068) · slice 1 `3efc7e7` · slice 2 `448ef28`/`71e26b7` · slice 3
+  `8bdece0`/`5bc5882` · slice 4 `c8cc224`/`0d218b9` · UAT Guide `1bab3c0`.
+  - **Slice 1 — effective titles + Enrich v2:** `app/workers/titles.py` — effective title =
+    confirmed > Enrich > filtered PDF metadata title > filename (the prompts get the prompt title,
+    which never includes the confirmed one, so a correction re-bills nothing). Enrich
+    `enrich-v2`/`enrich-prompt-v2` returns title, ordered authors, publisher, summary, typed tags
+    (≤7); the PDF info dictionary is an untrusted hint logged as `metadata`
+    (`EXTRACT_CODE_VERSION` 2 → re-extract with `--force` on an old clone). Claims prompt
+    `enrich-claims-prompt-v4`, items prompt `enrich-items-prompt-v5`.
+  - **Slice 2 — Enrich tags join the tag suggestions** (`items._merge_enrich`, before the cap);
+    free-text `tags:` frontmatter replaced by **`keywords:`** (kept + eligible suggestions).
+    `tests/test_enrich_tags.py`.
+  - **Slice 3 — Details confirmation** on each document's screen (`app/workers/details.py`):
+    no-JS draft actions (Use these / Add author rows), order, per-name **show page** ticks,
+    **These details are correct** + Save, a baseline token (stale-form refusal), **Clear confirmed
+    details**. Manifest `provenance` keys title/authors[{name,show_page}]/publisher/confirmed_at/
+    confirmed_baseline (`manifests.confirm_details`, `provenance_problem`, `name_identity`).
+    **Independence digests** (`app/workers/reconciliation.py`): synthesis/contradictions record what
+    they used; a change shows a per-producer reconciliation notice and lint
+    `awaiting_reconciliation`.
+  - **Slice 4 — Authors & publishers pages** `wiki/Authors/` (`app/workers/authors.py`): a
+    code-owned navigation projection (never graph nodes/items), one page per `name_identity`
+    across both roles, listing confirmed + ticked + default-visible documents only; built in the
+    publication index step (`_publish_authors`) and listed in `index.md` "## Authors &
+    publishers". JSON-encoded frontmatter read back exactly; atomic writes; ownership
+    owned/invalid/handwritten (only owned pages are overwritten or pruned); an unreadable or
+    malformed manifest stops the step before any prune. Source Details list the names (linked only
+    when ticked and visible). `rebuild_index.py --parent-holds-write-lock` is internal to
+    publication; standalone it takes the lock. Obsidian colour group `path:Authors`.
+    `tests/test_authors.py` (37).
+- **Tests/lint green (2026-10-30, `0d218b9`):** `1890 passed, 2 skipped` (opt-in `gpu`/`model`
+  marks), ruff clean, all **15 validators** pass (ADR-0068 added `validate_publication`,
+  `validate_producer_journal`, `validate_revision`). Earlier (2026-10-28): 1549 passed. ADR-0066 coverage: `tests/test_tag_links.py` + helper
   `tests/tagging.py` (`keep_all`, `close_journals`), `test_tag_suggestions.py`,
   `test_tag_authority.py`, `test_uat_round8.py`, `test_apply_tag_serialization.py`; ADR-0067
   `test_request_guard.py`. **Test gotcha:** never `monkeypatch.undo()` in a
@@ -336,11 +407,14 @@ critical rules and `CONTEXT.md` for the glossary.
   add these flags, so plain `obsidian &` works. Use the WSL Obsidian, not Windows-over-`\\wsl$`.
 - The committed graph preset filters `-path:Claims -file:index -file:log`; to hide unreviewed tags
   too, add `-[status:candidate]` (the space before it matters).
+- **Authors pages** live in `wiki/Authors/` (colour group `path:Authors` in the committed preset);
+  they appear only for documents whose Details are confirmed with the name's **show page** ticked.
 - `wiki/` is **regenerated by the pipeline** — Obsidian is a viewer; manual edits are overwritten.
 - The **Human Review UI** is at `/ui/reviews` (loopback only); the high-volume **per-source flow**
   at `/ui/reviews/sources` (per-document tag keep / drop / never suggest with amendments incl.
   `item_type`, Use *X* / keep as new for ambiguous matches, *edit aliases* on kept tags, undo drop,
-  human-add, `?preselect=approve`, per-source "view original" via `/raw/<source_id>`); unused and
+  human-add, `?preselect=approve`, per-source "view original" via `/raw/<source_id>`, the
+  **Details** section with "These details are correct" + Clear); unused and
   blocked tags at `/ui/reviews/tags/unused` and
   `/ui/reviews/tags/blocked`.
 
@@ -365,9 +439,10 @@ critical rules and `CONTEXT.md` for the glossary.
 | **UAT rounds 4–6** (fresh clones, 5→9 sources) | **Done** — item fragmentation → ADR-0064; bookmark/tag model → ADR-0066 |
 | **ADR-0064 item consolidation Part A** (merge-candidate lint + human-filed merge) | **Complete + pushed** (`ea88f64` · `ed6cd00` · `3b6e4ca`) |
 | **ADR-0065 item-type management** | **Deferred placeholder** (not scheduled) |
-| **ADR-0066 item curation as tagging** | **Parts 1–2 + decision 9 complete + pushed** (`16f9619` design · `d17e7a7` part 1 + rounds 2–5 · `705d029` decision 8 alias hygiene · `71051ac` rounds 6–7 · `5be2e50` part-2 grill · `f0e43f1` part 2 + round 8 · `20f6885` UAT r8 fixes + rounds 9–10); decisions 6, 10, 11 open |
+| **ADR-0066 item curation as tagging** | **Parts 1–3 + decision 9 complete + pushed** (`16f9619` design · `d17e7a7` part 1 + rounds 2–5 · `705d029` decision 8 alias hygiene · `71051ac` rounds 6–7 · `5be2e50` part-2 grill · `f0e43f1` part 2 + round 8 · `20f6885` UAT r8 fixes + rounds 9–10 · part 3: `bd99dba` grill 2 · `3efc7e7` · `71e26b7` · `5bc5882` · `0d218b9` · `1bab3c0` UAT Guide); decisions 10, 11 open; part-3 UAT next |
 | **ADR-0067 request-origin guard** (+ ADR-0039 consistent-backup amendment) | **Complete + pushed** (`71051ac`) |
-| **UAT rounds 7–8** (r7 fresh clone at `d17e7a7`; r8 = part-2 UAT) | **Done** — r8 fixes in `20f6885`; user re-check of the screens pending |
+| **UAT rounds 7–8** (r7 fresh clone at `d17e7a7`; r8 = part-2 UAT) | **Done** — r8 fixes in `20f6885` |
+| **ADR-0068 vault consistency contract** (write lock · publication queue · per-document producer commits · preview tokens · bounded traversal) | **Complete + pushed** (`4ed3e13` · `0d75234` · `e3558c6` · `b13f513` · `d11945b`); validators 12→15 |
 
 ## Next step
 
@@ -383,37 +458,21 @@ critical rules and `CONTEXT.md` for the glossary.
 - **To run enrichment/query on a LOCAL model** (Ollama/vLLM/LM Studio): see `docs/Local Models.md`
   — set `ENRICH_LOCAL_BASE_URL` + add `local:<model>` to a tier chain (start with
   `ENRICH_MODEL_LIGHT`). No-cost resolve-check snippet in that doc.
-- **NEXT (order locked 2026-10-28, ADR-0068 §Sequencing; each step on the user's go):**
-  **ADR-0068 vault consistency contract** (design-locked: one exclusive write lock for every commit
-  phase, per-producer run guards, publication inside the lock plus a pending queue
-  (`saved_publication_pending`), consistent previews plus an `(epoch, counter)` revision token,
-  durable page fields declared) → implement in slices (locks/guards → publication + queue →
-  producers + keyword refresh → previews + token) with its 8 acceptance tests → graph traversal
-  bound (small, any time) → ADR-0066 **part 3** → **part 4 scorer** (pre-restart baseline) →
-  decision 10 **clean restart** → fresh UAT + scoring. The Obsidian test in `/tmp/ks-uat` can run at
-  any time. Detail of the older items follows:
-  1. **Re-check the screens** in `/tmp/ks-uat` with the r8–r10 fixes (the clone lives on the root
-     disk, so it survives a reboot). Restart the API with
-     `cd /tmp/ks-uat && uv run --no-sync python -m app.backend` (port 18000) — **`--no-sync`**: a
-     plain `uv sync` strips the GPU overlay (torch cu128 / FlagEmbedding) and the API won't start;
-     restore with `uv sync --all-extras` + the pinned cu128 torch, never `-U`.
-  2. **Done 2026-10-28 (ADR-0016 amendment):** Source pages link the original through the API
-     (**open original** → `http://<APP_HOST>:<APP_PORT>/raw/<source_id>`, `wiki.raw_view_base`);
-     Source Details trimmed to Original / Type / Pages (bookkeeping stays in frontmatter), Key Points
-     and Notes removed, `SOURCE_SCHEMA_VERSION` `wiki-source-v2` (next `generate_wiki` rewrites
-     every Source page); UAT Guide Front Matter Title defaults corrected (v4.2.1: only Header on —
-     turn on Graph + File Explorer, leave Alias/Note Link off). Click-check in the clone pending.
-  3. **Part 3 — DESIGN-LOCKED 2026-10-28** (ADR-0066 "Part 3 — implementation decisions"; next =
-     "implement now"). Decision 6 plus: the **effective title** (confirmed > Enrich > filtered PDF
-     metadata > filename) everywhere, with the claims and items prompts taking the Enrich title
-     (corrections are display-only); **Enrich's typed tags join the per-document suggestion list
-     first**, under one cap, and the free-text `tags:` frontmatter goes away; Details section with a
-     "These details are correct" tick box and per-document "show page" ticks; the PDF metadata hint
-     goes in the extraction log. The Enrich, claims and items prompts all bump, so the restart
-     re-bills claims too. Decision 10's clean restart follows part 3's UAT.
-  4. **Part 4** — decision 11: `scripts/eval_item_tags.py` (deterministic, manual run) against
-     `evals/golden_item_tags.yaml`, measured on the vault rebuilt by the clean restart.
-  5. **Slice B** (ADR-0066 deferred list): real titles on review screens, a readable apply preview,
+- **NEXT (each step on the user's go):**
+  1. **Fresh-start part-3 UAT** following `docs/UAT Guide.md` from §1 (`rm -rf /tmp/ks-uat`
+     first). Part 3 is covered in §6 (Enrich outputs, effective title, `keywords:`), **§9.0.1
+     Confirm each document's Details** and four checklist lines. The Enrich, claims and items
+     prompts all bumped, so the paid stages re-bill (the saved cache only helps for unchanged
+     calls). Run the API with `cd /tmp/ks-uat && uv run --no-sync python -m app.backend` (port
+     18000) — **`--no-sync`**: a plain `uv sync` strips the GPU overlay (torch cu128 /
+     FlagEmbedding) and the API won't start; restore with `uv sync --all-extras` + the pinned cu128
+     torch, never `-U`. After the paid run, save the new cache to `~/ks-saved/<date>/`. Also
+     click-check the open-original link (`19c720a`). The user's own §11 Front Matter Title note
+     ("title = filename") is now only the fallback — theirs to edit, don't touch it.
+  2. **Part 4** — decision 11: `scripts/eval_item_tags.py` (deterministic, manual run) against
+     `evals/golden_item_tags.yaml` (pre-restart baseline, then measured on the rebuilt vault).
+  3. **Decision 10 clean restart** at the new prompt versions → fresh UAT + scoring.
+  4. **Slice B** (ADR-0066 deferred list): real titles on review screens, a readable apply preview,
      untouched-row warning + "next document", queue UX, hiding candidate/unused/dropped tags in
      Obsidian and `index.md`, UAT Guide §10.1 step 3 wording.
 - ADR-0064 deferrals still stand: manual `mark_semantic_duplicate` filing, token-containment /
@@ -439,7 +498,11 @@ critical rules and `CONTEXT.md` for the glossary.
 
 **Operate it** (`docs/Operations.md`): `POST /jobs/lint|stale-check|reindex` (key-free,
 detect-and-propose); review at `/ui/reviews` (flat) or `/ui/reviews/sources` (per-source); apply via
-`POST /reviews/apply` (dry-run first); reconcile stale items via `scripts/reconcile_reviews.py`.
+`POST /reviews/apply` (dry-run first — it returns the `preview_token` Apply requires); reconcile
+stale items via `scripts/reconcile_reviews.py`. A `saved_publication_pending` result → **Retry
+publishing** banner or `scripts/republish.py`; a damaged producer journal →
+`scripts/repair_producer_journal.py`. Confirm each document's Details on its screen (feeds the
+effective title and `wiki/Authors/`).
 **LLM producers** (need a provider for the tier chain — `ANTHROPIC_API_KEY`, or a local model via
 `ENRICH_LOCAL_BASE_URL`, see `docs/Local Models.md`): `scripts/enrich.py` → `extract_claims.py` →
 `extract_items.py` → `promote.py` → `detect_contradictions.py` → `generate_synthesis.py`. Tag
@@ -462,7 +525,8 @@ Re-suggest without billing via `extract_items.py --cache-only`; check/repair the
 
 - Tests: `uv run pytest -q`
 - Lint: `.venv/bin/ruff check app/ scripts/ tests/`
-- Validators: `uv run python scripts/validate_all.py`
+- Validators: `uv run python scripts/validate_all.py` (15)
+- Commits exclude the user's `.vscode/`: `git add -A -- . ':!.vscode'`
 
 ## Key ADRs
 
@@ -501,9 +565,15 @@ placeholder), **0066 (item curation as tagging: per-document keep/drop ledger
 merge/split, journaled identity operations, under_supported_item retired; part 2 = suggestion cap
 `ENRICH_ITEMS_CAP`, domains first, `merge_key` resolution with Use *X*, aliases the user's after
 the first keep and editable, decided statuses outrank re-extraction, lock order ledger-then-graph;
-parts 3–4 open)**, **0067 (request-origin guard: loopback `Host` allowlist + same-origin state
+part 3 = effective titles, Enrich v2 provenance + typed tags into the suggestions, `keywords:`,
+Details confirmation + independence/reconciliation notices, `wiki/Authors/` pages; part 4 + the
+clean restart open)**, **0067 (request-origin guard: loopback `Host` allowlist + same-origin state
 changes; amends 0009's CSRF deferral; with the 0039 consistent-backup / vault writer lock
-amendment)** — full glossary entries in `CONTEXT.md` (historical superseded entries
+amendment)**, **0068 (vault consistency contract: one exclusive write lock for every commit phase,
+per-producer run guards, publication inside the lock + `db/publication_pending.json` queue and
+`saved_publication_pending`, per-document producer commits + commit journal, `(epoch, counter)`
+revision + preview tokens + code/settings fingerprints, bounded graph traversal; amends Build Spec
+§3.2, 0029, 0039, 0040)** — full glossary entries in `CONTEXT.md` (historical superseded entries
 carry supersession notes).
 
 **Path safety:** `app/backend/paths.py` (`safe_under` containment, `safe_child` basename-only) is the
