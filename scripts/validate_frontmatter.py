@@ -14,8 +14,10 @@ if str(ROOT) not in sys.path:
 from app.workers.wiki_render import REVIEW_STATUSES as PAGE_REVIEW_STATUSES  # noqa: E402
 
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
-WIKI_SUBDIRS = ["Sources", "Items", "Claims", "Tags", "Synthesis", "Queries"]
-VALID_TYPES = {"source", "item", "claim", "tag", "synthesis", "query"}
+WIKI_SUBDIRS = ["Sources", "Items", "Claims", "Tags", "Synthesis", "Queries", "Authors"]
+VALID_TYPES = {"source", "item", "claim", "tag", "synthesis", "query", "author"}
+AUTHOR_ROLES = {"author", "publisher"}
+AUTHORS_GENERATOR = "authors-v1"
 # Field contracts per page type (ADR-0016/0020/0021/0022). Source pages use
 # relative_raw_path (never absolute raw_path) and the shared lifecycle fields.
 REQUIRED_BY_TYPE = {
@@ -35,7 +37,23 @@ REQUIRED_BY_TYPE = {
     # No wall-clock fields: a saved Query page is a deterministic derived artifact (ADR-0023/0034),
     # like claim/synthesis pages — byte-stable, so no `created`/`last_compiled_at`.
     "query": ["type", "query_id", "title", "aliases", "question", "status", "review_status"],
+    # ADR-0066 part 3 slice 4: a generated Authors & publishers page (navigation only).
+    "author": ["type", "author_id", "title", "aliases", "name_identity", "roles", "status",
+               "generated_by"],
 }
+
+
+def _author_errors(rel: Path, fm: dict[str, str]) -> list[str]:
+    """`roles` a non-empty, duplicate-free subset of author/publisher; generated pages are active."""
+    out = []
+    raw = fm.get("roles", "")
+    roles = [r.strip() for r in raw.strip("[]").split(",") if r.strip()] if raw else []
+    if not roles or len(set(roles)) != len(roles) or not set(roles) <= AUTHOR_ROLES:
+        out.append(f"{rel}: roles must be a non-empty, duplicate-free subset of "
+                   f"{sorted(AUTHOR_ROLES)} (got {raw!r})")
+    if fm.get("generated_by") == AUTHORS_GENERATOR and fm.get("status") != "active":
+        out.append(f"{rel}: a generated Authors page must be status: active")
+    return out
 
 
 def parse_frontmatter(text: str) -> dict[str, str]:
@@ -69,6 +87,11 @@ def main(argv: list[str] | None = None) -> int:
             text = path.read_text(encoding="utf-8", errors="replace")
             fm = parse_frontmatter(text)
             rel = path.relative_to(root)
+            # Authors/ is code-owned: a file without the generator marker or the type is a
+            # handwritten note, reported by validate_wiki, never validated as a page here.
+            if subdir == "Authors" and fm.get("generated_by") != AUTHORS_GENERATOR \
+                    and fm.get("type") != "author":
+                continue
             if not fm:
                 errors.append(f"{rel}: missing frontmatter")
                 continue
@@ -90,6 +113,8 @@ def main(argv: list[str] | None = None) -> int:
                               "(review state lives in the ledger, owned by no renderer; ADR-0022)")
             if not has_summary(text):
                 errors.append(f"{rel}: missing > [!summary] callout")
+            if page_type == "author":
+                errors.extend(_author_errors(rel, fm))
 
     if errors:
         print("Frontmatter validation failed:")

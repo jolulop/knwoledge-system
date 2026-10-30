@@ -20,6 +20,13 @@
         "a": 1,
         "rgb": 6000111
       }
+    },
+    {
+      "query": "path:Authors",
+      "color": {
+        "a": 1,
+        "rgb": 10181046
+      }
     }
   ],
   "collapse-display": true,

@@ -226,10 +226,19 @@ def _suggested_block(suggested: list[dict[str, Any]] | None) -> str:
             + "\n".join(f"- {n}" for n in names))
 
 
-def _details_block(manifest: dict[str, Any], raw_url: str | None) -> str:
+def _name_list(names: list[tuple[str, str | None]]) -> str:
+    """Confirmed names, each linked to its Authors page when the worker gives a filename (a ticked
+    name on a default-visible document), else plain text; display text is always link-safe."""
+    return ", ".join(f"[[Authors/{f}|{display_link_label(n)}]]" if f else display_link_label(n)
+                     for n, f in names if display_link_label(n))
+
+
+def _details_block(manifest: dict[str, Any], raw_url: str | None,
+                   names: dict[str, list[tuple[str, str | None]]] | None = None) -> str:
     """The Source Details lines a reader browses by: the original (a link to the API's raw view,
-    `GET /raw/<source_id>`, when the worker supplies one), its type and page count. Internal
-    bookkeeping (normalized path, chunks, checksum, language) stays in the frontmatter."""
+    `GET /raw/<source_id>`, when the worker supplies one), its type and page count, and (ADR-0066
+    part 3 slice 4) the confirmed authors and publisher. Internal bookkeeping (normalized path,
+    chunks, checksum, language) stays in the frontmatter."""
     rel = manifest.get("relative_raw_path", "")
     original = f"[open original]({raw_url}) (`{rel}`; needs the app running)" if raw_url else f"`{rel}`"
     lines = [f"- Original: {original}"]
@@ -238,6 +247,10 @@ def _details_block(manifest: dict[str, Any], raw_url: str | None) -> str:
         lines.append(f"- Type: {ext.upper()}")
     if manifest.get("page_count") is not None:
         lines.append(f"- Pages: {manifest['page_count']}")
+    for role, label in (("author", "Authors"), ("publisher", "Publisher")):
+        rendered = _name_list((names or {}).get(role) or [])
+        if rendered:
+            lines.append(f"- {label}: {rendered}")
     return "\n".join(lines)
 
 
@@ -283,6 +296,7 @@ def build_source_values(
     raw_url: str | None = None,
     title: str | None = None,
     keywords: list[str] | None = None,
+    names: dict[str, list[tuple[str, str | None]]] | None = None,
 ) -> dict[str, Any]:
     sid = manifest["source_id"]
     # ADR-0066 part 3: the caller passes the effective title (app/workers/titles.py).
@@ -336,7 +350,7 @@ def build_source_values(
         # ADR-0066 part 3 slice 2: search terms (the kept tags plus the eligible suggestions, from
         # the graph projection), an ordinary property, never Obsidian tags; it replaced `tags:`.
         "keywords": _render_tag_list(list(keywords or [])),
-        "details_block": _details_block(manifest, raw_url),
+        "details_block": _details_block(manifest, raw_url, names),
         "claims_block": _claims_block(claims),
         "items_block": _items_block(items) + _suggested_block(suggested_items),
         # The frontmatter array mirrors the projected body links as an **advisory** slug
@@ -785,6 +799,7 @@ def render_source_page(
     raw_url: str | None = None,
     title: str | None = None,
     keywords: list[str] | None = None,
+    names: dict[str, list[tuple[str, str | None]]] | None = None,
 ) -> str:
     """Render a Source page, stamping its input_fingerprint.
 
@@ -798,7 +813,7 @@ def render_source_page(
     values = build_source_values(
         manifest, normalized_markdown, summary_max=summary_max, summary_min=summary_min,
         enrichment=enrichment, claims=claims, items=items, suggested_items=suggested_items,
-        raw_url=raw_url, title=title, keywords=keywords,
+        raw_url=raw_url, title=title, keywords=keywords, names=names,
     )
     draft = render_template(template, {**values, "input_fingerprint": ""})
     fingerprint = _fingerprint(_FP_LINE.sub("", draft))

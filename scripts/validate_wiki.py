@@ -137,6 +137,63 @@ def _check_page(root: Path, path: Path, manifests: dict[str, dict]) -> list[str]
     return errors
 
 
+_AUTHORS_LINK = re.compile(r"\[\[Authors/([^\]|#]+)")
+
+
+def _check_authors(root: Path, notes: list[str]) -> list[str]:
+    """ADR-0066 part 3 slice 4: `wiki/Authors/` against the inventory and the Source-page links.
+
+    Ownership and validity are separate: a generated page must match the inventory (its roles,
+    listed documents and summary counts, not just resolving links); a generated page the inventory
+    no longer has is a missed prune; a file claiming the generator marker but failing the identity
+    or type checks is an error (it stays protected); a file without the marker is handwritten, only
+    noted."""
+    from app.workers import authors
+    errors: list[str] = []
+    try:
+        pages = {p["filename"]: p for p in authors.inventory(root)}
+    except authors.InventoryError as exc:
+        return [f"Authors: {exc}"]
+    folder = root / "wiki" / authors.DIR
+    files = {p.stem: p for p in sorted(folder.glob("*.md"))} if folder.exists() else {}
+    for stem, path in files.items():
+        state = authors.ownership(path)
+        rel = f"{authors.DIR}/{path.name}"
+        if state == "handwritten":
+            notes.append(f"{rel}: handwritten file (no generator marker) — left as it is")
+            continue
+        if state == "invalid":
+            errors.append(f"{rel}: claims generated_by {authors.GENERATOR} but fails the identity, "
+                          "type or schema checks (left untouched)")
+            continue
+        page = pages.get(stem)
+        if page is None:
+            errors.append(f"{rel}: generated page no confirmed document lists any more (missed prune)")
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if text != authors.render_page(page):
+            errors.append(f"{rel}: differs from the inventory (roles, listed documents or counts)")
+        if not any(ln.strip().startswith("> [!summary]") for ln in text.splitlines()):
+            errors.append(f"{rel}: missing > [!summary] callout")
+    for stem, page in pages.items():
+        if stem not in files:
+            errors.append(f"Authors/{stem}.md: missing (the inventory lists it)")
+    listed = {stem: {d["source_id"] for docs in p["roles"].values() for d in docs}
+              for stem, p in pages.items()}
+    sources = root / "wiki" / "Sources"
+    for path in sorted(sources.glob("*.md")) if sources.exists() else []:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for stem in sorted(set(_AUTHORS_LINK.findall(text))):
+            if path.stem not in listed.get(stem, set()):
+                errors.append(f"Sources/{path.name}: links Authors/{stem}, which doesn't list it")
+    for stem, sids in listed.items():
+        for sid in sorted(sids):
+            page = sources / f"{sid}.md"
+            if page.exists() and f"[[Authors/{stem}|" not in page.read_text(encoding="utf-8"):
+                errors.append(f"Authors/{stem}.md lists {sid}, whose Source page doesn't link back")
+    return errors
+
+
 def main(argv: list[str]) -> int:
     root = Path(argv[0]).resolve() if argv else Path.cwd()
     sources_dir = root / "wiki" / "Sources"
@@ -152,6 +209,11 @@ def main(argv: list[str]) -> int:
     for sid, manifest in manifests.items():
         if manifest.get("ingestion_status") in _EXTRACTED and sid not in page_ids:
             errors.append(f"{sid}: extracted source has no Source page (coverage gap)")
+
+    notes: list[str] = []
+    errors.extend(_check_authors(root, notes))
+    for note in notes:
+        print(f"note: {note}")
 
     if errors:
         print("Wiki validation failed:")

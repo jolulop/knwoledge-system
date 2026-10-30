@@ -109,8 +109,39 @@ def _rebuild_index_status(root: Path) -> str:
     script = Path(root) / "scripts" / "rebuild_index.py"
     if not script.exists():
         return "missing"
-    return "rebuilt" if subprocess.run(
-        [sys.executable, str(script), str(root)]).returncode == 0 else "failed"
+    # Publication holds the write lock; the subprocess must not take it again (the lock is
+    # re-entrant per thread, not across processes). The flag is internal: a standalone run locks.
+    # A timeout turns a stuck rebuild into a failed (pending) index step, never a hang.
+    try:
+        proc = subprocess.run([sys.executable, str(script), str(root), _PARENT_HOLDS_LOCK],
+                              timeout=_INDEX_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        return "failed"
+    return "rebuilt" if proc.returncode == 0 else "failed"
+
+
+_INDEX_TIMEOUT_S = 300
+
+
+_PARENT_HOLDS_LOCK = "--parent-holds-write-lock"   # internal to publication (ADR-0066 part 3 slice 4)
+
+
+def _publish_authors(root: Path, wiki_dir: Path, out: dict[str, Any]) -> bool:
+    """Render and prune `wiki/Authors/` (ADR-0066 part 3 slice 4), the first part of the index step.
+    Returns False (index and keyword work stay pending) on unreadable manifests or a collision."""
+    from app.workers import authors
+    try:
+        res = authors.publish(root, wiki_dir=wiki_dir)
+    except authors.InventoryError as exc:
+        out["warnings"].append(f"authors_publication_failed:{exc}")
+        return False
+    except Exception as exc:  # noqa: BLE001 - outstanding, reported
+        out["warnings"].append(f"authors_publication_failed:{type(exc).__name__}")
+        return False
+    out["authors_written"], out["authors_removed"] = res["written"], res["removed"]
+    for c in res["conflicts"]:
+        out["warnings"].append(f"authors_conflict:{c['file']}:{c['state']}")
+    return not res["conflicts"]
 
 
 def _open_graph(root: Path) -> tuple[Any, bool]:
@@ -345,10 +376,17 @@ def publish(root: Path, *, intent: str | None = None, sources: Any = (), items: 
 
         index_failed = keyword_failed = False
         if any(e["index"] or e["full"] for e in entries):
-            index_status = _rebuild_index_status(root)
-            out["index_rebuilt"] = index_status == "rebuilt"
-            index_failed = index_status == "failed"       # "missing": a degraded env, not a failure
-        if any(e["keyword"] or e["full"] for e in entries):
+            # Authors pages → index.md → search (ADR-0066 part 3 slice 4): a failure of the first two
+            # keeps the index and the keyword work pending, so search never links pages that failed.
+            if _publish_authors(root, wiki_dir, out):
+                index_status = _rebuild_index_status(root)
+                out["index_rebuilt"] = index_status == "rebuilt"
+                index_failed = index_status == "failed"   # "missing": a degraded env, not a failure
+            else:
+                index_failed = True
+        if index_failed:
+            keyword_failed = any(e["keyword"] or e["full"] for e in entries)
+        elif any(e["keyword"] or e["full"] for e in entries):
             try:
                 keyword_index.reindex(root)
                 out["keyword_reindexed"] = True

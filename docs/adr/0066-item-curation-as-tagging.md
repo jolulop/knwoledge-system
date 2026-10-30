@@ -20,7 +20,8 @@
   2026-10-30** (form-level refusals and the baseline token, the provenance shape, reconciliation
   notices, the no-JavaScript form) **and implemented 2026-10-30**; **slice 4 design-locked by its
   grill 2026-10-30** (the page schema and ownership marker, listing and linking under source
-  visibility, one inventory builder for pages and index). Item
+  visibility, one inventory builder for pages and index) **and implemented 2026-10-30** — part 3 is
+  complete. Item
   consolidation Part B ("Slice A" of the post-UAT-r6 plan); follows ADR-0064 (Part A). **Review
   round 1 applied 2026-10-24** (see the section at the end): durable keep ledger, merge/split and
   unused-status rules, ambiguous-match path, sentinel gate, confirmed-vs-suggested metadata, the
@@ -1197,6 +1198,93 @@ rest.
 - **Required tests:** an empty inventory; deterministic ordering; malformed manifests before any
   pruning; a malformed generator-owned page; a role or count mismatch; the index rebuilt both
   standalone and from publication.
+
+## Implementation — part 3 slice 4 (2026-10-30): Authors & publishers pages
+
+- **`app/workers/authors.py`:** `filename_for` (plain slug for a lossless identity, else
+  `<slug>--<8 hex>`, `unnamed` for an empty slug); `linked_names` (a document's confirmed names per
+  role, with a filename only for a ticked name on a confirmed, default-visible document);
+  `inventory` (read-only and deterministic; it first checks that every manifest parses, since
+  `valid_manifests` skips unparseable files silently, and raises `InventoryError` on any problem;
+  titles are the most common spelling among listed documents, ties to the first in code-point
+  order; aliases sorted); `render_page` (the Q1 schema; frontmatter names JSON-encoded with brackets escaped, body names
+  through `display_link_label` — see review round 1); `ownership` (`owned` / `invalid` / `handwritten`);
+  `publish` (renders changed pages, prunes owned pages the inventory dropped, reports collisions
+  with handwritten, invalid or other-identity files and leaves them untouched).
+- **Publication** (`publication.publish`): the `index` step runs the Authors pages first
+  (`_publish_authors`); unreadable manifests or a collision keep the entry's index **and keyword**
+  work pending (warnings `authors_publication_failed:…` / `authors_conflict:<file>:<state>`), and
+  an index failure now also keeps the keyword work pending (Authors → index → search). The
+  `rebuild_index.py` subprocess gets the internal `--parent-holds-write-lock` flag.
+- **`scripts/rebuild_index.py`:** the `## Authors & publishers` section from the same inventory
+  (omitted when empty). It now imports the app package for it and **fails rather than dropping
+  the section** when the package or a manifest can't be read. Run standalone it takes the write
+  lock (`authority=False, changes=False`). It is therefore no longer dependency-free; one existing
+  test that copied the script alone into a vault now copies `app/` beside it, as the Apply sandbox
+  does.
+- **Source pages:** the Source Details block lists the confirmed authors and publisher, linking
+  `[[Authors/<file>|<this document's spelling>]]` exactly where `linked_names` gives a filename
+  (ADR-0060 requires a non-empty alias, not the target's current title, so another document's
+  confirmation never stales these links); other names are plain, link-safe text.
+- **Validators:** `validate_frontmatter` covers `wiki/Authors/` (the `author` type, its required
+  fields, `roles` and `status: active`); files with neither the marker nor the type are skipped
+  there as handwritten. `validate_wiki` checks every generated page against the inventory
+  (byte-for-byte against `render_page`, so roles, lists and counts all count), missed prunes,
+  missing pages, invalid marker-claiming files (errors), Source-page Authors links and their
+  backlinks; handwritten files are printed as notes only.
+- **Obsidian:** the committed graph preset (`wiki/.obsidian/graph.json`) gains the `path:Authors`
+  colour group, and the UAT Guide's Obsidian section explains the generated pages; the user's
+  hand-added notes are untouched.
+- **Tests:** `tests/test_authors.py` covers every test the grill required: filename rules,
+  inventory rules (ticks, confirmation, visibility, spellings, ordering, empty), a malformed
+  manifest before pruning, the schema and safe names, each failed ownership condition, a forced
+  hash collision, pruning (rename, untick, shared names), Source-page links under visibility
+  (hiding one and the last reference, unhide restoring), publication (pages then index, a
+  collision keeping index and keyword pending and recovering), the index section standalone
+  (with its own lock) and from publication, the validators, name search and answer
+  ineligibility.
+- **The index subprocess has a timeout** (`_INDEX_TIMEOUT_S`, 300 s): a stuck rebuild becomes a
+  failed, pending index step instead of a hang. (Found by the mutation run: without the lock flag
+  the subprocess waits forever for the lock its parent holds.)
+- **Verification:** 1884 passed + 2 skipped; ruff, `git diff --check` and all 15 validators clean.
+  `tests/test_authors.py` has 31 tests. 26 mutation checks, all caught — three only after a sharper
+  test (a document title with a `|`; the standalone lock checked from a deleted lock file; a missed
+  prune validated with the Source page already re-rendered) — and the missing-lock-flag mutant by
+  the deadlock it causes.
+- **Review round 1 on slice 4 (2 P1, 1 P2, 1 non-blocking, fixed):**
+  - *Names that didn't round-trip (P1).* A name ending in a quote or apostrophe (`Eve "Smith"`,
+    `O'Connor'`) rendered fine but failed `ownership` at once, because the parser stripped the
+    trailing quote before comparing identities, so every retry reported a conflict; an alias with
+    a backslash (`ACME\quality`) made invalid YAML. Frontmatter strings are now JSON-encoded
+    (`_q`, a valid YAML double-quoted scalar, brackets escaped as `\u005b`/`\u005d`), aliases as
+    a flow list of those, and `read_frontmatter` decodes them exactly; `ownership` and the
+    collision check both use it.
+  - *Interrupted writes (P1).* A page was written in place, so a crash after truncation left
+    incomplete frontmatter that the next retry took for a handwritten or invalid file and refused
+    to replace. Pages are now written to a temporary sibling, flushed and fsynced, then atomically
+    replaced (directory fsynced); the temporary file is removed on failure.
+  - *Malformed provenance in valid JSON (P2).* `provenance.authors: "Ada Lovelace"` silently
+    produced no names and could prune a page while publication reported success.
+    `manifests.provenance_problem` (the same field checks `confirm_details` enforces) now runs over
+    every manifest before any write or prune; a problem raises `InventoryError` and the entry
+    stays pending.
+  - *One vote per document (non-blocking).* A document naming someone as both author and
+    publisher counted twice toward the title; spelling votes are now one per (identity, document),
+    matching "the most common spelling among documents".
+  - *Tests:* repeated publication of quote/apostrophe/backslash/bracket names (ownership, YAML
+    parsed by PyYAML, aliases preserved, a retry writes nothing); a write failing half-way during
+    both creation and replacement, after which the old page or no page remains, no temporary file
+    is left, and a plain retry recovers; parseable manifests with malformed provenance (existing
+    page unchanged, publication pending); title selection with both roles in one document.
+    `tests/test_authors.py` now has 36 tests; the four fixes' mutants (naive quoting, direct
+    write, no provenance check, a vote per role) are all caught. Gate: 1889 passed + 2 skipped;
+    ruff, `git diff --check` and all 15 validators clean.
+- **Sign-off on slice 4, with one non-blocking edge case (fixed):** deduplicating the spelling
+  votes also dropped aliases (author `Ada` and publisher `ADA` in one document gave only
+  `aliases: ["Ada"]`). Aliases are now collected separately from the votes: every listed spelling
+  is an alias, and each document still casts one title vote. Regression test: a single document
+  with both spellings keeps both as aliases and takes the author's spelling as the title (a vote
+  per role would tie and pick `ADA`); both mutants caught. `tests/test_authors.py` has 37 tests.
 
 ## Consequences
 

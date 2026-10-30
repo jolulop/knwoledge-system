@@ -346,6 +346,18 @@ def _check_field(key: str, value: Any) -> Any:
     return value.strip()
 
 
+def provenance_problem(prov: dict[str, Any]) -> str | None:
+    """Why a stored provenance block is malformed (a shape `set_provenance` would refuse), or None.
+    Readers that act on confirmed names (the Authors pages) refuse to act on such a block."""
+    for key in ("title", "authors", "author", "publisher", "report_family", "canonical_url"):
+        if prov.get(key) is not None:
+            try:
+                _check_field(key, prov[key])
+            except ValueError as exc:
+                return f"provenance {key}: {exc}"
+    return None
+
+
 def set_provenance(manifests_dir: Path, source_id: str, **fields: Any) -> dict[str, Any] | None:
     """Set provenance fields on a manifest (the single write path); returns it or None.
 

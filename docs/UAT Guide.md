@@ -480,9 +480,15 @@ find wiki -maxdepth 2 -type f | sort | less
 
 The clone ships a committed graph-view preset (`wiki/.obsidian/graph.json`): the **Claims** layer is
 filtered out (`-path:Claims`), the `index`/`log` hub pages are hidden (`-file:index -file:log`), and
-**Sources**/**Items** are color-coded, so the graph opens as a
+**Sources**/**Items**/**Authors** are color-coded, so the graph opens as a
 readable ~120-node knowledge map instead of all ~460 pages. To see a page's claims, open it and use
 **"Open local graph"** (command palette) rather than un-filtering the global view.
+
+**Authors & publishers pages** (`wiki/Authors/`, ADR-0066 part 3) have their own colour group
+(`path:Authors`, in the same preset). They are **generated**: a page appears when a document's
+Details are confirmed with "show page" ticked, and lists only those documents. Edits made to them in
+Obsidian are overwritten on the next publication; change the Details on the document screen
+instead. A note of your own in that folder (without the `generated_by` marker) is left alone.
 
 Install Front Matter Title (by Snezhig). Your UAT Guide covers it under §11, "Readable titles". Obsidian's graph labels nodes by filename, and page files are deliberately named by id (src_…, itm_…). The plugin swaps in each page's frontmatter title: instead.
 

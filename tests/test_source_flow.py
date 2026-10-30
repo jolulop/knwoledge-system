@@ -524,9 +524,13 @@ def test_human_add_rebuilds_wiki_index(tmp_path):
     _build(tmp_path, {"a.md": "alpha body"})
     _extract(tmp_path, RoutingAdapter({"alpha": {"items": [_item("Existing")]}}))
     a = _sids(tmp_path)["a.md"]
-    # The producer index seam runs root/scripts/rebuild_index.py (dependency-free by design).
+    # The producer index seam runs root/scripts/rebuild_index.py. Since ADR-0066 part 3 slice 4 it
+    # imports the app package (the Authors inventory), so the vault needs app/ beside it, as the
+    # Apply sandbox copies them.
     (tmp_path / "scripts").mkdir(exist_ok=True)
     shutil.copy(SCRIPTS / "rebuild_index.py", tmp_path / "scripts" / "rebuild_index.py")
+    shutil.copytree(SCRIPTS.parent / "app", tmp_path / "app",
+                    ignore=shutil.ignore_patterns("__pycache__"))
 
     out = _human_add(tmp_path, source_id=a, item_type="method_technique", title="Indexed Fresh")
     assert out["outcome"] == "created" and out["index_rebuilt"] is True

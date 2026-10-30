@@ -23,7 +23,7 @@ from typing import Any
 from app.backend import db, graph, write_lock
 from app.backend.config import get_settings
 from app.backend.manifests import iso_now, load_manifest, valid_manifests
-from app.workers import enrichment_artifact, labels, titles, wiki_render
+from app.workers import authors, enrichment_artifact, labels, titles, wiki_render
 
 
 def _claim_label(claims_dir: Path, claim_id: str) -> str | None:
@@ -241,6 +241,7 @@ def generate_wiki(
                         manifest, enrichment=enrichment,
                         hint=titles.read_metadata_hint(logs_dir, source_id)),
                     keywords=keywords,
+                    names=authors.linked_names(manifest),   # ADR-0066 part 3 slice 4
                 )
             except Exception as exc:  # one page's failure must not abort the run
                 return {"source_id": source_id, "error": f"{type(exc).__name__}: {exc}"}

@@ -2,7 +2,11 @@
 """Rebuild wiki/index.md from frontmatter and > [!summary] callouts.
 
 Dependency-free by design. The parser intentionally supports only the frontmatter
-subset used by this project: scalar `key: value` lines and simple bracket lists.
+subset used by this project: scalar `key: value` lines and simple bracket lists. One exception
+(ADR-0066 part 3 slice 4): the "Authors & publishers" section comes from
+`app.workers.authors.inventory`, the same read-only builder publication renders the Authors pages
+from, so the two never disagree. Run standalone it takes the write lock itself (`changes=False`);
+publication, which already holds it, passes an internal flag instead.
 """
 from __future__ import annotations
 
@@ -141,7 +145,22 @@ def collect_pages(wiki_root: Path) -> dict[str, list[dict[str, Any]]]:
     return sections
 
 
-def render_index(sections: dict[str, list[dict[str, Any]]]) -> str:
+def authors_section(people: list[dict[str, Any]]) -> list[str]:
+    """`## Authors & publishers` (ADR-0066 part 3 slice 4): one line per page, alphabetical by
+    title, with its role counts; nothing when the inventory is empty."""
+    if not people:
+        return []
+    lines = [f"## Authors & publishers ({len(people)})", ""]
+    for p in people:
+        counts = [f"{role} of {len(p['roles'][role])}" for role in ("author", "publisher")
+                  if p["roles"][role]]
+        label = display_link_label(p["title"]) or p["filename"]
+        lines.append(f"- [[Authors/{p['filename']}|{label}]] — {', '.join(counts)}")
+    return lines + [""]
+
+
+def render_index(sections: dict[str, list[dict[str, Any]]],
+                 people: list[dict[str, Any]] | None = None) -> str:
     # Deterministic: a pure function of the wiki pages, no wall-clock (ADR-0023).
     lines: list[str] = [
         "# Index",
@@ -193,21 +212,45 @@ def render_index(sections: dict[str, list[dict[str, Any]]]) -> str:
         for page in pages:
             lines.extend(_page_lines(page))
         lines.append("")
+    lines.extend(authors_section(people or []))
     return "\n".join(lines).rstrip() + "\n"
 
 
-def main() -> int:
-    project_root = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path.cwd()
-    wiki_root = project_root / "wiki"
-    if not wiki_root.exists():
-        print(f"error: wiki directory not found at {wiki_root}", file=sys.stderr)
-        return 2
+_PARENT_HOLDS_LOCK = "--parent-holds-write-lock"   # internal: passed only by publication
+
+
+def _people(project_root: Path) -> list[dict[str, Any]]:
+    """The Authors inventory. Never silently empty: without the app package, or with an unreadable
+    manifest, the rebuild fails, and publication keeps the index work pending."""
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+    from app.workers import authors
+    return authors.inventory(project_root)
+
+
+def _build(project_root: Path, wiki_root: Path) -> int:
     sections = collect_pages(wiki_root)
-    output = render_index(sections)
+    output = render_index(sections, _people(project_root))
     index_path = wiki_root / "index.md"
     index_path.write_text(output, encoding="utf-8")
     print(f"rebuilt {index_path} with {sum(len(v) for v in sections.values())} pages", file=sys.stderr)
     return 0
+
+
+def main() -> int:
+    args = [a for a in sys.argv[1:] if a != _PARENT_HOLDS_LOCK]
+    project_root = Path(args[0]).resolve() if args else Path.cwd()
+    wiki_root = project_root / "wiki"
+    if not wiki_root.exists():
+        print(f"error: wiki directory not found at {wiki_root}", file=sys.stderr)
+        return 2
+    if _PARENT_HOLDS_LOCK in sys.argv[1:]:
+        return _build(project_root, wiki_root)
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+    from app.backend import write_lock
+    with write_lock.hold(project_root / "reviews", authority=False, changes=False):
+        return _build(project_root, wiki_root)
 
 
 if __name__ == "__main__":
