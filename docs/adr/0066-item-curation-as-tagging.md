@@ -16,7 +16,9 @@
   grill 2** (2026-10-29: suggestions in the Enrich artifact, Authors pages in publication's index
   step, name identity and filenames, the Details save model, four slices). **Slice 1 implemented
   2026-10-29**; **slice 2 design-locked by its grill and implemented 2026-10-29** (plan freshness and
-  the stored raw list, the both-lists match, `keywords:`). Item
+  the stored raw list, the both-lists match, `keywords:`); **slice 3 design-locked by its grill
+  2026-10-30** (form-level refusals and the baseline token, the provenance shape, reconciliation
+  notices, the no-JavaScript form). Item
   consolidation Part B ("Slice A" of the post-UAT-r6 plan); follows ADR-0064 (Part A). **Review
   round 1 applied 2026-10-24** (see the section at the end): durable keep ledger, merge/split and
   unused-status rules, ambiguous-match path, sentinel gate, confirmed-vs-suggested metadata, the
@@ -634,7 +636,9 @@ decision 6's "two names that slug alike get a short hash suffix").
 - **One commit for the whole Save** (ADR-0068 screen action: one hold, one publication intent,
   `sources=[sid]`, `index=True`). Tag decisions and details are validated together: title not
   empty, each name non-empty and normalizable, no duplicate normalized names among the authors.
-  Any error writes **nothing**, and the form shows the errors with the values kept.
+  Any error writes **nothing**, and the form shows the errors with the values kept. *(Refined by
+  the slice-3 grill Q1: any **form-level** error writes no authority changes; per-row tag skips
+  stay non-fatal.)*
 - **Revalidated under the lock against what the form displayed:** the source's lifecycle, its tag
   decisions and its existing confirmation. A concurrent Details edit (or tag change) since the
   form was rendered refuses the save as a stale form, never overwriting it. The form carries
@@ -656,11 +660,13 @@ decision 6's "two names that slug alike get a short hash suffix").
   can. Merely unequal lists are not enough. The publisher compares by its normalized identity.
   Confirmation timestamps and artifact fingerprints never affect independence.
 - **Producers reconsider on their next run, visibly:** a save never re-runs synthesis or
-  contradiction detection. Their freshness checks include the independence inputs (the involved
-  sources' confirmed, normalized provenance), so a provenance change is never skipped as
-  "fresh"; results whose recorded inputs differ from the current ones are reported as awaiting
-  reconciliation (on the document screen after the save, and by the maintenance report) until
-  that run. A topic that becomes ineligible is retracted by synthesis step 3.
+  contradiction detection. *(Amended by the slice-3 grill Q3:)* both producers already recompute
+  independence from current provenance on every run (synthesis eligibility; contradiction
+  candidate pairs, with pairs that left the set superseded), so a provenance change is never
+  skipped as "fresh" and no model fingerprint changes. Recorded per-document digests only report
+  what is still **awaiting reconciliation** (on the document screen after the save, and by the
+  maintenance report) until that run. A topic that becomes ineligible is retracted by synthesis
+  step 3.
 - **Legacy manifests:** a string `author` is read as a one-name list; manifests are not
   rewritten (the clean restart follows).
 - **Required tests:** combined validation failure writes nothing; concurrent Details saves (the
@@ -912,6 +918,133 @@ would have removed the Enrich tag names from search.
      (`RECOVER_COMMAND`). Test: the printed command, run as printed, restores the raw list.
   6 mutation checks on these fixes, all caught (the rejected-pair one after the candidate-node
   test). `tests/test_enrich_tags.py` now has 29 tests. Gate: 1807 passed + 2 skipped.
+
+## Part 3 slice 3 — grill (2026-10-30): Details confirmation
+
+Grill 2 Q4 fixed the save model. This pass settles what it left open.
+
+**Q1. Form-level refusals abort the Save; row-level tag skips stay non-fatal.**
+- **Form-level refusals** write no authority changes, tags included; the form shows the reason
+  with every submitted value preserved:
+  - **invalid Details** (an empty title, an empty or unnormalizable name, a duplicate normalized
+    author);
+  - **a stale form:** the form carries a **baseline token**, a digest of what it displayed —
+    the source's lifecycle status, this document's tag-ledger state, its confirmed provenance,
+    and the **actual displayed Details values and suggestions** (the Enrich output and the
+    fallback values shown), not merely Enrich's input fingerprint, since a forced Enrich run can
+    return a different title or authors under the same fingerprint;
+  - **Details edited without the tick:** "tick *These details are correct* to save the details,
+    or undo your edits"; the edits are neither saved nor silently dropped.
+- **"Touched" is judged against the displayed baseline:** the tick is set, or a submitted Details
+  field differs from the value the form displayed (carried with the form), never from values
+  freshly loaded during the POST, so a concurrent update can't make an untouched tags-only
+  submission look like a Details edit. Details are validated only when touched: unchanged or
+  absent Details never obstruct pure tagging, and a tags-only Save keeps today's per-row
+  revalidation with no new stale-form refusal.
+- **Under the write lock, one commit phase:**
+  1. if Details are touched, validate the baseline token, the fields and the tick, before any
+     tag or Details write;
+  2. on refusal, write nothing and report the form-level reason, values preserved;
+  3. otherwise process the tag rows with today's revalidation and skip reporting, save the
+     confirmed Details, and publish through one intent.
+- **Atomicity is at the validation level:** the lock makes the checks and writes one serialized
+  phase, but the writes span several files (ledgers, graph, manifest) and are not crash-atomic.
+  A crash part-way can leave some tag decisions saved without the Details; the publication queue
+  covers the projections, and the user saves the Details again.
+- **Required tests:** a tags-only submission after a concurrent Details change is accepted (rows
+  revalidated, no stale refusal); a same-fingerprint Enrich output change makes a Details save
+  stale; Details edited without the tick are refused with nothing written; a valid Details save
+  containing one skipped tag row saves the Details and reports the skip.
+
+**Q2. Confirmed Details in the manifest's `provenance`** (`set_provenance` stays the one write
+path).
+- **Keys:** `title` (string); `authors` (a new plural key: an ordered list of `{name,
+  show_page}`); `publisher` (`{name, show_page}`; the same key, which still reads a legacy
+  string); `confirmed_at`; `confirmed_baseline` (the Q1 digest of what the person saw, replacing
+  grill 2's `confirmed_from_artifact`). `report_family` and `canonical_url` are unchanged.
+- **Precedence and legacy values:** `authors` wins whenever present, **even an empty list**; the
+  legacy string `author` is read (as `[{name, show_page: false}]`) only when `authors` is absent.
+  A legacy string `publisher` reads as `{name, show_page: false}`. Legacy values were set by a
+  person (ADR-0018), so they count as confirmed. Nothing is rewritten until a confirmation: the
+  first one writes the new keys and removes the legacy `author`.
+- **Independence** (`manifests.independent_sources`): authors compare as sets of `name_identity`
+  values, and **any shared author** means the author field establishes shared provenance:
+  {Alice, Bob} and {Alice, Carol} are not independent, and merely unequal sets are not enough.
+  The publisher compares by its identity. The existing rule is kept: independent only if at
+  least one comparable field differs and no comparable field is shared. `show_page`,
+  `confirmed_at` and `confirmed_baseline` never take part. **`confirmed_baseline` is an audit
+  record only**: never an independence input, never a producer-freshness input.
+- **Clear** removes `title`, `authors`, `publisher`, the legacy `author`, `confirmed_at` and
+  `confirmed_baseline`, and keeps `report_family`, `canonical_url` and everything else. Independence
+  may therefore stay established through those fields: the UI never promises that a Clear makes
+  it unknown.
+- **Validation matches Q1:** a confirmed title is non-empty after cleaning; each author and the
+  publisher name is non-empty after cleaning; duplicate normalized authors are rejected;
+  `show_page` must be a boolean. An explicit clear (Clear, or `None` through `set_provenance`) is
+  distinct from malformed input, which is rejected.
+- **Required tests:** overlapping and reordered author sets; `authors` vs legacy `author`
+  precedence (an empty `authors` included); mixed publisher shapes; strict validation; Clear
+  keeping unrelated provenance.
+
+**Q3. "Awaiting reconciliation" from per-document digests the producers record.**
+- **One shared normalization** (used by `independent_sources` and the digest alike): a document's
+  independence inputs are its normalized author identity set, publisher identity,
+  `report_family` and `canonical_url`. Author order, spelling variants covered by
+  `name_identity`, `show_page`, the title and confirmation timestamps never change the digest.
+- **Recorded from what the run actually used:** each `generate_synthesis` and
+  `detect_contradictions` run captures the digests of the provenance it used for its eligibility
+  decisions (not current provenance read at job completion: Details may change during a model
+  call). Before acknowledging, it verifies those inputs under the write lock; a document whose
+  inputs changed meanwhile stays awaiting reconciliation (or is recomputed and reconciled first).
+  Only documents covered by a **completed** reconciliation are acknowledged: failed, partial or
+  out-of-scope work never clears a notice. The acknowledged digests go in the run's job metadata.
+- **Awaiting reconciliation,** per producer independently: the document's current digest differs
+  from the one that producer last acknowledged. A Clear is a transition to the remaining inputs,
+  detected the same way. Only a document with **no provenance and no prior reconciliation
+  history** gets no warning just because no producer has run yet. Clearing the last provenance
+  field is still a change: when a producer acknowledged a non-empty digest before, the empty
+  state differs from it, so the document is awaiting reconciliation (the next run may need to
+  withdraw assertions that relied on the old independence). A document with provenance whose
+  acknowledging job history is missing or pruned is conservatively *not known to be reconciled*.
+- **Shown:** on the document screen after a Details save or Clear, naming whichever producer is
+  pending ("Synthesis hasn't run since these details changed", and/or the same for contradiction
+  detection); and in the maintenance report (`lint`), listing documents and the producer to run.
+  Report-only: no validator fails.
+- **Required tests:** a provenance change during a run stays awaiting; a partial run acknowledges
+  only what it completed; Clear; **Clear to empty** (the last provenance field removed after an
+  acknowledged run shows awaiting reconciliation); display-only edits (title, `show_page`, author order or
+  spelling variants) raise no notice; each producer acknowledges independently.
+
+**Q4. The Details form, without JavaScript.**
+- **Prefill:** the confirmed values when there are any; otherwise Enrich's fresh suggestions;
+  otherwise the fallback title (filtered PDF title or filename) with no authors or publisher.
+- **Fields:** the title (one input); the authors as one row each, in order (a name input, a
+  **show page** checkbox and a small order-number field), plus three empty rows; the publisher
+  (a name input and a **show page** checkbox).
+- **Draft-only actions** (POSTs that re-render the form and write nothing — no tag decision, no
+  provenance, no publication):
+  - **Add author rows** adds three empty rows. (Using a Save without the tick for this would
+    clash with Q1's refusal of unconfirmed Details edits.)
+  - **Use these**, beside "Enrich now suggests …" (shown when confirmed details differ from the
+    current Enrich suggestion), replaces the Details fields with the suggestion, preserves the
+    pending tag selections and every other form value, and leaves the tick unset.
+- **Checkbox defaults only at server-rendered prefill:** a name that already has an Authors page
+  is pre-ticked "show page" when the server fills the row. A `<datalist>` of the vault's confirmed
+  names offers existing spellings, but can't tick anything when a name is typed or picked. A
+  submitted choice is preserved exactly, unchecked included (each row carries a hidden marker, so
+  an absent checkbox reads as unchecked); an existing Authors page never overrides it.
+- **Authors parsing:** blank rows (cleared ones included) are dropped before validation; the
+  remaining names are validated and de-duplicated, then ordered by the number field, with row order
+  as the tie-breaker.
+- **Status line:** "Details confirmed on <date>" with the **Clear confirmed details** button; or,
+  when unconfirmed, "Suggestions from Enrich" only when fresh suggestions exist, otherwise naming
+  the fallback ("Title from the PDF metadata" / "Title from the file name"). Clear is its own form,
+  outside the main form (HTML forms can't nest), or a button tied to a separate form through the
+  `form` attribute.
+- **The tick box** "These details are correct" sits beside the single Save.
+- **Required tests:** draft actions preserve tag selections and write nothing; cleared author
+  rows; stable ordering; checkbox choices preserved (an unchecked box against an existing page);
+  editing Details without confirming.
 
 ## Consequences
 
