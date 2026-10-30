@@ -38,7 +38,7 @@ from app.backend import db, graph, write_lock
 from app.backend.manifests import get_provenance, independent_sources, iso_now, valid_manifests
 from app.llm import prompts
 from app.llm.client import LLMClient, ParseError
-from app.workers import claims, publication, reviews
+from app.workers import claims, publication, reconciliation, reviews
 from app.workers import enrichment_artifact as art
 
 _CLAIM_TEXT_RE = re.compile(r'(?m)^claim_text:\s*"(.*)"\s*$')
@@ -319,6 +319,7 @@ def detect_contradictions(
         # ADR-0068: steps 1-4 are deterministic and commit under the write lock in one phase, which
         # records its intent first (`full`: the claims it changes are not known up front).
         stale = 0
+        captured: dict[str, str] = {}         # independence digests this run decides with
         with write_lock.hold(reviews_dir):
             intent = run.intent(full=True, refresh=False)
             # 1. Apply human decisions made since the last run (deterministic; runs without a key).
@@ -329,6 +330,8 @@ def detect_contradictions(
             # 2. Recompute candidate pairs from the current active graph.
             _valid, _skipped_invalid = valid_manifests(manifests_dir)
             prov = {m["source_id"]: get_provenance(m) for m in _valid}
+            # ADR-0066 part 3 slice 3: the independence inputs this run decides with.
+            captured = reconciliation.capture(prov)
             pairs = candidate_pairs(gconn, prov)
             pair_keys = {(p["claim_a"], p["claim_b"]) for p in pairs}
             active_claims = set(graph.active_node_ids_of_type(gconn, "claim"))
@@ -459,6 +462,10 @@ def detect_contradictions(
         else:
             status = "succeeded"
         status = publication.job_status(status, pub)
+        # ADR-0066 part 3 slice 3: a completed run acknowledges the documents whose independence
+        # inputs are still the ones it decided with (read under the lock, so none lands between).
+        with write_lock.hold(reviews_dir, changes=False):
+            acknowledged = reconciliation.verify(manifests_dir, captured, status)
 
         summary: dict[str, Any] = {
             "job_id": job_id, "model_ref": model_ref, "status": status,
@@ -474,6 +481,7 @@ def detect_contradictions(
             "resolutions_rejected": resolution["rejected"],
             "supersede_executed": resolution["superseded_executed"],
             "manifests_skipped_invalid": len(_skipped_invalid),
+            "independence_acknowledged": acknowledged,
             "errors": len(errors), "error_details": errors, "detected_at": now,
         }
         if conn is not None:

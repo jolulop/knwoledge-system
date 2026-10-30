@@ -1798,4 +1798,33 @@ def source_review_view(reviews_dir: Path, source_id: str, *, graph_db: Path | No
     view["next_source"] = next(
         (s["source_id"] for s in flow["sources"]
          if s["counts"]["remaining"] and s["source_id"] != source_id), None)
+    if manifests_dir is not None:
+        view.update(details_section(reviews_dir, source_id, manifests_dir=Path(manifests_dir),
+                                    enrichment_dir=_enrichment_dir(wiki_dir, enrichment_dir)))
     return view
+
+
+def details_section(reviews_dir: Path, source_id: str, *, manifests_dir: Path,
+                    enrichment_dir: Path) -> dict[str, Any]:
+    """The Details block of the document screen (ADR-0066 part 3 slice 3): what it shows, the
+    vault's confirmed names, and the baseline token a Save must still match."""
+    from app.workers import details as details_mod
+    from app.workers import tag_links  # lazy: the worker imports the read model
+    manifest = manifests.load_manifest(manifests_dir, source_id)
+    if manifest is None:
+        return {}
+    root = Path(reviews_dir).parent
+    md_path = root / "normalized" / "markdown" / f"{source_id}.md"
+    markdown = md_path.read_text(encoding="utf-8") if md_path.exists() else ""
+    known, paged = details_mod.vault_names(manifests_dir)
+    shown = details_mod.view(manifest, markdown=markdown, enrichment_dir=enrichment_dir,
+                             logs_dir=root / "normalized" / "extraction_logs", paged=paged)
+    try:
+        ledger = tag_links.load_ledger(reviews_dir, source_id)
+    except tag_links.LedgerCorrupt as exc:
+        ledger = {"corrupt": exc.problem}
+    from app.workers import reconciliation
+    waiting = reconciliation.awaiting(manifests_dir, root / "db" / "jobs.sqlite", source_id=source_id)
+    return {"details": shown | {"known_names": known,
+                                "baseline": details_mod.baseline_token(manifest, ledger, shown),
+                                "pending": [reconciliation.PRODUCERS[p] for p in sorted(waiting)]}}

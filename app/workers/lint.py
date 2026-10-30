@@ -483,6 +483,24 @@ def _check_stale_claims(gconn, enrichment_dir: Path,
     return findings, degraded
 
 
+def _check_awaiting_reconciliation(manifests_dir: Path | None,
+                                   jobs_db: Path | None) -> list[dict[str, Any]]:
+    """`awaiting_reconciliation` findings: one per (producer, document) whose confirmed independence
+    inputs changed since that producer last acknowledged them (or have never been acknowledged)."""
+    from app.workers import reconciliation
+    if manifests_dir is None or jobs_db is None:
+        return []
+    out = []
+    for producer, sids in reconciliation.awaiting(manifests_dir, jobs_db).items():
+        for sid in sids:
+            out.append({"check": "awaiting_reconciliation", "severity": "low", "subject": sid,
+                        "detail": f"{reconciliation.PRODUCERS[producer]} hasn't run since this "
+                                  "document's provenance changed",
+                        "data": {"source_id": sid, "producer": producer,
+                                 "remediation": f"run {producer}"}})
+    return out
+
+
 def _check_synthesis_rot(gconn, manifests_dir: Path, claims_dir: Path, markdown_dir: Path,
                          enrichment_dir: Path,
                          model_ref: str | None) -> tuple[list[dict[str, Any]], bool]:
@@ -657,6 +675,10 @@ def run_lint(
 
             # topic_starvation is artifact-driven and graph-independent — runs always (ADR-0059).
             findings += _check_topic_starvation(enrichment_dir)
+
+            # ADR-0066 part 3 slice 3: documents whose independence inputs changed since a producer
+            # reconciled them. Report-only (low): never fails lint, nothing is filed.
+            findings += _check_awaiting_reconciliation(manifests_dir, jobs_db)
 
             # display_alias_rot reads wiki pages only — runs always (ADR-0060, report-only).
             findings += _check_display_alias_rot(wiki_dir)

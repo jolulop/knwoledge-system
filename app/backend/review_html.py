@@ -543,13 +543,13 @@ def render_sources_index(data: dict[str, Any]) -> str:
     return _page("Review by source", "".join(parts))
 
 
-def _decision_radios(rid: str, *, preselect: str | None = None) -> str:
+def _decision_radios(rid: str, *, preselect: str | None = None, chosen: str | None = None) -> str:
     """Per-row decision radios for review items (type changes, retirements). The explicit
     no-decision option is load-bearing in this JS-free UI: a radio group cannot be DEselected once
     clicked, so it is the only way to take back a misclick before submit (and unlike defer it
     records NOTHING — the row just stays pending)."""
     rid = _h(rid)
-    default = "approve" if preselect == "approve" else ""
+    default = chosen if chosen is not None else ("approve" if preselect == "approve" else "")
     return ("".join(
         f"<label><input type='radio' name='decision_{rid}' value='{v}'"
         f"{' checked' if v == default else ''}> {label}</label> "
@@ -558,7 +558,7 @@ def _decision_radios(rid: str, *, preselect: str | None = None) -> str:
 
 
 def _link_radios(nid: str, *, kept: bool, preselect: str | None = None,
-                 ambiguous: list[dict[str, Any]] | None = None) -> str:
+                 ambiguous: list[dict[str, Any]] | None = None, chosen: str | None = None) -> str:
     """ADR-0066 per-link radios: a suggestion is kept, dropped (this document only) or blocked
     ("never suggest", vault-wide); a kept link can be dropped. "— leave" records nothing.
 
@@ -576,13 +576,14 @@ def _link_radios(nid: str, *, kept: bool, preselect: str | None = None,
     else:
         options = (("", "— leave undecided"), ("keep", "keep"), ("drop", "drop"),
                    ("block", "never suggest"))
-    default = "keep" if (preselect == "keep" and not kept and not ambiguous) else ""
+    default = (chosen if chosen is not None
+               else "keep" if (preselect == "keep" and not kept and not ambiguous) else "")
     return "".join(
         f"<label><input type='radio' name='link_{nid}' value='{_h(v)}'"
         f"{' checked' if v == default else ''}> {_h(label)}</label> " for v, label in options)
 
 
-def _amend_inputs(row: dict[str, Any]) -> str:
+def _amend_inputs(row: dict[str, Any], draft: dict[str, Any] | None = None) -> str:
     """Inline amendment fields for a keep that activates a CANDIDATE (ADR-0058 title/aliases/
     description + ADR-0059 item_type). The item_type select is REQUIRED to keep an unclassified
     suggestion (the keep blocks without it); otherwise it is an optional reclassification."""
@@ -595,15 +596,24 @@ def _amend_inputs(row: dict[str, Any]) -> str:
     # one per line (a comma-split field would split an alias that contains a comma).
     aliases = "\n".join(str(a) for a in row.get("aliases") or [])
     rows = max(2, min(6, len(row.get("aliases") or []) + 1))
-    return (f"<input type='text' name='amend_title_{nid}' size='18' placeholder='amended title'> "
+    d = draft or {}
+    raw = str(row.get("node_id"))
+    aliases = d.get(f"amend_aliases_{raw}", aliases)
+    picked = d.get(f"amend_item_type_{raw}", "")
+    options = [o.replace(f"value='{picked}'>", f"value='{picked}' selected>") if picked else o
+               for o in options]
+    title_v = _h(d.get(f"amend_title_{raw}", ""))
+    desc_v = _h(d.get(f"amend_description_{raw}", ""))
+    return (f"<input type='text' name='amend_title_{nid}' size='18' placeholder='amended title' "
+            f"value='{title_v}'> "
             f"<label>aliases (one per line; delete wrong ones): <textarea name='amend_aliases_{nid}' "
             f"rows='{rows}' cols='24'>{_h(aliases)}</textarea></label> "
             f"<input type='text' name='amend_description_{nid}' size='24' "
-            "placeholder='description'> "
+            f"placeholder='description' value='{desc_v}'> "
             f"<select name='amend_item_type_{nid}'>" + "".join(options) + "</select>" + required)
 
 
-def _alias_editor(row: dict[str, Any]) -> str:
+def _alias_editor(row: dict[str, Any], draft: dict[str, Any] | None = None) -> str:
     """UAT round 8: the aliases of a kept tag are the human's — edit them here (one per line; the
     list replaces the tag's aliases everywhere, not just on this document). Review round 9: the
     hidden `shown_aliases_<id>` carries the list as displayed, so an untouched box (browsers submit
@@ -612,10 +622,14 @@ def _alias_editor(row: dict[str, Any]) -> str:
     nid = _h(row.get("node_id"))
     shown = [str(a) for a in row.get("aliases") or []]
     rows = max(2, min(6, len(shown) + 1))
+    d = draft or {}
+    raw = str(row.get("node_id"))
+    text = d.get(f"edit_aliases_{raw}", chr(10).join(shown))
+    shown_field = d.get(f"shown_aliases_{raw}", json.dumps(shown))   # a draft keeps what was SHOWN
     return (f"<details><summary>edit aliases</summary><label>aliases (one per line; applies to this "
             f"tag everywhere): <textarea name='edit_aliases_{nid}' rows='{rows}' cols='24'>"
-            f"{_h(chr(10).join(shown))}</textarea></label>"
-            f"<input type='hidden' name='shown_aliases_{nid}' value='{_h(json.dumps(shown))}'>"
+            f"{_h(text)}</textarea></label>"
+            f"<input type='hidden' name='shown_aliases_{nid}' value='{_h(shown_field)}'>"
             f"</details>")
 
 
@@ -629,11 +643,82 @@ def _decided_cell(row: dict[str, Any]) -> str:
     return _render_value(meta)
 
 
-def render_source_screen(data: dict[str, Any]) -> str:
-    """One source's screen (ADR-0066): tag suggestions to keep/drop/never-suggest, kept tags (drop to
-    remove), type changes and retirements in ONE batch form (untouched rows record nothing), then
-    the dropped-earlier list (undo) and the add-a-tag form."""
+_DETAILS_SOURCE = {"enrich": "Suggestions from Enrich", "pdf": "Title from the PDF metadata",
+                   "filename": "Title from the file name"}
+
+
+def _details_section(data: dict[str, Any], draft: dict[str, Any] | None) -> str:
+    """ADR-0066 part 3 slice 3: the Details fields inside the main form. Draft actions (Add author
+    rows, Use these) re-render with the submitted values and write nothing; the baseline token and
+    the displayed values (`details_shown`) always come from the page first shown."""
+    from app.workers import details as details_mod
+    info = data.get("details")
+    if not info:
+        return ""
+    d = draft or {}
+    if d and "details_title" in d:
+        values = details_mod.parse_form(d)
+        extra = int(d.get("_extra_rows") or 0)
+    else:
+        values = info["prefill"]
+        extra = 0
+    if d.get("_use_suggestion") and info.get("suggested"):
+        values = info["suggested"]
+    shown = d.get("details_shown") or json.dumps(info["prefill"], ensure_ascii=False)
+    baseline = d.get("details_baseline") or info["baseline"]
+    status = (f"Details confirmed on {_h(info.get('confirmed_at') or 'an earlier date')}."
+              if info["confirmed"] else
+              f"Not confirmed: {_h(_DETAILS_SOURCE.get(info['source'], info['source']))}.")
+    parts = ["<h2>Details</h2>", f"<p>{status}</p>", reconciliation_notices(info.get("pending") or [])]
+    if info.get("suggestion_differs") and info.get("suggested"):
+        sug = info["suggested"]
+        names = ", ".join(a["name"] for a in sug["authors"]) or "no authors"
+        pub = (sug.get("publisher") or {}).get("name") or "no publisher"
+        parts.append(f"<p>Enrich now suggests: <em>{_h(sug['title'])}</em> — {_h(names)} — "
+                     f"{_h(pub)}. <button type='submit' name='details_action' value='use_suggestion'>"
+                     "Use these</button> (fills the fields; confirms nothing)</p>")
+    parts.append(f"<p><label>Title: <input type='text' name='details_title' size='60' "
+                 f"value='{_h(values['title'])}'></label></p>")
+    rows = list(values["authors"]) + [{"name": "", "show_page": False}] * (
+        details_mod.EMPTY_AUTHOR_ROWS + extra)
+    rows = rows[:details_mod.MAX_AUTHOR_ROWS]
+    table = ["<tr><th>order</th><th>author</th><th>show page</th></tr>"]
+    for i, a in enumerate(rows):
+        table.append(
+            f"<tr><td><input type='hidden' name='author_row_{i}' value='1'>"
+            f"<input type='number' name='author_order_{i}' value='{i}' style='width:4em'></td>"
+            f"<td><input type='text' name='author_name_{i}' size='40' list='ks-known-names' "
+            f"value='{_h(a['name'])}'></td>"
+            f"<td><input type='checkbox' name='author_show_{i}' value='1'"
+            f"{' checked' if a.get('show_page') else ''}></td></tr>")
+    parts.append("<p>Authors, in document order (clear a name to remove it):</p><table>"
+                 + "".join(table) + "</table>")
+    parts.append("<p><button type='submit' name='details_action' value='add_rows'>Add author rows"
+                 "</button> (writes nothing)</p>")
+    pub = values.get("publisher") or {"name": "", "show_page": False}
+    parts.append(f"<p><label>Publisher: <input type='text' name='publisher_name' size='40' "
+                 f"list='ks-known-names' value='{_h(pub['name'])}'></label> "
+                 f"<label><input type='checkbox' name='publisher_show' value='1'"
+                 f"{' checked' if pub.get('show_page') else ''}> show page</label></p>")
+    parts.append("<datalist id='ks-known-names'>"
+                 + "".join(f"<option value='{_h(n)}'>" for n in info.get("known_names") or [])
+                 + "</datalist>")
+    parts.append(f"<input type='hidden' name='details_shown' value='{_h(shown)}'>"
+                 f"<input type='hidden' name='details_baseline' value='{_h(baseline)}'>"
+                 f"<input type='hidden' name='_extra_rows' value='{extra}'>")
+    return "".join(parts)
+
+
+def render_source_screen(data: dict[str, Any], *, draft: dict[str, Any] | None = None,
+                         errors: list[str] | None = None) -> str:
+    """One source's screen (ADR-0066): the Details section (part 3 slice 3), tag suggestions to
+    keep/drop/never-suggest, kept tags (drop to remove), type changes and retirements in ONE batch
+    form (untouched rows record nothing), then the dropped-earlier list (undo) and the add-a-tag form.
+
+    `draft` re-renders a submission (a draft action or a form-level refusal) with every submitted
+    value preserved; `errors` are the form-level refusal reasons."""
     sid = _h(data.get("source_id"))
+    draft = draft or {}
     totals = data.get("totals") or {}
     counts = data.get("counts") or {}
     preselect = data.get("preselect")
@@ -666,7 +751,10 @@ def render_source_screen(data: dict[str, Any]) -> str:
          f"<form method='get' action='/ui/reviews/sources/{sid}'>"
          "<input type='hidden' name='preselect' value='keep'>"
          "<button type='submit'>Pre-select keep for all suggestions</button></form>"),
+        "".join(f"<p class='err'><strong>Nothing was saved:</strong> {_h(e)}</p>"
+                for e in errors or []),
         f"<form method='post' action='/ui/reviews/sources/{sid}/decide'>",
+        _details_section(data, draft),
     ]
 
     def _tag_section(title_txt: str, rows: list[dict[str, Any]], *, kept: bool) -> None:
@@ -697,12 +785,13 @@ def render_source_screen(data: dict[str, Any]) -> str:
                 if all(m.get("node_id") != pending["chosen"] for m in choices):
                     choices.append({"node_id": pending["chosen"], "title": pending.get("chosen_title"),
                                     "item_type": "unfinished", "kept_count": "?"})
-            cell = _link_radios(str(row.get("node_id")), kept=kept, preselect=preselect,
-                                ambiguous=choices)
+            raw = str(row.get("node_id"))
+            cell = _link_radios(raw, kept=kept, preselect=preselect, ambiguous=choices,
+                                chosen=draft.get(f"link_{raw}") if draft else None)
             if not kept and row.get("amendable"):
-                cell += "<br>" + _amend_inputs(row)
+                cell += "<br>" + _amend_inputs(row, draft)
             elif kept:
-                cell += "<br>" + _alias_editor(row)
+                cell += "<br>" + _alias_editor(row, draft)
             table.append(
                 f"<tr><td>{_h(row.get('title'))}</td><td>{_h(row.get('item_type'))}</td>"
                 f"<td>{_h(', '.join(row.get('aliases') or []))}</td>"
@@ -726,7 +815,10 @@ def render_source_screen(data: dict[str, Any]) -> str:
                 info += (f"<td>{_h(row.get('title'))}</td><td>{_h(row.get('page'))}</td>"
                          f"<td>{_h(row.get('node_status'))}</td>")
             if row.get("decidable"):
-                table.append(f"<tr>{info}<td>{_decision_radios(str(row.get('review_id')))}</td></tr>")
+                rid_raw = str(row.get("review_id"))
+                radios = _decision_radios(rid_raw, chosen=draft.get(f"decision_{rid_raw}")
+                                          if draft else None)
+                table.append(f"<tr>{info}<td>{radios}</td></tr>")
             else:
                 table.append(f"<tr style='color:#777'>{info}<td>{_decided_cell(row)}</td></tr>")
         parts.append("<table>" + "".join(table) + "</table>")
@@ -754,9 +846,25 @@ def render_source_screen(data: dict[str, Any]) -> str:
                     columns="<th>review_id</th><th>name</th><th>retype</th>")
     _review_section("Retired by re-extraction", data.get("retired") or [],
                     columns="<th>review_id</th><th>title</th><th>page</th><th>status</th>")
+    details_info = data.get("details")
+    tick = ("<p><label><input type='checkbox' name='details_confirm' value='1'"
+            f"{' checked' if draft.get('details_confirm') and not draft.get('_use_suggestion') else ''}"
+            "> <strong>These details are correct</strong> (confirms the Details above)</label></p>"
+            if details_info else "")
     parts.append("<p><label>Note (applies to every review-item decision this submit): "
-                 "<input type='text' name='note' size='40'></label></p>"
-                 "<button type='submit'>Record marked decisions</button></form>")
+                 f"<input type='text' name='note' size='40' value='{_h(draft.get('note', ''))}'>"
+                 "</label></p>" + tick + "<button type='submit'>Save</button></form>")
+    if details_info and details_info.get("confirmed"):
+        # Its own form: HTML forms can't nest (slice-3 grill Q4).
+        parts.append(
+            f"<form method='post' action='/ui/reviews/sources/{sid}/details/clear'>"
+            # A redrawn draft keeps the baseline the person actually saw, so Clear can't act on a
+            # newer confirmation they never reviewed (slice-3 review round 1).
+            f"<input type='hidden' name='details_baseline' "
+            f"value='{_h(draft.get('details_baseline') or details_info['baseline'])}'>"
+            "<button type='submit'>Clear confirmed details</button> "
+            "<small>(removes the confirmed title, authors and publisher; independence may still rest "
+            "on other provenance)</small></form>")
 
     dropped = data.get("dropped") or []
     parts.append(f"<h2>Dropped earlier ({len(dropped)})</h2>")
@@ -807,8 +915,16 @@ def _refresh_warnings(warnings: list[str] | None) -> str:
             "</strong> (or <code>uv run python scripts/republish.py</code>).</p>")
 
 
+def reconciliation_notices(pending: list[str]) -> str:
+    """ADR-0066 part 3 slice 3: one line per producer that hasn't run since this document's
+    independence inputs changed (report-only)."""
+    return "".join(f"<p class='banner'>{_h(name)} hasn't run since these details changed; run it to "
+                   "reconcile them.</p>" for name in pending)
+
+
 def render_source_decide_result(source_id: str, results: list[dict[str, Any]], *,
-                                 warnings: list[str] | None = None) -> str:
+                                 warnings: list[str] | None = None,
+                                 pending: list[str] | None = None) -> str:
     """Per-row batch results (recorded vs skipped-with-reason; never a batch abort)."""
     sid = _h(source_id)
     recorded = sum(1 for r in results if r.get("recorded"))
@@ -817,6 +933,7 @@ def render_source_decide_result(source_id: str, results: list[dict[str, Any]], *
         f"<h1>Batch decisions — source {sid}</h1>",
         f"<p>{_h(recorded)} recorded, {_h(len(results) - recorded)} skipped/no-op.</p>",
         _refresh_warnings(warnings),
+        reconciliation_notices(pending or []),
         f"<p><a href='/ui/reviews/sources/{sid}'>Back to source</a> · "
         "<a href='/ui/reviews/sources'>Source index</a> · "
         "<a href='/ui/reviews/apply'>Apply…</a></p>",

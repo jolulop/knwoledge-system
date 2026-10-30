@@ -18,7 +18,7 @@
   2026-10-29**; **slice 2 design-locked by its grill and implemented 2026-10-29** (plan freshness and
   the stored raw list, the both-lists match, `keywords:`); **slice 3 design-locked by its grill
   2026-10-30** (form-level refusals and the baseline token, the provenance shape, reconciliation
-  notices, the no-JavaScript form). Item
+  notices, the no-JavaScript form) **and implemented 2026-10-30**. Item
   consolidation Part B ("Slice A" of the post-UAT-r6 plan); follows ADR-0064 (Part A). **Review
   round 1 applied 2026-10-24** (see the section at the end): durable keep ledger, merge/split and
   unused-status rules, ambiguous-match path, sentinel gate, confirmed-vs-suggested metadata, the
@@ -1045,6 +1045,64 @@ path).
 - **Required tests:** draft actions preserve tag selections and write nothing; cleared author
   rows; stable ordering; checkbox choices preserved (an unchecked box against an existing page);
   editing Details without confirming.
+
+## Implementation — part 3 slice 3 (2026-10-30): Details confirmation
+
+- **The provenance model** (`app/backend/manifests.py`): `PROVENANCE_FIELDS` adds `title`,
+  `authors`, `confirmed_at`, `confirmed_baseline` (the legacy `author` stays readable and
+  writable); `set_provenance` validates every value (`_check_field`: a non-empty cleaned title,
+  `{name, show_page}` authors with a boolean `show_page`, no duplicate normalized author, a
+  publisher as `{name, show_page}` or a legacy string) and an explicit `None` clears;
+  `confirmed_details` reads the current shape with the legacy fallback (`authors` wins whenever
+  present, even empty); `confirm_details` writes the new keys and removes the legacy `author`;
+  `clear_details` removes `DETAILS_FIELDS` and keeps `report_family` / `canonical_url`.
+  `name_identity` moved here (`titles.name_identity` delegates), and `independence_inputs` is the
+  one normalization behind `independent_sources` (author identity sets: any overlap is shared
+  provenance) and `independence_digest`.
+- **The Details logic** (`app/workers/details.py`): `view` (prefill: confirmed > fresh Enrich >
+  fallback; `source` for the status line; `suggestion_differs`), `vault_names` (the datalist and
+  the identities with an Authors page, pre-ticked at prefill), `baseline_token`, `parse_form`
+  (row markers, blank rows dropped, order field then row order), `touched` (against the
+  `details_shown` the form carried), `validate`. `review_read.details_section` adds the block,
+  its baseline token and the pending producers to the document view.
+- **The screen and the Save** (`review_html`, `main._source_decide`): the Details section inside
+  the main form; draft actions (`details_action` = `add_rows` / `use_suggestion`) re-render with
+  every submitted value (tag radios, review decisions, amendments, alias editors, the note) and
+  write nothing; a touched submission is refused with 409 and the values kept when the baseline
+  token is stale, the fields are invalid or the tick is missing; otherwise the tag rows run as
+  before and the Details are confirmed in the same commit phase and publication intent. The main
+  button reads **Save**. **Clear confirmed details** is its own form and route
+  (`POST /ui/reviews/sources/{id}/details/clear`), stale-checked against the baseline token.
+- **Reconciliation** (`app/workers/reconciliation.py`): synthesis and contradiction detection
+  capture the digests of the provenance their eligibility step used and, when the run is
+  `succeeded` or `saved_publication_pending`, verify them under the write lock (`changes=False`)
+  and record the still-current ones as `independence_acknowledged` in the job metadata. `awaiting`
+  compares current digests with each producer's newest acknowledgement (ties within a second go to
+  the later job). The document screen and the Save/Clear result page name the pending producers;
+  lint adds report-only `awaiting_reconciliation` findings (low severity).
+- **Not in this slice:** the Source page does not list the confirmed authors yet; slice 4 renders
+  them with their Authors-page links.
+- **Tests:** `tests/test_provenance.py` (18), `tests/test_details.py` (14),
+  `tests/test_reconciliation.py` (10) cover every test the grill required, plus a same-second job
+  tie and a confirmed document whose Enrich suggestion changes.
+- **Mutation checks:** 20, all caught but one equivalent mutant (keeping blank author rows in
+  `parse_form`: `normalize` drops them before any validation or write). The suggestion-in-token
+  mutant was caught after the confirmed-document test. Gate: 1849 passed + 2 skipped.
+- **Review round 1 on slice 3 (2 P1, 1 P2, fixed):**
+  1. *A newer run could erase another document's history:* `_acknowledged` returned the newest
+     acknowledgement map wholesale, so a run that left a document out (its inputs changed during
+     the run, e.g. a Clear-to-empty) hid that document's warning. History is now walked
+     newest-first and each source keeps its latest acknowledgement. Test: an earlier run
+     acknowledges A; a later run during which A is cleared to empty leaves A out; A still awaits.
+  2. *A stale-form redraw gave Clear a fresh baseline:* the redrawn draft kept its old baseline for
+     the Details but Clear took the current one, so it could delete a newer confirmation the
+     person never saw. Clear now carries the draft's (seen) baseline. Test: stale Save → redrawn
+     draft → Clear is refused and the concurrent confirmation survives.
+  3. *Unnormalizable names vanished before validation:* a control-characters-only author or
+     publisher was dropped as if blank and the Save succeeded. `validate` now rejects any nonblank
+     value that normalizes to nothing; only a blank row is a removal. Test: such an author or
+     publisher, together with a tag keep, is refused and nothing is saved.
+  4 mutation checks on these fixes, all caught. Gate: 1853 passed + 2 skipped.
 
 ## Consequences
 

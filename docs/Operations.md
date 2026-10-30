@@ -89,6 +89,16 @@ screens show **Search refresh pending** (and `validate_publication.py` fails) un
 run stopped part-way, Retry publishing finishes its refresh. Tagging stays available during a run's
 model calls, and a keep made meanwhile is published at once and never overwritten by the run.
 
+**Details and reconciliation (ADR-0066 part 3 slice 3).** The document screen's **Details**
+section confirms a document's title, authors and publisher: tick *These details are correct* and
+Save. A Save that changes the Details without the tick, or from a page shown before a newer change
+(another save, a new Enrich run), is refused with nothing written and the values kept; reload and
+review again. **Add author rows** and **Use these** only redraw the form. **Clear confirmed
+details** removes them (`report_family` and `canonical_url` stay, so independence may still rest on
+them). Confirmed authors decide source independence for synthesis and contradiction detection on
+their next run; until each runs, the document screen and the lint report
+(`awaiting_reconciliation`, report-only) name it.
+
 **Graph traversal indexes (ADR-0068 decision 7).** Graph views and the graph part of search read
 at most a fixed number of edges per node, through three indexes on `db/graph.sqlite`. The API
 installs them at startup, every producer when it opens the graph, and a restore after it

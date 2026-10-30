@@ -103,10 +103,10 @@ _TAG_JOINERS = re.compile(r"(?<=\w)[-_]+(?=\w)")
 
 
 def name_identity(name: Any) -> str:
-    """The normalized identity of a provenance name (ADR-0066 part 3, implementation grill 2 Q3):
-    NFKC, casefold and whitespace only. Not `merge_key`, which singularizes ("Robin Woods" would
-    become "Robin Wood"); accents and non-Latin characters stay."""
-    return clean_text(name, max_chars=MAX_NAME_CHARS).casefold()
+    """The normalized identity of a provenance name (grill 2 Q3); one implementation, shared with
+    independence (`app.backend.manifests.name_identity`)."""
+    from app.backend.manifests import name_identity as _identity
+    return _identity(name)
 
 
 def clean_names(names: Any) -> list[str]:

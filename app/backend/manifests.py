@@ -195,8 +195,33 @@ def save_manifest(manifests_dir: Path, manifest: dict[str, Any]) -> Path:
 
 # Optional source-provenance fields (manifest-owned) that the promotion lifecycle uses to
 # judge source independence (ADR-0018, Phase 3.5b slice 5). All null/absent by default; not
-# auto-derived — populated manually or by a future extractor. The graph never owns these.
-PROVENANCE_FIELDS = ("author", "publisher", "report_family", "canonical_url")
+# auto-derived — a human sets them (ADR-0066 part 3: the document screen's Details confirmation).
+# The graph never owns these. ADR-0066 part 3 slice 3 adds the confirmed `title`, `authors` (an
+# ordered list of {name, show_page}), `publisher` as {name, show_page} (a legacy string still reads),
+# and the audit fields `confirmed_at` / `confirmed_baseline`; the legacy string `author` is read only
+# when `authors` is absent.
+PROVENANCE_FIELDS = ("title", "authors", "author", "publisher", "report_family", "canonical_url",
+                     "confirmed_at", "confirmed_baseline")
+# The Details a confirmation sets and a Clear removes (report_family / canonical_url are kept).
+DETAILS_FIELDS = ("title", "authors", "author", "publisher", "confirmed_at", "confirmed_baseline")
+_MAX_NAME = 200
+_WS = re.compile(r"\s+")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _clean(value: Any, max_chars: int = _MAX_NAME) -> str:
+    if not isinstance(value, str):
+        return ""
+    import unicodedata
+    text = _WS.sub(" ", _CONTROL.sub(" ", unicodedata.normalize("NFKC", value))).strip()
+    return text[:max_chars].strip()
+
+
+def name_identity(name: Any) -> str:
+    """The normalized identity of a provenance name (ADR-0066 part 3 grill 2 Q3): NFKC, control
+    characters and whitespace normalized, casefold. Not `merge_key` (no singularization); accents
+    and non-Latin characters stay. Shared by independence, its digest and the Authors pages."""
+    return _clean(name).casefold()
 
 
 def get_provenance(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -205,40 +230,138 @@ def get_provenance(manifest: dict[str, Any]) -> dict[str, Any]:
     return {k: prov.get(k) for k in PROVENANCE_FIELDS if prov.get(k) is not None}
 
 
-def _canon_provenance(key: str, value: Any) -> Any:
-    """Canonicalize a provenance value before comparison so trivial variants don't read as
-    independent — a conservative gate (ADR-0018). Text: casefold + whitespace-collapse;
-    `canonical_url` also drops a #fragment and trailing slashes."""
-    if not isinstance(value, str):
-        return value
-    v = " ".join(value.split()).strip().casefold()
-    if key == "canonical_url":
-        v = v.split("#", 1)[0].rstrip("/")
-    return v
+def confirmed_details(prov: dict[str, Any]) -> dict[str, Any]:
+    """The confirmed Details in their current shape, legacy values read (never rewritten):
+    `{title, authors: [{name, show_page}], publisher: {name, show_page} | None, confirmed_at}`.
+    `authors` wins whenever present, even empty; a legacy string `author` reads as one name."""
+    if "authors" in prov:
+        authors = [{"name": a["name"], "show_page": bool(a.get("show_page"))}
+                   for a in prov.get("authors") or [] if isinstance(a, dict) and a.get("name")]
+    elif isinstance(prov.get("author"), str) and prov["author"].strip():
+        authors = [{"name": prov["author"].strip(), "show_page": False}]
+    else:
+        authors = []
+    pub = prov.get("publisher")
+    if isinstance(pub, dict) and pub.get("name"):
+        publisher = {"name": pub["name"], "show_page": bool(pub.get("show_page"))}
+    elif isinstance(pub, str) and pub.strip():
+        publisher = {"name": pub.strip(), "show_page": False}
+    else:
+        publisher = None
+    return {"title": prov.get("title") if isinstance(prov.get("title"), str) else None,
+            "authors": authors, "publisher": publisher, "confirmed_at": prov.get("confirmed_at")}
+
+
+def _canon_url(value: str) -> str:
+    return " ".join(value.split()).strip().casefold().split("#", 1)[0].rstrip("/")
+
+
+def independence_inputs(prov: dict[str, Any]) -> dict[str, Any]:
+    """The one normalization of a source's independence inputs (ADR-0018; ADR-0066 part 3 slice 3):
+    the author identity set, the publisher identity, `report_family` and `canonical_url`. Order,
+    spelling variants covered by `name_identity`, `show_page`, the title and the confirmation audit
+    fields never change it. Empty values are omitted."""
+    details = confirmed_details(prov)
+    out: dict[str, Any] = {}
+    authors = sorted({name_identity(a["name"]) for a in details["authors"]} - {""})
+    if authors:
+        out["authors"] = authors
+    if details["publisher"] and name_identity(details["publisher"]["name"]):
+        out["publisher"] = name_identity(details["publisher"]["name"])
+    family = _clean(prov.get("report_family")).casefold()
+    if family:
+        out["report_family"] = family
+    url = _canon_url(prov["canonical_url"]) if isinstance(prov.get("canonical_url"), str) else ""
+    if url:
+        out["canonical_url"] = url
+    return out
+
+
+def independence_digest(prov: dict[str, Any]) -> str:
+    """A digest of :func:`independence_inputs` (reconciliation notices, ADR-0066 part 3 slice 3)."""
+    data = json.dumps(independence_inputs(prov), sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(data.encode("utf-8")).hexdigest()[:16]
 
 
 def independent_sources(p1: dict[str, Any], p2: dict[str, Any]) -> bool:
-    """Two sources are independent iff >=1 *comparable* provenance key (known on both) differs
-    and no comparable key is equal (ADR-0018). Non-comparable/unknown keys never prove
-    independence, so the gate stays conservative until provenance is populated. The single home
-    for the independence rule, shared by the promotion lifecycle and contradiction detection."""
-    comparable = [k for k in PROVENANCE_FIELDS if p1.get(k) and p2.get(k)]
-    return bool(comparable) and all(
-        _canon_provenance(k, p1[k]) != _canon_provenance(k, p2[k]) for k in comparable
-    )
+    """Two sources are independent iff >=1 *comparable* independence input (known on both) differs
+    and no comparable input is shared (ADR-0018). Authors compare as identity sets: **any shared
+    author** is shared provenance ({Alice, Bob} vs {Alice, Carol} are not independent), and only
+    disjoint sets differ. Non-comparable/unknown inputs never prove independence, so the gate stays
+    conservative until provenance is populated. The single home for the independence rule, shared
+    by the promotion lifecycle, contradiction detection and synthesis."""
+    a, b = independence_inputs(p1), independence_inputs(p2)
+    comparable = [k for k in a if k in b]
+    if not comparable:
+        return False
+    for key in comparable:
+        if key == "authors":
+            if set(a[key]) & set(b[key]):
+                return False
+        elif a[key] == b[key]:
+            return False
+    return True
+
+
+def _check_field(key: str, value: Any) -> Any:
+    """Validate (and clean) one provenance value; raise ValueError on malformed input."""
+    if key == "title":
+        text = _clean(value, 300)
+        if not text:
+            raise ValueError("a confirmed title must not be empty")
+        return text
+    if key == "authors":
+        if not isinstance(value, list):
+            raise ValueError("authors must be a list")
+        out, seen = [], set()
+        for a in value:
+            if not isinstance(a, dict) or set(a) != {"name", "show_page"}:
+                raise ValueError("each author is {name, show_page}")
+            if not isinstance(a["show_page"], bool):
+                raise ValueError("show_page must be a boolean")
+            name = _clean(a["name"])
+            if not name:
+                raise ValueError("an author name must not be empty")
+            if name_identity(name) in seen:
+                raise ValueError(f"duplicate author: {name}")
+            seen.add(name_identity(name))
+            out.append({"name": name, "show_page": a["show_page"]})
+        return out
+    if key == "publisher":
+        if isinstance(value, str):                 # the legacy shape, still accepted
+            text = _clean(value)
+            if not text:
+                raise ValueError("a publisher name must not be empty")
+            return text
+        if not isinstance(value, dict) or set(value) != {"name", "show_page"}:
+            raise ValueError("publisher is {name, show_page}")
+        if not isinstance(value["show_page"], bool):
+            raise ValueError("show_page must be a boolean")
+        name = _clean(value["name"])
+        if not name:
+            raise ValueError("a publisher name must not be empty")
+        return {"name": name, "show_page": value["show_page"]}
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{key} must be a non-empty string")
+    return value.strip()
 
 
 def set_provenance(manifests_dir: Path, source_id: str, **fields: Any) -> dict[str, Any] | None:
-    """Set provenance fields on a manifest (the single write path); returns it or None."""
+    """Set provenance fields on a manifest (the single write path); returns it or None.
+
+    Values are validated and cleaned (`_check_field`); malformed input raises ValueError and
+    writes nothing. An explicit None clears a field back to unknown, which is distinct from
+    malformed input. The caller holds the write lock (a screen action's commit phase)."""
     _require_source_id(source_id)  # write path: a non-canonical id raises
     unknown = set(fields) - set(PROVENANCE_FIELDS)
     if unknown:
         raise ValueError(f"unknown provenance field(s) {sorted(unknown)}; allowed: {PROVENANCE_FIELDS}")
+    checked = {k: (None if v is None else _check_field(k, v)) for k, v in fields.items()}
     manifest = load_manifest(manifests_dir, source_id)
     if manifest is None:
         return None
     prov = dict(manifest.get("provenance") or {})
-    for key, value in fields.items():
+    for key, value in checked.items():
         if value is None:
             prov.pop(key, None)   # explicit None clears the field back to unknown
         else:
@@ -246,6 +369,22 @@ def set_provenance(manifests_dir: Path, source_id: str, **fields: Any) -> dict[s
     manifest["provenance"] = prov
     save_manifest(manifests_dir, manifest)
     return manifest
+
+
+def confirm_details(manifests_dir: Path, source_id: str, *, title: str, authors: list[dict[str, Any]],
+                    publisher: dict[str, Any] | None, baseline: str, now: str) -> dict[str, Any] | None:
+    """Record the human-confirmed Details (ADR-0066 part 3 slice 3): writes the new keys and
+    removes the legacy `author`; `report_family` / `canonical_url` are untouched."""
+    return set_provenance(manifests_dir, source_id, title=title, authors=authors,
+                          publisher=publisher, author=None, confirmed_at=now,
+                          confirmed_baseline=baseline)
+
+
+def clear_details(manifests_dir: Path, source_id: str) -> dict[str, Any] | None:
+    """Clear confirmed Details: title, authors, publisher, the legacy author and the audit fields.
+    `report_family`, `canonical_url` and every other field stay, so independence may remain
+    established through them."""
+    return set_provenance(manifests_dir, source_id, **{k: None for k in DETAILS_FIELDS})
 
 
 # Source lifecycle status — the durable retrieval-visibility authority (ADR-0036 decision 13). The

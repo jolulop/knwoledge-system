@@ -31,6 +31,7 @@ from app.backend import (
     review_html, review_read, run_guard, search, taxonomy, vault_lock, vector_index, write_lock,
 )
 from app.backend.config import get_settings
+from app.workers import details as details_mod
 from app.backend.paths import safe_under
 from app.backend.models import (
     ChunksResponse,
@@ -1841,6 +1842,46 @@ def _apply_link_action(gconn: Any, source_id: str, nid: str, action: str,
     return out
 
 
+@app.post("/ui/reviews/sources/{source_id}/details/clear", response_class=HTMLResponse)
+async def ui_review_source_details_clear(source_id: str, request: Request) -> HTMLResponse:
+    """Clear a document's confirmed Details (ADR-0066 part 3 slice 3): its own commit phase."""
+    form = {str(k): v for k, v in (await request.form()).items()}
+    return await anyio.to_thread.run_sync(_source_details_clear, source_id, form)
+
+
+@_commit_phase
+def _source_details_clear(source_id: str, form: dict[str, Any]) -> HTMLResponse:
+    if not manifests.is_source_id(source_id):
+        return HTMLResponse(
+            review_html.render_error(404, f"unknown source: {source_id}"), status_code=404)
+    view = review_read.source_review_view(
+        settings.reviews_dir, source_id, graph_db=settings.graph_db_path,
+        wiki_dir=settings.wiki_dir, manifests_dir=settings.manifests_dir,
+        enrichment_dir=settings.normalized_dir / "enrichment")
+    if view is None or not view.get("details"):
+        return HTMLResponse(
+            review_html.render_error(404, f"unknown source: {source_id}"), status_code=404)
+    if str(form.get("details_baseline") or "") != view["details"]["baseline"]:
+        return HTMLResponse(review_html.render_source_screen(view, errors=[
+            "The details changed after this page was shown. Reload the page before clearing."]),
+            status_code=409)
+    intent = _publication_intent("tag_action", sources=[source_id])
+    manifests.clear_details(settings.manifests_dir, source_id)
+    warnings = tag_links.finish(settings.root, {source_id}, wiki_dir=settings.wiki_dir,
+                                intent=intent)["warnings"]
+    return HTMLResponse(review_html.render_source_decide_result(
+        source_id, [{"action": "clear details", "recorded": True, "status": "cleared"}],
+        warnings=warnings, pending=_pending_producers(source_id)))
+
+
+def _pending_producers(source_id: str) -> list[str]:
+    """The producers a document still awaits after a provenance change (ADR-0066 part 3 slice 3)."""
+    from app.workers import reconciliation
+    waiting = reconciliation.awaiting(settings.manifests_dir, settings.jobs_db_path,
+                                      source_id=source_id)
+    return [reconciliation.PRODUCERS[p] for p in sorted(waiting)]
+
+
 @app.post("/ui/reviews/sources/{source_id}/decide", response_class=HTMLResponse)
 async def ui_review_source_decide(source_id: str, request: Request) -> HTMLResponse:
     """Batch decide. ADR-0066 tag rows (`link_<node_id>` = keep/drop/block) run the `tag_links`
@@ -1879,8 +1920,37 @@ def _source_decide(source_id: str, form: dict[str, Any]) -> HTMLResponse:
     results: list[dict[str, Any]] = []
     warnings: list[str] = []
 
+    # ADR-0066 part 3 slice 3: draft-only actions re-render the submission and write nothing.
+    action = str(form.get("details_action") or "")
+    if action in ("add_rows", "use_suggestion") and view.get("details"):
+        draft = dict(form)
+        if action == "add_rows":
+            draft["_extra_rows"] = int(str(form.get("_extra_rows") or "0") or 0) + 3
+        else:
+            draft["_use_suggestion"] = "1"
+            draft.pop("details_confirm", None)
+        return HTMLResponse(review_html.render_source_screen(view, draft=draft))
+    # Form-level refusals (slice-3 grill Q1) are checked before any write, and only when the
+    # submission touches Details (the tick set, or a field differing from what was displayed).
+    details_save = None
+    if view.get("details") and details_mod.touched(form):
+        errors = []
+        if str(form.get("details_baseline") or "") != view["details"]["baseline"]:
+            errors.append("The details or this document's tags changed after this page was shown "
+                          "(another save, or a new Enrich run). Reload the page and review them "
+                          "again.")
+        submitted = details_mod.parse_form(form)
+        errors += details_mod.validate(submitted)
+        if not form.get("details_confirm"):
+            errors.append("You changed the details: tick “These details are correct” to save "
+                          "them, or undo your edits.")
+        if errors:
+            return HTMLResponse(review_html.render_source_screen(view, draft=dict(form),
+                                                                 errors=errors), status_code=409)
+        details_save = details_mod.normalize(submitted)
+
     link_keys = sorted(k for k in form.keys() if str(k).startswith("link_"))
-    if link_keys:
+    if link_keys or details_save is not None:
         gconn = _open_graph_safe()
         if gconn is None:
             return _source_flow_unavailable()
@@ -1888,6 +1958,7 @@ def _source_decide(source_id: str, form: dict[str, Any]) -> HTMLResponse:
         named = [str(k)[len("link_"):] for k in link_keys]
         named += [str(form.get(k))[len("use:"):] for k in link_keys
                   if str(form.get(k) or "").startswith("use:")]
+        # One publication intent for the tag rows and the Details (slice-3 grill Q1).
         intent = _publication_intent("tag_action", sources=[source_id], items=named)
         try:
             for key in link_keys:
@@ -1928,6 +1999,14 @@ def _source_decide(source_id: str, form: dict[str, Any]) -> HTMLResponse:
                 else:
                     results.append(row | {"recorded": True, "amended": bool(amendments),
                                           "status": out.get("effect") or out["outcome"]})
+            if details_save is not None:                   # after the tag rows, same commit phase
+                manifests.confirm_details(
+                    settings.manifests_dir, source_id, title=details_save["title"],
+                    authors=details_save["authors"], publisher=details_save["publisher"],
+                    baseline=view["details"]["baseline"], now=manifests.iso_now())
+                affected.add(source_id)
+                results.append({"action": "confirm details", "recorded": True,
+                                "title": details_save["title"], "status": "confirmed"})
         finally:
             gconn.close()
         warnings += tag_links.finish(settings.root, affected, wiki_dir=settings.wiki_dir,
@@ -2010,8 +2089,9 @@ def _source_decide(source_id: str, form: dict[str, Any]) -> HTMLResponse:
         except HTTPException as exc:
             results.append({"review_id": rid, "action": action, "recorded": False,
                             "skip_reason": f"{exc.status_code}: {exc.detail}"})
-    return HTMLResponse(review_html.render_source_decide_result(source_id, results,
-                                                                warnings=warnings))
+    return HTMLResponse(review_html.render_source_decide_result(
+        source_id, results, warnings=warnings,
+        pending=_pending_producers(source_id) if details_save is not None else None))
 
 
 def _alias_lines(values: Any) -> list[str]:

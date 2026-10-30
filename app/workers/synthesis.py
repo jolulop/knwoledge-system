@@ -42,7 +42,7 @@ from app.backend.paths import safe_child
 from app.llm import prompts
 from app.llm.client import LLMClient, ParseError
 from app.workers import enrichment_artifact as art
-from app.workers import publication, reviews
+from app.workers import publication, reconciliation, reviews
 from app.workers import labels
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter, render_synthesis_page
 
@@ -663,6 +663,7 @@ def generate_syntheses(
         unfinished = journal.pending(root, _PRODUCER)
         journal_verified: list[str] = []      # unfinished records found complete and cleared
         blocked: list[str] = []               # ... a human decision keeps from being redone
+        captured: dict[str, str] = {}         # independence digests this run decides with
         with write_lock.hold(reviews_dir):
             intent = run.intent(full=True, refresh=False)
             # 1. Apply human decisions (deterministic; runs without a key).
@@ -672,6 +673,8 @@ def generate_syntheses(
             # 2. Eligible topics from the current active graph.
             _valid, _skipped_invalid = valid_manifests(manifests_dir)
             prov = {m["source_id"]: get_provenance(m) for m in _valid}
+            # ADR-0066 part 3 slice 3: the independence inputs this run decides with.
+            captured = reconciliation.capture(prov)
             topics = eligible_topics(gconn, prov, claims_dir=claims_dir, markdown_dir=markdown_dir)
             eligible_ids = {t["node_id"] for t in topics}
 
@@ -873,6 +876,10 @@ def generate_syntheses(
         else:
             status = "succeeded"
         status = publication.job_status(status, pub)
+        # ADR-0066 part 3 slice 3: a completed run acknowledges the documents whose independence
+        # inputs are still the ones it decided with (read under the lock, so none lands between).
+        with write_lock.hold(reviews_dir, changes=False):
+            acknowledged = reconciliation.verify(manifests_dir, captured, status)
 
         summary: dict[str, Any] = {
             "job_id": job_id, "model_ref": model_ref, "status": status,
@@ -889,6 +896,7 @@ def generate_syntheses(
             # decision keeps from being redone, and the ones verified complete and cleared.
             "unfinished_commits": sorted(left), "unfinished_blocked": sorted(set(blocked)),
             "journal_verified": journal_verified,
+            "independence_acknowledged": acknowledged,
             "errors": len(errors), "error_details": errors, "generated_at": now,
         }
         if conn is not None:
