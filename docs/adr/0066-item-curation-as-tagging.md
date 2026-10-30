@@ -18,7 +18,9 @@
   2026-10-29**; **slice 2 design-locked by its grill and implemented 2026-10-29** (plan freshness and
   the stored raw list, the both-lists match, `keywords:`); **slice 3 design-locked by its grill
   2026-10-30** (form-level refusals and the baseline token, the provenance shape, reconciliation
-  notices, the no-JavaScript form) **and implemented 2026-10-30**. Item
+  notices, the no-JavaScript form) **and implemented 2026-10-30**; **slice 4 design-locked by its
+  grill 2026-10-30** (the page schema and ownership marker, listing and linking under source
+  visibility, one inventory builder for pages and index). Item
   consolidation Part B ("Slice A" of the post-UAT-r6 plan); follows ADR-0064 (Part A). **Review
   round 1 applied 2026-10-24** (see the section at the end): durable keep ledger, merge/split and
   unused-status rules, ambiguous-match path, sentinel gate, confirmed-vs-suggested metadata, the
@@ -1103,6 +1105,98 @@ path).
      value that normalizes to nothing; only a blank row is a removal. Test: such an author or
      publisher, together with a tag keep, is refused and nothing is saved.
   4 mutation checks on these fixes, all caught. Gate: 1853 passed + 2 skipped.
+
+## Part 3 slice 4 — grill (2026-10-30): Authors pages
+
+Decision 6, grill 2 Q2–Q3 and slice 3's confirmed shape fixed the design. This pass settles the
+rest.
+
+**Q1. The page schema and its ownership marker.**
+- **Frontmatter:** `type: author` (one navigation-only page type for both roles, outside the item
+  taxonomy and the graph authority); `author_id` (the filename stem); `title` (the most common
+  confirmed spelling); `aliases` (every confirmed spelling); `name_identity` (the fold);
+  `roles` (a non-empty, duplicate-free subset of `author`, `publisher`); `status: active`;
+  `generated_by: authors-v1`, the **generator ownership** marker, kept separate from the page
+  type (it says who owns the file, not what entity it is).
+- **Body:** `# <title>`, a `> [!summary]` callout ("Author of N documents and publisher of M in
+  this vault, from confirmed details"), then `## Authored` and `## Published` listing
+  `[[Sources/<sid>|<document title>]]`.
+- **Ownership** (for overwriting and for pruning): the file is in `wiki/Authors/`, `type: author`,
+  `generated_by: authors-v1`, `author_id` equals the filename stem, and the stem equals the
+  deterministic filename derived from `name_identity` (grill 2 Q3). A file with any ownership
+  field missing, inconsistent or unrecognized is never overwritten or removed; a collision with
+  it is reported and publication stays pending.
+- **Safety:** names and aliases are serialized through the safe frontmatter quoting, and display
+  text through the existing link-label sanitization, so a confirmed name can't introduce a
+  wikilink or malformed frontmatter.
+- **Validation and search:** `validate_frontmatter` gains the `author` type (required fields,
+  `roles` as above, `status: active` on generated pages). The keyword index lists the pages, so a
+  name search finds them; they are never answer-eligible.
+- **Source visibility applies to the lists:** the document lists and counts follow the agreed
+  source-visibility rules (Q2); an answer-ineligible page could otherwise still expose hidden
+  sources.
+- **Required tests:** a valid generated page; each failed ownership condition; a filename or
+  identity mismatch; a handwritten collision; name-search discovery; answer ineligibility; source
+  visibility in the lists.
+
+**Q2. Which documents a page lists, when it exists, and how Source pages link.**
+- **Listed under a role** when the document's Details are confirmed (legacy, manually confirmed
+  provenance counts as confirmed without `confirmed_at`), the name is among its confirmed authors
+  (*Authored*) or is its confirmed publisher (*Published*) **with `show_page: true`**, and its
+  source is **default-visible** (`active` or `deprecated_candidate`, search's
+  `RETENTION_DEFAULT_STATUSES`). Hidden, archived and deleted sources are never listed or counted.
+- **A page exists** while at least one listed document references it; when the last one goes (an
+  untick, a correction, a Clear, a hide, an archive) it is pruned under the Q1 ownership rule.
+- **Title and aliases** come from the listed documents' spellings only: a hidden document's
+  spelling never surfaces.
+- **Source pages:** the Source Details block shows the confirmed authors and publisher.
+  - A **default-visible** Source page links each ticked name to its generated page,
+    `[[Authors/<file>|<name>]]`, so generated links are bidirectional.
+  - A **non-default-visible** Source page shows its confirmed names as **plain text**, whatever the
+    stored checkbox says: a link there would dangle once the page is pruned, and even while
+    another reference keeps the page alive it would expose the hidden source through Obsidian
+    backlinks. The manifest keeps `show_page: true`; making the source visible again restores the
+    page and the links through publication, without changing the person's saved choice.
+  - Unticked names are plain text. Unconfirmed suggestions never appear on the Source page; they
+    stay on the document screen.
+- **Required tests:** hiding the last reference prunes the page and leaves no link on the hidden
+  Source page; hiding one of several references keeps the page without that document and its
+  link; unhiding restores both; a hidden document's spelling leaves the title and aliases.
+
+**Q3. One inventory builder, the index section, validation and the Obsidian docs.**
+- **`authors.inventory(root)`** is a read-only, deterministic builder (it reads the manifests and the
+  Source titles; it isn't pure): per page its identity, filename, title, aliases and listed
+  documents per role, under Q2's rules. **Both consumers** — publication's `index` step rendering
+  the pages, and `rebuild_index.py` building the index section — call it with the same validation
+  and visibility rules. A manifest-read failure fails the step and prevents any pruning.
+- **Locking:** publication already holds the write lock while it runs `rebuild_index.py` in a
+  subprocess, so the subprocess must not acquire it again (the lock is re-entrant per thread, not
+  across processes). The two paths are explicit: publication passes a flag saying the parent holds
+  the lock; a standalone `rebuild_index.py` takes the write lock itself (`changes=False`). The flag
+  is an **internal publication mechanism**, not an operator option: normal standalone execution
+  always acquires the lock.
+- **Failure:** if the Authors pages or the index fail, the entry keeps its index and keyword work
+  pending (grill 2 Q2); success is never reported with links to Authors pages that failed to
+  render.
+- **The index section:** `## Authors & publishers`, one line per page, alphabetical by title, e.g.
+  `- [[Authors/ada-lovelace|Ada Lovelace]] — author of 3, publisher of 1`; omitted when the
+  inventory is empty.
+- **Validation** (`validate_wiki`, extended to `wiki/Authors/`), with ownership kept separate from
+  validity:
+  - every generated page passes the Q1 checks, has its summary callout, and matches the
+    inventory: its roles, its listed documents and the counts in its summary (a page can't pass
+    merely because its links resolve);
+  - every Authors link on a Source page resolves to a generated page that lists that document;
+  - a generated page the inventory no longer has is an error (a missed prune);
+  - a file **claiming** `generated_by: authors-v1` but failing the identity, type or schema checks
+    is a **validation error**, and stays protected from overwrite and pruning; it never turns into
+    a "handwritten file". Only a file without the marker is handwritten (an informational note).
+- **Obsidian docs** (`docs/UAT Guide.md`, Obsidian section): a graph colour group `path:Authors`,
+  and a note that Authors pages are generated (edits made in Obsidian are overwritten). The user's
+  hand-added notes in that file are preserved.
+- **Required tests:** an empty inventory; deterministic ordering; malformed manifests before any
+  pruning; a malformed generator-owned page; a role or count mismatch; the index rebuilt both
+  standalone and from publication.
 
 ## Consequences
 
