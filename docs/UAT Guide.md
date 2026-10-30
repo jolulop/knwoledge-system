@@ -189,6 +189,13 @@ uv run python scripts/validate_all.py
 Each producer publishes its pages, `wiki/index.md` and search before it reports success (ADR-0068).
 One that prints "publication incomplete" left work queued: run `uv run python scripts/republish.py`.
 
+`enrich.py` (ADR-0066 part 3) also suggests each document's **title, authors and publisher** and a
+list of typed tags. Its tags join the tag suggestions, so run it before `extract_items.py` (the
+order above). A Source page shows the **effective title**: the confirmed title (§9.0.1), else
+Enrich's title, else the PDF metadata title when it passes a filter, else the filename. A confirmed
+title is display-only: it never re-runs or re-bills claims or items. Source pages list their tags
+as `keywords:` (kept tags and the eligible suggestions) instead of `tags:`.
+
 > [!note] Contradictions and synthesis report 0 on a fresh vault
 > `detect_contradictions` and `generate_synthesis` consider only **active** items, and nothing
 > auto-promotes (ADR-0066: a tag becomes active when you keep it on a document) — so on a fresh vault
@@ -326,6 +333,45 @@ ls reviews/tag_links/ && cat reviews/tag_links/*.json | head -40
 cat policies/blocked_tags.txt 2>/dev/null
 uv run python scripts/validate_tag_links.py       # ledgers and graph agree
 uv run python scripts/rebuild_tag_links.py        # dry run; add --apply to repair
+```
+
+### 9.0.1 Confirm each document's Details (ADR-0066 part 3)
+
+The same document screen has a **Details** section (title, authors, publisher) above the tag
+suggestions. Its status line reads **Details confirmed on …** or **Not confirmed: Suggestions from
+Enrich** (or the PDF title or filename it fell back to). Authors pages exist only for confirmed
+Details, so do this on a few documents, sharing at least one author between two of them.
+
+- **Use these** fills the fields from Enrich's suggestions and **Add author rows** adds three empty
+  rows. Both only redraw the form: nothing is written or confirmed.
+- Authors are listed in document order (the **order** column); clear a name to remove it. Names
+  already confirmed elsewhere in the vault are offered as you type. Tick **show page** on each
+  author or the publisher who should get an Authors page; a name that already has one comes
+  pre-ticked.
+- Tick **These details are correct** and press **Save**: the Details and this screen's tag choices
+  are saved together. A save writes nothing and says why when you changed a field without the tick,
+  when a name is invalid, or when the details or tags changed after the page was shown (another
+  save, a new Enrich run): reload and review again.
+- **Clear confirmed details** returns the document to unconfirmed, and its names leave the Authors
+  pages.
+- Changing a confirmed **author or publisher** changes which documents count as independent. The
+  screen then shows "**Synthesis** / **Contradiction detection** hasn't run since these details
+  changed", and lint reports `awaiting_reconciliation`, until you re-run
+  `scripts/generate_synthesis.py` and `scripts/detect_contradictions.py`. Title and show-page edits
+  don't need that.
+
+After a save, each ticked name has a page under `wiki/Authors/` (§11) listing the documents that name
+it. The Source page's Details list the authors and publisher, linking those pages, and
+`wiki/index.md` gains an **Authors & publishers** section. Hiding a document takes it off the pages
+(the last reference removes the page); unhiding restores it.
+
+Check:
+
+```bash
+ls wiki/Authors/
+grep -A6 "## Authors & publishers" wiki/index.md
+grep -n "Authors\|Publisher" wiki/Sources/<source_id>.md
+uv run python scripts/validate_wiki.py            # pages, links and backlinks agree with the Details
 ```
 
 ### 9.1 Scope-checked apply
@@ -613,6 +659,15 @@ nothing, and applies nothing.
   retired and merged tags keep their status through re-extraction and `rebuild_tag_links.py`.
 - A kept tag's aliases can be edited on its Kept tags row; a name shared with another tag is flagged;
   no merge is proposed for a blocked tag; the approved queue shows what apply carried out.
+- A Source page shows the effective title (confirmed > Enrich > filtered PDF title > filename);
+  confirming a different title re-runs nothing.
+- Details save only with "These details are correct" ticked and from an up-to-date page; *Use
+  these* and *Add author rows* write nothing; *Clear confirmed details* returns the document to
+  unconfirmed.
+- An Authors page exists exactly for each ticked name on a confirmed, visible document, lists only
+  those documents, and is linked from their Source pages; hiding the last one removes the page.
+- Changing a confirmed author or publisher shows the reconciliation notice (screen and lint) until
+  synthesis and contradiction detection re-run.
 - Review items are decision-only until apply; the dry-run shows the intended scope before apply.
 - Applying approved reviews updates only the governed surfaces and validators still pass.
 - Maintenance jobs complete with reports and never act autonomously on semantic/destructive decisions.
