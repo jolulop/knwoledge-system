@@ -29,7 +29,8 @@ Current high-level workflow:
 ```text
 raw/inbox -> scan_inbox -> extract_sources -> generate_wiki
           -> reindex_keyword + rebuild_index
-          -> enrich/extract_claims/extract_items/promote/detect_contradictions/generate_synthesis
+          -> enrich/extract_claims/extract_items/promote/generate_synthesis
+          (contradiction judging is not a pipeline step: ADR-0069 — an occasional, scoped check)
           -> reindex_keyword + rebuild_index + validate_all
           -> tag each document: keep / drop / never suggest its suggested tags (ADR-0066)
           -> review decide + dry-run/apply (apply refreshes index + keyword itself) + validate_all

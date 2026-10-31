@@ -25,7 +25,9 @@ Keep the filing-cabinet/wiki/search/graph layers healthy over time.
 - Summary rot.
 - Stale claims.
 - Duplicate sources.
-- Contradictions.
+- Contradictions: report the existing `resolve_contradiction` review items only. Never run a
+  contradiction judging pass — whole-vault judging was removed (ADR-0069 slice 0); scoped checks on
+  user-selected documents arrive in ADR-0069 slice 2.
 - Unreviewed destructive changes.
 - Archive candidates older than three years.
 

@@ -48,7 +48,7 @@ headers and are unaffected.
 | **Apply** (human-gated) | `POST /reviews/apply` `{"preview_token"}` | `scripts/apply_reviews.py apply --token <id>` | Needs the token of a clean preview (ADR-0068 decision 6; see *Apply tokens* below). Deterministically apply *approved* decisions: promotion, contradiction, synthesis, deprecation, **archive** (`active→archive_candidate`), **duplicate annotation** (`mark_semantic_duplicate` → `## Duplicates`, ADR-0041), the **visibility family** — hide/unhide for sources (`hide_content`/`unhide_content`, ADR-0043/0047), semantic pages (`hide_semantic_page`/`unhide_semantic_page`, ADR-0046/0047), claims (ADR-0048) and synthesis (ADR-0049, `evidence_hidden`) — the **identity-surgery family** — `merge_items` (ADR-0050/0059) and `split_item` (ADR-0052/0059) — and the non-rekeying **`change_item_type`** classification flip (ADR-0059). |
 | **Apply preview** (dry-run) | `POST /reviews/apply/dry-run` | `scripts/apply_reviews.py preview [--json]` | Apply-on-a-copy preview (ADR-0040): runs the same executors against a throwaway sandbox and returns the semantic mutation diff (graph/wiki/reviews/manifests) **without touching live state**. Only a clean (`ok`) preview returns a `preview_token`. In the UI, `GET /ui/reviews/apply` is read-only; its **Preview** button (`POST /ui/reviews/apply/preview`) renders the diff and, when clean, the Apply form. |
 
-Maintenance passes are **key-free**. Only the LLM *producers* (claims/items/contradictions/synthesis)
+Maintenance passes are **key-free**. Only the LLM *producers* (Enrich/claims/items/synthesis)
 and `POST /query` need `ANTHROPIC_API_KEY`.
 
 **Overlapping runs (ADR-0068).** Every commit (a screen action, a review decision, Apply, each
@@ -78,7 +78,7 @@ queue with one full-recovery entry, and republishes every page from the saved de
 of publication; refresh it with `scripts/reindex_vector.py`.
 
 **Pipeline runs publish too (ADR-0068 decision 5).** Every producer (`extract_sources`, `generate_wiki`,
-`enrich`, `extract_claims`, `extract_items`, `promote`, `detect_contradictions`,
+`enrich`, `extract_claims`, `extract_items`, `promote`,
 `generate_synthesis`, the reindex job) saves each document as one commit and publishes that
 document's pages before it moves to the next, then refreshes `wiki/index.md` and the keyword index
 **once** at the end. There is no separate `generate_wiki` / `reindex_keyword` / `rebuild_index`
@@ -95,9 +95,11 @@ Save. A Save that changes the Details without the tick, or from a page shown bef
 (another save, a new Enrich run), is refused with nothing written and the values kept; reload and
 review again. **Add author rows** and **Use these** only redraw the form. **Clear confirmed
 details** removes them (`report_family` and `canonical_url` stay, so independence may still rest on
-them). Confirmed authors decide source independence for synthesis and contradiction detection on
-their next run; until each runs, the document screen and the lint report
-(`awaiting_reconciliation`, report-only) name it.
+them). Confirmed authors decide source independence for synthesis on its next run; until it runs, the
+document screen and the lint report (`awaiting_reconciliation`, report-only) name it. The
+contradiction notice says that proposed contradictions weren't re-checked: whole-vault judging was
+removed (ADR-0069 slice 0), and nothing re-checks them until contradiction maintenance (ADR-0069
+slice 2(a)), which also retires that notice.
 
 **Graph traversal indexes (ADR-0068 decision 7).** Graph views and the graph part of search read
 at most a fixed number of edges per node, through three indexes on `db/graph.sqlite`. The API

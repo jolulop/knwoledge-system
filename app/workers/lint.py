@@ -493,11 +493,11 @@ def _check_awaiting_reconciliation(manifests_dir: Path | None,
     out = []
     for producer, sids in reconciliation.awaiting(manifests_dir, jobs_db).items():
         for sid in sids:
+            detail, remediation = reconciliation.LINT_TEXT[producer]
             out.append({"check": "awaiting_reconciliation", "severity": "low", "subject": sid,
-                        "detail": f"{reconciliation.PRODUCERS[producer]} hasn't run since this "
-                                  "document's provenance changed",
+                        "detail": detail,
                         "data": {"source_id": sid, "producer": producer,
-                                 "remediation": f"run {producer}"}})
+                                 "remediation": remediation}})
     return out
 
 

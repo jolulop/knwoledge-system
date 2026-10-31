@@ -181,10 +181,13 @@ uv run python scripts/enrich.py
 uv run python scripts/extract_claims.py
 uv run python scripts/extract_items.py
 uv run python scripts/promote.py
-uv run python scripts/detect_contradictions.py
 uv run python scripts/generate_synthesis.py
 uv run python scripts/validate_all.py
 ```
+
+Contradiction checks are **not** part of this run: whole-vault judging was removed (ADR-0069 slice 0;
+`scripts/detect_contradictions.py` now only prints usage). An occasional check on documents you
+select arrives in ADR-0069 slice 2.
 
 Each producer publishes its pages, `wiki/index.md` and search before it reports success (ADR-0068).
 One that prints "publication incomplete" left work queued: run `uv run python scripts/republish.py`.
@@ -196,14 +199,13 @@ Enrich's title, else the PDF metadata title when it passes a filter, else the fi
 title is display-only: it never re-runs or re-bills claims or items. Source pages list their tags
 as `keywords:` (kept tags and the eligible suggestions) instead of `tags:`.
 
-> [!note] Contradictions and synthesis report 0 on a fresh vault
-> `detect_contradictions` and `generate_synthesis` consider only **active** items, and nothing
-> auto-promotes (ADR-0066: a tag becomes active when you keep it on a document) — so on a fresh vault
-> they report `Candidate pairs: 0` / `Eligible topics: 0`. That is expected. After you have tagged
-> the documents in §9.0, re-run them:
+> [!note] Synthesis reports 0 on a fresh vault
+> `generate_synthesis` considers only **active** tags kept on documents from at least two
+> independent sources, and nothing auto-promotes (ADR-0066: a tag becomes active when you keep it on
+> a document) — so on a fresh vault it reports `Eligible topics: 0`. That is expected. After you have
+> tagged the documents in §9.0 and confirmed their Details in §9.0.1, re-run it:
 >
 > ```bash
-> uv run python scripts/detect_contradictions.py
 > uv run python scripts/generate_synthesis.py
 > uv run python scripts/validate_all.py
 > ```
@@ -355,10 +357,11 @@ Details, so do this on a few documents, sharing at least one author between two 
 - **Clear confirmed details** returns the document to unconfirmed, and its names leave the Authors
   pages.
 - Changing a confirmed **author or publisher** changes which documents count as independent. The
-  screen then shows "**Synthesis** / **Contradiction detection** hasn't run since these details
-  changed", and lint reports `awaiting_reconciliation`, until you re-run
-  `scripts/generate_synthesis.py` and `scripts/detect_contradictions.py`. Title and show-page edits
-  don't need that.
+  screen then shows "**Synthesis** hasn't run since these details changed", and lint reports
+  `awaiting_reconciliation`, until you re-run `scripts/generate_synthesis.py`. A second notice says
+  that proposed contradictions involving the document weren't re-checked: nothing re-checks them
+  until contradiction maintenance (ADR-0069 slice 2(a)), so that one stays. Title and show-page
+  edits don't need either.
 
 After a save, each ticked name has a page under `wiki/Authors/` (§11) listing the documents that name
 it. The Source page's Details list the authors and publisher, linking those pages, and
@@ -666,8 +669,8 @@ nothing, and applies nothing.
   unconfirmed.
 - An Authors page exists exactly for each ticked name on a confirmed, visible document, lists only
   those documents, and is linked from their Source pages; hiding the last one removes the page.
-- Changing a confirmed author or publisher shows the reconciliation notice (screen and lint) until
-  synthesis and contradiction detection re-run.
+- Changing a confirmed author or publisher shows the synthesis reconciliation notice (screen and
+  lint) until synthesis re-runs; the contradiction notice says nothing re-checks them yet.
 - Review items are decision-only until apply; the dry-run shows the intended scope before apply.
 - Applying approved reviews updates only the governed surfaces and validators still pass.
 - Maintenance jobs complete with reports and never act autonomously on semantic/destructive decisions.

@@ -34,7 +34,6 @@ from app.workers import claims, extract, intake, retention, reviews, synthesis, 
 from app.workers.wiki_render import parse_frontmatter
 from tests import fixtures
 from tests import test_claims as claims_t
-from tests import test_contradictions as con_t
 from tests import test_synthesis as syn_t
 from tests import test_items as items_t
 
@@ -412,67 +411,6 @@ def test_an_archive_during_extraction_survives_the_manifest_write(tmp_path, monk
     assert extract.extract_sources(tmp_path, jobs_db=jobs)["extracted"] == 1
     m = manifests.load_manifest(md, sid)
     assert manifests.get_status(m) == "archive_candidate" and m["ingestion_status"] == "extracted"
-
-
-def _detect_fresh(tmp_path, adapter, jobs, cache_name):
-    """Contradiction detection with its own response cache, so the model is really called."""
-    from app.workers import contradictions
-    return contradictions.detect_contradictions(
-        tmp_path, client=LLMClient({"anthropic": adapter},
-                                   cache=ResponseCache(tmp_path / "db" / cache_name)),
-        model_ref=con_t.HEAVY, jobs_db=jobs, rebuild_index=False)
-
-
-def _contradiction_edges(tmp_path):
-    conn = graph.connect(tmp_path / "db" / "graph.sqlite")
-    try:
-        return [dict(r) for r in conn.execute(
-            "SELECT edge_id, src_id, dst_id, status FROM edges WHERE edge_type = 'contradicts'")]
-    finally:
-        conn.close()
-
-
-@pytest.mark.parametrize("decision", ["approved", "rejected"])
-def test_a_decision_recorded_during_a_contradiction_model_call_wins(tmp_path, decision):
-    """Review round 1, P1: approve/reject move the review file first (the edge changes at Apply),
-    so a verdict returned meanwhile must not supersede the pair the human just decided."""
-    jobs = con_t._build_graph(tmp_path)
-    con_t._detect(tmp_path, con_t.ContradictionAdapter(verdict=True), jobs)
-    [edge] = _contradiction_edges(tmp_path)
-    rid = reviews.review_id("resolve_contradiction", {"claim_a": edge["src_id"],
-                                                      "claim_b": edge["dst_id"]})
-
-    class DecidingAdapter(con_t.ContradictionAdapter):
-        def parse(self, *args, **kwargs):
-            reviews.resolve_review_item(tmp_path / "reviews", rid, decision=decision,
-                                        decided_by="human")
-            return super().parse(*args, **kwargs)
-
-    summary = _detect_fresh(tmp_path, DecidingAdapter(verdict=False), jobs, "rerun.sqlite")
-    assert summary["skipped_human_decided"] == 1 and summary["not_contradiction"] == 0
-    [after] = _contradiction_edges(tmp_path)
-    assert after["edge_id"] == edge["edge_id"] and after["status"] == "proposed"  # left for Apply
-    assert (tmp_path / "reviews" / decision / f"{rid}.json").exists()
-
-
-def test_a_claim_retracted_during_a_contradiction_model_call_gets_no_verdict(tmp_path):
-    jobs = con_t._build_graph(tmp_path)
-    sid_b = con_t._sid(tmp_path, "b.md")
-
-    class RetractingAdapter(con_t.ContradictionAdapter):
-        def parse(self, *args, **kwargs):
-            with write_lock.hold(tmp_path / "reviews"):   # claim B's source re-extracted to nothing
-                conn = graph.connect(tmp_path / "db" / "graph.sqlite")
-                graph.supersede_source_edges(conn, sid_b)
-                conn.close()
-            return super().parse(*args, **kwargs)
-
-    summary = _detect_fresh(tmp_path, RetractingAdapter(verdict=True), jobs, "rerun.sqlite")
-    assert summary["skipped_changed_during_call"] == 1 and summary["contradictions_proposed"] == 0
-    assert _contradiction_edges(tmp_path) == []
-    assert not list((tmp_path / "reviews" / "pending").glob("*.json")) or all(
-        json.loads(f.read_text())["type"] != "resolve_contradiction"
-        for f in (tmp_path / "reviews" / "pending").glob("*.json"))
 
 
 def _gen_fresh(tmp_path, adapter, jobs, cache_name, **kw):

@@ -3,7 +3,9 @@
 ## Cross-Source Synthesis and Contradiction Detection
 
 **Status:** Complete as historical plan; terminology superseded by ADR-0059 where it says
-concept/entity (updated 2026-09-08).
+concept/entity (updated 2026-09-08). **The whole-vault contradiction sweep described here
+(`candidate_pairs`, per-pair verdicts, `scripts/detect_contradictions.py`) was removed by ADR-0069
+slice 0 (2026-10-31)**; Apply's resolution of `resolve_contradiction` items is unchanged.
 
 > **Current implementation note:** contradiction detection and synthesis shipped. Eligible topics
 > are now active knowledge items (`node_type: item`) with sufficient grounded claim evidence from

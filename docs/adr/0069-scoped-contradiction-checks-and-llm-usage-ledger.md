@@ -1,7 +1,7 @@
 # ADR-0069 — Scoped contradiction checks and the LLM usage ledger
 
-- **Status:** accepted — design-locked 2026-10-31 (grill Q1–Q10); **not implemented**. Implementation
-  is a separate step, in the slice order of decision 10.
+- **Status:** accepted — design-locked 2026-10-31 (grill Q1–Q10). **Slice 0 implemented 2026-10-31**
+  (see "Implementation — slice 0"); slices 1–3 not implemented, in the order of decision 10.
 - **Date:** 2026-10-31
 - **Drivers:** part-3 UAT (2026-10-30, fresh clone at `de91d28`, 12 PDFs, ~995 active claims, 37 kept
   tags), findings #1 and #2:
@@ -280,3 +280,34 @@ deliberately starts it on a set of documents.
   batch judging) and decision 4 (per-claim-pair fingerprint → window-level identity) for
   contradictions; synthesis (3.5c-2) is unchanged. **Amends ADR-0066 part 3 slice 3:** reconciliation
   covers synthesis only. **ADR-0063** tier chains do not apply to the judge.
+
+## Implementation — slice 0 (2026-10-31)
+
+- **Worker** (`app/workers/contradictions.py`): `detect_contradictions()` (the whole-vault run),
+  `candidate_pairs()` (graph-neighbourhood blocking) and `_still_as_shown()` (its under-lock
+  re-check) are removed; the module no longer imports the LLM client. Kept: Apply's
+  `apply_contradiction_decisions` / `apply_resolved_contradictions`, `_execute_supersede`,
+  `_reproject_claim_pages` and `_claim_context` (reused by slice 2). The old per-pair prompt
+  (`prompts.build_contradiction_messages`, `CONTRADICTION_SCHEMA`) and its version constants stay
+  inert, still covered by the ADR-0061 encoding tests, until slice 2(b) replaces them.
+- **CLI** (`scripts/detect_contradictions.py`): prints usage and runs nothing; exit 0 for
+  `-h`/`--help`, **2 otherwise** (so automation still calling it fails visibly); it imports no model
+  code. No `/jobs` endpoint ever ran contradictions; a route-name test guards that none is added
+  (the stronger guarantee is that no judging function exists for a handler to call).
+- **Reconciliation:** the `detect_contradictions` notice stays (decision 10) with honest wording —
+  screen: "Proposed contradictions involving this document weren't re-checked after these details
+  changed; nothing re-checks them yet (contradiction maintenance arrives with ADR-0069 slice 2(a))";
+  lint remediation "none yet: …". Per-producer texts live in `reconciliation.SCREEN_NOTICES` /
+  `LINT_TEXT`. Acknowledgements recorded by pre-slice-0 runs still count. Synthesis is unchanged.
+- **Docs/skills:** judging removed from the default pipeline in `README.md`, `docs/Workflow.md`,
+  `docs/Operations.md`, the UAT Guide (§6 run + note, §9.0.1 bullet, checklist line; the user's
+  notes untouched), `REANCHOR.md`, the `vault-maintenance` and `vault-ingest` skills; ADR-0069
+  pointers in the Build Spec and the Phase 3.5c plan.
+- **Tests:** sweep tests removed (blocking, verdicts, cache replay, stale supersession, no-key skip,
+  under-lock re-checks, prompt cache key, confidence clamp — slice 2 brings their successors);
+  Apply-path tests now seed a proposed contradiction exactly as the old worker filed it and resolve
+  it through `apply_contradiction_decisions`; reconciliation tests use synthesis as the acknowledging
+  producer and assert the contradiction notice stays. New: the sweep is gone from worker and CLI (no
+  model client built), no `/jobs` route runs contradictions, the lint/screen wording. Gate **1875
+  passed + 2 skipped** (was 1890; −15 removed sweep tests), ruff clean, 15 validators; 3/3 mutants
+  caught (no-arg exit 0, sweep re-added, old notice wording).

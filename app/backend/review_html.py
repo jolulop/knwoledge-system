@@ -916,10 +916,11 @@ def _refresh_warnings(warnings: list[str] | None) -> str:
 
 
 def reconciliation_notices(pending: list[str]) -> str:
-    """ADR-0066 part 3 slice 3: one line per producer that hasn't run since this document's
-    independence inputs changed (report-only)."""
-    return "".join(f"<p class='banner'>{_h(name)} hasn't run since these details changed; run it to "
-                   "reconcile them.</p>" for name in pending)
+    """ADR-0066 part 3 slice 3: one line per producer that hasn't reconciled this document's changed
+    independence inputs (report-only; wording per producer, ADR-0069 slice 0)."""
+    from app.workers import reconciliation
+    return "".join(f"<p class='banner'>{_h(reconciliation.SCREEN_NOTICES.get(name, name))}</p>"
+                   for name in pending)
 
 
 def render_source_decide_result(source_id: str, results: list[dict[str, Any]], *,

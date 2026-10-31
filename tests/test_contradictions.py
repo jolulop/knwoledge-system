@@ -23,7 +23,6 @@ from tests import fixtures  # noqa: E402
 
 TEMPLATES = ROOT / "templates"
 CLAIM_MODEL = "anthropic:claude-sonnet-4-6"
-HEAVY = "anthropic:claude-opus-4-8"
 
 # Two independent sources that both make a checkable claim about the same shared knowledge item.
 DOC_A = "# Report A\n\nThe Q3 revenue increased by ten percent. Margins improved.\n"
@@ -71,26 +70,6 @@ class ItemAdapter:
         return {"items": [{"name": ITEM, "item_type": "method_technique", "aliases": []}]}
 
 
-class ContradictionAdapter:
-    """Fake tier-3 adapter: returns a fixed verdict; counts provider calls."""
-    name = "anthropic"
-    supports_batch = False
-
-    def __init__(self, verdict=True, *, confidence=0.9, available=True):
-        self._verdict = verdict
-        self._confidence = confidence
-        self._available = available
-        self.calls = 0
-
-    def available(self):
-        return self._available
-
-    def parse(self, messages, schema, model_id, *, max_tokens):
-        self.calls += 1
-        return {"contradicts": bool(self._verdict), "confidence": self._confidence,
-                "explanation": "Opposite revenue direction for the same quarter."}
-
-
 def _claim_page_contradictions(tmp_path, claim_id):
     """The `[[Claims/...]]` ids in a Claim page's Contradicting Claims section."""
     text = (tmp_path / "wiki" / "Claims" / f"{claim_id}.md").read_text(encoding="utf-8")
@@ -136,203 +115,115 @@ def _build_graph(tmp_path, *, independent=True, claim_adapter=None, item_adapter
     return jobs
 
 
-def _detect(tmp_path, adapter, jobs, *, rebuild_index=False):
-    return contradictions.detect_contradictions(
-        tmp_path, client=_client(tmp_path, adapter), model_ref=HEAVY, jobs_db=jobs,
-        rebuild_index=rebuild_index)
+def _propose(tmp_path, *, confidence=0.9):
+    """Seed one proposed contradiction between the two extracted claims, filed exactly as the
+    removed judging sweep did (sorted pair, advisory anchor, both sides in the review item). Judging
+    itself returns as ADR-0069's scoped check; these tests cover what happens after a proposal."""
+    conn = _gconn(tmp_path)
+    try:
+        a, b = sorted(graph.active_node_ids_of_type(conn, "claim"))
+        dirs = {"claims_dir": tmp_path / "wiki" / "Claims",
+                "markdown_dir": tmp_path / "normalized" / "markdown"}
+        ctx_a = contradictions._claim_context(conn, a, **dirs)
+        ctx_b = contradictions._claim_context(conn, b, **dirs)
+        anchor = ctx_a["citations"][0]
+        rid = reviews.review_id("resolve_contradiction", {"claim_a": a, "claim_b": b})
+        graph.upsert_assertion(
+            conn, src_id=a, dst_id=b, edge_type="contradicts", asserted_by="llm",
+            status="proposed", confidence=confidence, evidence_source_id=anchor["source_id"],
+            evidence_char_start=anchor["char_start"], evidence_char_end=anchor["char_end"],
+            review_id=rid)
+        conn.commit()
+    finally:
+        conn.close()
+    reviews.create_review_item(
+        tmp_path / "reviews", review_type="resolve_contradiction",
+        subject={"claim_a": a, "claim_b": b},
+        proposal={"outcomes": ["acknowledge", "supersede", "reject"], "confidence": confidence,
+                  "explanation": "Opposite revenue direction for the same quarter.",
+                  "sides": [ctx_a, ctx_b]},
+        context={"asserted_by": "llm"}, priority="medium")
+    return a, b
+
+
+def _apply(tmp_path):
+    """Apply's contradiction executor (`/reviews/apply` runs the same function)."""
+    conn = _gconn(tmp_path)
+    try:
+        out = contradictions.apply_contradiction_decisions(
+            conn, tmp_path / "reviews", claims_dir=tmp_path / "wiki" / "Claims",
+            markdown_dir=tmp_path / "normalized" / "markdown")
+        conn.commit()
+    finally:
+        conn.close()
+    return out
+
+
+def _pending_contradiction_rid(tmp_path):
+    return next(json.loads(p.read_text())["review_id"]
+                for p in (tmp_path / "reviews" / "pending").glob("*.json")
+                if json.loads(p.read_text())["type"] == "resolve_contradiction")
 
 
 def _gconn(tmp_path):
     return graph.connect(tmp_path / "db" / "graph.sqlite")
 
 
-# --- candidate-pair blocking (deterministic core) --------------------------
+# --- ADR-0069 slice 0: the whole-vault judging sweep is gone ----------------
 
 
-def test_candidate_pairs_blocks_on_shared_item_and_independence(tmp_path):
-    _build_graph(tmp_path)
-    conn = _gconn(tmp_path)
-    try:
-        prov = {m["source_id"]: manifests.get_provenance(m)
-                for m in manifests.list_manifests(tmp_path / "raw" / "manifests")}
-        pairs = contradictions.candidate_pairs(conn, prov)
-    finally:
-        conn.close()
-    assert len(pairs) == 1
-    p = pairs[0]
-    assert p["claim_a"] < p["claim_b"]          # canonical ordering
-    assert p["shared_nodes"]                      # blocked on the shared co-mentioned item node
+def test_the_judging_sweep_is_gone_from_the_worker_and_the_cli(tmp_path, monkeypatch, capsys):
+    import detect_contradictions as cli
+
+    from app.llm import client as llm_client
+    assert not hasattr(contradictions, "detect_contradictions")
+    assert not hasattr(contradictions, "candidate_pairs")
+    # The CLI never builds a model client: no arguments prints usage and fails visibly (exit 2),
+    # -h/--help prints it and succeeds, and anything else is refused the same way.
+    monkeypatch.setattr(llm_client, "build_client",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("model client built")))
+    assert cli.main([]) == 2
+    assert "removed (ADR-0069 slice 0)" in capsys.readouterr().err
+    assert cli.main(["--help"]) == 0
+    assert "runs nothing" in capsys.readouterr().out
+    assert cli.main(["estimate", "src_a", "src_b"]) == 2
+    assert "app.llm" not in Path(cli.__file__).read_text(encoding="utf-8")
 
 
-def test_no_pairs_when_sources_not_independent(tmp_path):
-    # Same author on both sources -> not independent -> no candidate pair.
-    _build_graph(tmp_path, independent=False)
-    ms = tmp_path / "raw" / "manifests"
-    manifests.set_provenance(ms, _sid(tmp_path, "a.md"), author="Same Co")
-    manifests.set_provenance(ms, _sid(tmp_path, "b.md"), author="Same Co")
-    conn = _gconn(tmp_path)
-    try:
-        prov = {m["source_id"]: manifests.get_provenance(m) for m in manifests.list_manifests(ms)}
-        pairs = contradictions.candidate_pairs(conn, prov)
-    finally:
-        conn.close()
-    assert pairs == []
+def test_no_jobs_route_is_named_for_contradictions():
+    # A route-name guard only; the stronger guarantee is that the worker has no judging function
+    # for any handler to call (asserted in the test above).
+    from app.backend import main as main_module
+    paths = [getattr(r, "path", "") for r in main_module.app.routes]
+    assert not [p for p in paths if p.startswith("/jobs") and "contradict" in p]
 
 
-def test_no_pairs_without_shared_item(tmp_path):
-    # Each source mentions a different item -> no co-mention -> no candidate pair.
-    class SplitItems:
-        name = "anthropic"
-        supports_batch = False
-
-        def available(self):
-            return True
-
-        def parse(self, messages, schema, model_id, *, max_tokens):
-            body = messages[-1]["content"]
-            name = "alpha topic" if "Report A" in body else "beta topic"
-            return {"items": [{"name": name, "item_type": "method_technique", "aliases": []}]}
-
-    _build_graph(tmp_path, item_adapter=SplitItems())
-    conn = _gconn(tmp_path)
-    try:
-        prov = {m["source_id"]: manifests.get_provenance(m)
-                for m in manifests.list_manifests(tmp_path / "raw" / "manifests")}
-        pairs = contradictions.candidate_pairs(conn, prov)
-    finally:
-        conn.close()
-    assert pairs == []
-
-
-# --- detection worker ------------------------------------------------------
-
-
-def test_proposes_one_sorted_assertion_and_review(tmp_path):
-    jobs = _build_graph(tmp_path)
-    summary = _detect(tmp_path, ContradictionAdapter(verdict=True), jobs)
-
-    assert summary["candidate_pairs"] == 1
-    assert summary["contradictions_proposed"] == 1
-    assert summary["status"] == "succeeded"
-
-    conn = _gconn(tmp_path)
-    try:
-        rows = conn.execute(
-            "SELECT * FROM edges WHERE edge_type = 'contradicts'").fetchall()
-    finally:
-        conn.close()
-    assert len(rows) == 1
-    row = rows[0]
-    assert row["status"] == "proposed" and row["asserted_by"] == "llm"
-    assert row["src_id"] < row["dst_id"]                 # canonical ordering
-    assert row["evidence_source_id"] and row["evidence_char_start"] is not None  # advisory anchor
-    assert abs(row["confidence"] - 0.9) < 1e-9
-
-    # One review item, carrying both sides.
-    pend = list((tmp_path / "reviews" / "pending").glob("*.json"))
-    items = [p for p in pend]
-    rc = [json.loads(p.read_text()) for p in items
-          if json.loads(p.read_text())["type"] == "resolve_contradiction"]
-    assert len(rc) == 1
-    sides = rc[0]["proposal"]["sides"]
-    assert {s["claim_id"] for s in sides} == {row["src_id"], row["dst_id"]}
-    assert all(s["citations"] for s in sides)
-
-    assert validate_graph.main([str(tmp_path)]) == 0
+# --- after a proposal: projection and Apply's resolution ---------------------
 
 
 def test_proposed_edge_does_not_project_as_backlink(tmp_path):
-    jobs = _build_graph(tmp_path)
-    _detect(tmp_path, ContradictionAdapter(verdict=True), jobs)
+    _build_graph(tmp_path)
+    a, _b = _propose(tmp_path)
     conn = _gconn(tmp_path)
     try:
-        src = conn.execute("SELECT src_id FROM edges WHERE edge_type='contradicts'").fetchone()["src_id"]
-        active = graph.outgoing_active(conn, src)
+        active = graph.outgoing_active(conn, a)
     finally:
         conn.close()
     assert all(e["edge_type"] != "contradicts" for e in active)  # proposed != projected
-
-
-def test_verdict_false_writes_no_assertion(tmp_path):
-    jobs = _build_graph(tmp_path)
-    summary = _detect(tmp_path, ContradictionAdapter(verdict=False), jobs)
-    assert summary["candidate_pairs"] == 1 and summary["contradictions_proposed"] == 0
-    conn = _gconn(tmp_path)
-    try:
-        n = conn.execute("SELECT COUNT(*) AS n FROM edges WHERE edge_type='contradicts'").fetchone()["n"]
-    finally:
-        conn.close()
-    assert n == 0
-
-
-def test_unchanged_pair_replays_from_cache(tmp_path):
-    jobs = _build_graph(tmp_path)
-    adapter = ContradictionAdapter(verdict=True)
-    _detect(tmp_path, adapter, jobs)
-    assert adapter.calls == 1
-    # Second run with a fresh adapter sharing the same cache: no provider call.
-    adapter2 = ContradictionAdapter(verdict=True)
-    summary = _detect(tmp_path, adapter2, jobs)
-    assert adapter2.calls == 0
-    assert summary["skipped_human_decided"] == 0  # still proposed, re-evaluated via cache
-
-
-def test_stale_pair_superseded_and_review_withdrawn(tmp_path):
-    jobs = _build_graph(tmp_path)
-    _detect(tmp_path, ContradictionAdapter(verdict=True), jobs)
-    # The pair leaves the candidate set: make the two sources no longer independent.
-    ms = tmp_path / "raw" / "manifests"
-    manifests.set_provenance(ms, _sid(tmp_path, "a.md"), author="Same Co")
-    manifests.set_provenance(ms, _sid(tmp_path, "b.md"), author="Same Co")
-    summary = _detect(tmp_path, ContradictionAdapter(verdict=True), jobs)
-    assert summary["candidate_pairs"] == 0 and summary["superseded_stale"] == 1
-    conn = _gconn(tmp_path)
-    try:
-        statuses = [r["status"] for r in conn.execute(
-            "SELECT status FROM edges WHERE edge_type='contradicts'")]
-    finally:
-        conn.close()
-    assert statuses == ["superseded"]
-    # The pending contradiction review was withdrawn (re-fileable later, not a blocking
-    # rejection). Other pending items (e.g. the shared item's promotion) are untouched.
-    pending = [json.loads(p.read_text()) for p in (tmp_path / "reviews" / "pending").glob("*.json")]
-    assert not [i for i in pending if i["type"] == "resolve_contradiction"]
-
-
-def test_no_api_key_skips_evaluation(tmp_path):
-    jobs = _build_graph(tmp_path)
-    adapter = ContradictionAdapter(verdict=True, available=False)
-    summary = _detect(tmp_path, adapter, jobs)
-    assert summary["status"] == "skipped"
-    assert summary["candidate_pairs"] == 1 and summary["pairs_evaluated"] == 0
-    assert adapter.calls == 0
-    conn = _gconn(tmp_path)
-    try:
-        n = conn.execute("SELECT COUNT(*) AS n FROM edges WHERE edge_type='contradicts'").fetchone()["n"]
-    finally:
-        conn.close()
-    assert n == 0
-
-
-# --- resolution application (acknowledge / reject) -------------------------
+    assert validate_graph.main([str(tmp_path)]) == 0
 
 
 def test_acknowledge_activates_edge(tmp_path):
-    jobs = _build_graph(tmp_path)
-    _detect(tmp_path, ContradictionAdapter(verdict=True), jobs)
-    rid = next(json.loads(p.read_text())["review_id"]
-               for p in (tmp_path / "reviews" / "pending").glob("*.json")
-               if json.loads(p.read_text())["type"] == "resolve_contradiction")
-    reviews.resolve_review_item(tmp_path / "reviews", rid, decision="approved", decided_by="human")
-    # Re-run detect: applies the human decision -> edge active.
-    summary = _detect(tmp_path, ContradictionAdapter(verdict=True), jobs)
-    assert summary["resolutions_acknowledged"] == 1
-    assert summary["skipped_human_decided"] == 1  # now human-decided, not re-evaluated
-    assert summary["claim_pages_reprojected"] == 2  # both claim pages re-rendered
+    _build_graph(tmp_path)
+    a, b = _propose(tmp_path)
+    reviews.resolve_review_item(tmp_path / "reviews", _pending_contradiction_rid(tmp_path),
+                                decision="approved", decided_by="human")
+    out = _apply(tmp_path)
+    assert out["resolution"]["acknowledged"] == 1
+    assert set(out["changed_pages"]) == {a, b}            # both claim pages re-rendered
     conn = _gconn(tmp_path)
     try:
         row = conn.execute("SELECT * FROM edges WHERE edge_type='contradicts'").fetchone()
-        a, b = row["src_id"], row["dst_id"]
     finally:
         conn.close()
     assert row["status"] == "active"
@@ -349,18 +240,10 @@ def test_tombstoned_claim_retracts_contradiction_in_claim_worker(tmp_path):
     # worker, the contradiction is superseded and the surviving page's backlink dropped
     # *immediately* — extract_claims stays valid without a separate contradiction pass.
     jobs = _build_graph(tmp_path)
-    _detect(tmp_path, ContradictionAdapter(verdict=True), jobs)
-    rid = next(json.loads(p.read_text())["review_id"]
-               for p in (tmp_path / "reviews" / "pending").glob("*.json")
-               if json.loads(p.read_text())["type"] == "resolve_contradiction")
-    reviews.resolve_review_item(tmp_path / "reviews", rid, decision="approved", decided_by="human")
-    _detect(tmp_path, ContradictionAdapter(verdict=True), jobs)  # -> active, both pages linked
-    conn = _gconn(tmp_path)
-    try:
-        a, b = (lambda r: (r["src_id"], r["dst_id"]))(
-            conn.execute("SELECT src_id, dst_id FROM edges WHERE edge_type='contradicts'").fetchone())
-    finally:
-        conn.close()
+    a, b = _propose(tmp_path)
+    reviews.resolve_review_item(tmp_path / "reviews", _pending_contradiction_rid(tmp_path),
+                                decision="approved", decided_by="human")
+    _apply(tmp_path)                                     # -> active, both pages linked
 
     # Tombstone source B's claim via the CLAIM worker (fresh cache so the empty adapter runs).
     class NoClaims:
@@ -378,7 +261,6 @@ def test_tombstoned_claim_retracts_contradiction_in_claim_worker(tmp_path):
                           jobs_db=jobs, source_ids=[_sid(tmp_path, "b.md")], force=True, rebuild_index=False)
     wiki.generate_wiki(tmp_path, jobs_db=jobs, templates_dir=TEMPLATES, rebuild_index=False)  # drop tombstoned claim from Source page
 
-    # No contradiction pass has run since the tombstone — the claim worker already retracted it.
     conn = _gconn(tmp_path)
     try:
         status = conn.execute("SELECT status FROM edges WHERE edge_type='contradicts'").fetchone()["status"]
@@ -388,9 +270,8 @@ def test_tombstoned_claim_retracts_contradiction_in_claim_worker(tmp_path):
         conn.close()
     assert status == "superseded"                                   # retracted by the claim worker
     assert _claim_page_contradictions(tmp_path, surviving) == set()  # backlink dropped immediately
-    assert validate_projection.main([str(tmp_path)]) == 0           # repo valid without a detect pass
+    assert validate_projection.main([str(tmp_path)]) == 0           # valid without a contradiction pass
     assert validate_graph.main([str(tmp_path)]) == 0
-    # The pending review was withdrawn (it had been approved here, so nothing pending lingers).
     assert not [json.loads(p.read_text()) for p in (tmp_path / "reviews" / "pending").glob("*.json")
                 if json.loads(p.read_text())["type"] == "resolve_contradiction"]
 
@@ -411,18 +292,11 @@ def _approve_with_winner(tmp_path, winner):
 def test_supersede_executes_winner_loser_effects(tmp_path):
     # Slice 1b: an approved supersede writes an active supersedes edge winner->loser, deprecates
     # the loser (with evidence retained), keeps the contradicts edge active, and audits the cause.
-    jobs = _build_graph(tmp_path)
-    _detect(tmp_path, ContradictionAdapter(verdict=True), jobs)
-    conn = _gconn(tmp_path)
-    try:
-        a, b = (lambda r: (r["src_id"], r["dst_id"]))(
-            conn.execute("SELECT src_id, dst_id FROM edges WHERE edge_type='contradicts'").fetchone())
-    finally:
-        conn.close()
-    winner, loser = a, b
+    _build_graph(tmp_path)
+    winner, loser = _propose(tmp_path)
     _approve_with_winner(tmp_path, winner)
-    summary = _detect(tmp_path, ContradictionAdapter(verdict=True), jobs)
-    assert summary["supersede_executed"] == 1
+    out = _apply(tmp_path)
+    assert out["resolution"]["superseded_executed"] == 1
 
     conn = _gconn(tmp_path)
     try:
@@ -453,17 +327,12 @@ def test_supersede_executes_winner_loser_effects(tmp_path):
 
 
 def test_supersede_is_idempotent(tmp_path):
-    jobs = _build_graph(tmp_path)
-    _detect(tmp_path, ContradictionAdapter(verdict=True), jobs)
-    conn = _gconn(tmp_path)
-    try:
-        winner = conn.execute("SELECT src_id FROM edges WHERE edge_type='contradicts'").fetchone()["src_id"]
-    finally:
-        conn.close()
+    _build_graph(tmp_path)
+    winner, _loser = _propose(tmp_path)
     _approve_with_winner(tmp_path, winner)
-    s1 = _detect(tmp_path, ContradictionAdapter(verdict=True), jobs)
-    s2 = _detect(tmp_path, ContradictionAdapter(verdict=True), jobs)
-    assert s1["supersede_executed"] == 1 and s2["supersede_executed"] == 0  # applied once
+    s1, s2 = _apply(tmp_path), _apply(tmp_path)
+    assert s1["resolution"]["superseded_executed"] == 1
+    assert s2["resolution"]["superseded_executed"] == 0           # applied once
     conn = _gconn(tmp_path)
     try:
         n = conn.execute("SELECT COUNT(*) AS n FROM edges WHERE edge_type='supersedes'").fetchone()["n"]
@@ -476,15 +345,9 @@ def test_supersede_deprecation_persists_across_reextraction(tmp_path):
     # The loser's deprecated_candidate status is page-authoritative and survives a claim
     # re-extraction (its evidence is unchanged) — it is never resurrected to active.
     jobs = _build_graph(tmp_path)
-    _detect(tmp_path, ContradictionAdapter(verdict=True), jobs)
-    conn = _gconn(tmp_path)
-    try:
-        a, b = (lambda r: (r["src_id"], r["dst_id"]))(
-            conn.execute("SELECT src_id, dst_id FROM edges WHERE edge_type='contradicts'").fetchone())
-    finally:
-        conn.close()
+    a, b = _propose(tmp_path)
     _approve_with_winner(tmp_path, a)
-    _detect(tmp_path, ContradictionAdapter(verdict=True), jobs)  # b deprecated
+    _apply(tmp_path)                                             # b deprecated
 
     # Re-extract both sources' claims (evidence unchanged) — the loser must stay deprecated, and
     # the contradicts edge must stay active (evidence-based endpoint validity, not status-based).
@@ -501,147 +364,19 @@ def test_supersede_deprecation_persists_across_reextraction(tmp_path):
     assert "status: deprecated_candidate" in (tmp_path / "wiki" / "Claims" / f"{b}.md").read_text()
 
 
-def test_superseded_contradiction_survives_detect_backstop(tmp_path):
-    # The detect backstop must NOT re-supersede the contradicts edge of a supersede-deprecated
-    # pair: endpoint validity is evidence-based, and the deprecated loser still has evidence.
-    jobs = _build_graph(tmp_path)
-    _detect(tmp_path, ContradictionAdapter(verdict=True), jobs)
-    conn = _gconn(tmp_path)
-    try:
-        a = conn.execute("SELECT src_id FROM edges WHERE edge_type='contradicts'").fetchone()["src_id"]
-    finally:
-        conn.close()
-    _approve_with_winner(tmp_path, a)
-    _detect(tmp_path, ContradictionAdapter(verdict=True), jobs)
-    summary = _detect(tmp_path, ContradictionAdapter(verdict=True), jobs)  # backstop pass
-    assert summary["superseded_stale"] == 0
-    conn = _gconn(tmp_path)
-    try:
-        contra = conn.execute("SELECT status FROM edges WHERE edge_type='contradicts'").fetchone()["status"]
-    finally:
-        conn.close()
-    assert contra == "active"
-
-
-def test_two_sided_evidence_required_before_verdict(tmp_path):
-    # A verdict is never requested without grounded evidence on BOTH sides: if claim B's wording
-    # is unavailable, the pair is skipped and no model call is made.
-    jobs = _build_graph(tmp_path)
-    conn = _gconn(tmp_path)
-    try:
-        b = sorted(graph.active_node_ids_of_type(conn, "claim"))[1]
-    finally:
-        conn.close()
-    (tmp_path / "wiki" / "Claims" / f"{b}.md").unlink()  # remove side B's wording/citations
-    adapter = ContradictionAdapter(verdict=True)
-    summary = _detect(tmp_path, adapter, jobs)
-    assert summary["candidate_pairs"] == 1 and summary["pairs_evaluated"] == 0
-    assert adapter.calls == 0  # no model call without two-sided evidence
-    assert summary["contradictions_proposed"] == 0
-
-
-def test_reprojection_rebuilds_index(tmp_path, monkeypatch):
-    # The contradiction worker honours the rebuild_index contract (like claims/items/promote):
-    # it rebuilds wiki/index.md exactly when it re-projects Claim pages, and not otherwise. The
-    # real rebuild script lives in the repo, not tmp_path, so the call itself is monkeypatched.
-    calls = []
-    monkeypatch.setattr(contradictions.publication, "_rebuild_index_status",
-                        lambda root: bool(calls.append(root)) or "rebuilt")
-    jobs = _build_graph(tmp_path)
-    calls.clear()                             # extraction's own end refresh (ADR-0068) ran above
-    _detect(tmp_path, ContradictionAdapter(verdict=True), jobs)
-    rid = next(json.loads(p.read_text())["review_id"]
-               for p in (tmp_path / "reviews" / "pending").glob("*.json")
-               if json.loads(p.read_text())["type"] == "resolve_contradiction")
-    reviews.resolve_review_item(tmp_path / "reviews", rid, decision="approved", decided_by="human")
-    summary = _detect(tmp_path, ContradictionAdapter(verdict=True), jobs, rebuild_index=True)
-    assert summary["claim_pages_reprojected"] == 2 and summary["index_rebuilt"] is True
-    assert len(calls) == 1
-    # A run with nothing to re-project does not rebuild.
-    summary2 = _detect(tmp_path, ContradictionAdapter(verdict=True), jobs, rebuild_index=True)
-    assert summary2["claim_pages_reprojected"] == 0 and summary2["index_rebuilt"] is False
-    assert len(calls) == 1  # not rebuilt again
-
-
-def test_acknowledged_edge_survives_provenance_change(tmp_path):
-    # Independence is the blocking criterion for *finding* candidates, not a validity condition:
-    # once a human acknowledges a contradiction, a later provenance edit must not retract it.
-    jobs = _build_graph(tmp_path)
-    _detect(tmp_path, ContradictionAdapter(verdict=True), jobs)
-    rid = next(json.loads(p.read_text())["review_id"]
-               for p in (tmp_path / "reviews" / "pending").glob("*.json")
-               if json.loads(p.read_text())["type"] == "resolve_contradiction")
-    reviews.resolve_review_item(tmp_path / "reviews", rid, decision="approved", decided_by="human")
-    _detect(tmp_path, ContradictionAdapter(verdict=True), jobs)  # applies -> active
-    # Now make the sources non-independent; the pair leaves the candidate set.
-    ms = tmp_path / "raw" / "manifests"
-    manifests.set_provenance(ms, _sid(tmp_path, "a.md"), author="Same Co")
-    manifests.set_provenance(ms, _sid(tmp_path, "b.md"), author="Same Co")
-    summary = _detect(tmp_path, ContradictionAdapter(verdict=True), jobs)
-    assert summary["superseded_stale"] == 0  # active human decision not auto-retracted
-    conn = _gconn(tmp_path)
-    try:
-        status = conn.execute("SELECT status FROM edges WHERE edge_type='contradicts'").fetchone()["status"]
-    finally:
-        conn.close()
-    assert status == "active"
-
-
 def test_reject_marks_edge_rejected(tmp_path):
-    jobs = _build_graph(tmp_path)
-    _detect(tmp_path, ContradictionAdapter(verdict=True), jobs)
-    rid = next(json.loads(p.read_text())["review_id"]
-               for p in (tmp_path / "reviews" / "pending").glob("*.json")
-               if json.loads(p.read_text())["type"] == "resolve_contradiction")
-    reviews.resolve_review_item(tmp_path / "reviews", rid, decision="rejected", decided_by="human")
-    summary = _detect(tmp_path, ContradictionAdapter(verdict=True), jobs)
-    assert summary["resolutions_rejected"] == 1
+    _build_graph(tmp_path)
+    _propose(tmp_path)
+    reviews.resolve_review_item(tmp_path / "reviews", _pending_contradiction_rid(tmp_path),
+                                decision="rejected", decided_by="human")
+    out = _apply(tmp_path)
+    assert out["resolution"]["rejected"] == 1
     conn = _gconn(tmp_path)
     try:
         status = conn.execute("SELECT status FROM edges WHERE edge_type='contradicts'").fetchone()["status"]
     finally:
         conn.close()
     assert status == "rejected"
-
-
-# --- idempotency fingerprint fidelity & defensive handling -----------------
-
-
-def test_cache_key_busts_on_anchor_or_topic_change():
-    # The response cache keys on the messages, so the prompt must embed the full citation
-    # anchors + shared node ids for the per-pair fingerprint to be faithful (ADR-0031): identical
-    # claim text + quote but a changed source_id, char range, or shared node must miss the cache.
-    from app.llm import prompts
-    from app.llm.cache import cache_key
-
-    base = [{"source_id": "src_" + "a" * 16, "char_start": 10, "char_end": 40, "quote": "q"}]
-    diff_src = [{"source_id": "src_" + "b" * 16, "char_start": 10, "char_end": 40, "quote": "q"}]
-    diff_range = [{"source_id": "src_" + "a" * 16, "char_start": 99, "char_end": 129, "quote": "q"}]
-
-    def key(cites_a, shared):
-        msgs = prompts.build_contradiction_messages("A", cites_a, "B", base, shared)
-        return cache_key(msgs, "anthropic:m", prompts.CONTRADICTION_SCHEMA,
-                         schema_version="v", prompt_version="v")
-
-    # Shared node ids must be canonical (ADR-0061 asserts id shape at prompt assembly).
-    itm_x, itm_y = "itm_" + "1" * 16, "itm_" + "2" * 16
-    k0 = key(base, [itm_x])
-    assert key(base, [itm_x]) == k0                       # identical inputs -> hit
-    assert key(diff_src, [itm_x]) != k0                   # changed source_id -> miss
-    assert key(diff_range, [itm_x]) != k0                 # changed char range -> miss
-    assert key(base, [itm_y]) != k0                       # changed shared node -> miss
-
-
-def test_confidence_is_clamped(tmp_path):
-    # An out-of-range confidence from the (untrusted) model is clamped before it reaches the edge.
-    jobs = _build_graph(tmp_path)
-    _detect(tmp_path, ContradictionAdapter(verdict=True, confidence=5.0), jobs)
-    conn = _gconn(tmp_path)
-    try:
-        conf = conn.execute("SELECT confidence FROM edges WHERE edge_type='contradicts'").fetchone()["confidence"]
-    finally:
-        conn.close()
-    assert conf == 1.0
 
 
 # --- Phase 6 slice 6-3: apply_contradiction_decisions bundle (ADR-0035 A4) ---

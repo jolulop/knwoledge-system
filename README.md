@@ -75,8 +75,8 @@ uv run python scripts/enrich.py
 uv run python scripts/extract_claims.py
 uv run python scripts/extract_items.py
 uv run python scripts/promote.py
-uv run python scripts/detect_contradictions.py
 uv run python scripts/generate_synthesis.py
+# contradiction checks are not a pipeline step (ADR-0069): an occasional, scoped check arrives in slice 2
 # each producer publishes its pages, wiki/index.md and search before it reports success (ADR-0068);
 # one that prints "publication incomplete" left work queued: uv run python scripts/republish.py
 uv run python scripts/validate_all.py

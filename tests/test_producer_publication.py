@@ -370,30 +370,15 @@ def test_job_summaries_are_json_and_name_the_publication(tmp_path):
     assert meta["publication"]["status"] == "published"
 
 
-# --- contradictions, synthesis and promotion runs --------------------------------------------------
+# --- synthesis and promotion runs (ADR-0069 slice 0 removed the contradiction run) -----------------
 
 
-def test_contradiction_synthesis_and_promotion_runs_end_with_current_pages_and_search(tmp_path):
-    import tests.test_contradictions as con_t
+def test_synthesis_and_promotion_runs_end_with_current_pages_and_search(tmp_path):
     import tests.test_synthesis as syn_t
-    from app.workers import contradictions, reviews, synthesis
+    from app.workers import synthesis
 
     fixtures.copy_templates(tmp_path)
     jobs = syn_t._build(tmp_path)
-    run = contradictions.detect_contradictions(
-        tmp_path, client=con_t._client(tmp_path, con_t.ContradictionAdapter(verdict=True)),
-        model_ref=con_t.HEAVY, jobs_db=jobs)
-    assert run["publication"]["status"] == "published"
-    rid = next(json.loads(p.read_text())["review_id"]
-               for p in (tmp_path / "reviews" / "pending").glob("*.json")
-               if json.loads(p.read_text())["type"] == "resolve_contradiction")
-    reviews.resolve_review_item(tmp_path / "reviews", rid, decision="approved", decided_by="human")
-    run = contradictions.detect_contradictions(
-        tmp_path, client=con_t._client(tmp_path, con_t.ContradictionAdapter(verdict=True)),
-        model_ref=con_t.HEAVY, jobs_db=jobs)
-    assert run["claim_pages_reprojected"] == 2 and run["keyword_reindexed"] is True
-    assert run["status"] == "succeeded" and publication_queue.load(tmp_path) == []
-
     run = synthesis.generate_syntheses(
         tmp_path, client=syn_t._client(tmp_path, syn_t.SynthAdapter()), model_ref=syn_t.HEAVY,
         jobs_db=jobs)

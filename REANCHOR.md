@@ -451,7 +451,7 @@ critical rules and `CONTEXT.md` for the glossary.
   `validate_index_consistency` flags it. Full pipeline: drop corpus into `raw/inbox/` →
   `scan_inbox` → `extract_sources` → `generate_wiki` → `reindex_keyword` + `rebuild_index` (free)
   → billable: `enrich` → `extract_claims` → **`extract_items`** → `promote` →
-  `detect_contradictions` → `generate_synthesis` → `reindex_keyword` + `rebuild_index` →
+  `generate_synthesis` (contradiction judging removed by ADR-0069 slice 0) → `reindex_keyword` + `rebuild_index` →
   `validate_all`; `reindex_vector` for the vector channel. Watch: `topic_starved` /
   `unclassified_items` counters, sentinel volume, priority-order classification quality,
   per-source flow retype items. Old F5 (concept starvation misrouting) **dissolved by design**.
@@ -505,7 +505,7 @@ publishing** banner or `scripts/republish.py`; a damaged producer journal →
 effective title and `wiki/Authors/`).
 **LLM producers** (need a provider for the tier chain — `ANTHROPIC_API_KEY`, or a local model via
 `ENRICH_LOCAL_BASE_URL`, see `docs/Local Models.md`): `scripts/enrich.py` → `extract_claims.py` →
-`extract_items.py` → `promote.py` → `detect_contradictions.py` → `generate_synthesis.py`. Tag
+`extract_items.py` → `promote.py` → `generate_synthesis.py` (no contradiction step — ADR-0069). Tag
 each document on its screen at `/ui/reviews/sources/<source_id>` (keep / drop / never suggest);
 Re-suggest without billing via `extract_items.py --cache-only`; check/repair the tag ledgers with
 `scripts/validate_tag_links.py` / `scripts/rebuild_tag_links.py`. Validate: `scripts/validate_all.py`.

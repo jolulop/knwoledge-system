@@ -505,8 +505,8 @@ def test_api_claim_hide_reindex_failure_is_non_clean(client, tmp_path, monkeypat
 
 
 def test_detection_still_pairs_after_using_active_claims(tmp_path):
-    # sanity: candidate_pairs uses active claims only (so a hidden claim is excluded — see above), and
-    # the contradicts producer / detection path is unchanged for active claims.
+    # sanity: contradiction work starts from active claims only (so a hidden claim is excluded — see
+    # above); hiding changes nothing for active claims.
     conn = _graph(tmp_path)
     _active_claim(tmp_path, conn, CX, text="The sky is blue.")
     _active_claim(tmp_path, conn, CY, text="The sky is green.")

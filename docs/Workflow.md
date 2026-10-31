@@ -66,11 +66,11 @@ After this you can already browse **Source pages** in Obsidian. No review items 
 | Claims | `extract_claims.py` | Sonnet | atomic **Claim** pages, each with a verbatim source quote (citation-grounded) |
 | Knowledge items | `extract_items.py` | Sonnet | **candidate** Item nodes (15-type taxonomy, ADR-0059) + `mentions` edges |
 | Promote | `promote.py` | — (deterministic) | activates candidates whose `promote_candidate_node` item is **approved** (flat queue). ADR-0066: extracted items are per-document **tag suggestions** — keeping one on a document's review screen makes it active immediately; nothing auto-promotes |
-| Contradictions | `detect_contradictions.py` | Opus | `resolve_contradiction` review items for conflicting claim pairs |
+| Contradictions | — (not a pipeline step) | — | whole-vault judging was removed (ADR-0069 slice 0); an occasional check on documents you select (estimate → token → run) arrives in ADR-0069 slice 2. Existing `resolve_contradiction` items are still resolved by Apply |
 | Synthesis | `generate_synthesis.py` | Opus | candidate cross-source **Synthesis** pages → `propose_synthesis` review items |
 
 > **Independence** is judged from manifest *provenance* (author/publisher/…). Manifests have none by
-> default, so **contradictions/synthesis stay empty** until you set provenance — by design, the gate
+> default, so **synthesis (and any contradiction check) stays empty** until you set provenance — by design, the gate
 > is conservative. Tags never auto-promote (ADR-0066): you keep or drop each suggestion per document.
 
 LLM output is **cached** (`db/llm_cache.sqlite`) keyed by prompt+model+schema, so re-running a pass is
@@ -153,8 +153,8 @@ uv run python scripts/enrich.py
 uv run python scripts/extract_claims.py
 uv run python scripts/extract_items.py
 uv run python scripts/promote.py
-uv run python scripts/detect_contradictions.py
 uv run python scripts/generate_synthesis.py
+# contradiction checks are not a pipeline step (ADR-0069 slice 0)
 # each producer publishes its pages, wiki/index.md and search before it reports success (ADR-0068);
 # one that prints "publication incomplete" left work queued: uv run python scripts/republish.py
 uv run python scripts/validate_all.py
@@ -173,8 +173,8 @@ uv run python scripts/validate_all.py
 
 **Tip:** dense documents can exceed the default LLM token budget — if a pass reports
 `max_tokens` truncation errors, re-run it with `ENRICH_MAX_TOKENS=8192` (cached successes won't
-re-bill). To make contradictions/synthesis eligible, set manifest provenance so sources count as
-independent, then re-run those two passes.
+re-bill). To make synthesis eligible, set manifest provenance (confirm Details) so sources count as
+independent, then re-run `generate_synthesis.py`.
 
 ---
 

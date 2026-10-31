@@ -27,6 +27,23 @@ from app.backend import manifests
 
 PRODUCERS = {"generate_synthesis": "Synthesis",
              "detect_contradictions": "Contradiction detection"}
+
+# ADR-0069 slice 0 removed whole-vault contradiction judging, so nothing acknowledges a change for
+# `detect_contradictions` until model-free contradiction maintenance (slice 2(a)) does. The notice
+# stays until then (ADR-0069 decision 10) but says what is true: no command re-checks them yet.
+_PENDING_MAINTENANCE = "contradiction maintenance arrives with ADR-0069 slice 2(a)"
+SCREEN_NOTICES = {
+    "Synthesis": "Synthesis hasn't run since these details changed; run it to reconcile them.",
+    "Contradiction detection": ("Proposed contradictions involving this document weren't re-checked "
+                                "after these details changed; nothing re-checks them yet ("
+                                + _PENDING_MAINTENANCE + ")."),
+}
+LINT_TEXT = {
+    "generate_synthesis": ("Synthesis hasn't run since this document's provenance changed",
+                           "run generate_synthesis"),
+    "detect_contradictions": ("Proposed contradictions involving this document weren't re-checked "
+                              "after its provenance changed", "none yet: " + _PENDING_MAINTENANCE),
+}
 _EMPTY = manifests.independence_digest({})
 _COMPLETE = ("succeeded", "saved_publication_pending")
 

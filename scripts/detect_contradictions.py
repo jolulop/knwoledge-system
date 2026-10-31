@@ -1,83 +1,41 @@
 #!/usr/bin/env python3
-"""CLI: detect contradictions across independent sources (Phase 3.5c slice 1).
+"""CLI: contradiction checks — whole-vault judging removed (ADR-0069 slice 0).
 
 Usage:
-    uv run python scripts/detect_contradictions.py        # detect over the current graph
+    uv run python scripts/detect_contradictions.py          # prints this usage; runs nothing
 
-Preconditions: run scripts/extract_claims.py and scripts/extract_items.py first — detection
-blocks candidate claim pairs on the graph's `derived_from` (claim→source) and `mentions`
-(source→item) edges, so claims and knowledge items must already be in db/graph.sqlite.
+The old no-argument run judged every candidate claim pair across the whole vault with one tier-3
+call per pair; under ADR-0066's broad tags that no longer bounded the work (the part-3 UAT built
+10,500 pairs). It is removed, with no legacy flag. Contradiction checks return as an explicit,
+user-selected document scope in ADR-0069 slice 2:
 
-Uses the tier-3 (heavy) model_ref and provider credentials from config/.env. With no API key,
-detection is skipped (recorded as a 'skipped' job) — but human review decisions are still
-applied to the graph and stale contradiction assertions are still superseded. Proposes
-`contradicts` edges (status=proposed) and files `resolve_contradiction` review items; it never
-activates a contradiction without human approval. Never touches raw/.
+    detect_contradictions.py maintain                      # slice 2(a): model-free maintenance
+    detect_contradictions.py estimate <sid> <sid> ...      # slice 2(b): free estimate + token
+    detect_contradictions.py run --token <id> [--allow-paid]
+
+Until then this script makes no model call and changes nothing. Existing `resolve_contradiction`
+review items are still resolved by Apply (`/reviews/apply`, `scripts/apply_reviews.py`).
+Exit status: 0 for `-h`/`--help`, 2 otherwise (so automation that still calls it fails visibly).
 """
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-SCRIPTS = ROOT / "scripts"
-if str(SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS))
+USAGE = """\
+usage: detect_contradictions.py [-h]
 
-import validate_graph  # noqa: E402
-import validate_projection  # noqa: E402
-import validate_wikilinks  # noqa: E402
-
-from app.backend.config import get_settings
-from app.llm.cache import ResponseCache
-from app.llm.client import build_client
-from app.workers import contradictions, publication
+Whole-vault contradiction judging was removed (ADR-0069 slice 0); this command runs nothing.
+Scoped contradiction checks on documents you select (estimate -> token -> run) and model-free
+contradiction maintenance arrive in ADR-0069 slice 2. Existing contradiction review items are
+still resolved by Apply (/reviews/apply or scripts/apply_reviews.py).
+"""
 
 
 def main(argv: list[str]) -> int:
-    settings = get_settings()
-    client = build_client(settings, cache=ResponseCache(settings.response_cache_path))
-    summary = contradictions.detect_contradictions(
-        settings.root,
-        client=client,
-        model_ref=settings.enrich_model_heavy,
-        manifests_dir=settings.manifests_dir,
-        jobs_db=settings.jobs_db_path,
-        markdown_dir=settings.markdown_dir,
-    )
-
-    print("Contradiction detection complete.")
-    print(f"Model: {summary['model_ref']}  (job status: {summary['status']})")
-    print(f"Candidate pairs: {summary['candidate_pairs']}  "
-          f"(evaluated: {summary['pairs_evaluated']}, human-decided skipped: "
-          f"{summary['skipped_human_decided']})")
-    print(f"Contradictions proposed: {summary['contradictions_proposed']}  "
-          f"(not a contradiction: {summary['not_contradiction']})")
-    print(f"Stale assertions superseded: {summary['superseded_stale']}")
-    print(f"Resolutions applied: {summary['resolutions_acknowledged']} acknowledged, "
-          f"{summary['resolutions_rejected']} rejected, {summary['supersede_executed']} superseded "
-          f"(claim pages re-projected: {summary['claim_pages_reprojected']})")
-    print(f"Index rebuilt: {summary['index_rebuilt']}")
-    print(f"Errors: {summary['errors']}")
-    for err in summary["error_details"]:
-        print(f"  - {err['pair']}: {err['error']}")
-    for line in publication.report(summary["publication"]):
-        print(line)
-    print(f"Job: {summary['job_id']}")
-
-    print("\nValidators:")
-    root = str(settings.root)
-    rcs = [
-        validate_graph.main([root]),
-        validate_wikilinks.main([root]),
-        validate_projection.main([root]),
-    ]
-    published = (summary["publication"] or {}).get("status") != publication.PENDING
-    return 0 if (not summary["errors"] and all(rc == 0 for rc in rcs) and published) else 1
+    help_asked = any(a in ("-h", "--help") for a in argv)
+    print(USAGE, end="", file=sys.stdout if help_asked else sys.stderr)
+    return 0 if help_asked else 2
 
 
 if __name__ == "__main__":
-    from app.backend import run_guard  # noqa: E402 - one run at a time (ADR-0068)
-    raise SystemExit(run_guard.run_cli(get_settings().db_dir, "detect_contradictions", lambda: main(sys.argv[1:])))
+    raise SystemExit(main(sys.argv[1:]))
