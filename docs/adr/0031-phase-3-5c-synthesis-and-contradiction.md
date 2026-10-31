@@ -1,5 +1,11 @@
 # Phase 3.5c: graph-blocked contradiction detection and per-concept synthesis, both review-gated
 
+> **Amended by ADR-0069 (2026-10-31, design-locked, not yet implemented):** for contradictions,
+> decision 1 (graph-neighbourhood blocking over the whole vault) is replaced by an explicit,
+> user-selected document scope judged in windowed batches, and decision 4's per-claim-pair
+> fingerprint by window-level cache identity. Decisions 2–3 (sorted-pair assertion, review-gated
+> resolution) stand. Synthesis is unchanged.
+
 Phase 3.5c is the last and highest-risk enrichment slice (ADR-0028): tier-3 reasoning that
 spans multiple sources/claims and proposes **contradictions** and **syntheses** as
 human-reviewed items. It builds entirely on the proven 3.5b graph — it adds no new graph

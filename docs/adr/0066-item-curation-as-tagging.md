@@ -990,6 +990,11 @@ path).
   keeping unrelated provenance.
 
 **Q3. "Awaiting reconciliation" from per-document digests the producers record.**
+
+> **Amended by ADR-0069 (2026-10-31):** contradiction detection becomes an occasional, scoped check,
+> so its awaiting-reconciliation report is retired — once ADR-0069's targeted maintenance and its
+> failure reporting are in place. Synthesis reconciliation is unchanged.
+
 - **One shared normalization** (used by `independent_sources` and the digest alike): a document's
   independence inputs are its normalized author identity set, publisher identity,
   `report_family` and `canonical_url`. Author order, spelling variants covered by

@@ -5,6 +5,10 @@ slice 2 (sticky-to-chain freshness + chain-aware lint rot) this commit. Extends 
 (provider-agnostic adapter + tiered routing) and ADR-0027 (non-deterministic fingerprint +
 response cache). Supersedes nothing.
 
+**Scope note (ADR-0069, 2026-10-31):** the contradiction judge does **not** use tier chains. It takes
+exactly one `provider:model` (`--model` → `CONTRADICTION_MODEL` → refuse); chains are rejected and
+non-`local:` providers need explicit per-run paid authorization.
+
 **Implementation note.** The resolver is `LLMClient.resolve_run_model(chain) -> (concrete_ref,
 available)` (with `chain_available` + `parse_chain`); `validate_tiers` reworked to "every chain
 parses + ≥1 available member". Each producer resolves at the top, rebinding `model_ref` to the
