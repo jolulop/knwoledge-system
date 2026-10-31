@@ -4,9 +4,9 @@ Covers the digests each producer acknowledges (slice-3 grill Q3): captured from 
 with, verified under the lock, acknowledged only by a completed run and per producer; Clear and
 Clear-to-empty; display-only edits; the document-screen notice and the lint finding.
 
-Synthesis is the acknowledging producer here: ADR-0069 slice 0 removed whole-vault contradiction
-judging, so nothing acknowledges `detect_contradictions` until contradiction maintenance (slice 2(a));
-its notice stays, saying that nothing re-checks them yet.
+Synthesis is the only acknowledging producer: ADR-0069 slice 2(a) retired contradiction
+reconciliation (targeted contradiction maintenance runs inside every Details save or clear, and what
+it couldn't do is reported from the evidence — tests/test_contradiction_maintenance.py).
 """
 from __future__ import annotations
 
@@ -55,13 +55,10 @@ def _confirm(tmp_path, sid, authors, **kw):
 
 def test_documents_with_provenance_await_until_a_completed_run(tmp_path):
     a, b = _vault(tmp_path)
-    assert set(_awaiting(tmp_path)) == {"generate_synthesis", "detect_contradictions"}
+    assert set(_awaiting(tmp_path)) == {"generate_synthesis"}      # ADR-0069 2(a): synthesis only
     out = _synth(tmp_path)
     assert out["status"] == "succeeded" and set(out["independence_acknowledged"]) >= {a, b}
-    waiting = _awaiting(tmp_path)
-    assert "generate_synthesis" not in waiting                     # each producer on its own
-    # ADR-0069 slice 0: nothing acknowledges contradictions until contradiction maintenance exists.
-    assert set(waiting["detect_contradictions"]) == {a, b}
+    assert _awaiting(tmp_path) == {}
 
 
 def test_a_document_without_provenance_or_history_gets_no_notice(tmp_path):
@@ -121,13 +118,10 @@ def test_lint_reports_without_failing(tmp_path):
     a, _b = _vault(tmp_path)
     findings = lint._check_awaiting_reconciliation(tmp_path / MD, tmp_path / "db" / "jobs.sqlite")
     by_producer = {(f["subject"], f["data"]["producer"]): f for f in findings}
-    assert set(by_producer) >= {(a, "generate_synthesis"), (a, "detect_contradictions")}
+    assert (a, "generate_synthesis") in by_producer
+    assert {p for _s, p in by_producer} == {"generate_synthesis"}  # ADR-0069 2(a)
     assert all(f["severity"] == "low" for f in findings)
     assert by_producer[(a, "generate_synthesis")]["data"]["remediation"] == "run generate_synthesis"
-    # ADR-0069 slice 0: no command re-checks contradictions yet, and the finding says so.
-    contra = by_producer[(a, "detect_contradictions")]
-    assert contra["data"]["remediation"].startswith("none yet")
-    assert "weren't re-checked" in contra["detail"]
 
 
 def test_the_document_screen_names_the_pending_producer(tmp_path, monkeypatch):
@@ -142,9 +136,9 @@ def test_the_document_screen_names_the_pending_producer(tmp_path, monkeypatch):
     html = TestClient(main_module.app).get(f"/ui/reviews/sources/{a}").text
     assert "Synthesis hasn&#x27;t run since these details changed" in html \
         or "Synthesis hasn't run since these details changed" in html
-    assert "Proposed contradictions involving this document weren" in html
-    assert "nothing re-checks them yet" in html
-    assert "Contradiction detection hasn" not in html               # no "run it" for a removed run
+    # ADR-0069 slice 2(a): no contradiction reconciliation notice (no proposal is stale here).
+    assert "Proposed contradictions involving this document weren" not in html
+    assert "Contradiction detection" not in html
 
 
 def test_the_newest_acknowledgement_wins_within_the_same_second(tmp_path):
@@ -161,8 +155,9 @@ def test_the_newest_acknowledgement_wins_within_the_same_second(tmp_path):
     assert reconciliation._acknowledged(jobs, "detect_contradictions") == {"src_x": "new"}
 
 
-def test_a_contradiction_acknowledgement_from_before_slice_0_still_counts(tmp_path):
-    # Job history from the removed whole-vault run keeps acknowledging what it reconciled.
+def test_old_contradiction_acknowledgements_are_ignored(tmp_path):
+    # ADR-0069 slice 2(a): job history from the removed whole-vault run neither clears nor raises a
+    # notice; contradiction maintenance is reported from the evidence instead.
     from app.backend import db
     a, b = _vault(tmp_path)
     digests = reconciliation.capture({m["source_id"]: manifests.get_provenance(m)
@@ -176,7 +171,7 @@ def test_a_contradiction_acknowledgement_from_before_slice_0_still_counts(tmp_pa
     conn.close()
     assert "detect_contradictions" not in _awaiting(tmp_path)
     _confirm(tmp_path, a, _a("Alice", "Carol"))
-    assert _awaiting(tmp_path)["detect_contradictions"] == [a]
+    assert "detect_contradictions" not in _awaiting(tmp_path)
 
 
 def test_a_newer_run_omitting_a_document_never_erases_its_history(tmp_path):

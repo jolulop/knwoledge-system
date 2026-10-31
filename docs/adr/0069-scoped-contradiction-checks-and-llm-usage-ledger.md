@@ -2,7 +2,8 @@
 
 - **Status:** accepted — design-locked 2026-10-31 (grill Q1–Q10). **Slice 0 implemented 2026-10-31**
   (see "Implementation — slice 0"); **slice 1 implemented 2026-10-31** (see "Implementation — slice
-  1"); slices 2–3 not implemented, in the order of decision 10.
+  1"); **slice 2(a) implemented 2026-10-31** (see "Implementation — slice 2(a)"); slices 2(b) and 3
+  not implemented, in the order of decision 10.
 - **Date:** 2026-10-31
 - **Drivers:** part-3 UAT (2026-10-30, fresh clone at `de91d28`, 12 PDFs, ~995 active claims, 37 kept
   tags), findings #1 and #2:
@@ -369,3 +370,112 @@ deliberately starts it on a set of documents.
   case, attribution removed, send despite ledger failure; SDK retries left on for either SDK, read
   errors reported as empty, pre-ledger jobs reported as recorded, nested end clearing the parent,
   finalize failure raised).
+
+## Implementation — slice 2(a) (2026-10-31)
+
+- **Check and retirement** (`app/workers/contradictions.py`): `check_assertions` (read-only) walks
+  the **proposed** `contradicts` assertions only — an `active` (approved) one is never read, so
+  maintenance cannot reverse it — optionally scoped to documents (`sources`) or claims
+  (`claims_scope`). In order: a proposal whose review a human already approved or rejected is left
+  for Apply (`awaiting_apply`); a pending review marked `retiring` is an interrupted retirement
+  (`retirement_unfinished`, below); then the **judged record is validated first** — a missing or
+  unreadable review, or one recording no judged evidence or not both claims' fingerprints, makes the
+  proposal **unverifiable** whatever else changed; only then an endpoint claim without active
+  evidence (`evidence_gone`), no independent document pair (`not_independent`, the same
+  `manifests.independent_sources` rule), or a claim's current context differing from what was
+  judged (`evidence_changed`). Nothing reads tags, scopes or window boundaries, so dropping a tag
+  or leaving a scope retires nothing.
+- **Recoverable retirement** (review round 1): a retirement is three effects — edge superseded,
+  audit entry, pending review removed — and an interruption between them must stay discoverable.
+  `maintain_assertions` therefore (0) marks the pending review `retiring` (`{id, reason, at}`,
+  written atomically) before any effect, (1) supersedes the edge, (2) withdraws the review:
+  `withdraw_review_item` now writes the audit entry **first** (atomically; for every caller), under
+  `audit_key` = the marker id when given, then removes the file. An interruption anywhere leaves the
+  marked review, which the check reports — also when its edge is already superseded, through a scan
+  of marked pending reviews — and the next maintenance completes with the **original** reason,
+  keeping an audit entry already written (same key, never a second). A re-proposal files a fresh,
+  unmarked review, so it gets its own audit entry.
+- **No decision on a retiring review** (review round 2): its edge may already be superseded, and
+  Apply activates only proposed edges, so a decision could never take effect. The ledger
+  primitives refuse it — `resolve_review_item` (approve/reject) and `defer_review_item` raise
+  `ReviewRetiring` for a pending item carrying `retiring`, under the write lock — and
+  `_record_decision`, which every human path uses (the JSON routes, the review form, the
+  per-source batch), answers **409 `maintenance_required`** naming `detect_contradictions.py
+  maintain`, with nothing recorded. A form opened before the retirement started is refused the same
+  way, since the check reads the item at decision time.
+- **Durable recovery records** (review round 2): `reviews.write_json_durably` writes the temp file,
+  fsyncs it, renames it and fsyncs the directory (the publication queue's `_write_durably` /
+  `_sync_dir`). The marker is durable (file and `pending/`) before the edge is superseded; the
+  withdrawal audit is durable (file and `audit_log/`) before the review is deleted, and `pending/`
+  is fsynced after the delete. A power loss can therefore not keep the supersession and lose the
+  marker, nor keep the deletion and lose the audit; a failed directory sync stops before the effect
+  it guards. **A retry repeats the barrier** (review round 3): the record an interrupted run renamed
+  into place may be exactly what failed to flush, so on a retry `reviews.sync_durably` fsyncs the
+  existing marker and `pending/` before the edge step, and an existing withdrawal audit and
+  `audit_log/` before the deletion; a sync that fails again stops the retry at the same point.
+- **Evidence fingerprints:** `evidence_fingerprint` = the claim wording plus each citation's
+  document and quote; **character offsets are excluded** (the same quote at a shifted offset is the
+  same evidence). `judged_fingerprints` reads `context.judged_evidence` (`{claim_id: fingerprint}`,
+  which slice 2(b)'s scoped run will record per verdict), else derives it from the `proposal.sides`
+  the removed sweep stored, so legacy proposals are maintained too. A proposal whose review item is
+  missing, unreadable or records neither is **unverifiable**: reported, never retired.
+- **Targeted maintenance** (`targeted_maintenance`, inside the same commit phase, never raising):
+  after a Details **save** (`_source_decide`, after `confirm_details`) and **clear**
+  (`_source_details_clear`), scoped to that document; after each document's claim commit in
+  `extract_claims` (`_compose`, scoped to the claims it recomposed — so a claim id that survives
+  with new evidence is caught). The Details result shows "N proposed contradiction(s) retired", or
+  a failed row naming the error and `detect_contradictions.py maintain` (the Details stay saved);
+  the claims summary carries `contradictions_retired` and `contradiction_maintenance_errors`; a
+  maintenance error keeps the claims but makes the job `partial` and `extract_claims.py` exit 1.
+- **Failure reporting from the evidence:** instead of a pending-work marker, the read-only check
+  itself is the report. Lint adds `contradiction_maintenance_needed` and
+  `contradiction_unverifiable` (graph-gated, report-only, low); the Source screen shows a
+  "Contradiction maintenance" notice while a proposal of that document would be retired
+  (`notice_needed`). A failed or skipped targeted run, a crash, a restore from backup or an
+  out-of-band edit therefore stays visible until `maintain` runs, with nothing to keep in sync.
+- **Full repair:** `scripts/detect_contradictions.py maintain` (run guard `detect_contradictions`;
+  a `detect_contradictions` job with `mode: maintain`; exit 0 done, 1 failed, 2 for any other
+  arguments, 3 busy). It never builds a model client, never calls Apply, and says "This does not
+  check documents for contradictions". No argument still prints usage.
+- **No page changes, so no publication:** pages render only `active` contradictions (ADR-0030), so
+  retiring a proposal changes no Claim, Source or synthesis page and maintenance records no
+  publication intent. "Failures reported through the publication contract" (acceptance criteria)
+  is met by the job status and exit code plus the evidence-based reports above; the Details save's
+  own publication is unchanged.
+- **Contradiction reconciliation retired** (decision 10, now that targeted maintenance and its
+  failure reporting exist): `reconciliation.PRODUCERS`, `SCREEN_NOTICES` and `LINT_TEXT` are
+  synthesis-only; acknowledgements recorded by old `detect_contradictions` jobs are ignored.
+  Synthesis reconciliation is unchanged.
+- **Docs:** `docs/Operations.md` (a contradiction-maintenance paragraph), the UAT Guide (§ pipeline
+  note, the Details bullet, the checklist line), the vault-maintenance skill, REANCHOR.md and
+  CONTEXT.md (the awaiting-reconciliation entry).
+- **Tests:** `tests/test_contradiction_maintenance.py` (22): unchanged proposals kept; not
+  independent → retired with an audit note, idempotent; same claim id with a new quote retired on
+  re-extraction, same evidence kept; fingerprint ignores offsets only; recorded judged evidence
+  wins; a decision awaiting Apply left for Apply; an approved contradiction never reversed;
+  unverifiable proposals reported, not retired; targeted scope; Details save and clear retire in
+  the same save; a failed targeted run reported and still visible on the screen and in lint until
+  `maintain`; a lint run; the CLI (no model client, job recorded, failure exit 1, other arguments
+  exit 2); no page changes; after review round 1, interruption at each retirement step (marking,
+  edge supersession, audit write, review deletion) completed on retry with the original reason and
+  one audit entry, a re-proposal's own audit entry, extraction maintenance failure → `partial` and
+  CLI exit 1 with the claims kept, and unverifiable proposals (missing review, no sides, one side
+  judged) never retired despite lost independence or changed evidence; after review round 2,
+  decisions on a retiring review refused by the primitives, by every API route (after marking and
+  after supersession) and by a review form opened before the retirement started, an unmarked
+  review still decidable, the persistence order (marker durable → edge → audit durable → delete →
+  directory sync) and failed directory syncs stopping before the guarded effect; after review round
+  3, the retry order after each failed directory sync (the existing marker, and the existing audit,
+  flushed again before the effect each guards) and a sync failing twice stopping both attempts
+  (51 tests).
+  `tests/test_reconciliation.py` and `tests/test_contradictions.py` updated. **34/34 mutants**
+  caught (independence check, evidence check, awaiting-Apply skip, active included, offsets in the
+  fingerprint, scope ignored, targeted failure raised, screen notice off, claims retired count
+  lost, claims scope emptied, Details clear hook, Details save hook, lint check unregistered,
+  contradiction reconciliation restored; marker skipped, marked-review scan removed, marked
+  proposal not recognised, random audit key, unverifiable-review check dropped, one-side judged
+  accepted, audit written after delete, claims status ignoring maintenance errors, CLI exit
+  ignoring them; approve/reject refusal, defer refusal, API mapping, marker not durable, directory
+  sync after rename, directory sync after delete, file fsync; retry skipping the marker flush,
+  retry skipping the audit flush, `sync_durably` without the file fsync, without the directory
+  fsync). Gate **1954 passed + 2 skipped**, ruff clean, `validate_all` (15 validators) passing.

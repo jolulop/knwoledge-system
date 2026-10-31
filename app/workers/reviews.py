@@ -18,12 +18,14 @@ from __future__ import annotations
 import functools
 import hashlib
 import json
+import os
 import uuid
 from pathlib import Path
 from typing import Any
 
 from app.backend import write_lock
 from app.backend.manifests import iso_now
+from app.backend.publication_queue import _sync_dir, _write_durably
 
 REVIEW_TYPES = frozenset({
     "delete_raw_file", "archive_source", "deprecate_wiki_page", "resolve_contradiction",
@@ -54,6 +56,53 @@ def _committed(fn):
         with write_lock.hold(Path(reviews_dir)):
             return fn(reviews_dir, *args, **kwargs)
     return wrapper
+
+
+# A pending review carrying this key is being retired by contradiction maintenance (ADR-0069 slice
+# 2(a)): its edge may already be superseded, so no human decision may be recorded on it.
+RETIRING = "retiring"
+
+
+class ReviewRetiring(RuntimeError):
+    """A decision was refused: the item is being retired by contradiction maintenance."""
+
+    def __init__(self, review_id: str) -> None:
+        super().__init__(f"review {review_id} is being retired by contradiction maintenance; "
+                         "no decision was recorded")
+        self.review_id = review_id
+
+
+def is_retiring(item: dict[str, Any]) -> bool:
+    return isinstance(item.get(RETIRING), dict)
+
+
+def write_json_durably(path: Path, obj: Any) -> None:
+    """Replace `path` with `obj` as JSON, durably: the temp file is flushed and fsynced, renamed
+    over `path`, and the directory fsynced, so the new file survives a power loss once this
+    returns (the recovery records of a contradiction retirement depend on it, ADR-0069)."""
+    path = Path(path)
+    tmp = path.with_name(path.name + ".tmp")
+    _write_durably(tmp, (json.dumps(obj, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+    tmp.replace(path)
+    _sync_dir(path.parent)
+
+
+def _sync_file(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def sync_durably(path: Path) -> None:
+    """Make an existing file durable: fsync it, then its directory. A retried retirement calls this
+    on a recovery record an earlier run already renamed into place — that run's own flush may have
+    failed after the rename — so the retry repeats the barrier before the effect it guards
+    (ADR-0069)."""
+    path = Path(path)
+    _sync_file(path)
+    _sync_dir(path.parent)
 
 
 def review_id(review_type: str, subject: dict[str, Any]) -> str:
@@ -95,15 +144,19 @@ def create_review_item(
 
 @_committed
 def withdraw_review_item(
-    reviews_dir: Path, review_id: str, *, reason: str = "", now: str | None = None
+    reviews_dir: Path, review_id: str, *, reason: str = "", now: str | None = None,
+    audit_key: str | None = None,
 ) -> bool:
     """Withdraw a still-**pending** machine-proposed item (it never reached a human).
 
-    Removes the pending file and writes an audit entry, so a later re-detection can re-file the
-    same `review_id` (unlike a rejected item, which stays and blocks re-filing). Only touches
-    `pending/` — an already-decided item (approved/rejected) is a human record and is left
-    intact. Used when a proposed contradiction stops being a candidate or is no longer judged a
-    contradiction (Phase 3.5c). Returns True if it withdrew this call, False otherwise.
+    Writes an audit entry, then removes the pending file, so a later re-detection can re-file the
+    same `review_id` (unlike a rejected item, which stays and blocks re-filing). The audit is
+    written first (atomically), so an interruption never leaves a deleted item without its record.
+    Only touches `pending/` — an already-decided item (approved/rejected) is a human record and is
+    left intact. Used when a proposed contradiction stops being a candidate or is no longer judged a
+    contradiction (Phase 3.5c). `audit_key` names the audit entry deterministically (contradiction
+    maintenance, ADR-0069: a retried retirement finds and keeps its first entry); otherwise each
+    withdrawal gets a fresh one. Returns True if it withdrew this call, False otherwise.
     """
     reviews_dir = Path(reviews_dir)
     src = reviews_dir / "pending" / f"{review_id}.json"
@@ -114,16 +167,21 @@ def withdraw_review_item(
         item = json.loads(src.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         item = {"review_id": review_id}
-    src.unlink()
     audit = reviews_dir / "audit_log"
     audit.mkdir(parents=True, exist_ok=True)
     # Unique suffix: a withdraw/re-file/withdraw cycle for the same review_id must not overwrite
     # earlier audit entries (unlike a terminal approve/reject, a withdrawal can recur).
-    (audit / f"{review_id}-withdrawn-{uuid.uuid4().hex[:8]}.json").write_text(json.dumps({
-        "review_id": review_id, "type": item.get("type"), "decision": "withdrawn",
-        "decided_by": "system", "decided_at": now, "subject": item.get("subject"),
-        "note": reason,
-    }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    entry = audit / f"{review_id}-withdrawn-{audit_key or uuid.uuid4().hex[:8]}.json"
+    if entry.exists():                                    # a retried keyed withdrawal keeps its first,
+        sync_durably(entry)                               # flushed again before the item is deleted
+    else:
+        write_json_durably(entry, {                       # durable before the item is deleted
+            "review_id": review_id, "type": item.get("type"), "decision": "withdrawn",
+            "decided_by": "system", "decided_at": now, "subject": item.get("subject"),
+            "note": reason,
+        })
+    src.unlink()
+    _sync_dir(src.parent)
     return True
 
 
@@ -172,6 +230,8 @@ def resolve_review_item(
         return False
     now = now or iso_now()
     item = json.loads(src.read_text(encoding="utf-8"))
+    if is_retiring(item):                 # ADR-0069: its edge may already be superseded
+        raise ReviewRetiring(review_id)
     item.pop("draft_amendments", None)  # ADR-0058: drafts never survive a terminal decision
     item.update(status=decision, decided_by=decided_by, decided_at=now, decision_note=note)
     if winner is not None:
@@ -288,6 +348,8 @@ def defer_review_item(
     if not src.exists():
         return False
     item = json.loads(src.read_text(encoding="utf-8"))
+    if is_retiring(item):                 # ADR-0069: being withdrawn; a deferral would mislead
+        raise ReviewRetiring(review_id)
     if item.get("status") == "deferred":
         if draft_amendments is not None and item.get("draft_amendments") != draft_amendments:
             item["draft_amendments"] = draft_amendments

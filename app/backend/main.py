@@ -749,25 +749,43 @@ def _record_decision(
                 status_code=409,
                 detail=f"review {review_id} already decided as {current}; decisions are immutable")
         recorded, final = False, current  # idempotent: same terminal decision re-sent (winner unchanged)
-    elif decision == "deferred":
-        recorded = reviews.defer_review_item(settings.reviews_dir, review_id, note=note,
-                                             draft_amendments=amendments)
-        final = "deferred"
     else:
-        if winner is not None:
-            _require_active_claims(item)  # 409 if either Claim page is missing / not active
-        if decision == "approved" and rtype == "merge_items":
-            _require_no_conflicting_merge(item)  # 409 on an approved-unapplied conflict (ADR-0064)
-        recorded = reviews.resolve_review_item(
-            settings.reviews_dir, review_id, decision=decision, decided_by="human", note=note,
-            winner=winner, amendments=amendments if decision == "approved" else None)
-        final = decision
+        try:
+            recorded, final = _record_pending_decision(review_id, item, decision, note, winner,
+                                                       amendments)
+        except reviews.ReviewRetiring:
+            # ADR-0069 slice 2(a): an interrupted retirement; its edge may already be superseded, so
+            # a decision here could never take effect. Refused at the ledger primitive (under the
+            # write lock), which also covers a form opened before the retirement started.
+            raise HTTPException(
+                status_code=409,
+                detail=(f"maintenance_required: review {review_id} is being retired by "
+                        "contradiction maintenance (an interrupted retirement); no decision was "
+                        f"recorded. Run `{contradictions.MAINTENANCE_COMMAND}` to finish it."),
+            ) from None
     return {
         "review_id": review_id,
         "decision_recorded": recorded,
         "status": final,
         "apply_required": review_read.decision_apply_required(rtype, final),
     }
+
+
+def _record_pending_decision(review_id: str, item: dict[str, Any], decision: str, note: str,
+                             winner: str | None,
+                             amendments: dict[str, Any] | None) -> tuple[bool, str]:
+    """Defer, approve or reject a pending item (the ledger primitives refuse a retiring one)."""
+    rtype = str(item.get("type"))
+    if decision == "deferred":
+        return reviews.defer_review_item(settings.reviews_dir, review_id, note=note,
+                                         draft_amendments=amendments), "deferred"
+    if winner is not None:
+        _require_active_claims(item)  # 409 if either Claim page is missing / not active
+    if decision == "approved" and rtype == "merge_items":
+        _require_no_conflicting_merge(item)  # 409 on an approved-unapplied conflict (ADR-0064)
+    return reviews.resolve_review_item(
+        settings.reviews_dir, review_id, decision=decision, decided_by="human", note=note,
+        winner=winner, amendments=amendments if decision == "approved" else None), decision
 
 
 @app.post("/reviews/{review_id}/approve", response_model=ReviewDecisionResponse)
@@ -1891,19 +1909,57 @@ def _source_details_clear(source_id: str, form: dict[str, Any]) -> HTMLResponse:
             status_code=409)
     intent = _publication_intent("tag_action", sources=[source_id])
     manifests.clear_details(settings.manifests_dir, source_id)
+    results = [{"action": "clear details", "recorded": True, "status": "cleared"}]
+    gconn = _open_graph_safe()
+    if gconn is None:
+        results.append(_maintenance_row("the graph is unavailable"))
+    else:
+        try:
+            results += _contradiction_maintenance(gconn, source_id)
+        finally:
+            gconn.close()
     warnings = tag_links.finish(settings.root, {source_id}, wiki_dir=settings.wiki_dir,
                                 intent=intent)["warnings"]
     return HTMLResponse(review_html.render_source_decide_result(
-        source_id, [{"action": "clear details", "recorded": True, "status": "cleared"}],
-        warnings=warnings, pending=_pending_producers(source_id)))
+        source_id, results, warnings=warnings, pending=_pending_producers(source_id)))
+
+
+_MAINTENANCE_ACTION = "re-check proposed contradictions"
+
+
+def _maintenance_row(error: str) -> dict[str, Any]:
+    return {"action": _MAINTENANCE_ACTION, "recorded": False,
+            "skip_reason": f"failed ({error}); the Details are saved — run "
+                           f"`{contradictions.MAINTENANCE_COMMAND}`"}
+
+
+def _contradiction_maintenance(gconn, source_id: str) -> list[dict[str, Any]]:
+    """ADR-0069 slice 2(a): targeted, model-free contradiction maintenance after a Details save or
+    clear, in the same commit phase: proposed contradictions of this document whose documents are
+    no longer independent (or whose evidence changed) are retired. A result row when it retired
+    something or failed; nothing otherwise."""
+    out = contradictions.targeted_maintenance(
+        gconn, reviews_dir=settings.reviews_dir, claims_dir=settings.wiki_dir / "Claims",
+        markdown_dir=settings.normalized_dir / "markdown", manifests_dir=settings.manifests_dir,
+        sources={source_id})
+    if out["error"]:
+        return [_maintenance_row(out["error"])]
+    if out["retired"]:
+        return [{"action": _MAINTENANCE_ACTION, "recorded": True,
+                 "status": f"{len(out['retired'])} proposed contradiction(s) retired"}]
+    return []
 
 
 def _pending_producers(source_id: str) -> list[str]:
-    """The producers a document still awaits after a provenance change (ADR-0066 part 3 slice 3)."""
+    """The producers a document still awaits after a provenance change (ADR-0066 part 3 slice 3),
+    plus contradiction maintenance when it would still retire one of its proposals (ADR-0069)."""
     from app.workers import reconciliation
     waiting = reconciliation.awaiting(settings.manifests_dir, settings.jobs_db_path,
                                       source_id=source_id)
-    return [reconciliation.PRODUCERS[p] for p in sorted(waiting)]
+    pending = [reconciliation.PRODUCERS[p] for p in sorted(waiting)]
+    if contradictions.notice_needed(settings.root, source_id, manifests_dir=settings.manifests_dir):
+        pending.append(contradictions.NOTICE_NAME)
+    return pending
 
 
 @app.post("/ui/reviews/sources/{source_id}/decide", response_class=HTMLResponse)
@@ -2031,6 +2087,7 @@ def _source_decide(source_id: str, form: dict[str, Any]) -> HTMLResponse:
                 affected.add(source_id)
                 results.append({"action": "confirm details", "recorded": True,
                                 "title": details_save["title"], "status": "confirmed"})
+                results += _contradiction_maintenance(gconn, source_id)
         finally:
             gconn.close()
         warnings += tag_links.finish(settings.root, affected, wiki_dir=settings.wiki_dir,

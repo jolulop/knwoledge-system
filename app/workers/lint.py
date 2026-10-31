@@ -501,6 +501,34 @@ def _check_awaiting_reconciliation(manifests_dir: Path | None,
     return out
 
 
+def _check_contradiction_maintenance(gconn, *, reviews_dir: Path, claims_dir: Path,
+                                     markdown_dir: Path, manifests_dir: Path) -> list[dict[str, Any]]:
+    """ADR-0069 slice 2(a): proposed contradictions that maintenance would retire
+    (`contradiction_maintenance_needed`) or can't check (`contradiction_unverifiable`). Read-only and
+    report-only (low): computed from the evidence itself, so a failed or skipped targeted maintenance
+    stays visible until `detect_contradictions.py maintain` runs."""
+    from app.workers import contradictions
+    found = contradictions.check_assertions(gconn, reviews_dir=reviews_dir, claims_dir=claims_dir,
+                                            markdown_dir=markdown_dir, manifests_dir=manifests_dir)
+    out = []
+    for e in found["stale"]:
+        out.append({"check": "contradiction_maintenance_needed", "severity": "low",
+                    "subject": e["review_id"],
+                    "detail": f"proposed contradiction {e['claim_a']} <-> {e['claim_b']}: "
+                              f"{contradictions.RETIRE_REASONS[e['reason']]}",
+                    "data": {"claim_a": e["claim_a"], "claim_b": e["claim_b"],
+                             "reason": e["reason"],
+                             "remediation": "run " + contradictions.MAINTENANCE_COMMAND}})
+    for e in found["unverifiable"]:
+        out.append({"check": "contradiction_unverifiable", "severity": "low",
+                    "subject": e["review_id"],
+                    "detail": f"proposed contradiction {e['claim_a']} <-> {e['claim_b']} can't be "
+                              f"checked: {contradictions.UNVERIFIABLE_REASONS[e['reason']]}",
+                    "data": {"claim_a": e["claim_a"], "claim_b": e["claim_b"],
+                             "reason": e["reason"]}})
+    return out
+
+
 def _check_synthesis_rot(gconn, manifests_dir: Path, claims_dir: Path, markdown_dir: Path,
                          enrichment_dir: Path,
                          model_ref: str | None) -> tuple[list[dict[str, Any]], bool]:
@@ -701,6 +729,9 @@ def run_lint(
                         gconn, manifests_dir, wiki_dir / "Claims", markdown_dir, enrichment_dir,
                         synthesis_model_ref)
                     findings += synth_findings
+                    findings += _check_contradiction_maintenance(  # graph-gated (ADR-0069 2(a))
+                        gconn, reviews_dir=reviews_dir, claims_dir=wiki_dir / "Claims",
+                        markdown_dir=markdown_dir, manifests_dir=manifests_dir)
                     coverage_degraded = coverage_degraded or stale_degraded or synth_degraded
                 finally:
                     gconn.close()

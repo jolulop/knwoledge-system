@@ -110,10 +110,21 @@ Save. A Save that changes the Details without the tick, or from a page shown bef
 review again. **Add author rows** and **Use these** only redraw the form. **Clear confirmed
 details** removes them (`report_family` and `canonical_url` stay, so independence may still rest on
 them). Confirmed authors decide source independence for synthesis on its next run; until it runs, the
-document screen and the lint report (`awaiting_reconciliation`, report-only) name it. The
-contradiction notice says that proposed contradictions weren't re-checked: whole-vault judging was
-removed (ADR-0069 slice 0), and nothing re-checks them until contradiction maintenance (ADR-0069
-slice 2(a)), which also retires that notice.
+document screen and the lint report (`awaiting_reconciliation`, report-only) name it. Proposed
+contradictions are maintained in the same save (ADR-0069 slice 2(a)): a proposal whose two documents
+are no longer independent is retired at once, and the result says how many.
+
+**Contradiction maintenance (ADR-0069 slice 2(a)).** Model-free; it never judges anything. It
+retires a *proposed* contradiction (never an approved one, nor a decision awaiting Apply) when a
+claim lost its evidence, when a claim's wording or evidence changed since it was judged (even under
+the same claim id), or when its two documents are no longer independent. It runs on its own after a
+Details save or clear and after claim re-extraction (`extract_claims.py` prints how many it retired).
+If one of those runs fails, the save still stands, the result names the failure, and the document
+screen and lint (`contradiction_maintenance_needed`, report-only) keep reporting the proposals until
+you run `uv run python scripts/detect_contradictions.py maintain`, the full repair path (exit 0 when
+done, 1 on failure). Lint's `contradiction_unverifiable` names a proposal whose review item doesn't
+record what was judged; it is left as it is. Maintenance being current does not mean any documents
+were checked for contradictions.
 
 **Graph traversal indexes (ADR-0068 decision 7).** Graph views and the graph part of search read
 at most a fixed number of edges per node, through three indexes on `db/graph.sqlite`. The API

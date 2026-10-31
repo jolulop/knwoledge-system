@@ -354,6 +354,8 @@ def extract_claims(
     errors: list[dict[str, Any]] = []
     page_outcomes: dict[str, str] = {}   # cid -> the last page outcome this run
     journal_reconciled: list[str] = []   # unfinished commits finished from authority
+    # ADR-0069 slice 2(a): targeted contradiction maintenance after each document's commit.
+    maintenance: dict[str, Any] = {"retired": [], "errors": []}
     run = publication.Run(root, "extract_claims", search=rebuild_index, wiki_dir=claims_dir.parent)
 
     def _compose(cids: set[str], texts: dict[str, str]) -> None:
@@ -371,6 +373,16 @@ def extract_claims(
             if node and node["status"] == "active":
                 recompose_claim(gconn, cid=cid, claims_dir=claims_dir, reviews_dir=reviews_dir,
                                 markdown_dir=markdown_dir, now=now)
+        # ADR-0069 slice 2(a): a re-extracted claim keeps its id when its wording survives, but its
+        # evidence may have changed, so proposed contradictions touching these claims are
+        # re-checked against what was judged (model-free; changes no page).
+        from app.workers import contradictions
+        out = contradictions.targeted_maintenance(
+            gconn, reviews_dir=reviews_dir, claims_dir=claims_dir, markdown_dir=markdown_dir,
+            manifests_dir=manifests_dir, claims_scope=set(cids), now=now)
+        maintenance["retired"] += out["retired"]
+        if out["error"]:
+            maintenance["errors"].append(out["error"])
 
     try:
         # ADR-0063: resolve the tier chain INSIDE the protected block so a malformed-chain ConfigError
@@ -592,7 +604,9 @@ def extract_claims(
         # A document this run attempted whose commit is still unfinished is never a clean success.
         left_attempted = sorted(set(left) & attempted)
 
-        if errors or left_attempted:
+        # ADR-0069 slice 2(a): a failed contradiction maintenance keeps the claims but leaves the
+        # run incomplete (lint reports the proposals until `detect_contradictions.py maintain`).
+        if errors or left_attempted or maintenance["errors"]:
             status = "partial"
         elif not has_key and considered > 0:
             status = "skipped"
@@ -622,6 +636,10 @@ def extract_claims(
             # ADR-0068 producer journal: documents whose commit is still unfinished (redone by the
             # next run that reaches them), and the ones finished here from authority.
             "unfinished_commits": sorted(left), "journal_reconciled": journal_reconciled,
+            # ADR-0069 slice 2(a): proposed contradictions retired by targeted maintenance, and its
+            # failures (lint keeps reporting what is left until `detect_contradictions.py maintain`).
+            "contradictions_retired": len(maintenance["retired"]),
+            "contradiction_maintenance_errors": maintenance["errors"],
             "index_rebuilt": bool(pub and pub["index_rebuilt"]),
             "keyword_reindexed": bool(pub and pub["keyword_reindexed"]),
             "publication": publication.summary(pub), "extracted_at": now,

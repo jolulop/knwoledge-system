@@ -363,9 +363,9 @@ critical rules and `CONTEXT.md` for the glossary.
     **These details are correct** + Save, a baseline token (stale-form refusal), **Clear confirmed
     details**. Manifest `provenance` keys title/authors[{name,show_page}]/publisher/confirmed_at/
     confirmed_baseline (`manifests.confirm_details`, `provenance_problem`, `name_identity`).
-    **Independence digests** (`app/workers/reconciliation.py`): synthesis/contradictions record what
-    they used; a change shows a per-producer reconciliation notice and lint
-    `awaiting_reconciliation`.
+    **Independence digests** (`app/workers/reconciliation.py`): synthesis records what it used; a
+    change shows a reconciliation notice and lint `awaiting_reconciliation` (contradictions retired
+    from it by ADR-0069 slice 2(a): targeted contradiction maintenance runs in the save instead).
   - **Slice 4 — Authors & publishers pages** `wiki/Authors/` (`app/workers/authors.py`): a
     code-owned navigation projection (never graph nodes/items), one page per `name_identity`
     across both roles, listing confirmed + ticked + default-visible documents only; built in the

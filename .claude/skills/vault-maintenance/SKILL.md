@@ -25,9 +25,12 @@ Keep the filing-cabinet/wiki/search/graph layers healthy over time.
 - Summary rot.
 - Stale claims.
 - Duplicate sources.
-- Contradictions: report the existing `resolve_contradiction` review items only. Never run a
+- Contradictions: report the existing `resolve_contradiction` review items and lint's
+  `contradiction_maintenance_needed` / `contradiction_unverifiable` findings. Never run a
   contradiction judging pass — whole-vault judging was removed (ADR-0069 slice 0); scoped checks on
-  user-selected documents arrive in ADR-0069 slice 2.
+  user-selected documents arrive in ADR-0069 slice 2(b). `scripts/detect_contradictions.py maintain`
+  (model-free; retires only out-of-date *proposed* contradictions, never an approved one) is the
+  repair those findings name.
 - Unreviewed destructive changes.
 - Archive candidates older than three years.
 

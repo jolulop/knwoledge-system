@@ -78,6 +78,12 @@ def main(argv: list[str]) -> int:
     print(f"Errors: {summary['errors']}")
     for err in summary["error_details"]:
         print(f"  - {err['source_id']}: {err['error']}")
+    if summary["contradictions_retired"]:
+        print(f"Proposed contradictions retired by maintenance: "
+              f"{summary['contradictions_retired']}")
+    for err in summary["contradiction_maintenance_errors"]:  # ADR-0069 slice 2(a)
+        print(f"  ! contradiction maintenance failed: {err} — run "
+              "`uv run python scripts/detect_contradictions.py maintain`")
     print(f"Index rebuilt: {summary['index_rebuilt']}")
     # ADR-0068: each source's commit published its Source page (its Claims section); the run ended
     # with one refresh of index.md and search.
@@ -104,7 +110,8 @@ def main(argv: list[str]) -> int:
 
     published = (summary["publication"] or {}).get("status") != publication.PENDING
     published = published and not summary["unfinished_commits"]
-    return 0 if (not summary["errors"] and validators_ok and published) else 1
+    maintained = not summary["contradiction_maintenance_errors"]       # ADR-0069 slice 2(a)
+    return 0 if (not summary["errors"] and validators_ok and published and maintained) else 1
 
 
 if __name__ == "__main__":

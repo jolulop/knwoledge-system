@@ -185,7 +185,7 @@ def test_the_judging_sweep_is_gone_from_the_worker_and_the_cli(tmp_path, monkeyp
     assert cli.main([]) == 2
     assert "removed (ADR-0069 slice 0)" in capsys.readouterr().err
     assert cli.main(["--help"]) == 0
-    assert "runs nothing" in capsys.readouterr().out
+    assert "maintain" in capsys.readouterr().out          # the one command that runs (no model)
     assert cli.main(["estimate", "src_a", "src_b"]) == 2
     assert "app.llm" not in Path(cli.__file__).read_text(encoding="utf-8")
 

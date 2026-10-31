@@ -186,8 +186,9 @@ uv run python scripts/validate_all.py
 ```
 
 Contradiction checks are **not** part of this run: whole-vault judging was removed (ADR-0069 slice 0;
-`scripts/detect_contradictions.py` now only prints usage). An occasional check on documents you
-select arrives in ADR-0069 slice 2.
+`scripts/detect_contradictions.py` with no arguments only prints usage). Its one working command,
+`maintain`, makes no model call and only retires out-of-date proposals (ADR-0069 slice 2(a)); an
+occasional check on documents you select arrives in ADR-0069 slice 2(b).
 
 Each producer publishes its pages, `wiki/index.md` and search before it reports success (ADR-0068).
 One that prints "publication incomplete" left work queued: run `uv run python scripts/republish.py`.
@@ -358,10 +359,10 @@ Details, so do this on a few documents, sharing at least one author between two 
   pages.
 - Changing a confirmed **author or publisher** changes which documents count as independent. The
   screen then shows "**Synthesis** hasn't run since these details changed", and lint reports
-  `awaiting_reconciliation`, until you re-run `scripts/generate_synthesis.py`. A second notice says
-  that proposed contradictions involving the document weren't re-checked: nothing re-checks them
-  until contradiction maintenance (ADR-0069 slice 2(a)), so that one stays. Title and show-page
-  edits don't need either.
+  `awaiting_reconciliation`, until you re-run `scripts/generate_synthesis.py`. Title and show-page
+  edits don't need it. Proposed contradictions are re-checked in the same save (ADR-0069 slice
+  2(a)): one whose documents are no longer independent is retired, and the result says
+  "N proposed contradiction(s) retired". There is no contradiction notice to clear.
 
 After a save, each ticked name has a page under `wiki/Authors/` (§11) listing the documents that name
 it. The Source page's Details list the authors and publisher, linking those pages, and
@@ -670,7 +671,8 @@ nothing, and applies nothing.
 - An Authors page exists exactly for each ticked name on a confirmed, visible document, lists only
   those documents, and is linked from their Source pages; hiding the last one removes the page.
 - Changing a confirmed author or publisher shows the synthesis reconciliation notice (screen and
-  lint) until synthesis re-runs; the contradiction notice says nothing re-checks them yet.
+  lint) until synthesis re-runs; proposed contradictions it makes non-independent are retired in the
+  same save (no contradiction notice).
 - Review items are decision-only until apply; the dry-run shows the intended scope before apply.
 - Applying approved reviews updates only the governed surfaces and validators still pass.
 - Maintenance jobs complete with reports and never act autonomously on semantic/destructive decisions.

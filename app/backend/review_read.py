@@ -1823,8 +1823,11 @@ def details_section(reviews_dir: Path, source_id: str, *, manifests_dir: Path,
         ledger = tag_links.load_ledger(reviews_dir, source_id)
     except tag_links.LedgerCorrupt as exc:
         ledger = {"corrupt": exc.problem}
-    from app.workers import reconciliation
+    from app.workers import contradictions, reconciliation
     waiting = reconciliation.awaiting(manifests_dir, root / "db" / "jobs.sqlite", source_id=source_id)
+    pending = [reconciliation.PRODUCERS[p] for p in sorted(waiting)]
+    if contradictions.notice_needed(root, source_id, manifests_dir=manifests_dir):  # ADR-0069 2(a)
+        pending.append(contradictions.NOTICE_NAME)
     return {"details": shown | {"known_names": known,
                                 "baseline": details_mod.baseline_token(manifest, ledger, shown),
-                                "pending": [reconciliation.PRODUCERS[p] for p in sorted(waiting)]}}
+                                "pending": pending}}

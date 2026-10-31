@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Which documents still await reconciliation after a provenance change (ADR-0066 part 3 slice 3).
 
-Synthesis and contradiction detection recompute source independence from current provenance on
-every run, so a confirmation or a Clear never changes a model fingerprint. What they record is which
-documents' independence inputs they have **reconciled**, so the screens and the maintenance report
-can say what is still waiting (slice-3 grill Q3):
+Synthesis recomputes source independence from current provenance on every run, so a confirmation or
+a Clear never changes a model fingerprint. What it records is which documents' independence inputs
+it has **reconciled**, so the screens and the maintenance report can say what is still waiting
+(slice-3 grill Q3). Contradictions no longer take part (ADR-0069 slice 2(a)): targeted contradiction
+maintenance runs inside every Details save or clear, and what it couldn't do is reported from the
+evidence itself (`contradictions.check_assertions`: lint and the Source screen), so acknowledgements
+recorded by old `detect_contradictions` jobs are ignored.
 
 - a run captures each document's independence digest from the provenance it used for its
   eligibility decisions (`capture`), not from provenance read when it finishes;
@@ -25,24 +28,13 @@ from typing import Any
 
 from app.backend import manifests
 
-PRODUCERS = {"generate_synthesis": "Synthesis",
-             "detect_contradictions": "Contradiction detection"}
-
-# ADR-0069 slice 0 removed whole-vault contradiction judging, so nothing acknowledges a change for
-# `detect_contradictions` until model-free contradiction maintenance (slice 2(a)) does. The notice
-# stays until then (ADR-0069 decision 10) but says what is true: no command re-checks them yet.
-_PENDING_MAINTENANCE = "contradiction maintenance arrives with ADR-0069 slice 2(a)"
+PRODUCERS = {"generate_synthesis": "Synthesis"}
 SCREEN_NOTICES = {
     "Synthesis": "Synthesis hasn't run since these details changed; run it to reconcile them.",
-    "Contradiction detection": ("Proposed contradictions involving this document weren't re-checked "
-                                "after these details changed; nothing re-checks them yet ("
-                                + _PENDING_MAINTENANCE + ")."),
 }
 LINT_TEXT = {
     "generate_synthesis": ("Synthesis hasn't run since this document's provenance changed",
                            "run generate_synthesis"),
-    "detect_contradictions": ("Proposed contradictions involving this document weren't re-checked "
-                              "after its provenance changed", "none yet: " + _PENDING_MAINTENANCE),
 }
 _EMPTY = manifests.independence_digest({})
 _COMPLETE = ("succeeded", "saved_publication_pending")
