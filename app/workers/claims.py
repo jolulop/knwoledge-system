@@ -494,6 +494,7 @@ def extract_claims(
                         schema_version=art.CLAIM_SCHEMA_VERSION,
                         prompt_version=art.CLAIM_PROMPT_VERSION,
                         strategy_ref=strategy_ref,
+                        operation=f"{sid}#window{i}/{len(windows)}",
                     )
                 except ParseError as exc:
                     failed = {"source_id": sid, "window": i, "windows": len(windows),

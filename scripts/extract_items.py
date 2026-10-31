@@ -42,6 +42,7 @@ import validate_wikilinks  # noqa: E402
 from app.backend.config import get_settings
 from app.llm.cache import ResponseCache
 from app.llm.client import build_client
+from app.llm.usage import report_lines
 from app.workers import items, publication
 
 
@@ -125,6 +126,8 @@ def main(argv: list[str]) -> int:
         print(f"Unfinished commits: {len(summary['unfinished_commits'])} "
               f"({', '.join(summary['unfinished_commits'])}) — the next run redoes them.")
     print(f"Job: {summary['job_id']}")
+    for line in report_lines(settings.jobs_db_path, summary["job_id"]):  # ADR-0069
+        print(line)
 
     root = str(settings.root)
     print("\nValidators:")

@@ -134,6 +134,7 @@ def enrich_sources(
                 result = client.parse(
                     messages, prompts.SUMMARY_TAGS_SCHEMA, model_ref,
                     schema_version=art.SCHEMA_VERSION, prompt_version=art.PROMPT_VERSION,
+                    operation=source_id,
                 )
             except ParseError as exc:
                 errors.append({"source_id": source_id, "error": str(exc)})

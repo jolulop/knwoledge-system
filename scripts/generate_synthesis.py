@@ -35,6 +35,7 @@ import validate_wikilinks  # noqa: E402
 from app.backend.config import get_settings
 from app.llm.cache import ResponseCache
 from app.llm.client import build_client
+from app.llm.usage import report_lines
 from app.workers import publication, synthesis
 
 
@@ -73,6 +74,8 @@ def main(argv: list[str]) -> int:
             print(f"  kept by a human decision (approved, rejected or hidden): "
                   f"{', '.join(summary['unfinished_blocked'])}")
     print(f"Job: {summary['job_id']}")
+    for line in report_lines(settings.jobs_db_path, summary["job_id"]):  # ADR-0069
+        print(line)
 
     print("\nValidators:")
     root = str(settings.root)

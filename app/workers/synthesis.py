@@ -782,6 +782,7 @@ def generate_syntheses(
                         prompts.SYNTHESIS_SCHEMA, model_ref,
                         schema_version=art.SYNTHESIS_SCHEMA_VERSION,
                         prompt_version=art.SYNTHESIS_PROMPT_VERSION,
+                        operation=tid,
                     )
                 except ParseError as exc:
                     errors.append({"topic": tid, "error": str(exc)})

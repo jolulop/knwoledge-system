@@ -8,12 +8,22 @@ index is a derived product under indexes/ (ADR-0032 §7). Dependency-free (stdli
 A job recorded `running` holds the vault writer lock (`app/backend/vault_lock.py`, shared) from
 before its row is inserted until `update_job` records a terminal status, so a backup never runs
 while a producer writes (ADR-0039 amendment).
+
+The same database holds the **LLM usage ledger** (ADR-0069 decision 6): `llm_usage`, one row per
+provider attempt, and `llm_cache_hits`, avoided calls counted per job and model. A job recorded
+`running` is also this context's **current job** (`current_job`), which the ledger uses to attribute
+attempts without each producer passing its job id; `bound_invocation` does the same for work that
+is not a job (a `/query` request, an eval run). Attribution is a per-context stack: a nested job is
+current until it ends, then its parent is again; concurrent threads and tasks each see their own.
 """
 from __future__ import annotations
 
 import json
 import sqlite3
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +46,9 @@ _TERMINAL_STATUSES = frozenset({"succeeded", "failed", "partial", "skipped",
                                 "saved_publication_pending"})
 _JOB_LOCKS: dict[str, Any] = {}                           # job_id -> vault writer-lock handle
 _JOB_LOCKS_GUARD = threading.Lock()
+# Stack of (job or invocation id, producer) in this context; the top one is the job the context's
+# LLM attempts are attributed to (ADR-0069).
+_JOB_STACK: ContextVar[tuple[tuple[str, str], ...]] = ContextVar("ks_job_stack", default=())
 
 
 def _db_dir(conn: sqlite3.Connection) -> Path | None:
@@ -58,6 +71,50 @@ CREATE TABLE IF NOT EXISTS jobs (
     warnings_json TEXT NOT NULL DEFAULT '[]',
     metadata_json TEXT NOT NULL DEFAULT '{}'
 );
+
+-- ADR-0069 decision 6: one row per provider attempt, recorded `started` before sending and
+-- finalized after. Token fields are each nullable (NULL = not reported) and keep the provider's own
+-- categories: for `usage_family` 'anthropic' `input_tokens` excludes the cache read/write tokens;
+-- for 'openai_compatible' `input_tokens` is `prompt_tokens`, which INCLUDES `cache_read_tokens`.
+-- Metadata and counts only: never prompts, responses, error text or credentials.
+CREATE TABLE IF NOT EXISTS llm_usage (
+    attempt_id         TEXT PRIMARY KEY,
+    job_id             TEXT,
+    producer           TEXT,
+    operation          TEXT,
+    retry              INTEGER NOT NULL,
+    model_ref          TEXT NOT NULL,
+    provider           TEXT NOT NULL,
+    status             TEXT NOT NULL,
+    input_chars        INTEGER NOT NULL,
+    max_output_tokens  INTEGER NOT NULL,
+    usage_family       TEXT,
+    input_tokens       INTEGER,
+    output_tokens      INTEGER,
+    cache_read_tokens  INTEGER,
+    cache_write_tokens INTEGER,
+    started_at         TEXT NOT NULL,
+    finished_at        TEXT
+);
+CREATE INDEX IF NOT EXISTS llm_usage_job ON llm_usage (job_id);
+
+-- Cache replays are avoided calls, counted apart from attempts (job_id '' = unattributed).
+CREATE TABLE IF NOT EXISTS llm_cache_hits (
+    job_id     TEXT NOT NULL,
+    producer   TEXT,
+    model_ref  TEXT NOT NULL,
+    hits       INTEGER NOT NULL,
+    PRIMARY KEY (job_id, model_ref)
+);
+
+-- When this database started recording usage (written once, iso_now's format): a job created
+-- earlier made attempts no ledger saw, so its usage is "not recorded", not "none".
+CREATE TABLE IF NOT EXISTS llm_ledger_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+INSERT OR IGNORE INTO llm_ledger_meta (key, value)
+    VALUES ('started_at', strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now'));
 """
 
 
@@ -67,6 +124,22 @@ def connect(db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def current_job() -> tuple[str, str] | None:
+    """`(job or invocation id, producer)` this context's LLM attempts belong to, or None."""
+    stack = _JOB_STACK.get()
+    return stack[-1] if stack else None
+
+
+@contextmanager
+def bound_invocation(invocation_id: str, producer: str) -> Iterator[None]:
+    """Attribute LLM attempts made inside the block to work that is not a job (ADR-0069)."""
+    token = _JOB_STACK.set(_JOB_STACK.get() + ((invocation_id, producer),))
+    try:
+        yield
+    finally:
+        _JOB_STACK.reset(token)
 
 
 def init_db(db_path: Path) -> None:
@@ -109,6 +182,8 @@ def insert_job(
     except BaseException:
         _release_job_lock(job_id)
         raise
+    if status == "running":                               # the ledger attributes attempts to it
+        _JOB_STACK.set(_JOB_STACK.get() + ((job_id, job_type),))
 
 
 def _release_job_lock(job_id: str) -> None:
@@ -163,6 +238,9 @@ def update_job(conn: sqlite3.Connection, job_id: str, **fields: Any) -> None:
     finally:
         if fields.get("status") in _TERMINAL_STATUSES:
             _release_job_lock(job_id)                     # the job's writes are done
+            stack = _JOB_STACK.get()                      # a parent job is current again
+            if any(entry[0] == job_id for entry in stack):
+                _JOB_STACK.set(tuple(entry for entry in stack if entry[0] != job_id))
 
 
 def _row_to_job(row: sqlite3.Row) -> dict[str, Any]:

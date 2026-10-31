@@ -10,6 +10,7 @@ import os
 import re
 import sqlite3
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -70,6 +71,7 @@ from app.backend.policy import load_retrieval_policy, load_yaml
 from app.llm.adapters import AdapterError
 from app.llm.cache import ResponseCache
 from app.llm.client import ConfigError, ParseError, build_client
+from app.llm import usage as llm_usage
 from app.workers import (
     claims, contradictions, deprecations, duplicates, eval_answers, extract, human_add,
     human_merge, identity_journal, intake, lint, merges, promote, publication, query, retention,
@@ -300,7 +302,27 @@ def list_jobs(limit: int = 100, status: str | None = None) -> dict[str, Any]:
         jobs = db.list_jobs(conn, limit=limit, status=status)
     finally:
         conn.close()
+    usage, usage_status = _ledger_read(
+        lambda: llm_usage.summarize_many(settings.jobs_db_path, [j["job_id"] for j in jobs]))
+    for j in jobs:
+        _attach_usage(j, None if usage is None else usage[j["job_id"]], usage_status)
     return {"count": len(jobs), "jobs": jobs}
+
+
+def _ledger_read(read: Any) -> tuple[Any, str | None]:
+    """Run a usage-ledger read; return (result, None), or (None, "unavailable") if it can't be read."""
+    try:
+        return read(), None
+    except llm_usage.LedgerUnavailable:
+        return None, "unavailable"
+
+
+def _attach_usage(job: dict[str, Any], usage: dict[str, Any] | None, failed: str | None) -> None:
+    """`llm_usage` + `llm_usage_status`: `recorded` (an empty usage = no model attempt),
+    `not_recorded` (the job predates the ledger) or `unavailable` — the last two mean usage is
+    unknown, never none (ADR-0069)."""
+    job["llm_usage"] = usage or {}
+    job["llm_usage_status"] = failed or ("not_recorded" if usage is None else "recorded")
 
 
 @app.get("/jobs/{job_id}", response_model=Job)
@@ -313,6 +335,8 @@ def get_job(job_id: str) -> dict[str, Any]:
         conn.close()
     if job is None:
         raise HTTPException(status_code=404, detail=f"job not found: {job_id}")
+    usage, failed = _ledger_read(lambda: llm_usage.summarize(settings.jobs_db_path, job_id))
+    _attach_usage(job, usage, failed)
     return job
 
 
@@ -2664,11 +2688,14 @@ def run_query_endpoint(req: QueryRequest) -> dict[str, Any]:
             node_statuses=search.parse_statuses(None, graph.NODE_STATUSES, search.RETENTION_DEFAULT_STATUSES),
             edge_statuses=graph_read.DEFAULT_EDGE_STATUSES,
         )
-        answer = query.answer_query(
-            question=q, evidence_hits=result["evidence"], client=client,
-            model_ref=query_model, markdown_dir=settings.markdown_dir,
-            fallback_text=_no_source_text(),
-        )
+        # ADR-0069: a durable id for this request's LLM attempts, saved or not.
+        invocation_id = f"qry_{uuid.uuid4().hex[:16]}"
+        with db.bound_invocation(invocation_id, "query"):
+            answer = query.answer_query(
+                question=q, evidence_hits=result["evidence"], client=client,
+                model_ref=query_model, markdown_dir=settings.markdown_dir,
+                fallback_text=_no_source_text(),
+            )
     except HTTPException:
         raise  # already-controlled 4xx/503 (e.g. provider unavailable, explicit-vector unavailable)
     except ConfigError as exc:
@@ -2720,6 +2747,7 @@ def run_query_endpoint(req: QueryRequest) -> dict[str, Any]:
         "unsourced_claims": answer.unsourced_claims if req.include_unsourced else [],
         "notes": result.get("notes", []),
         "query_id": saved_id,
+        "invocation_id": invocation_id,
         "navigation_stale": navigation_stale,
     }
 
@@ -2860,9 +2888,11 @@ def run_eval_endpoint(req: EvalRunRequest) -> dict[str, Any]:
                 status_code=503,
                 detail=("answer-quality eval requires a configured LLM; set QUERY_MODEL and the "
                         "provider credential (GET /evals/results stays available without one)"))
-        report = eval_answers.run_eval(
-            cases, _eval_query_fn(client, cache, query_model), limit=limit, known_source_ids=known,
-            cache_mode=("fresh" if req.fresh else "cached"))
+        invocation_id = f"eva_{uuid.uuid4().hex[:16]}"  # ADR-0069: attributes its LLM attempts
+        with db.bound_invocation(invocation_id, "eval_answers"):
+            report = eval_answers.run_eval(
+                cases, _eval_query_fn(client, cache, query_model), limit=limit,
+                known_source_ids=known, cache_mode=("fresh" if req.fresh else "cached"))
     except HTTPException:
         raise  # already-controlled (provider unavailable / search-vector 4xx/503) — no raw detail
     except (ConfigError, ParseError, AdapterError) as exc:
@@ -2882,6 +2912,7 @@ def run_eval_endpoint(req: EvalRunRequest) -> dict[str, Any]:
         "model_ref": query_model, "model_provider": query_model.split(":", 1)[0],
         "graph_schema_version": graph.SCHEMA_VERSION, "vault_fingerprint": _vault_fingerprint(),
         "n_requested": requested, "n_run": report["n_run"], "n_skipped": report["n_skipped"],
+        "llm_invocation_id": invocation_id,
     }
     report["meta"] = meta
     json_path = settings.eval_reports_dir / f"{run_id}.json"

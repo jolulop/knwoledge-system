@@ -15,6 +15,20 @@ chains** resolved to the first available provider, with hosted fallback (ADR-006
 a **local** OpenAI-compatible model (Ollama / vLLM / LM Studio) instead of a hosted one, see
 `docs/Local Models.md` — set `ENRICH_LOCAL_BASE_URL` and add a `local:<model>` entry to the tier chain.
 
+**LLM usage (ADR-0069).** Every provider attempt — from Enrich, claims, items, synthesis, `POST /query`
+and the answer eval — is recorded in `db/jobs.sqlite` (`llm_usage`): one row per attempt, written
+before the request is sent, with its outcome (ok, schema error, adapter error, output limit) and the
+**reported** tokens. Failed and retried attempts count too; a cache replay is counted separately as
+an avoided call. Each producer script ends with an "LLM usage" summary per model, `GET /jobs` and
+`GET /jobs/{id}` carry the same totals (`llm_usage`, with `llm_usage_status`: `recorded`, or
+`not_recorded` for jobs older than the ledger, or `unavailable` if it can't be read — unknown,
+not none), and `POST /query` returns the
+`invocation_id` its attempts are recorded under. Retries are the app's own (the provider SDKs'
+automatic retries are off), so every request sent is a recorded attempt. Tokens a provider didn't report are shown as unknown, never 0
+(local servers often omit them). For Anthropic, input excludes cache read/write tokens; on the
+OpenAI wire, input includes cached tokens. No prompts, responses or prices are stored — your
+provider console stays the cost authority.
+
 ## Starting the app
 
 The **only supported launch** is the blessed entrypoint, which binds Uvicorn to `APP_HOST` through the

@@ -7,6 +7,11 @@ present (no provider call), otherwise calls the adapter with native schema-const
 decoding, re-validates the result, and on a bounded number of failures raises `ParseError`
 so the caller can drop the item. Startup validation (`validate_tiers`) fails fast on an
 unknown provider or a missing credential rather than discovering it mid-run.
+
+With a usage ledger (ADR-0069 decision 6; `build_client` always wires one), every provider attempt
+is recorded `started` before it is sent and finalized after with its outcome and the
+provider-reported usage, including failed and retried attempts; a cache replay is counted as an
+avoided call instead.
 """
 from __future__ import annotations
 
@@ -21,6 +26,7 @@ from app.llm.adapters import (
     OpenAIAdapter,
 )
 from app.llm.cache import ResponseCache, cache_key
+from app.llm.usage import UsageLedger, input_chars
 
 # Default tier -> model_ref mapping (config examples, not normative — ADR-0025).
 DEFAULT_TIERS = {
@@ -75,11 +81,13 @@ class LLMClient:
         cache: ResponseCache | None = None,
         max_tokens: int = 1024,
         max_retries: int = 2,
+        ledger: UsageLedger | None = None,
     ) -> None:
         self._adapters = adapters
         self._cache = cache
         self._max_tokens = max_tokens
         self._max_retries = max_retries
+        self._ledger = ledger
 
     def _adapter(self, provider: str) -> Any:
         adapter = self._adapters.get(provider)
@@ -145,6 +153,7 @@ class LLMClient:
         prompt_version: str | None = None,
         strategy_ref: str | None = None,
         cache_only: bool = False,
+        operation: str | None = None,
     ) -> dict[str, Any]:
         """Return a schema-valid object, replaying from cache when possible, or raise.
 
@@ -152,7 +161,7 @@ class LLMClient:
         identity — tier-2 callers pass their coverage strategy so a window-budget or
         input-cap change forces fresh calls without pretending the prompt changed.
         `cache_only` (ADR-0066 Re-suggest) replays or raises :class:`CacheMiss` — the provider
-        is never called.
+        is never called. `operation` names the unit of work in the usage ledger (ADR-0069).
         """
         provider, model_id = parse_model_ref(model_ref)
         adapter = self._adapter(provider)
@@ -171,6 +180,8 @@ class LLMClient:
                 # re-derived below.
                 try:
                     schema_mod.validate(cached, schema)
+                    if self._ledger is not None:
+                        self._ledger.cache_hit(model_ref)
                     return cached
                 except schema_mod.SchemaError:
                     pass
@@ -178,13 +189,33 @@ class LLMClient:
             raise CacheMiss(f"{model_ref}: no cached response (cache-only replay)")
 
         last_error: Exception | None = None
-        for _ in range(self._max_retries + 1):
+        sent_chars = input_chars(messages, schema)
+        for retry in range(self._max_retries + 1):
+            attempt = None
+            if self._ledger is not None:              # recorded before sending, or not sent
+                attempt = self._ledger.start(
+                    model_ref=model_ref, provider=provider, retry=retry, input_chars=sent_chars,
+                    max_output_tokens=self._max_tokens, operation=operation)
+            usage: dict[str, Any] | None = None
             try:
-                raw = adapter.parse(messages, schema, model_id, max_tokens=self._max_tokens)
+                if hasattr(adapter, "parse_with_usage"):
+                    raw, usage = adapter.parse_with_usage(messages, schema, model_id,
+                                                          max_tokens=self._max_tokens)
+                else:                                 # an adapter that reports no usage
+                    raw = adapter.parse(messages, schema, model_id, max_tokens=self._max_tokens)
                 schema_mod.validate(raw, schema)
-            except (AdapterError, schema_mod.SchemaError) as exc:
+            except AdapterError as exc:
+                self._finish(attempt, exc.outcome, exc.usage)
                 last_error = exc
                 continue
+            except schema_mod.SchemaError as exc:     # the response still consumed tokens
+                self._finish(attempt, "schema_error", usage)
+                last_error = exc
+                continue
+            except BaseException:                     # unexpected failure or interrupt
+                self._finish(attempt, "adapter_error", usage)
+                raise
+            self._finish(attempt, "ok", usage)
             if self._cache is not None:
                 self._cache.put(
                     key, provider=provider, model_id=model_id, response=raw,
@@ -198,9 +229,14 @@ class LLMClient:
             f"{last_error}"
         ) from last_error
 
+    def _finish(self, attempt: str | None, outcome: str, usage: dict[str, Any] | None) -> None:
+        if attempt is not None and self._ledger is not None:
+            self._ledger.finish(attempt, outcome=outcome, usage=usage)
+
 
 def build_client(settings: Any, *, cache: ResponseCache | None = None) -> LLMClient:
-    """Construct an LLMClient with all three adapters wired from config (ADR-0025)."""
+    """Construct an LLMClient with all three adapters wired from config (ADR-0025) and the usage
+    ledger in the jobs database (ADR-0069), so every producer and `/query` records its attempts."""
     adapters = {
         "anthropic": AnthropicAdapter(api_key=settings.anthropic_api_key),
         "openai": OpenAIAdapter(
@@ -208,4 +244,5 @@ def build_client(settings: Any, *, cache: ResponseCache | None = None) -> LLMCli
         ),
         "local": LocalAdapter(base_url=settings.enrich_local_base_url),
     }
-    return LLMClient(adapters=adapters, cache=cache, max_tokens=settings.enrich_max_tokens)
+    return LLMClient(adapters=adapters, cache=cache, max_tokens=settings.enrich_max_tokens,
+                     ledger=UsageLedger(settings.jobs_db_path))

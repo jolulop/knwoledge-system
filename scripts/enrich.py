@@ -25,6 +25,7 @@ if str(ROOT) not in sys.path:
 from app.backend.config import get_settings
 from app.llm.cache import ResponseCache
 from app.llm.client import build_client
+from app.llm.usage import report_lines
 from app.workers import enrich, publication
 
 
@@ -62,6 +63,8 @@ def main(argv: list[str]) -> int:
     for line in publication.report(summary["publication"]):
         print(line)
     print(f"Job: {summary['job_id']}")
+    for line in report_lines(settings.jobs_db_path, summary["job_id"]):  # ADR-0069
+        print(line)
     published = (summary["publication"] or {}).get("status") != publication.PENDING
     return 1 if summary["errors"] or not published else 0
 

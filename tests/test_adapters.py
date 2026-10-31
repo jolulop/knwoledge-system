@@ -43,7 +43,7 @@ def _fake_anthropic(*, text=None, stop_reason="end_turn", raise_exc=None):
             return _Resp()
 
     class _Client:
-        def __init__(self, api_key=None):
+        def __init__(self, api_key=None, max_retries=2):
             self.messages = _Messages()
 
     mod.Anthropic = _Client
@@ -76,7 +76,7 @@ def _fake_openai(*, content=None, raise_exc=None):
             self.completions = _Completions()
 
     class _Client:
-        def __init__(self, api_key=None, base_url=None):
+        def __init__(self, api_key=None, base_url=None, max_retries=2):
             self.chat = _Chat()
 
     mod.OpenAI = _Client

@@ -140,6 +140,12 @@ class Job(BaseModel):
     error_message: str | None = None
     warnings: list[Any] = []
     metadata: dict[str, Any] = {}
+    # ADR-0069: per-model LLM usage from the ledger — attempts by outcome, cache hits, reported
+    # tokens and unknown counts. `llm_usage_status`: `recorded` (the ledger was read; empty usage =
+    # no model call), `not_recorded` (the job predates the ledger) or `unavailable` (it could not be
+    # read) — the last two mean usage is unknown, not none.
+    llm_usage: dict[str, Any] = {}
+    llm_usage_status: str = "recorded"
 
 
 class JobsResponse(BaseModel):
@@ -349,6 +355,8 @@ class QueryResponse(BaseModel):
     unsourced_claims: list[str] = []
     notes: list[str] = []
     query_id: str | None = None  # set only when save=true (the saved wiki/Queries/<id>.md)
+    # ADR-0069: the id this request's LLM attempts are recorded under in the usage ledger, saved or not.
+    invocation_id: str | None = None
     # True when a page was saved but the nav/index were NOT synchronously rebuilt — the saved query is
     # discoverable only after the next reindex (ADR-0034 Q3). False/None when nothing was saved.
     navigation_stale: bool = False

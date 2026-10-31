@@ -1,7 +1,8 @@
 # ADR-0069 — Scoped contradiction checks and the LLM usage ledger
 
 - **Status:** accepted — design-locked 2026-10-31 (grill Q1–Q10). **Slice 0 implemented 2026-10-31**
-  (see "Implementation — slice 0"); slices 1–3 not implemented, in the order of decision 10.
+  (see "Implementation — slice 0"); **slice 1 implemented 2026-10-31** (see "Implementation — slice
+  1"); slices 2–3 not implemented, in the order of decision 10.
 - **Date:** 2026-10-31
 - **Drivers:** part-3 UAT (2026-10-30, fresh clone at `de91d28`, 12 PDFs, ~995 active claims, 37 kept
   tags), findings #1 and #2:
@@ -311,3 +312,60 @@ deliberately starts it on a set of documents.
   model client built), no `/jobs` route runs contradictions, the lint/screen wording. Gate **1875
   passed + 2 skipped** (was 1890; −15 removed sweep tests), ruff clean, 15 validators; 3/3 mutants
   caught (no-arg exit 0, sweep re-added, old notice wording).
+
+## Implementation — slice 1 (2026-10-31)
+
+- **Tables** (`app/backend/db.py`, `db/jobs.sqlite`, additive `CREATE TABLE IF NOT EXISTS`):
+  `llm_usage` (attempt id, job/invocation id, producer, operation, retry, model ref, provider,
+  status `started`/`ok`/`schema_error`/`adapter_error`/`output_limit`, input characters, max output
+  tokens, `usage_family`, nullable `input_tokens`/`output_tokens`/`cache_read_tokens`/
+  `cache_write_tokens`, started/finished timestamps), `llm_cache_hits` (job, model, count) and
+  `llm_ledger_meta` (`started_at`, written once). No content, error text or prices.
+- **Attribution:** `db.insert_job(status="running")` makes that job the context's current job
+  (`db.current_job()`) until `update_job` records a terminal status — so every producer's attempts
+  are attributed with no producer change. It is a per-context stack (a `ContextVar`): a nested job
+  is current until it ends and then its parent is again, in whatever order they end; concurrent
+  threads and tasks each see their own; `db.bound_invocation(id, producer)` covers
+  `/query` (`qry_…`, returned as `invocation_id`) and `/evals/run` (`eva_…`, in the report meta).
+  `operation` is passed at the call sites: source id (Enrich, items), `<sid>#window<i>/<n>`
+  (claims), topic id (synthesis).
+- **Adapters** (`app/llm/adapters.py`): `parse_with_usage` returns `(data, usage)`; usage is read
+  from the response before parsing; `AdapterError` carries `outcome` and `usage`. Anthropic
+  `max_tokens` and OpenAI-wire `finish_reason=length` are `output_limit`. Families keep their
+  categories (Anthropic input excludes cache tokens; OpenAI-wire input includes cached tokens).
+  An adapter without `parse_with_usage` (test doubles) reports no usage. Both SDK clients are built
+  with `max_retries=0`: `LLMClient` owns every retry, so each HTTP request is a recorded attempt
+  (the SDKs' automatic retries would otherwise send unrecorded requests and defeat the request caps
+  of decision 5).
+- **Client** (`app/llm/client.py`): with a ledger (`build_client` always wires
+  `UsageLedger(settings.jobs_db_path)`), each attempt is `start`ed before sending — if it cannot be
+  recorded, `UsageLedgerError` is raised and nothing is sent — and `finish`ed after with its outcome
+  and usage (schema-invalid responses keep their usage; an interrupt is finalized as
+  `adapter_error` and re-raised). A `finish` failure never loses a response: the row stays
+  `started` (unfinished, usage unknown) and a warning is logged. Cache replays call `cache_hit`.
+- **Surfacing** (`app/llm/usage.py`): `summarize` / `summarize_many` (per model: attempts by
+  outcome, unfinished, cache hits, reported sums and per-field unknown counts) and `report_lines`
+  ("reported tokens; prices not tracked"). Usage that was **not recorded** (`None`: a database
+  without the ledger tables, or a job created before `llm_ledger_meta.started_at`, when the
+  database began recording) and an unreadable ledger (`LedgerUnavailable`, read-only connection)
+  are told apart from a job with no model attempt: the CLI says "not recorded" or "unknown", never
+  "no model attempts". The Enrich, claims, items and synthesis CLIs print it; `GET /jobs` and
+  `GET /jobs/{id}` return `llm_usage` with `llm_usage_status` (`recorded`, `not_recorded`,
+  `unavailable`); `docs/Operations.md` documents it.
+- **Not in this slice:** reservations and budgets (decision 7) arrive with the contradiction run in
+  slice 2(b); the ledger already records the input characters and output limit they need.
+- **Tests:** `tests/test_llm_usage.py` (19): started-before-send, failed/retried attempts with usage,
+  no-usage adapters, crash leaves `started`, interrupt finalized, unrecordable attempt not sent,
+  cache hits apart, no content stored, job and invocation attribution, provider categories and
+  partial reports, OpenAI `length`, Anthropic non-JSON usage, summaries, `/jobs`, `/query`
+  invocation id, a real producer run; after review, the real Anthropic and OpenAI SDKs over a mocked
+  HTTP transport (each HTTP request is exactly one ledger row, also with client retries off),
+  not-recorded and unreadable ledgers (CLI and `/jobs`), nested jobs ending in either order,
+  concurrent threads, and a fault-injected `finish` (response kept, row `started`, warning). 28
+  tests; `tests/conftest.py` gives each test a fresh attribution stack (an interrupted producer
+  leaves its job `running` — UAT finding #3 — and the test session shares one context). Gate
+  **1903 passed + 2 skipped**, ruff clean, 16 validators; **11/11 mutants** caught (usage dropped
+  on schema error, cache hit uncounted, unknown coerced to 0 — caught after adding a partial-report
+  case, attribution removed, send despite ledger failure; SDK retries left on for either SDK, read
+  errors reported as empty, pre-ledger jobs reported as recorded, nested end clearing the parent,
+  finalize failure raised).

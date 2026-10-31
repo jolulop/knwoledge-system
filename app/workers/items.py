@@ -950,6 +950,7 @@ def extract_items(
                     prompt_version=art.ITEMS_PROMPT_VERSION,
                     strategy_ref=strategy_ref,
                     cache_only=cache_only,
+                    operation=sid,
                 )
             except CacheMiss:
                 cache_miss_sources.append(sid)            # typed outcome: nothing written
