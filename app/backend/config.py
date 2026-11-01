@@ -106,6 +106,13 @@ class Settings:
     # `--force --cache-only` Re-suggest re-cuts the stored responses.
     enrich_items_cap: int
     enrich_local_base_url: str | None
+    # ADR-0069 contradiction checks. The judge is one `provider:model` reference with **no
+    # default** until the decision-9 evaluation passes; the caps bound every run (decision 5).
+    contradiction_model: str | None
+    contradiction_window_chars: int
+    contradiction_max_calls: int
+    contradiction_max_input_tokens: int
+    contradiction_max_output_tokens: int
     anthropic_api_key: str | None
     openai_api_key: str | None
     openai_base_url: str | None
@@ -191,6 +198,15 @@ def get_settings(root: Path | None = None) -> Settings:
             cfg("ENRICH_ITEMS_INPUT_MAX_CHARS", "300000"), "ENRICH_ITEMS_INPUT_MAX_CHARS"),
         enrich_items_cap=_positive_int(cfg("ENRICH_ITEMS_CAP", "15"), "ENRICH_ITEMS_CAP"),
         enrich_local_base_url=(cfg("ENRICH_LOCAL_BASE_URL", "") or None),
+        contradiction_model=(cfg("CONTRADICTION_MODEL", "").strip() or None),
+        contradiction_window_chars=_positive_int(
+            cfg("CONTRADICTION_WINDOW_CHARS", "12000"), "CONTRADICTION_WINDOW_CHARS"),
+        contradiction_max_calls=_positive_int(
+            cfg("CONTRADICTION_MAX_CALLS", "50"), "CONTRADICTION_MAX_CALLS"),
+        contradiction_max_input_tokens=_positive_int(
+            cfg("CONTRADICTION_MAX_INPUT_TOKENS", "400000"), "CONTRADICTION_MAX_INPUT_TOKENS"),
+        contradiction_max_output_tokens=_positive_int(
+            cfg("CONTRADICTION_MAX_OUTPUT_TOKENS", "4096"), "CONTRADICTION_MAX_OUTPUT_TOKENS"),
         anthropic_api_key=(cfg("ANTHROPIC_API_KEY", "") or None),
         openai_api_key=(cfg("OPENAI_API_KEY", "") or None),
         openai_base_url=(cfg("OPENAI_BASE_URL", "") or None),

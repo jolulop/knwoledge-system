@@ -57,9 +57,9 @@ def claims_strategy_ref(window_chars: int) -> str:
 
 def items_strategy_ref(input_max_chars: int) -> str:
     return f"{ITEMS_COVERAGE_STRATEGY}:{input_max_chars}"
-# Phase 3.5c contradiction-detection pass (tier-3; per claim pair, response-cache replayed).
-CONTRADICTION_SCHEMA_VERSION = "enrich-contradiction-v1"
-CONTRADICTION_PROMPT_VERSION = "enrich-contradiction-prompt-v1-enc2"
+# ADR-0069 contradiction checks: one judge call per window of A against a window of B.
+CONTRADICTION_SCHEMA_VERSION = "contradiction-batch-v1"
+CONTRADICTION_PROMPT_VERSION = "contradiction-batch-prompt-v1"
 # Phase 3.5c cross-source synthesis pass (tier-3; per active knowledge item).
 SYNTHESIS_SCHEMA_VERSION = "enrich-synthesis-v1"
 SYNTHESIS_PROMPT_VERSION = "enrich-synthesis-prompt-v1-enc2"

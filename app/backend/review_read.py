@@ -600,6 +600,8 @@ def preview_resolve_contradiction(
         "confidence": proposal.get("confidence"),
         "explanation": proposal.get("explanation"),
         "shared_nodes": (item.get("context") or {}).get("shared_nodes"),
+        # ADR-0069 slice 2(b): the scoped run, window, model and prompt behind the verdict.
+        "judged_by": (item.get("context") or {}).get("judged_by"),
         "winner": item.get("winner"),  # ADR-0044: the recorded supersede sub-outcome (None until chosen)
     }
     effect_status, warnings = _effect_contradiction(item, gconn, wiki_dir)

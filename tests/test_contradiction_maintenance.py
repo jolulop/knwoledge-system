@@ -313,7 +313,8 @@ def test_the_cli_reports_a_failed_maintenance(tmp_path, monkeypatch, capsys):
     assert "Contradiction maintenance failed: graph locked" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("argv", [[], ["maintain", "extra"], ["run"], ["estimate", "src_a"]])
+@pytest.mark.parametrize("argv", [[], ["maintain", "extra"], ["run"], ["estimate", "--bogus"],
+                                  ["run", "--token"], ["run", "--token", "x", "extra"]])
 def test_other_arguments_run_nothing(argv, capsys):
     import detect_contradictions as cli
     assert cli.main(argv) == 2

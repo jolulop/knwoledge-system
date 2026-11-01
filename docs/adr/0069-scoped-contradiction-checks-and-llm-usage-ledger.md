@@ -2,8 +2,8 @@
 
 - **Status:** accepted — design-locked 2026-10-31 (grill Q1–Q10). **Slice 0 implemented 2026-10-31**
   (see "Implementation — slice 0"); **slice 1 implemented 2026-10-31** (see "Implementation — slice
-  1"); **slice 2(a) implemented 2026-10-31** (see "Implementation — slice 2(a)"); slices 2(b) and 3
-  not implemented, in the order of decision 10.
+  1"); **slice 2(a) implemented 2026-10-31** (see "Implementation — slice 2(a)"); **slice 2(b)
+  implemented 2026-10-31** (see "Implementation — slice 2(b)"); slice 3 not implemented.
 - **Date:** 2026-10-31
 - **Drivers:** part-3 UAT (2026-10-30, fresh clone at `de91d28`, 12 PDFs, ~995 active claims, 37 kept
   tags), findings #1 and #2:
@@ -263,7 +263,8 @@ deliberately starts it on a set of documents.
 - A UI for selecting documents and running estimate → run (CLI first).
 - **Embedding-similarity narrowing** as an efficiency alternative (can lose recall).
 - A validated tokenizer or conservative bound per model (would make the token budget non-approximate).
-- Default values for window size, call/input caps and the output limit (set in slice 2(b)).
+- ~~Default values for window size, call/input caps and the output limit~~ — set in slice 2(b):
+  12,000 window characters, 50 calls, 400,000 input tokens, 4,096 output tokens per call.
 - The fixture's thresholds (set by the user in slice 3, before any evaluation).
 - A price table or cost display (explicitly out of scope).
 
@@ -479,3 +480,150 @@ deliberately starts it on a set of documents.
   sync after rename, directory sync after delete, file fsync; retry skipping the marker flush,
   retry skipping the audit flush, `sync_durably` without the file fsync, without the directory
   fsync). Gate **1954 passed + 2 skipped**, ruff clean, `validate_all` (15 validators) passing.
+
+## Implementation — slice 2(b) (2026-10-31)
+
+- **Worker** (`app/workers/contradiction_check.py`): planner, saved estimates, budget and run. The
+  model stays unset (`CONTRADICTION_MODEL` empty); no live judging was done.
+- **Scope and pairs:** at least two distinct valid source ids, never expanded. Each unordered pair
+  is compared once; a pair that isn't independent (`manifests.independent_sources`) is skipped with
+  its actual reason (`skip_reason`: `shared author <names>`, `same publisher <name>`,
+  `same report family …`, `same canonical URL`, `provenance unknown (details not confirmed)`).
+  Cross-document claims only: a document's **active** claims with wording and a quote **from that
+  document**; a claim drawn from both documents of a pair is in neither list. **Evidence is scoped
+  to the selected document** (review round 1): each side carries only its own document's citations
+  (`contradictions.scoped_claim_context`), so a claim shared with an unselected document never
+  brings that document's quotes into the prompt, the shown sides or the fingerprints.
+- **Windows:** claims are packed in claim-id order into windows of at most
+  `CONTRADICTION_WINDOW_CHARS` (default 12,000; a larger claim gets its own window). The plan is the
+  full cross-product, every window of A against every window of B (window id
+  `<sidA>~<sidB>#a<i>/<m>xb<j>/<n>`); the estimate prints it per pair as "claims × claims → windows ×
+  windows = calls" and states that cost grows with the product.
+- **Prompt** (`prompts.build_contradiction_messages`, `CONTRADICTION_SCHEMA`; versions
+  `contradiction-batch-v1` / `contradiction-batch-prompt-v1`): two delimited, escaped lists
+  (`<claims_a>`, `<claims_b>`); each claim is its validated id, its wording and each citation's
+  document and quote — **offsets left out**, as in the evidence fingerprint, so a shifted offset
+  changes neither the window nor its cache key. The model returns `{contradictions: [{claim_a,
+  claim_b, confidence, explanation}]}`. The old per-pair prompt and its versions are removed (the
+  ADR-0061 encoding tests now cover the batch prompt).
+- **Validation:** a returned pair must name one supplied claim from each list (either order); any
+  other pair is dropped and counted (`out_of_scope_pairs_dropped`); confidence is clamped.
+- **Cache identity:** `cache_key(messages, model, schema, schema/prompt versions, strategy_ref)`,
+  where the messages are the window's exact contents and `strategy_ref` names the strategy, the
+  selected documents, the **endpoint** (review round 1: another server under the same model ref
+  replays nothing) and the output limit. Completed windows replay from the response cache, so a
+  re-estimate shows them as expected cache hits and a re-run doesn't pay for them.
+- **Judge model:** `--model` → `CONTRADICTION_MODEL` → refused (`no_model`); a comma (chain) is
+  refused (`chain`); an unknown provider is refused. A non-`local:` model is "requires paid
+  authorization" and needs `--allow-paid` on the run; `local:` is described as "a configured
+  endpoint (not proof that it runs on this device or for free)". The run calls exactly that model
+  ref; there is no chain resolution and nothing to fall back to.
+- **Estimate** (`estimate`): no model call; reads the response cache read-only (it creates nothing)
+  for the expected cache hits; writes only `db/contradiction_estimates.json` (durable, last 20 kept,
+  **never backed up or restored**, like Apply's authorizations). It prints documents, eligible and
+  skipped pairs, the window plan, windows / expected cache hits / calls to send, the model, its
+  endpoint and authorization requirement (and "not configured" when it is), the per-call output
+  limit, approximate input (characters and estimated tokens), maximum output and the budget check.
+  A plan that doesn't fit, or has nothing to check, gets **no token**.
+- **Token binding:** the record holds the selection, the model ref, the limits and a SHA-256 digest
+  of the plan — the documents, their independence digests, the pairs with reasons, every window
+  (claim ids, input characters, cache key, hence its contents), the claims' scoped evidence
+  fingerprints (per document),
+  the model and endpoint, prompt and schema versions, window size, output limit — plus the limits.
+  The run rebuilds the plan and compares digests: a changed claim, quote or Details of a selected
+  document, a changed window size or output limit, or a changed endpoint refuses (`estimate_stale`);
+  an unselected document's edit does not.
+- **Acceptance** (under the write lock, before any change): the token exists; the effective limits
+  are the **tighter of the estimate's and the ones configured now** (review round 1: lowering
+  `CONTRADICTION_MAX_*` binds existing tokens), then a lowered `--max-calls` / `--max-input-tokens`,
+  a raised one refused (`limit_raised`); paid authorization; the model configured
+  (`model_unavailable` otherwise — no substitution); the digest; the budget with the effective
+  limits. Any refusal leaves the token usable (the job, recorded first, ends `skipped` with the
+  refusal). Then the accepted scope is written to the job, the token is consumed (durably) and
+  **targeted maintenance** of the selected documents runs in the same commit phase; it changes no
+  claim, so it can't invalidate the accepted plan. Judge calls run outside the lock.
+- **Revalidation** (review round 1): before each window is sent and again under the filing lock,
+  the window must still stand as estimated — its documents' independence digests unchanged, each
+  claim still `active` with the same scoped fingerprint. A change before sending stops the run (the
+  window remains); a change during the call fails the window unfiled and stops the run. Either way
+  coverage is incomplete and a fresh estimate is needed.
+- **Reservations** (`Budget`, passed to `LLMClient.parse` as its `guard`): `reserve` runs before
+  **every** attempt, retries included, and raising sends nothing (no ledger row either); it
+  reserves one call, the attempt's exact input characters, its estimated input tokens (characters /
+  2) and the full output limit (`max_tokens`, now a per-call override on the client). Caps: calls and
+  input characters (`CONTRADICTION_MAX_INPUT_TOKENS` × 2) are **hard**; estimated input tokens are
+  approximate; the output allowance is calls × output limit. `settle` replaces the estimate or
+  reservation with provider-reported usage where reported (Anthropic cache tokens counted once) and
+  keeps "reported", "estimated, not reported" and "reserved, not reported" apart in the report.
+- **Stops:** a truncated response (`output_limit`) is a **failed window** and isn't retried — never
+  "no contradictions". A reported output above the limit (review round 1) **fails its window**: the
+  guard raises before the client caches the response, nothing is filed, no further call is made. A window whose every attempt failed at the adapter stops the run with that model's error
+  ("no other model is substituted"). A reservation that doesn't fit stops the run; a window that had
+  already sent attempts is failed, the rest remain.
+- **Filing** (under the write lock, per revalidated window): each in-scope pair is sorted; it is
+  skipped when a human decided it (an active/rejected edge or an approved/rejected review) and when a pending review
+  already exists (`already_proposed`, left to maintenance). Otherwise a stray proposed edge without a
+  review is superseded and the pair is filed as ADR-0031 left it — a `proposed` `contradicts` edge
+  and a `resolve_contradiction` review item (both sides with their own document's citations, the
+  explanation) — with `context.judged_evidence` (the scoped fingerprints), `context.judged_scope`
+  (`{claim_id: source_id}`; maintenance computes the fingerprint and checks independence on exactly
+  those documents) and `context.judged_by` (job,
+  window, model, prompt version, time; also in the review preview's details). No page changes, so
+  no publication.
+- **Coverage record:** the `detect_contradictions` job (`mode: run`) keeps documents, pairs with
+  reasons, model, endpoint, prompt and schema versions, window size, output limit, the effective
+  limits, the completed / failed (with reason) / remaining windows, the one in progress, how many
+  came from the cache, why it stopped, the budget report, the filing counts and the maintenance
+  result. It is **checkpointed** (review round 1): the job is recorded before the write lock, the
+  accepted scope written before the token is spent, and progress before and after every window, so
+  a killed process leaves a `running` job naming what completed; an interruption that reaches the
+  handler ends it `failed` ("interrupted: …") with its coverage. Status `succeeded` only for a clean
+  run — complete coverage, no output-limit violation, maintenance not failed — else `partial`.
+- **CLI** (`scripts/detect_contradictions.py`): `estimate [--model REF] <sid> <sid> …` and
+  `run --token <id> [--allow-paid] [--max-calls N] [--max-input-tokens N]` (run guard
+  `detect_contradictions`, shared with `maintain`). Exit 0 for a token issued / a clean run
+  (`succeeded`), 1 for a refusal, an over-budget or empty plan, a failure or a run that isn't clean,
+  2 for usage errors. The run prints coverage ("INCOMPLETE — this is not a complete comparison of the selected
+  documents" with the failed and remaining windows), calls and input characters against the caps,
+  reported vs estimated vs reserved tokens and the ledger summary.
+- **Settings** (`app/backend/config.py`, `.env.example`): `CONTRADICTION_MODEL` (no default),
+  `CONTRADICTION_WINDOW_CHARS` 12,000, `CONTRADICTION_MAX_CALLS` 50,
+  `CONTRADICTION_MAX_INPUT_TOKENS` 400,000, `CONTRADICTION_MAX_OUTPUT_TOKENS` 4,096.
+- **Docs:** `docs/Operations.md` (a contradiction-checks paragraph), the UAT Guide (§6 note, new
+  §10.2 "Occasional contradiction check", a checklist line; the user's notes untouched),
+  `README.md`, `docs/Workflow.md`, `REANCHOR.md`, the vault-maintenance skill (run only when asked,
+  show the estimate, never pass `--allow-paid` without the user's authorization).
+- **Tests:** `tests/test_contradiction_check.py` (51): full A×B window coverage, a contradiction in
+  non-corresponding windows found, packing, skip reasons (shared author, same publisher,
+  unconfirmed), selection validation, the estimate makes no call and writes only its estimate;
+  missing model / chain / bad provider refused with zero calls, `--allow-paid` required for a
+  hosted model (refusal keeps the token), local model without it, a local connection failure stops
+  with its error and zero hosted calls, an unconfigured model refused (token kept); single use, the
+  token consumed before the first call, refusal on changed evidence / Details / window size / output
+  limit, an unrelated edit accepted; an oversized plan gets no token, limits lowered but not raised,
+  every attempt reserved and retries counted (never more calls than the cap; one ledger row per
+  attempt), a retry the budget can't cover fails its window, a truncated window failed and not
+  retried, the budget arithmetic; proposals carry judged evidence and maintenance keeps (then, after
+  re-extraction, retires) them, out-of-scope pairs dropped, human-decided pairs not re-proposed,
+  resume from the cache (complete and stopped runs), the coverage record on the job; the CLI
+  (estimate → refused without `--allow-paid` → run; incomplete coverage exit 1; over budget);
+  estimates never backed up or restored. After review round 1: a claim shared with an unselected
+  document (its evidence never sent, shown or fingerprinted; maintenance keeps the proposal and
+  checks independence on the judged documents only), a claim edited and Details changed during a
+  call (unfiled, run stopped), a claim hidden during the run (stopped before its window is sent), a
+  tighter configured cap binding an existing token, an output-limit violation failing its window
+  (also the final one: not a success, not cached), a failed maintenance keeping the run from
+  `succeeded` (CLI exit 1), progress checkpointed while running, the scope recorded before the
+  token is spent, an interrupted run leaving its coverage, a refused run recorded `skipped`, and
+  another endpoint under the same model ref replaying nothing. `tests/test_prompt_encoding.py`,
+  `tests/test_contradictions.py` and `tests/test_contradiction_maintenance.py` updated for the new
+  prompt and commands. **30/30 mutants** caught: corresponding windows only, token not consumed,
+  constant digest, paid check removed, guard on the first attempt only, truncation retried, adapter
+  failure not stopping, scope validation removed, human decision ignored, estimate ignoring the
+  budget, raised limit accepted, cache hits counted as calls, chain accepted, token consumed before
+  validation, reported usage ignored, skip reason dropped; after review round 1, evidence not
+  scoped, maintenance ignoring the judged scope, no revalidation under the filing lock, none before
+  calls, revalidation ignoring Details, ignoring visibility, configured caps ignored, violation not
+  raised, status ignoring maintenance, no checkpoints, scope recorded after spending the token,
+  endpoint missing from the cache identity, interruption not recorded, CLI exit on coverage only.
+  Gate **2007 passed + 2 skipped**, ruff clean, `validate_all` (15 validators) passing.

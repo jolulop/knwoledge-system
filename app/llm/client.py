@@ -11,7 +11,9 @@ unknown provider or a missing credential rather than discovering it mid-run.
 With a usage ledger (ADR-0069 decision 6; `build_client` always wires one), every provider attempt
 is recorded `started` before it is sent and finalized after with its outcome and the
 provider-reported usage, including failed and retried attempts; a cache replay is counted as an
-avoided call instead.
+avoided call instead. A caller with a budget (the contradiction run, ADR-0069 decision 7) passes a
+`guard`: `guard.reserve(...)` runs before **every** attempt, retries included, and raising there
+sends nothing; `guard.settle(...)` runs after each attempt with its outcome and usage.
 """
 from __future__ import annotations
 
@@ -154,6 +156,8 @@ class LLMClient:
         strategy_ref: str | None = None,
         cache_only: bool = False,
         operation: str | None = None,
+        max_tokens: int | None = None,
+        guard: Any = None,
     ) -> dict[str, Any]:
         """Return a schema-valid object, replaying from cache when possible, or raise.
 
@@ -162,6 +166,8 @@ class LLMClient:
         input-cap change forces fresh calls without pretending the prompt changed.
         `cache_only` (ADR-0066 Re-suggest) replays or raises :class:`CacheMiss` — the provider
         is never called. `operation` names the unit of work in the usage ledger (ADR-0069).
+        `max_tokens` overrides the client's per-call output limit; `guard` reserves each attempt
+        before it is sent and settles it afterwards (see the module docstring).
         """
         provider, model_id = parse_model_ref(model_ref)
         adapter = self._adapter(provider)
@@ -190,32 +196,41 @@ class LLMClient:
 
         last_error: Exception | None = None
         sent_chars = input_chars(messages, schema)
+        limit = self._max_tokens if max_tokens is None else max_tokens
         for retry in range(self._max_retries + 1):
+            if guard is not None:                     # reserved before sending, or not sent
+                guard.reserve(retry=retry, input_chars=sent_chars, max_tokens=limit)
             attempt = None
             if self._ledger is not None:              # recorded before sending, or not sent
                 attempt = self._ledger.start(
                     model_ref=model_ref, provider=provider, retry=retry, input_chars=sent_chars,
-                    max_output_tokens=self._max_tokens, operation=operation)
+                    max_output_tokens=limit, operation=operation)
             usage: dict[str, Any] | None = None
             try:
                 if hasattr(adapter, "parse_with_usage"):
                     raw, usage = adapter.parse_with_usage(messages, schema, model_id,
-                                                          max_tokens=self._max_tokens)
+                                                          max_tokens=limit)
                 else:                                 # an adapter that reports no usage
-                    raw = adapter.parse(messages, schema, model_id, max_tokens=self._max_tokens)
+                    raw = adapter.parse(messages, schema, model_id, max_tokens=limit)
                 schema_mod.validate(raw, schema)
             except AdapterError as exc:
                 self._finish(attempt, exc.outcome, exc.usage)
+                if guard is not None:
+                    guard.settle(outcome=exc.outcome, usage=exc.usage)
                 last_error = exc
                 continue
             except schema_mod.SchemaError as exc:     # the response still consumed tokens
                 self._finish(attempt, "schema_error", usage)
+                if guard is not None:
+                    guard.settle(outcome="schema_error", usage=usage)
                 last_error = exc
                 continue
             except BaseException:                     # unexpected failure or interrupt
                 self._finish(attempt, "adapter_error", usage)
                 raise
             self._finish(attempt, "ok", usage)
+            if guard is not None:
+                guard.settle(outcome="ok", usage=usage)
             if self._cache is not None:
                 self._cache.put(
                     key, provider=provider, model_id=model_id, response=raw,

@@ -186,9 +186,9 @@ uv run python scripts/validate_all.py
 ```
 
 Contradiction checks are **not** part of this run: whole-vault judging was removed (ADR-0069 slice 0;
-`scripts/detect_contradictions.py` with no arguments only prints usage). Its one working command,
-`maintain`, makes no model call and only retires out-of-date proposals (ADR-0069 slice 2(a)); an
-occasional check on documents you select arrives in ADR-0069 slice 2(b).
+`scripts/detect_contradictions.py` with no arguments only prints usage). `maintain` makes no model
+call and only retires out-of-date proposals (ADR-0069 slice 2(a)); an occasional check on documents
+you select is `estimate` then `run --token` (§10.2).
 
 Each producer publishes its pages, `wiki/index.md` and search before it reports success (ADR-0068).
 One that prints "publication incomplete" left work queued: run `uv run python scripts/republish.py`.
@@ -517,6 +517,38 @@ Run this **after** you have kept tags in §9.0: lint proposes merges only betwee
 6. Re-run lint: nothing is proposed for the absorbed item. A transitively linked item (one that only
    matched the absorbed item) may now be proposed against the survivor, with direct evidence.
 
+### 10.2 Occasional contradiction check (ADR-0069)
+
+Not a pipeline step: run it on a few documents you choose. The selected documents need claims
+(step 6) and confirmed Details that make them independent (§9.0.1). `CONTRADICTION_MODEL` has no
+default, so pass `--model`. A hosted model is billable: estimate first.
+
+```bash
+# 1. Plan (no model call): pairs, skipped pairs with their reason, the window cross-product,
+#    expected cache hits, the model and the budget — then a token
+uv run python scripts/detect_contradictions.py estimate --model anthropic:claude-sonnet-4-6 src_… src_…
+# 2. Run exactly that plan (a non-local model needs --allow-paid; --max-calls / --max-input-tokens
+#    may only lower the limits)
+uv run python scripts/detect_contradictions.py run --token cce_… --allow-paid
+```
+
+Check:
+
+- The estimate lists every document pair: an eligible one as claims × claims → windows × windows =
+  judge calls, a skipped one with its actual reason (`shared author …`, `same publisher …`,
+  `provenance unknown (details not confirmed)`). A plan over `CONTRADICTION_MAX_CALLS` /
+  `CONTRADICTION_MAX_INPUT_TOKENS` gets no token.
+- `run` without `--allow-paid` on a hosted model is refused; nothing is sent and the token still
+  works.
+- The run prints `Coverage: complete`, or `INCOMPLETE` with the failed and remaining windows, then
+  the calls sent against the cap and the reported vs estimated tokens. It exits 0 only for a clean
+  run (complete coverage, no output-limit violation, maintenance not failed).
+- The same token is refused the second time (single use). Re-extracting a selected document's claims
+  or changing its Details refuses an older token: estimate again. A re-estimate after a run shows
+  the completed windows as expected cache hits.
+- Proposed contradictions appear as `resolve_contradiction` review items (both claims, their
+  citations, the model's explanation and `judged_by`); decide them and Apply as in §9.1.
+
 ## 11. Browse
 
 Use Obsidian if available (`GALLIUM_DRIVER=d3d12 obsidian --no-sandbox --ozone-platform=wayland --use-gl=angle --use-angle=gl &` under WSLg — WSL has no `/dev/dri`, so Chromium's default GPU start-up fails; the D3D12 driver plus ANGLE-over-OpenGL renders on the real GPU, and without Wayland clicks land off-target on a maximized window at Windows display scaling above 100%; if no window appears, fall back to `--disable-gpu` instead of the last three settings) and open `/tmp/ks-uat/wiki` as the vault, or:
@@ -678,4 +710,7 @@ nothing, and applies nothing.
 - Maintenance jobs complete with reports and never act autonomously on semantic/destructive decisions.
 - Merge proposals are review-only; a rejected pair is never re-proposed in either direction; a
   human-filed merge shows a write-free preview first and takes effect only through apply.
+- A contradiction check runs only on the documents you select: the estimate makes no model call, its
+  token runs exactly that plan once, a hosted judge needs `--allow-paid`, and incomplete coverage is
+  reported as incomplete.
 - Teardown removes the entire disposable vault; the live vault is untouched.

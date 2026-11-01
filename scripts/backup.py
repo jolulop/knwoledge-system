@@ -80,6 +80,7 @@ INCLUDE_FILES = ["CLAUDE.md", "AGENTS.md", "README.md", "pyproject.toml", "docke
 # truthy value to opt out (trading reproducibility for a smaller backup footprint).
 _CACHE_FILENAME = "llm_cache.sqlite"
 _AUTHORIZATIONS_FILENAME = "apply_authorizations.json"   # never backed up (ADR-0068 decision 6)
+_ESTIMATES_FILENAME = "contradiction_estimates.json"     # never backed up (ADR-0069 decision 5)
 
 # The vector index is derived/regenerable; include it only on explicit opt-in (ADR-0032 §7) to
 # save re-embedding cost. The keyword index is never backed up (cheap full rebuild from chunks).
@@ -200,7 +201,8 @@ def _install_graph_indexes(root: Path) -> str | None:
 
 # Never restored, from any archive (older ones carry db/revision.json): restore keeps the epoch it
 # generated and the authorizations it cleared, so no earlier preview token can match (ADR-0068).
-_NEVER_RESTORED = {"db/revision.json", "db/apply_authorizations.json"}
+_NEVER_RESTORED = {"db/revision.json", "db/apply_authorizations.json",
+                   "db/contradiction_estimates.json"}
 
 
 def _new_epoch(root: Path) -> None:
@@ -363,8 +365,8 @@ def _create_backup_report(root: Path) -> BackupReport:
                     continue
                 if path.name.endswith(_SQLITE_SIDE_SUFFIXES) or _is_lock_file(path.name):
                     continue  # transient SQLite side files / the lock files themselves
-                if path.name == _AUTHORIZATIONS_FILENAME:
-                    continue  # ADR-0068: a restore must never bring back Apply authorizations
+                if path.name in (_AUTHORIZATIONS_FILENAME, _ESTIMATES_FILENAME):
+                    continue  # a restore must never bring back Apply or contradiction-run tokens
                 if path.name == _CACHE_FILENAME:
                     if exclude_cache:
                         continue  # opt-out: skip the LLM response cache

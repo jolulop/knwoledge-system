@@ -178,16 +178,23 @@ def test_the_judging_sweep_is_gone_from_the_worker_and_the_cli(tmp_path, monkeyp
     from app.llm import client as llm_client
     assert not hasattr(contradictions, "detect_contradictions")
     assert not hasattr(contradictions, "candidate_pairs")
-    # The CLI never builds a model client: no arguments prints usage and fails visibly (exit 2),
-    # -h/--help prints it and succeeds, and anything else is refused the same way.
+    # No path judges the whole vault: no arguments prints usage and fails visibly (exit 2) and
+    # -h/--help prints it and succeeds, neither building a model client; the scoped `estimate`
+    # (ADR-0069 slice 2(b)) refuses without a judge model before building one.
     monkeypatch.setattr(llm_client, "build_client",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("model client built")))
+    monkeypatch.delenv("CONTRADICTION_MODEL", raising=False)
     assert cli.main([]) == 2
     assert "removed (ADR-0069 slice 0)" in capsys.readouterr().err
     assert cli.main(["--help"]) == 0
-    assert "maintain" in capsys.readouterr().out          # the one command that runs (no model)
-    assert cli.main(["estimate", "src_a", "src_b"]) == 2
-    assert "app.llm" not in Path(cli.__file__).read_text(encoding="utf-8")
+    out = capsys.readouterr().out
+    assert "maintain" in out and "estimate" in out and "run --token" in out
+    from app.workers import contradiction_check
+    monkeypatch.setattr(contradiction_check, "build_client",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("model client built")))
+    monkeypatch.setenv("KNOWLEDGE_SYSTEM_HOME", str(tmp_path))
+    assert cli.main(["estimate", "src_a", "src_b"]) == 1
+    assert "choose a judge model" in capsys.readouterr().err
 
 
 def test_no_jobs_route_is_named_for_contradictions():

@@ -11,7 +11,8 @@ rule 9).
 The whole-vault judging sweep (graph-neighbourhood blocking over every claim pair, one tier-3 call
 per pair) was removed by ADR-0069 slice 0: under ADR-0066 items are broad user tags, so it no longer
 bounded the work (the part-3 UAT built 10,500 pairs). Contradiction checks return as an explicit,
-user-selected document scope (estimate → token → run, windowed batch judging) in slice 2(b).
+user-selected document scope (estimate → token → run, windowed batch judging), in
+`app/workers/contradiction_check.py` (slice 2(b)).
 
 **Contradiction maintenance** (ADR-0069 slice 2(a), decision 8) is model-free: it retires a
 **proposed** assertion whose evidence no longer stands as judged — a claim without evidence, a claim
@@ -69,6 +70,17 @@ def _claim_context(gconn, cid: str, *, claims_dir: Path, markdown_dir: Path) -> 
         cites.append({"source_id": src, "char_start": start, "char_end": end, "quote": quote})
     cites.sort(key=lambda c: (c["source_id"], c["char_start"] if c["char_start"] is not None else -1))
     return {"claim_id": cid, "claim_text": claim_text, "citations": cites}
+
+
+def scoped_claim_context(gconn, cid: str, source_id: str, *, claims_dir: Path,
+                         markdown_dir: Path) -> dict[str, Any] | None:
+    """A claim's context with only the citations from one document: what a contradiction check of
+    that document shows and judges (ADR-0069 slice 2(b)) — a claim shared with an unselected
+    document never carries that document's evidence into the check."""
+    ctx = _claim_context(gconn, cid, claims_dir=claims_dir, markdown_dir=markdown_dir)
+    if ctx is None:
+        return None
+    return ctx | {"citations": [c for c in ctx["citations"] if c["source_id"] == source_id]}
 
 
 # --- resolution application (deterministic effect of human decisions) ------
@@ -265,6 +277,15 @@ def judged_fingerprints(item: dict[str, Any]) -> dict[str, str] | None:
     return None
 
 
+def judged_scope(item: dict[str, Any], a: str, b: str) -> dict[str, str] | None:
+    """`{claim_id: source_id}` — the one document whose evidence a scoped check judged for each
+    claim (`context.judged_scope`, slice 2(b)); None for a proposal judged on all its evidence."""
+    scope = (item.get("context") or {}).get("judged_scope")
+    if isinstance(scope, dict) and all(isinstance(scope.get(c), str) for c in (a, b)):
+        return {a: scope[a], b: scope[b]}
+    return None
+
+
 def _review_state(reviews_dir: Path, rid: str) -> tuple[str | None, dict[str, Any] | None]:
     """`("decided", None)` once a human approved or rejected it (Apply executes it), `("pending",
     item)`, `("unreadable", None)`, or `(None, None)` when there is no item."""
@@ -335,12 +356,18 @@ def check_assertions(gconn, *, reviews_dir: Path, claims_dir: Path, markdown_dir
         if a not in standing or b not in standing:
             out["stale"].append(entry | {"reason": "evidence_gone"})
             continue
+        # A scoped check judged each claim's evidence from one document only (slice 2(b)).
+        scope = judged_scope(item or {}, a, b)
+        if scope:
+            srcs_a, srcs_b = [scope[a]], [scope[b]]
         if not any(sa != sb and independent_sources(prov.get(sa, {}), prov.get(sb, {}))
                    for sa in srcs_a for sb in srcs_b):
             out["stale"].append(entry | {"reason": "not_independent"})
             continue
         for cid in (a, b):
-            ctx = _claim_context(gconn, cid, claims_dir=claims_dir, markdown_dir=markdown_dir)
+            ctx = (scoped_claim_context(gconn, cid, scope[cid], claims_dir=claims_dir,
+                                        markdown_dir=markdown_dir) if scope else
+                   _claim_context(gconn, cid, claims_dir=claims_dir, markdown_dir=markdown_dir))
             if ctx is None or judged[cid] != evidence_fingerprint(ctx):
                 out["stale"].append(entry | {"reason": "evidence_changed"})
                 break

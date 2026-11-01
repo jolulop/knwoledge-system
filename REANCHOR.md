@@ -505,7 +505,9 @@ publishing** banner or `scripts/republish.py`; a damaged producer journal →
 effective title and `wiki/Authors/`).
 **LLM producers** (need a provider for the tier chain — `ANTHROPIC_API_KEY`, or a local model via
 `ENRICH_LOCAL_BASE_URL`, see `docs/Local Models.md`): `scripts/enrich.py` → `extract_claims.py` →
-`extract_items.py` → `promote.py` → `generate_synthesis.py` (no contradiction step — ADR-0069). Tag
+`extract_items.py` → `promote.py` → `generate_synthesis.py` (no contradiction step — ADR-0069;
+an occasional check on chosen documents is `detect_contradictions.py estimate <sid> <sid> …` →
+`run --token <id> [--allow-paid]`, judge `--model`/`CONTRADICTION_MODEL`, no default). Tag
 each document on its screen at `/ui/reviews/sources/<source_id>` (keep / drop / never suggest);
 Re-suggest without billing via `extract_items.py --cache-only`; check/repair the tag ledgers with
 `scripts/validate_tag_links.py` / `scripts/rebuild_tag_links.py`. Validate: `scripts/validate_all.py`.

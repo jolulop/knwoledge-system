@@ -27,8 +27,10 @@ Keep the filing-cabinet/wiki/search/graph layers healthy over time.
 - Duplicate sources.
 - Contradictions: report the existing `resolve_contradiction` review items and lint's
   `contradiction_maintenance_needed` / `contradiction_unverifiable` findings. Never run a
-  contradiction judging pass — whole-vault judging was removed (ADR-0069 slice 0); scoped checks on
-  user-selected documents arrive in ADR-0069 slice 2(b). `scripts/detect_contradictions.py maintain`
+  contradiction judging pass — whole-vault judging was removed (ADR-0069 slice 0). A scoped check
+  (`detect_contradictions.py estimate <sid> <sid> …` then `run --token …`) runs only when the user
+  asks for it on documents they name; show them the estimate and never pass `--allow-paid` unless
+  they authorize that model for that run. `scripts/detect_contradictions.py maintain`
   (model-free; retires only out-of-date *proposed* contradictions, never an approved one) is the
   repair those findings name.
 - Unreviewed destructive changes.

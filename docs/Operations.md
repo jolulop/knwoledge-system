@@ -126,6 +126,32 @@ done, 1 on failure). Lint's `contradiction_unverifiable` names a proposal whose 
 record what was judged; it is left as it is. Maintenance being current does not mean any documents
 were checked for contradictions.
 
+**Contradiction checks (ADR-0069 slice 2(b)).** Occasional, on documents you select, never part of a
+pipeline. `uv run python scripts/detect_contradictions.py estimate [--model REF] <sid> <sid> …`
+makes no model call: it lists the document pairs (a pair that isn't independent is skipped with its
+reason), the window plan — every window of one document's claims against every window of the
+other's, so the calls grow with the product — the expected cache hits, the model and whether it
+needs paid authorization, the approximate tokens and the budget, then saves the plan under a token
+(`db/contradiction_estimates.json`, never backed up). `run --token <id> [--allow-paid]
+[--max-calls N] [--max-input-tokens N]` executes exactly that plan once: a change to the selected
+documents' claims, evidence or Details, the window size, the output limit or the model refuses it
+(estimate again); unrelated edits don't, and lowering a `CONTRADICTION_MAX_*` limit binds
+existing tokens too. Each side shows the model only its own document's evidence, even for a claim
+shared with another document. The judge is one `provider:model` (`--model`, else
+`CONTRADICTION_MODEL`, which has no default until the ADR-0069 evaluation gate passes); chains are
+refused and nothing is substituted. Any non-`local:` model needs `--allow-paid` on the run. Limits
+(`CONTRADICTION_MAX_CALLS`, `CONTRADICTION_MAX_INPUT_TOKENS`, per-call
+`CONTRADICTION_MAX_OUTPUT_TOKENS`, window size `CONTRADICTION_WINDOW_CHARS`): calls and input
+characters (max input tokens × 2) are hard caps reserved before every attempt, retries included; the
+token figures are estimates unless the provider reports usage. A truncated response is a failed
+window; a reported output over the limit, the budget running out or the model failing on every
+attempt stops the run, and so does a selected document's claim or Details changing meanwhile
+(estimate again). The run prints its coverage (completed, failed and remaining windows) and keeps it
+on its `detect_contradictions` job (`mode: run`), checkpointed as it goes, so an interrupted run's
+job still names what completed. It exits 0 only for a clean run: complete coverage, no output-limit
+violation and no failed maintenance. A re-run resumes completed windows from the response cache. Proposals arrive as
+`resolve_contradiction` review items, decided and applied as before.
+
 **Graph traversal indexes (ADR-0068 decision 7).** Graph views and the graph part of search read
 at most a fixed number of edges per node, through three indexes on `db/graph.sqlite`. The API
 installs them at startup, every producer when it opens the graph, and a restore after it
