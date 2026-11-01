@@ -17,6 +17,15 @@ critical rules and `CONTEXT.md` for the glossary.
 
 ## Where we are
 
+- **2026-11-01 — ADR-0069 slice 3:** evaluator implemented; Codex reviewed the synthetic labels
+  and set the thresholds at the user's explicit request (review identity/date in
+  `evals/contradiction_judge.yaml`). C09 now directly denies hybrid/electric ferries entering
+  service in 2024. Thresholds: recall ≥0.85 (6/7), false positives agreement 0 / apparent_conflict 1 /
+  unrelated 0, worst order. Dry-run: 36 calls over three orders, with non-corresponding-window
+  contradictions in every order. Aggregate character caps and hosted-baseline compatibility are
+  checked. **No live model evaluated; `CONTRADICTION_MODEL` stays unset.** Next: explicitly choose
+  and authorize hosted/local evaluations, then record a recommendation or keep it unset.
+  Final gate: **2053 passed, 2 skipped**, ruff clean, 15 validators pass, diff whitespace clean.
 - **Branch:** `main` — tip `1bab3c0` (UAT Guide part-3 steps; before it `0d218b9` ADR-0066 part 3
   slice 4 Authors pages), **pushed, in sync with `origin/main`**, tree clean except the user's
   `.vscode/`. **ADR-0068 (all slices + decision 7) and ADR-0066 part 3 (slices 1–4) are complete
@@ -507,7 +516,8 @@ effective title and `wiki/Authors/`).
 `ENRICH_LOCAL_BASE_URL`, see `docs/Local Models.md`): `scripts/enrich.py` → `extract_claims.py` →
 `extract_items.py` → `promote.py` → `generate_synthesis.py` (no contradiction step — ADR-0069;
 an occasional check on chosen documents is `detect_contradictions.py estimate <sid> <sid> …` →
-`run --token <id> [--allow-paid]`, judge `--model`/`CONTRADICTION_MODEL`, no default). Tag
+`run --token <id> [--allow-paid]`, judge `--model`/`CONTRADICTION_MODEL`, no default until the
+judge evaluation gate `scripts/eval_contradictions.py` passes on `evals/contradiction_judge.yaml`). Tag
 each document on its screen at `/ui/reviews/sources/<source_id>` (keep / drop / never suggest);
 Re-suggest without billing via `extract_items.py --cache-only`; check/repair the tag ledgers with
 `scripts/validate_tag_links.py` / `scripts/rebuild_tag_links.py`. Validate: `scripts/validate_all.py`.

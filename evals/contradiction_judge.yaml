@@ -1,0 +1,178 @@
+# Contradiction-judge evaluation fixture (ADR-0069 decision 9, slice 3).
+#
+# Hand-authored, SYNTHETIC: Brennock and everyone named here are invented. Nothing in this file is
+# a real fact. `scripts/eval_contradictions.py` builds a throwaway vault from it in a temporary
+# directory (three documents, their claims and quotes, distinct authors so every pair is
+# independent) and runs the production estimate -> run path against it. It never touches a real
+# vault.
+#
+# GATES (the evaluator refuses to call a model until both hold):
+#   1. `review.labels_reviewed: true`: a human has read every label below and accepts the default
+#      ("every cross-document pair not listed is `unrelated`").
+#   2. Every threshold is set. Set them BEFORE any model is evaluated.
+#
+# Labels: contradiction | agreement | apparent_conflict (different dates, conditions or scopes, so
+# not a contradiction) | unrelated. Claims are grouped by `topic`. Every cross-document pair within
+# a topic MUST be listed under `labels.pairs` (the evaluator checks this). Pairs across topics take
+# `labels.default`. So the default is only safe if no two topics contradict each other. Check that
+# when reviewing.
+
+version: 1
+
+review:
+  labels_reviewed: true
+  reviewed_by: "Codex (AI architecture reviewer, authorized by the user)"
+  reviewed_at: "2026-11-01"
+  notes: >-
+    Reviewed all 20 explicit labels and the cross-topic unrelated default at the user's request.
+    C09 explicitly denies hybrid or electric ferries entering service in 2024, avoiding the
+    diesel-electric ambiguity. No cross-topic contradiction was identified. Thresholds were
+    fixed before any live model evaluation: at least 6 of 7 contradictions in every order;
+    at most 0 agreement, 1 apparent_conflict and 0 unrelated false positives per order.
+    This is a delegated AI review, not an independently completed human annotation exercise.
+
+thresholds:                     # set before any evaluation; the result records them
+  min_contradiction_recall: 0.85      # at least 6/7 in the worst permutation
+  max_false_positives:                # counts; the worst permutation must stay within each
+    agreement: 0
+    apparent_conflict: 1
+    unrelated: 0
+
+settings:
+  # Small on purpose: forces every document into at least two windows, so the run must compare
+  # non-corresponding windows (a1 x b2, a2 x b1). The production default is 12,000.
+  window_chars: 1200
+  # Claim-order permutations: the first is claim-id order, the rest are seeded shuffles.
+  permutations: 3
+
+documents:
+  - id: A
+    filename: brennock_harbour_review_2025.md
+    title: Brennock Harbour Authority — Annual Review 2025
+    author: Ines Marlow
+    claims:
+      - {id: A01, topic: ferry-passengers, text: "Ferry passenger numbers rose to 412,000 in 2025",
+         quote: "Ferry passenger numbers rose to 412,000 in 2025."}
+      - {id: A02, topic: ferry-fare, text: "The single adult ferry fare was 6 euros in 2025",
+         quote: "The single adult ferry fare was 6 euros in 2025."}
+      - {id: A03, topic: dredging, text: "Dredging of the north channel finished in March 2025",
+         quote: "Dredging of the north channel finished in March 2025."}
+      - {id: A04, topic: channel-depth, text: "The north channel is 9 metres deep at low tide",
+         quote: "The north channel is 9 metres deep at low tide."}
+      - {id: A05, topic: cargo, text: "Cargo tonnage handled at the port fell by 3 percent in 2025",
+         quote: "Cargo tonnage handled at the port fell by 3 percent in 2025."}
+      - {id: A06, topic: harbour-master, text: "Rhea Dunmore has been harbour master since 2021",
+         quote: "Rhea Dunmore has been harbour master since 2021."}
+      - {id: A07, topic: cycle-lane, text: "A cycle lane along the quay opened in September 2025",
+         quote: "A cycle lane along the quay opened in September 2025."}
+      - {id: A08, topic: lighthouse, text: "The Brennock lighthouse was automated in 1998",
+         quote: "The Brennock lighthouse was automated in 1998."}
+      - {id: A09, topic: ferry-fleet, text: "Two hybrid ferries entered service in 2024",
+         quote: "Two hybrid ferries entered service in 2024, cutting ferry emissions."}
+      - {id: A10, topic: staff, text: "The harbour authority employs 85 staff",
+         quote: "The harbour authority employs 85 staff."}
+      - {id: A11, topic: maintenance-budget,
+         text: "The authority's 2025 maintenance budget was 2.1 million euros",
+         quote: "The authority's 2025 maintenance budget was 2.1 million euros."}
+      - {id: A12, topic: accounts, text: "The harbour authority publishes its accounts each May",
+         quote: "The harbour authority publishes its accounts each May."}
+
+  - id: B
+    filename: brennock_gazette_harbour_feature.md
+    title: Brennock Gazette — The Harbour in 2025
+    author: Tomas Vey
+    claims:
+      - {id: B01, topic: ferry-passengers, text: "Ferry passenger numbers fell to 380,000 in 2025",
+         quote: "Ferry passenger numbers fell to 380,000 in 2025."}
+      - {id: B02, topic: ferry-fare,
+         text: "The single adult ferry fare stayed at 6 euros throughout 2025",
+         quote: "The single adult ferry fare stayed at 6 euros throughout 2025."}
+      - {id: B03, topic: dredging,
+         text: "Dredging of the north channel was still under way in June 2025",
+         quote: "Dredging of the north channel was still under way in June 2025."}
+      - {id: B04, topic: cargo, text: "The port handled less cargo in 2025 than in 2024",
+         quote: "The port handled less cargo in 2025 than in 2024."}
+      - {id: B05, topic: harbour-master, text: "Rhea Dunmore became harbour master in 2023",
+         quote: "Rhea Dunmore became harbour master in 2023."}
+      - {id: B06, topic: bus-14,
+         text: "The number 14 bus to the harbour runs every 20 minutes on weekdays",
+         quote: "The number 14 bus to the harbour runs every 20 minutes on weekdays."}
+      - {id: B07, topic: parking, text: "Harbour car park charges were introduced in April 2025",
+         quote: "Harbour car park charges were introduced in April 2025."}
+      - {id: B08, topic: lighthouse,
+         text: "The lighthouse keeper's cottage became a museum in 2010",
+         quote: "The lighthouse keeper's cottage became a museum in 2010."}
+      - {id: B09, topic: fish-market, text: "The fish market moved to the east quay in 2024",
+         quote: "The fish market moved to the east quay in 2024."}
+      - {id: B10, topic: tourism, text: "Tourist visits to Brennock peaked in August 2025",
+         quote: "Tourist visits to Brennock peaked in August 2025."}
+      - {id: B11, topic: staff,
+         text: "The harbour authority employs 85 people, a quarter of them seasonal",
+         quote: "The harbour authority employs 85 people, a quarter of them seasonal."}
+      - {id: B12, topic: gazette-survey,
+         text: "The Gazette surveyed 300 harbour users in October 2025",
+         quote: "The Gazette surveyed 300 harbour users in October 2025."}
+
+  - id: C
+    filename: brennock_district_transport_survey.md
+    title: Regional Transport Survey — Brennock District
+    author: Oda Kessler
+    claims:
+      - {id: C01, topic: ferry-passengers,
+         text: "More people travelled on the Brennock ferries in 2025 than in 2024",
+         quote: "More people travelled on the Brennock ferries in 2025 than in 2024."}
+      - {id: C02, topic: ferry-fare, text: "The single adult ferry fare was 4 euros in 2019",
+         quote: "The single adult ferry fare was 4 euros in 2019."}
+      - {id: C03, topic: channel-depth, text: "The north channel is 11 metres deep at high tide",
+         quote: "The north channel is 11 metres deep at high tide."}
+      - {id: C04, topic: bus-14,
+         text: "The number 14 bus to the harbour runs every 40 minutes on Sundays",
+         quote: "The number 14 bus to the harbour runs every 40 minutes on Sundays."}
+      - {id: C05, topic: bus-14, text: "The number 14 bus to the harbour runs hourly on weekdays",
+         quote: "On weekdays the number 14 bus to the harbour runs hourly."}
+      - {id: C06, topic: parking,
+         text: "The harbour car park has been free of charge since it opened",
+         quote: "The harbour car park has been free of charge since it opened."}
+      - {id: C07, topic: cycle-lane, text: "The quay cycle lane opened in autumn 2025",
+         quote: "The quay cycle lane opened in autumn 2025."}
+      - {id: C08, topic: fish-market, text: "Fish market trading starts at 5 a.m.",
+         quote: "Fish market trading starts at 5 a.m. on weekdays."}
+      - {id: C09, topic: ferry-fleet,
+         text: "No hybrid or electric ferries entered service in Brennock in 2024",
+         quote: "No hybrid or electric ferries entered service in Brennock in 2024."}
+      - {id: C10, topic: tourism, text: "Tourist visits to Brennock peaked in July 2024",
+         quote: "Tourist visits to Brennock peaked in July 2024."}
+      - {id: C11, topic: maintenance-budget,
+         text: "The authority's 2023 maintenance budget was 1.6 million euros",
+         quote: "The authority's 2023 maintenance budget was 1.6 million euros."}
+      - {id: C12, topic: traffic-count,
+         text: "The survey counted vehicles at four junctions in Brennock",
+         quote: "The survey counted vehicles at four junctions in Brennock."}
+
+labels:
+  default: unrelated            # every cross-document pair not listed below
+  pairs:                        # [claim, claim, label, why] — review provenance above
+    # contradiction (7)
+    - [A01, B01, contradiction, "rose to 412,000 vs fell to 380,000, same year"]
+    - [B01, C01, contradiction, "fell in 2025 vs more travellers in 2025 than 2024"]
+    - [A03, B03, contradiction, "finished in March 2025 vs still under way in June 2025"]
+    - [A06, B05, contradiction, "harbour master since 2021 vs became harbour master in 2023"]
+    - [B06, C05, contradiction, "every 20 minutes vs hourly, both on weekdays"]
+    - [B07, C06, contradiction, "charges introduced April 2025 vs free since it opened"]
+    - [A09, C09, contradiction, "two hybrid ferries entered service in 2024 vs none entered service in 2024"]
+    # apparent_conflict (6): different dates, conditions or scopes
+    - [A02, C02, apparent_conflict, "6 euros in 2025 vs 4 euros in 2019"]
+    - [B02, C02, apparent_conflict, "6 euros throughout 2025 vs 4 euros in 2019"]
+    - [A04, C03, apparent_conflict, "9 m at low tide vs 11 m at high tide"]
+    - [B06, C04, apparent_conflict, "every 20 minutes on weekdays vs every 40 minutes on Sundays"]
+    - [B10, C10, apparent_conflict, "peak in August 2025 vs peak in July 2024"]
+    - [A11, C11, apparent_conflict, "2.1 M in 2025 vs 1.6 M in 2023"]
+    # agreement (5)
+    - [A01, C01, agreement, "a rise to 412,000 in 2025 is more travellers than 2024"]
+    - [A02, B02, agreement, "6 euros in 2025 / stayed at 6 euros throughout 2025"]
+    - [A05, B04, agreement, "tonnage fell 3 percent / less cargo than 2024"]
+    - [A07, C07, agreement, "opened in September 2025 / opened in autumn 2025"]
+    - [A10, B11, agreement, "85 staff / 85 people"]
+    # unrelated, listed because they share a topic (2)
+    - [A08, B08, unrelated, "lighthouse automation vs cottage museum"]
+    - [B09, C08, unrelated, "market location vs trading hours"]

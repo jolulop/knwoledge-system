@@ -152,6 +152,32 @@ job still names what completed. It exits 0 only for a clean run: complete covera
 violation and no failed maintenance. A re-run resumes completed windows from the response cache. Proposals arrive as
 `resolve_contradiction` review items, decided and applied as before.
 
+**Judge evaluation gate (ADR-0069 slice 3).** Manual, never in CI.
+`uv run --extra eval python scripts/eval_contradictions.py --model REF [--allow-paid] [--baseline RESULT]`
+scores a candidate judge on the synthetic fixture `evals/contradiction_judge.yaml`: three invented
+documents, labels `contradiction` / `agreement` / `apparent_conflict` / `unrelated`, and a window
+size small enough that every pair needs non-corresponding windows. It builds a throwaway vault in a
+temporary directory and runs the production `estimate` → `run` there, once per claim-order
+permutation. It writes no vault state; the result JSON goes under `evals/results/`. It refuses
+before any call until the fixture's `review.labels_reviewed` is `true` and every threshold is set,
+and when the permutations together would exceed `CONTRADICTION_MAX_CALLS` /
+`CONTRADICTION_MAX_INPUT_TOKENS`. A non-`local:` model needs `--allow-paid`. `--dry-run` builds the
+vault and prints the plan with no call (no gate). A pass needs every permutation's run to be clean
+and complete, the worst permutation's recall ≥ `min_contradiction_recall`, and its false positives
+(reported per label) ≤ `max_false_positives`. A `local:` model must also match a hosted judge's
+result on the same fixture (`--baseline`: recall ≥, `apparent_conflict` false positives ≤), or its
+verdict is `incomplete`. Exit 0 pass or dry run, 1 fail or incomplete, 2 stopped before any call. A
+pass supports a recommendation for `CONTRADICTION_MODEL`; it does not establish real-corpus
+accuracy.
+
+The fixture's labels were reviewed by Codex at the user's explicit request on 2026-11-01, before
+any live evaluation. Its thresholds are recall ≥ 0.85 in every order (at least 6 of 7 contradictions),
+with at most 0 agreement, 1 apparent-conflict and 0 unrelated false positives per order. No model
+has yet been evaluated or selected as default. A supplied hosted baseline must have all expected
+permutations complete and match the fixture, prompt/schema, output limit and ordering settings;
+otherwise the evaluator refuses before candidate calls. The hard character cap applies across all
+permutations independently of reported token counts.
+
 **Graph traversal indexes (ADR-0068 decision 7).** Graph views and the graph part of search read
 at most a fixed number of edges per node, through three indexes on `db/graph.sqlite`. The API
 installs them at startup, every producer when it opens the graph, and a restore after it

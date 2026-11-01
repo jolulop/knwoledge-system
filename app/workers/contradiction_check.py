@@ -54,6 +54,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import random
 import re
 import sqlite3
 import uuid
@@ -229,9 +230,23 @@ def _windows(contexts: list[dict[str, Any]], window_chars: int) -> list[list[dic
     return out
 
 
-def build_plan(settings: Any, gconn, source_ids: list[str], model_ref: str) -> dict[str, Any]:
+def _ordered(contexts: list[dict[str, Any]], order_seed: int | None,
+             source_id: str) -> list[dict[str, Any]]:
+    """Claim-id order, or — for the judge evaluation's claim-order permutations (ADR-0069 decision
+    9) — a seeded shuffle of it, the same for a document in every pair it is part of."""
+    if order_seed is None:
+        return contexts
+    out = list(contexts)
+    random.Random(f"{order_seed}:{source_id}").shuffle(out)
+    return out
+
+
+def build_plan(settings: Any, gconn, source_ids: list[str], model_ref: str, *,
+               order_seed: int | None = None) -> dict[str, Any]:
     """The plan for the selected documents: `{"plan": <bound, JSON-serializable>, "work":
-    {window_id: {"messages", "contexts"}}, "titles": {sid: title}}`. Deterministic."""
+    {window_id: {"messages", "contexts"}}, "titles": {sid: title}}`. Deterministic. `order_seed`
+    (the evaluator only; no CLI flag) packs each document's claims in a seeded order instead of
+    claim-id order; it is part of the plan, so its token binds it."""
     docs = _documents(settings.manifests_dir, source_ids)
     prov = {s: get_provenance(m) for s, m in docs.items()}
     claims_dir, markdown_dir = settings.wiki_dir / "Claims", settings.markdown_dir
@@ -255,8 +270,10 @@ def build_plan(settings: Any, gconn, source_ids: list[str], model_ref: str) -> d
                 pairs.append({"a": sa, "b": sb, "eligible": False, "reason": reason})
                 continue
             # Cross-document claims only: a claim drawn from both documents is in neither list.
-            ca = [judged[sa][c] for c in sorted(judged[sa]) if c not in judged[sb]]
-            cb = [judged[sb][c] for c in sorted(judged[sb]) if c not in judged[sa]]
+            ca = _ordered([judged[sa][c] for c in sorted(judged[sa]) if c not in judged[sb]],
+                          order_seed, sa)
+            cb = _ordered([judged[sb][c] for c in sorted(judged[sb]) if c not in judged[sa]],
+                          order_seed, sb)
             wa = _windows(ca, settings.contradiction_window_chars)
             wb = _windows(cb, settings.contradiction_window_chars)
             pairs.append({"a": sa, "b": sb, "eligible": True, "reason": None,
@@ -296,6 +313,8 @@ def build_plan(settings: Any, gconn, source_ids: list[str], model_ref: str) -> d
         "window_chars": settings.contradiction_window_chars,
         "max_output_tokens": limit, "strategy": strategy,
     }
+    if order_seed is not None:                    # absent otherwise: production digests unchanged
+        plan["order_seed"] = order_seed
     names = {s: titles.confirmed_title(m) or m.get("original_filename") or s
              for s, m in docs.items()}
     return {"plan": plan, "work": work, "titles": names}
@@ -401,7 +420,7 @@ def find_estimate(root: Path, token: str) -> dict[str, Any] | None:
 
 
 def estimate(settings: Any, source_ids: list[str], *, model: str | None = None, client: Any = None,
-             now: str | None = None) -> dict[str, Any]:
+             now: str | None = None, order_seed: int | None = None) -> dict[str, Any]:
     """Plan the check, without a model call, and save it under a token when it fits the limits.
     Returns `{plan, titles, budget, available, token, refused}` (`refused`: why no token)."""
     model_ref = resolve_model(model, settings)
@@ -409,7 +428,7 @@ def estimate(settings: Any, source_ids: list[str], *, model: str | None = None, 
         raise Refused("no_graph", "there is no graph yet: run the pipeline first")
     gconn = graph.connect(settings.graph_db_path)
     try:
-        built = build_plan(settings, gconn, source_ids, model_ref)
+        built = build_plan(settings, gconn, source_ids, model_ref, order_seed=order_seed)
     finally:
         gconn.close()
     plan = built["plan"]
@@ -430,6 +449,8 @@ def estimate(settings: Any, source_ids: list[str], *, model: str | None = None, 
     record = {"token": token, "created_at": now or iso_now(), "documents": plan["documents"],
               "model_ref": model_ref, "limits": limits, "digest": digest(plan, limits),
               "windows": len(plan["windows"]), "calls": check["calls"]}
+    if order_seed is not None:
+        record["order_seed"] = order_seed
     with write_lock.hold(settings.reviews_dir, changes=False):
         _save(settings.root, _load(settings.root)[-(_KEEP - 1):] + [record])
     out["token"] = token
@@ -461,6 +482,7 @@ class Budget:
         self.reported_input = self.estimated_input = 0
         self.reported_output = self.reserved_output = 0
         self.violation: str | None = None
+        self.reported_models: set[str] = set()   # the model names the provider says answered
         self._open: tuple[int, int] | None = None
 
     def reserve(self, *, retry: int, input_chars: int, max_tokens: int) -> None:
@@ -488,6 +510,8 @@ class Budget:
         est, limit = self._open or (0, 0)
         self._open = None
         u = usage or {}
+        if isinstance(u.get("model"), str) and u["model"]:
+            self.reported_models.add(u["model"])
         reported_in = _reported_input(u)
         if reported_in is None:
             self.estimated_input += est
@@ -513,7 +537,8 @@ class Budget:
                 "estimated_input_tokens_not_reported": self.estimated_input,
                 "reported_output_tokens": self.reported_output,
                 "reserved_output_tokens_not_reported": self.reserved_output,
-                "limits": self.caps, "output_limit_violation": self.violation}
+                "limits": self.caps, "output_limit_violation": self.violation,
+                "reported_models": sorted(self.reported_models)}
 
 
 # --- run -------------------------------------------------------------------------------------------
@@ -555,7 +580,8 @@ def _accept(settings: Any, token: str, *, allow_paid: bool, max_calls: int | Non
                                            "base URL); no other model is substituted")
     gconn = graph.connect(settings.graph_db_path)
     try:
-        built = build_plan(settings, gconn, record["documents"], model_ref)
+        built = build_plan(settings, gconn, record["documents"], model_ref,
+                           order_seed=record.get("order_seed"))
     except Refused as exc:
         raise Refused("estimate_stale", f"the selection is no longer valid ({exc}); run "
                                         "`estimate` again") from exc

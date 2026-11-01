@@ -42,12 +42,16 @@ def _int_or_none(value: Any) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
+def _str_or_none(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
 def _anthropic_usage(response: Any) -> dict[str, Any] | None:
     """Anthropic's categories: `input_tokens` excludes the cache read/creation tokens."""
     u = getattr(response, "usage", None)
     if u is None:
         return None
-    return {"family": "anthropic",
+    return {"family": "anthropic", "model": _str_or_none(getattr(response, "model", None)),
             "input_tokens": _int_or_none(getattr(u, "input_tokens", None)),
             "output_tokens": _int_or_none(getattr(u, "output_tokens", None)),
             "cache_read_tokens": _int_or_none(getattr(u, "cache_read_input_tokens", None)),
@@ -62,6 +66,7 @@ def _openai_usage(response: Any) -> dict[str, Any] | None:
         return None
     details = getattr(u, "prompt_tokens_details", None)
     return {"family": "openai_compatible",
+            "model": _str_or_none(getattr(response, "model", None)),
             "input_tokens": _int_or_none(getattr(u, "prompt_tokens", None)),
             "output_tokens": _int_or_none(getattr(u, "completion_tokens", None)),
             "cache_read_tokens": _int_or_none(getattr(details, "cached_tokens", None)),

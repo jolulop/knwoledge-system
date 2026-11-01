@@ -3,7 +3,10 @@
 - **Status:** accepted — design-locked 2026-10-31 (grill Q1–Q10). **Slice 0 implemented 2026-10-31**
   (see "Implementation — slice 0"); **slice 1 implemented 2026-10-31** (see "Implementation — slice
   1"); **slice 2(a) implemented 2026-10-31** (see "Implementation — slice 2(a)"); **slice 2(b)
-  implemented 2026-10-31** (see "Implementation — slice 2(b)"); slice 3 not implemented.
+  implemented 2026-10-31** (see "Implementation — slice 2(b)"); **slice 3 evaluator built
+  2026-11-01** (see "Implementation — slice 3"): fixture labels reviewed by Codex at the user's
+  explicit request, thresholds set before evaluation, no model evaluated, `CONTRADICTION_MODEL`
+  unset. Candidate evaluations and the recommendation remain pending.
 - **Date:** 2026-10-31
 - **Drivers:** part-3 UAT (2026-10-30, fresh clone at `de91d28`, 12 PDFs, ~995 active claims, 37 kept
   tags), findings #1 and #2:
@@ -627,3 +630,106 @@ deliberately starts it on a set of documents.
   raised, status ignoring maintenance, no checkpoints, scope recorded after spending the token,
   endpoint missing from the cache identity, interruption not recorded, CLI exit on coverage only.
   Gate **2007 passed + 2 skipped**, ruff clean, `validate_all` (15 validators) passing.
+
+## Implementation — slice 3 (2026-11-01): evaluator and reviewed fixture ready; evaluations pending
+
+Built so far: the evaluator and the reviewed fixture. On 2026-11-01 the user explicitly delegated
+label review and threshold selection to Codex, whose identity and date are recorded in the fixture;
+this is not claimed as an independent human annotation exercise. No live model has been evaluated.
+Next: explicitly select and authorize candidate evaluations, then document a recommendation or keep
+the model unset.
+
+- **Fixture** `evals/contradiction_judge.yaml`, synthetic, with invented places and people. Three
+  documents (A harbour authority review, B newspaper feature, C transport survey) with 12 claims
+  each and distinct authors, so every pair is independent. Claims are grouped by `topic`. Every
+  cross-document pair within a topic is labelled: **7 contradiction, 6 apparent_conflict (dates,
+  tide, weekday/Sunday), 5 agreement, 2 unrelated**. Every other cross-document pair takes
+  `labels.default: unrelated` (412 of 432), which is safe only if no two topics contradict each
+  other; the delegated review checked that and identified no cross-topic contradictions.
+  C09 now explicitly denies hybrid or electric ferries entering service in Brennock in 2024,
+  removing the ambiguity that a diesel-electric hybrid also burns diesel.
+  `settings.window_chars: 1200` puts every document in 2
+  windows, so each pair needs 2 × 2 calls: 12 per permutation, 3 permutations, 36 calls (under the
+  default 50). `review.labels_reviewed: true`, reviewed by Codex on 2026-11-01. Thresholds are fixed
+  before any live evaluation: `min_contradiction_recall: 0.85` (at least 6 of 7 in every order),
+  maximum false positives `agreement: 0`, `apparent_conflict: 1`, `unrelated: 0`.
+- **Evaluator** `uv run --extra eval python scripts/eval_contradictions.py --model REF
+  [--allow-paid] [--baseline RESULT] [--dry-run]`. The `eval` extra declares PyYAML for the full YAML
+  fixture; the same dependency is included in `dev` for the evaluator tests and pinned in `uv.lock`.
+  Core policy parsing keeps its dependency-free loader. The installed GPU overlay was not synced.
+  - It builds a throwaway vault in a temporary directory through the production pipeline (intake,
+    extraction, wiki, provenance, and claims from an in-process scripted adapter that returns the
+    fixture's claims).
+  - It gives each permutation its own copy of that vault and runs `contradiction_check.estimate`
+    then `run --token` there: the production planner, prompt, schema and scope validation, budget
+    guard, usage ledger and filing.
+  - The proposals each run files are scored against the labels. The real configuration supplies
+    providers and limits; every vault location (cache, ledger, jobs, estimates, reviews) moves into
+    the temporary vault, which is deleted afterwards. The result JSON under `evals/results/` is the
+    only file written. Fixture filenames must be safe basenames so a custom fixture cannot escape
+    the temporary inbox.
+- **Gates before any call:** the fixture is valid (topic pairs labelled, distinct wording, at least
+  two windows per document, and in every permutation a labelled contradiction that meets only in
+  non-corresponding windows); labels are reviewed and every threshold is set; a non-local model
+  needs `--allow-paid`; a chain or an unconfigured model is refused; and the planned calls and
+  estimated input tokens of all permutations together fit `CONTRADICTION_MAX_CALLS` /
+  `CONTRADICTION_MAX_INPUT_TOKENS`. Each run then gets only what is left (`--max-calls` /
+  `--max-input-tokens` lowered), so retries in one permutation can't push the whole evaluation over
+  the cap; a later permutation that no longer fits is refused and the verdict fails. `--dry-run`
+  makes no call and skips the review/threshold gate.
+  The aggregate hard input-character allowance is tracked independently of reported input tokens:
+  low reported token usage cannot release already-sent characters for later permutations. Exhausted
+  allowances refuse later runs instead of rounding their remaining budget up to one.
+- **Permutations:** the first is claim-id order and the others are seeded shuffles. This adds one
+  production hook: `build_plan` / `estimate(order_seed=…)`. The seed is stored in the plan and in
+  the saved estimate, so the token binds it. There is no CLI flag, and a plan without a seed omits
+  the key, so production digests are unchanged. Order sensitivity is reported as the pairs
+  predicted in some permutations but not all.
+- **Verdict:**
+  - `pass` needs every permutation to be a clean, complete run (status `succeeded`), the worst
+    permutation's recall ≥ `min_contradiction_recall`, and its false positives ≤
+    `max_false_positives`, per label (agreement, apparent_conflict, unrelated).
+  - A `local:` model also needs `--baseline`: a hosted judge's result on the same fixture digest
+    whose expected permutations all have clean, complete coverage. A supplied baseline must match
+    the current prompt/schema, window strategy and size, output limit, and order seeds; incompatible
+    baselines are refused before any candidate call. The local model's worst recall must be ≥ the hosted judge's and its
+    worst `apparent_conflict` false positives ≤ the hosted judge's. Without a baseline its verdict
+    is `incomplete`.
+  - When labels have no default, predictions on unlabelled pairs are `unscored`.
+  - Exit codes: 0 for a pass or a dry run, 1 for a fail or incomplete verdict, 2 when the
+    evaluation stopped before any call.
+- **Result record:**
+  - the fixture digest (documents, labels, settings), the review record and the thresholds;
+  - the model ref and endpoint, and the provider-reported model names (adapters now return
+    `response.model` in their usage, and the budget reports `reported_models`);
+  - the prompt and schema versions;
+  - the settings (window size, output limit, limits, strategy, seeds) and the planned calls/tokens;
+  - for each permutation: the window plan in fixture ids, the non-corresponding contradictions,
+    cache status, the run's status/coverage/budget/stop reason, its predictions with confidence and
+    explanation, and its score;
+  - the verdict, with its reasons and the order-sensitive pairs.
+- **Tests:** `tests/test_eval_contradictions.py` (43).
+  - Fixture and gates: the committed fixture is valid and forces non-corresponding windows; seven
+    kinds of malformed fixture plus unsafe filenames are rejected; a window size that fits a
+    document is rejected; a permutation without a non-corresponding contradiction is rejected;
+    unreviewed labels, each
+    unset threshold, a missing `--allow-paid`, a chain, an unconfigured model and an over-budget
+    evaluation each make zero calls.
+  - Scoring and verdict: a perfect hosted judge passes and the record carries its run; false
+    positives are counted per label and fail the verdict; missed contradictions lower recall;
+    truncation and parse errors prevent a pass; retries count against the whole-evaluation budget.
+  - Permutations and baselines: permutations reorder the plan and order sensitivity is reported; a
+    local model without a baseline is incomplete; a local model with more apparent conflicts than
+    the hosted judge fails and one that matches passes; a baseline from another fixture or a local
+    model doesn't count.
+  - Unscored predictions; no vault state written and the throwaway vault removed; CLI exit codes.
+  - Review additions: fixed fixture review and thresholds; low reported tokens plus retries cannot
+    exceed the whole-evaluation character cap; missing/incomplete baseline runs and mismatched
+    prompt/schema/output limit/order seeds refuse before any candidate call.
+  - `tests/test_contradiction_check.py` +2: the order seed reorders the packing and binds the
+    token, and the budget reports the provider-reported models. `tests/test_llm_usage.py` is
+    updated for the `model` field.
+  - Final review gate (2026-11-01): **2053 passed, 2 skipped**, ruff clean, all **15 validators**
+    passing, `git diff --check` clean. Fixture dry-run plans **36 calls** over three orders with
+    cross-window contradictions in all three. No live judge call was made; candidate evaluations
+    and a documented model recommendation remain pending.

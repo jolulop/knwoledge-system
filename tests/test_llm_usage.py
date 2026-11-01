@@ -213,26 +213,28 @@ def test_build_client_always_wires_the_ledger(tmp_path):
 
 
 def test_anthropic_usage_keeps_its_categories_and_partial_reports():
-    resp = SimpleNamespace(usage=SimpleNamespace(input_tokens=10, output_tokens=5,
+    resp = SimpleNamespace(model="claude-x-20260101",
+                           usage=SimpleNamespace(input_tokens=10, output_tokens=5,
                                                  cache_read_input_tokens=None,
                                                  cache_creation_input_tokens=7))
     assert adapters._anthropic_usage(resp) == {
-        "family": "anthropic", "input_tokens": 10, "output_tokens": 5,
+        "family": "anthropic", "model": "claude-x-20260101", "input_tokens": 10, "output_tokens": 5,
         "cache_read_tokens": None, "cache_write_tokens": 7}
     assert adapters._anthropic_usage(SimpleNamespace()) is None
     # Every field is independently unknown: a missing count is None, never 0.
     only_input = SimpleNamespace(usage=SimpleNamespace(input_tokens=4))
     assert adapters._anthropic_usage(only_input) == {
-        "family": "anthropic", "input_tokens": 4, "output_tokens": None,
+        "family": "anthropic", "model": None, "input_tokens": 4, "output_tokens": None,
         "cache_read_tokens": None, "cache_write_tokens": None}
 
 
 def test_openai_usage_keeps_its_categories_and_local_omissions():
-    resp = SimpleNamespace(usage=SimpleNamespace(
+    resp = SimpleNamespace(model="qwen-local", usage=SimpleNamespace(
         prompt_tokens=100, completion_tokens=None,
         prompt_tokens_details=SimpleNamespace(cached_tokens=40)))
     assert adapters._openai_usage(resp) == {
-        "family": "openai_compatible", "input_tokens": 100, "output_tokens": None,
+        "family": "openai_compatible", "model": "qwen-local", "input_tokens": 100,
+        "output_tokens": None,
         "cache_read_tokens": 40, "cache_write_tokens": None}
     assert adapters._openai_usage(SimpleNamespace(usage=None)) is None   # a local server omitting it
 

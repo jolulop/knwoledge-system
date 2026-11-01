@@ -966,3 +966,33 @@ def test_a_claim_shared_with_an_unselected_document_carries_only_the_selected_ev
     finally:
         DOCS.pop("d.md")
         SENTENCES.pop()
+
+
+# --- slice 3 hooks: the evaluator's claim-order seed and the reported model -----------------------
+
+
+def test_an_order_seed_reorders_the_claims_and_its_token_binds_it(tmp_path):
+    sa, sb, _sc = _vault(tmp_path)
+    st = _settings(tmp_path)
+    plain = _estimate(st, [sa, sb], _client(tmp_path))
+    assert "order_seed" not in plain["plan"]            # production digests are unchanged
+    seeded = cc.estimate(st, [sa, sb], model=HOSTED, client=_client(tmp_path), order_seed=1)
+    assert seeded["plan"]["order_seed"] == 1
+    order = [w["claims_a"] + w["claims_b"] for w in seeded["plan"]["windows"]]
+    assert order != [w["claims_a"] + w["claims_b"] for w in plain["plan"]["windows"]]
+    assert sorted(map(sorted, order)) == sorted(
+        sorted(w["claims_a"] + w["claims_b"]) for w in plain["plan"]["windows"])
+    judge = Judge()
+    summary = _run(st, seeded["token"], _client(tmp_path, judge))
+    assert summary["status"] == "succeeded"
+    assert [a + b for a, b, _ in judge.calls] == order  # the run judged the seeded plan
+
+
+def test_the_budget_reports_the_models_the_provider_names(tmp_path):
+    sa, sb, _sc = _vault(tmp_path)
+    st = _settings(tmp_path)
+    est = _estimate(st, [sa, sb], _client(tmp_path))
+    judge = Judge(usage=lambda i: {"family": "anthropic", "model": "judge-model-20260101",
+                                   "input_tokens": 10, "output_tokens": 2})
+    summary = _run(st, est["token"], _client(tmp_path, judge))
+    assert summary["budget"]["reported_models"] == ["judge-model-20260101"]
