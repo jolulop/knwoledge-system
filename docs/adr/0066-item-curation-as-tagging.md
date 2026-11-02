@@ -1870,3 +1870,25 @@ an open journal, a tombstone without destination, a split and no graph (it repla
 whose merged tag had no tombstone). Mutation checks: removing the retype executor's lock, Apply's
 lock, the `flock`, or the tombstone check each fail their tests; the cross-process test passed 10 of
 10 repeated runs.
+
+## Document screen: one form, saved only by Save (2026-11-02)
+
+Part-3 UAT findings #6/#7 and the architecture review of their fix, decided by the user on
+2026-11-02. It amends the slice-3 rule that Clear confirmed details is its own form (grill Q4); the
+earlier sections keep the history.
+
+- The document screen is **one form**. Buttons placed outside it (Pre-select keep, Undo drop, Add
+  tag) join it with the HTML `form` attribute, so pressing one never discards choices made elsewhere
+  on the page.
+- **Only an explicit Save persists the batch** ("Save all changes on this page": tag decisions, type
+  changes and retirements, the Details, or a Clear). **Enter** in any field presses a hidden first
+  button that redraws the page and saves nothing. Pre-select keep, Use these and Add author rows
+  write nothing.
+- **Add tag** and **Undo drop** each save their one change at once, then redraw the screen with the
+  other unsaved choices kept. The Details baseline moves to the new state only if it matched before
+  that action (under the write lock), so a page that was already stale is still refused on Save.
+  Their plain form post (no `_screen` field) keeps the redirect for compatibility; new scripts
+  should use the JSON endpoint `POST /reviews/sources/{id}/links` where it applies.
+- **Clear confirmed details** is a pending checkbox of the batch, persisted by Save, refused with a
+  stale baseline or together with editing or confirming the Details. `POST …/details/clear` stays
+  for scripts.

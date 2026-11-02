@@ -1886,7 +1886,9 @@ def _apply_link_action(gconn: Any, source_id: str, nid: str, action: str,
 
 @app.post("/ui/reviews/sources/{source_id}/details/clear", response_class=HTMLResponse)
 async def ui_review_source_details_clear(source_id: str, request: Request) -> HTMLResponse:
-    """Clear a document's confirmed Details (ADR-0066 part 3 slice 3): its own commit phase."""
+    """Clear a document's confirmed Details (ADR-0066 part 3 slice 3): its own commit phase. Kept
+    for scripts; the document screen now ticks **Clear the confirmed details** and persists it with
+    Save (review 2026-11-02)."""
     form = {str(k): v for k, v in (await request.form()).items()}
     return await anyio.to_thread.run_sync(_source_details_clear, source_id, form)
 
@@ -2000,6 +2002,23 @@ def _source_decide(source_id: str, form: dict[str, Any]) -> HTMLResponse:
     results: list[dict[str, Any]] = []
     warnings: list[str] = []
 
+    # Review 2026-11-02: Enter in a field presses the screen's hidden first button, which redraws
+    # the submission and writes nothing; only an explicit Save persists the batch.
+    if str(form.get("screen_action") or "") == "redraw":
+        return HTMLResponse(review_html.render_source_screen(view, draft=dict(form), notices=[
+            "Nothing was saved (Enter only redraws the page). Press Save to save the choices on "
+            "this page."]))
+    # UAT part 3 #7: "Pre-select keep" inside the batch form re-renders the submission with keep on
+    # every plain suggestion still undecided; choices already made stay. It writes nothing.
+    if str(form.get("screen_action") or "") == "preselect_keep":
+        draft = dict(form)
+        for row in view["suggestions"]:
+            nid = str(row["node_id"])
+            if not row.get("ambiguous_with") and not row.get("pending_use") \
+                    and not str(draft.get(f"link_{nid}") or ""):
+                draft[f"link_{nid}"] = "keep"
+        return HTMLResponse(review_html.render_source_screen(view | {"preselect": "keep"},
+                                                             draft=draft))
     # ADR-0066 part 3 slice 3: draft-only actions re-render the submission and write nothing.
     action = str(form.get("details_action") or "")
     if action in ("add_rows", "use_suggestion") and view.get("details"):
@@ -2010,6 +2029,23 @@ def _source_decide(source_id: str, form: dict[str, Any]) -> HTMLResponse:
             draft["_use_suggestion"] = "1"
             draft.pop("details_confirm", None)
         return HTMLResponse(review_html.render_source_screen(view, draft=draft))
+    # Review 2026-11-02: Clear confirmed details is a pending change of the batch, persisted by
+    # Save. It needs the Details as shown (baseline) and can't be combined with editing them.
+    clear = bool(form.get("details_clear")) and bool(view.get("details"))
+    if clear:
+        errors = []
+        if str(form.get("details_baseline") or "") != view["details"]["baseline"]:
+            errors.append("The details changed after this page was shown. Reload the page before "
+                          "clearing.")
+        elif not view["details"]["confirmed"]:
+            errors.append("The details are not confirmed, so there is nothing to clear.")
+        if details_mod.touched(form):
+            errors.append("You ticked Clear and also edited or confirmed the details. Choose one: "
+                          "untick Clear, or undo the edits and untick “These details are "
+                          "correct”.")
+        if errors:
+            return HTMLResponse(review_html.render_source_screen(view, draft=dict(form),
+                                                                 errors=errors), status_code=409)
     # Form-level refusals (slice-3 grill Q1) are checked before any write, and only when the
     # submission touches Details (the tick set, or a field differing from what was displayed).
     details_save = None
@@ -2030,7 +2066,7 @@ def _source_decide(source_id: str, form: dict[str, Any]) -> HTMLResponse:
         details_save = details_mod.normalize(submitted)
 
     link_keys = sorted(k for k in form.keys() if str(k).startswith("link_"))
-    if link_keys or details_save is not None:
+    if link_keys or details_save is not None or clear:
         gconn = _open_graph_safe()
         if gconn is None:
             return _source_flow_unavailable()
@@ -2087,6 +2123,11 @@ def _source_decide(source_id: str, form: dict[str, Any]) -> HTMLResponse:
                 affected.add(source_id)
                 results.append({"action": "confirm details", "recorded": True,
                                 "title": details_save["title"], "status": "confirmed"})
+                results += _contradiction_maintenance(gconn, source_id)
+            elif clear:                                     # the pending Clear (same commit phase)
+                manifests.clear_details(settings.manifests_dir, source_id)
+                affected.add(source_id)
+                results.append({"action": "clear details", "recorded": True, "status": "cleared"})
                 results += _contradiction_maintenance(gconn, source_id)
         finally:
             gconn.close()
@@ -2172,7 +2213,7 @@ def _source_decide(source_id: str, form: dict[str, Any]) -> HTMLResponse:
                             "skip_reason": f"{exc.status_code}: {exc.detail}"})
     return HTMLResponse(review_html.render_source_decide_result(
         source_id, results, warnings=warnings,
-        pending=_pending_producers(source_id) if details_save is not None else None))
+        pending=_pending_producers(source_id) if details_save is not None or clear else None))
 
 
 def _alias_lines(values: Any) -> list[str]:
@@ -2271,16 +2312,59 @@ def post_source_link(source_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     return out | refresh
 
 
+_ADD_FIELDS = ("add_title", "add_item_type", "add_aliases", "add_description")
+# Fields a redraw doesn't carry over: the pressed action itself, and the Add tag fields unless the
+# caller keeps them (only a successful Add tag resets them).
+_SCREEN_DRAFT_DROP = ("key", "screen_action", *_ADD_FIELDS)
+
+
+def _source_view(source_id: str) -> dict[str, Any] | None:
+    return review_read.source_review_view(
+        settings.reviews_dir, source_id, graph_db=settings.graph_db_path,
+        wiki_dir=settings.wiki_dir, manifests_dir=settings.manifests_dir,
+        enrichment_dir=settings.normalized_dir / "enrichment")
+
+
+def _redraw_screen(source_id: str, form: dict[str, Any], before: dict[str, Any] | None, *,
+                   keep: tuple[str, ...] = (), status_code: int = 200,
+                   **messages: Any) -> HTMLResponse:
+    """UAT part 3 #6: after Add tag or Undo drop pressed on the document screen, redraw it with the
+    other unsaved choices of the submitted batch form. The Details baseline is moved to the new
+    state only if it still matched before this action (the change is this person's own); a page
+    that was already stale keeps its old baseline, so its Save is still refused."""
+    view = _source_view(source_id)
+    if view is None:
+        return HTMLResponse(review_html.render_error(404, f"unknown source: {source_id}"),
+                            status_code=404)
+    draft = {k: v for k, v in form.items() if k not in _SCREEN_DRAFT_DROP or k in keep}
+    old = ((before or {}).get("details") or {}).get("baseline")
+    if view.get("details") and old and str(draft.get("details_baseline") or "") == old:
+        draft["details_baseline"] = view["details"]["baseline"]
+    return HTMLResponse(review_html.render_source_screen(view, draft=draft, **messages),
+                        status_code=status_code)
+
+
 @app.post("/ui/reviews/sources/{source_id}/undrop", response_model=None)
+async def ui_review_source_undrop(source_id: str,
+                                  request: Request) -> HTMLResponse | RedirectResponse:
+    """Undo a drop record (ADR-0066): the tag becomes suggestible on this document again. Pressed on
+    the document screen (`_screen` in the form) it redraws the screen with the unsaved choices
+    kept; a bare form post (curl) gets the redirect."""
+    form = {str(k): v for k, v in (await request.form()).items()}
+    return await anyio.to_thread.run_sync(_source_undrop, source_id, form)
+
+
 @_commit_phase
-def ui_review_source_undrop(source_id: str, key: str = Form("")) -> HTMLResponse | RedirectResponse:
-    """Undo a drop record (ADR-0066): the tag becomes suggestible on this document again."""
+def _source_undrop(source_id: str, form: dict[str, Any]) -> HTMLResponse | RedirectResponse:
+    key = str(form.get("key") or "")
+    screen = bool(form.get("_screen"))
     if not manifests.is_source_id(source_id):
         return HTMLResponse(
             review_html.render_error(404, f"unknown source: {source_id}"), status_code=404)
     gconn = _open_graph_safe()
     if gconn is None:
         return _source_flow_unavailable()
+    before = _source_view(source_id) if screen else None
     intent = _publication_intent("tag_action", sources=[source_id])
     try:
         out = tag_links.undo_drop(gconn, source_id=source_id, key=key.strip(),
@@ -2291,8 +2375,18 @@ def ui_review_source_undrop(source_id: str, key: str = Form("")) -> HTMLResponse
                                 wiki_dir=settings.wiki_dir, intent=intent)["warnings"]
     if out["outcome"] == "blocked":
         code = 409 if out["reason"] == "ledger_corrupt" else 404
+        if screen:
+            return _redraw_screen(source_id, form, before, status_code=code, keep=_ADD_FIELDS,
+                                  errors=[f"The drop wasn't undone: {out['reason']}."])
         return HTMLResponse(review_html.render_error(code, f"undo blocked: {out['reason']}"),
                             status_code=code)
+    if screen:
+        name = next((d.get("name") for d in (before or {}).get("dropped") or []
+                     if d.get("key") == key.strip()), None) or key.strip()
+        return _redraw_screen(source_id, form, before, keep=_ADD_FIELDS, warnings=warnings,
+                              notices=[f"Drop undone: “{name}” can be suggested on this document "
+                                       "again. Your other choices on this page are not saved "
+                                       "yet."])
     if warnings:                                          # show the refresh failure, don't hide it
         return HTMLResponse(review_html.render_source_decide_result(
             source_id, [{"node_id": key.strip(), "action": "undo drop", "recorded": True,
@@ -2356,20 +2450,32 @@ def ui_unblock_tag(key: str = Form("")) -> HTMLResponse:
 
 
 @app.post("/ui/reviews/sources/{source_id}/add", response_model=None)
-@_commit_phase
-def ui_review_source_add(
-    source_id: str, title: str = Form(""), item_type: str = Form(""),
-    aliases: str = Form(""), description: str = Form(""),
-) -> HTMLResponse | RedirectResponse:
+async def ui_review_source_add(source_id: str,
+                               request: Request) -> HTMLResponse | RedirectResponse:
     """Human-add (ADR-0058, restated by ADR-0066): tag this document — create the item if needed
     (anchorless human mention + page) and keep the link, which activates it immediately. Blocked
-    outcomes write nothing."""
+    outcomes write nothing.
+
+    UAT part 3 #6: the document screen sends its whole batch form (`_screen`, fields `add_*`) and
+    gets the screen redrawn with its unsaved choices kept; a bare post (`title`, `item_type`,
+    `aliases`, `description`) keeps the redirect / error page."""
+    form = {str(k): v for k, v in (await request.form()).items()}
+    return await anyio.to_thread.run_sync(_source_add, source_id, form)
+
+
+@_commit_phase
+def _source_add(source_id: str, form: dict[str, Any]) -> HTMLResponse | RedirectResponse:
+    screen = bool(form.get("_screen"))
+    pre = "add_" if screen else ""
+    title, item_type, aliases, description = (
+        str(form.get(f"{pre}{k}") or "") for k in ("title", "item_type", "aliases", "description"))
     if not manifests.is_source_id(source_id):
         return HTMLResponse(
             review_html.render_error(404, f"unknown source: {source_id}"), status_code=404)
     gconn = _open_graph_safe()
     if gconn is None:
         return _source_flow_unavailable()
+    before = _source_view(source_id) if screen else None
     try:
         result = human_add.add_candidate(
             gconn, root=settings.root, source_id=source_id, item_type=item_type.strip(),
@@ -2382,8 +2488,16 @@ def ui_review_source_add(
         reason = result["reason"]
         status = 400 if reason.startswith("invalid") else \
             404 if reason == "unknown_source" else 409
+        if screen:
+            text = {"invalid_title": "give the tag a title"}.get(reason, reason)
+            return _redraw_screen(source_id, form, before, status_code=status, keep=_ADD_FIELDS,
+                                  errors=[f"The tag wasn't added: {text}."])
         return HTMLResponse(
             review_html.render_error(status, f"add blocked: {reason}"), status_code=status)
+    if screen:
+        return _redraw_screen(source_id, form, before, notices=[
+            f"Tag “{' '.join(title.split())}” added and kept on this document. Your other choices "
+            "on this page are not saved yet."])
     return RedirectResponse(f"/ui/reviews/sources/{source_id}", status_code=303)
 
 

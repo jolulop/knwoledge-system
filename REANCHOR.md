@@ -497,7 +497,7 @@ critical rules and `CONTEXT.md` for the glossary.
 - **Other queue (user picks, each starts with a `grill-phase`):** F4 reference-chunk down-ranking
   (eval-gated per ADR-0038), HF weight-download/offline policy (own knob, **not**
   `EMBEDDING_ALLOW_CLOUD`), dead-surface cleanup (illustrative templates incl. `templates/item.md`
-  note, empty `app/frontend/`, compose `qdrant`). Plus **3 filed follow-ups** (non-blocking):
+  note, compose `qdrant`; the empty `app/frontend/` was removed 2026-11-02). Plus **3 filed follow-ups** (non-blocking):
   lifecycle/status parity tests (retention/manifests/graph/validators), a missing-keyword-index
   user-facing-notes test, and the real-corpus item_type retrieval eval (ADR-0062 deferral).
   **W1 (0057/0058), W2 (0060), item_type faceting (0062), and W3 (0063) are DONE** — dropped from

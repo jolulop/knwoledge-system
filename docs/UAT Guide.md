@@ -295,7 +295,11 @@ On each document screen, decide every **Suggested tag** row:
 - **never suggest** puts the name on `policies/blocked_tags.txt`: it is withdrawn from every
   document's suggestions (links you kept stay). Manage it at `/ui/reviews/tags/blocked`.
 - Leaving a row untouched records nothing. **Pre-select keep for all suggestions** is a two-click
-  bulk keep: review the pre-checked rows, then submit.
+  bulk keep: it pre-checks the suggestions you haven't decided yet (your other choices stay), then
+  you review and press **Save all changes on this page**. Nothing on the screen is saved before
+  Save: pressing Enter in a field only redraws the page.
+- **Add tag** and **Undo drop** save their one change at once and redraw the page with your other
+  unsaved choices still in place (a green notice says what happened).
 - A row noted **matches several existing tags** (ADR-0066 part 2) offers **use *X*** for each
   matching tag (with its type and how many documents keep it) or **keep as new tag**. *Use X* keeps
   X on this document and drops the suggestion; pre-select never picks for such a row.
@@ -355,8 +359,9 @@ Details, so do this on a few documents, sharing at least one author between two 
   are saved together. A save writes nothing and says why when you changed a field without the tick,
   when a name is invalid, or when the details or tags changed after the page was shown (another
   save, a new Enrich run): reload and review again.
-- **Clear confirmed details** returns the document to unconfirmed, and its names leave the Authors
-  pages.
+- Tick **Clear the confirmed details** and press **Save** to return the document to unconfirmed;
+  its names leave the Authors pages. Clear can't be combined with editing or confirming the details
+  in the same save.
 - Changing a confirmed **author or publisher** changes which documents count as independent. The
   screen then shows "**Synthesis** hasn't run since these details changed", and lint reports
   `awaiting_reconciliation`, until you re-run `scripts/generate_synthesis.py`. Title and show-page
@@ -471,8 +476,8 @@ Run this **after** you have kept tags in §9.0: lint proposes merges only betwee
    curl -fsS "$APP/reviews?status=pending&type=merge_items" | python3 -m json.tool
    ```
 
-3. **Rejection memory.** Reject a false pair, re-run lint, and confirm nothing is filed again for it —
-   in either direction:
+3. **Rejection memory.** Reject a false pair (in the UI at `/ui/reviews/<review_id>`, **or** with
+   curl as below), re-run lint, and confirm nothing is filed again for it — in either direction:
 
    ```bash
    curl -fsS -X POST "$APP/reviews/<review_id>/reject" \
@@ -591,8 +596,10 @@ The plugin is installed per vault and its files aren't in the repo, so you'll re
 
 ### Readable titles (optional community plugin)
 
-Page **filenames stay id-keyed by design** (ADR-0060: `itm_…`, `clm_…`, `src_…`), so Obsidian's file
-explorer, tabs, and graph label nodes by id out of the box. Wiki **links** already show titles via
+Source, claim, synthesis and query **filenames stay id-keyed by design** (ADR-0060: `src_…`,
+`clm_…`, `syn_…`, query ids), so Obsidian's file explorer, tabs, and graph label those nodes by id
+out of the box. Items (tags) and Authors pages are named by a readable slug instead (for example
+`Items/retrieval-augmented-generation.md`). Wiki **links** already show titles via
 `[[id|Title]]` aliases; to make the explorer/tabs/**graph** show `title:` frontmatter too, install the
 **Front Matter Title** community plugin (not vendored in the repo — a deliberate supply-chain choice):
 
@@ -699,8 +706,8 @@ nothing, and applies nothing.
 - A Source page shows the effective title (confirmed > Enrich > filtered PDF title > filename);
   confirming a different title re-runs nothing.
 - Details save only with "These details are correct" ticked and from an up-to-date page; *Use
-  these* and *Add author rows* write nothing; *Clear confirmed details* returns the document to
-  unconfirmed.
+  these*, *Add author rows*, *Pre-select keep* and Enter write nothing; *Clear the confirmed details*
+  (ticked, then Save) returns the document to unconfirmed.
 - An Authors page exists exactly for each ticked name on a confirmed, visible document, lists only
   those documents, and is linked from their Source pages; hiding the last one removes the page.
 - Changing a confirmed author or publisher shows the synthesis reconciliation notice (screen and

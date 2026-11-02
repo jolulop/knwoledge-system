@@ -318,8 +318,9 @@ knowledge-system/
 │  ├─ graph.sqlite
 │  └─ llm_cache.sqlite
 ├─ app/
-│  ├─ backend/
-│  ├─ frontend/
+│  ├─ backend/                 # FastAPI app; the browser UI is server-rendered HTML here
+│  │                           #   (review_html.py, no JavaScript) — there is no separate frontend
+│  ├─ llm/
 │  └─ workers/
 ├─ scripts/
 ├─ policies/
@@ -593,7 +594,7 @@ deleted
 | Keyword search | SQLite FTS5 first; upgrade later if needed |
 | Vector store | LanceDB |
 | Graph store | SQLite graph tables first |
-| Frontend | Browser app; React or server-rendered UI |
+| Frontend | Server-rendered HTML from the FastAPI app (`app/backend/review_html.py`), no JavaScript and no separate frontend package (the planned `app/frontend/` was removed 2026-11-02) |
 | Development assistant | Claude Code |
 | Compatibility agent | Codex through `AGENTS.md` |
 | UI/editor | VS Code WSL + optional Obsidian |
@@ -602,20 +603,22 @@ deleted
 
 ## 15. API Requirements
 
-Implemented API endpoints:
+Implemented API endpoints (every route in `app/backend/main.py`, in source order; refreshed
+2026-11-02):
 
 ```text
 GET    /health
 GET    /sources
 GET    /sources/{source_id}
+GET    /jobs
+GET    /jobs/{job_id}
+POST   /jobs/intake-scan
+POST   /jobs/extract
 GET    /sources/{source_id}/chunks
 GET    /sources/{source_id}/normalized
+POST   /jobs/generate-wiki
 GET    /wiki/pages
 GET    /wiki/pages/{source_id}
-GET    /wiki/index
-GET    /raw/{source_id}
-GET    /search
-POST   /query
 GET    /graph/node/{node_id}
 GET    /graph/neighborhood/{node_id}
 GET    /reviews
@@ -627,29 +630,40 @@ POST   /reviews/{review_id}/reopen
 POST   /reviews/merge
 POST   /reviews/apply
 POST   /reviews/apply/dry-run
+POST   /jobs/lint
+POST   /jobs/stale-check
+POST   /jobs/reindex
 GET    /ui/reviews
 GET    /ui/reviews/apply
 POST   /ui/reviews/apply/preview
 POST   /ui/reviews/apply
+GET    /publication
+POST   /publication/retry
+POST   /publication/repair
+POST   /ui/publication/retry
+POST   /ui/publication/repair
 GET    /ui/reviews/sources
 GET    /ui/reviews/sources/{source_id}
+GET    /raw/{source_id}
+POST   /ui/reviews/sources/{source_id}/details/clear
 POST   /ui/reviews/sources/{source_id}/decide
+POST   /reviews/sources/{source_id}/links
+POST   /ui/reviews/sources/{source_id}/undrop
+GET    /ui/reviews/tags/unused
+POST   /ui/reviews/tags/unused/delete
+GET    /ui/reviews/tags/blocked
+POST   /ui/reviews/tags/blocked/unblock
 POST   /ui/reviews/sources/{source_id}/add
 GET    /ui/reviews/merge/preview
 POST   /ui/reviews/merge
 GET    /ui/reviews/{review_id}
 POST   /ui/reviews/{review_id}/decide
 POST   /ui/reviews/{review_id}/reopen
-POST   /jobs/intake-scan
-POST   /jobs/extract
-POST   /jobs/generate-wiki
-POST   /jobs/lint
-POST   /jobs/reindex
-POST   /jobs/stale-check
-GET    /jobs
-GET    /jobs/{job_id}
-GET    /evals/results
+GET    /search
+POST   /query
+GET    /wiki/index
 POST   /evals/run
+GET    /evals/results
 ```
 
 Historical note: `POST /sources/upload`, `POST /sources/rescan`, and `POST /jobs/ingest` were

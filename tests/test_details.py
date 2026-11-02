@@ -121,7 +121,7 @@ def test_the_section_is_prefilled_from_enrich(client, vault):
     html = client.get(f"/ui/reviews/sources/{sid}").text
     assert "Not confirmed: Suggestions from Enrich." in html
     assert "value='Planning Under Uncertainty'" in html and "value='Ada Lovelace'" in html
-    assert "name='details_confirm'" in html and "Clear confirmed details" not in html
+    assert "name='details_confirm'" in html and "name='details_clear'" not in html
 
 
 def test_a_valid_confirmation_writes_provenance_and_the_page_title(client, vault):
@@ -139,7 +139,7 @@ def test_a_valid_confirmation_writes_provenance_and_the_page_title(client, vault
     page = (root / "wiki" / "Sources" / f"{sid}.md").read_text(encoding="utf-8")
     assert parse_frontmatter(page)["title"] == "Planning, Revisited"
     html = client.get(f"/ui/reviews/sources/{sid}").text
-    assert "Details confirmed on" in html and "Clear confirmed details" in html
+    assert "Details confirmed on" in html and "name='details_clear'" in html
 
 
 # --- form-level refusals (Q1) --------------------------------------------------------------------
@@ -287,12 +287,13 @@ def test_a_stale_redraw_keeps_the_seen_baseline_for_clear(client, vault):
                               now="2026-10-30T01:00:00Z")          # someone else, meanwhile
     resp = _post(client, sid, form)
     assert resp.status_code == 409                                 # stale: my draft is redrawn
-    clear_form = re.search(r"details/clear'>.*?name='details_baseline' value='([0-9a-f]+)'",
-                           resp.text, re.S)
-    assert clear_form and clear_form.group(1) == form["details_baseline"]
-    resp = client.post(f"/ui/reviews/sources/{sid}/details/clear",
-                       data={"details_baseline": clear_form.group(1)})
-    assert resp.status_code == 409
+    seen = re.search(r"name='details_baseline' value='([0-9a-f]+)'", resp.text)
+    assert seen and seen.group(1) == form["details_baseline"]
+    # Clear is now a pending change of the same form: the seen baseline makes it stale too.
+    untouched = {k: v for k, v in form.items() if k != "details_confirm"}
+    untouched["details_title"] = json.loads(form["details_shown"])["title"]
+    resp = _post(client, sid, untouched | {"details_clear": "1"})
+    assert resp.status_code == 409 and "Reload the page before clearing" in resp.text
     assert _prov(root, sid)["title"] == "A Newer Confirmation"     # the unseen one survives
 
 
@@ -306,3 +307,229 @@ def test_an_unnormalizable_name_is_refused_with_its_tag_decision(client, vault, 
     resp = _post(client, sid, _form(root, sid, tick=True, **kw, **{f"link_{retrieval}": "keep"}))
     assert resp.status_code == 409 and "usable text (only control characters)" in resp.text
     assert (json.dumps(_prov(root, sid)), tag_links.load_ledger(root / "reviews", sid)) == before
+
+
+# --- UAT part 3 #6/#7: screen actions keep unsaved choices ---------------------------------------
+
+
+def _view(root, sid):
+    return review_read.source_review_view(
+        root / "reviews", sid, graph_db=root / "db" / "graph.sqlite", wiki_dir=root / "wiki",
+        manifests_dir=root / "raw" / "manifests", enrichment_dir=root / "normalized" / "enrichment")
+
+
+def _suggestion(root, sid):
+    return str(_view(root, sid)["suggestions"][0]["node_id"])
+
+
+def _shown_baseline(html):
+    import re
+    return re.search(r"name='details_baseline' value='([0-9a-f]+)'", html).group(1)
+
+
+def _add(**fields):
+    return {"_screen": "1", "add_title": "", "add_item_type": "method_technique",
+            "add_aliases": "", "add_description": ""} | fields
+
+
+def test_every_screen_button_belongs_to_the_one_batch_form(client, vault):
+    root, sid = vault
+    nid = _suggestion(root, sid)
+    assert _post(client, sid, {f"link_{nid}": "drop"}).status_code == 200    # an Undo drop row
+    html = client.get(f"/ui/reviews/sources/{sid}").text
+    assert html.count("<form ") == 1 and "id='ks-source-form'" in html      # no second form
+    for button in ("value='preselect_keep'>Pre-select keep", ">Undo drop</button>",
+                   ">Add tag</button>"):
+        tag = html[html.rindex("<button", 0, html.index(button)):html.index(button)]
+        assert "form='ks-source-form'" in tag, button
+    assert "formaction='/ui/reviews/sources/" + sid + "/add'" in html
+    assert "formaction='/ui/reviews/sources/" + sid + "/undrop'" in html
+    assert " required" not in html             # an empty Add-tag title must not block Save
+
+
+def test_preselect_keep_keeps_the_edits_already_made_and_saves_nothing(client, vault):
+    root, sid = vault
+    nid = _suggestion(root, sid)
+    before = tag_links.load_ledger(root / "reviews", sid)
+    form = _form(root, sid, title="Edited Title", tick=True) | {
+        "_screen": "1", "screen_action": "preselect_keep", f"link_{nid}": ""}
+    html = _post(client, sid, form).text
+    assert f"name='link_{nid}' value='keep' checked" in html
+    assert "value='Edited Title'" in html and "name='details_confirm' value='1' checked" in html
+    assert "Keep pre-selected on all suggestions" in html
+    assert tag_links.load_ledger(root / "reviews", sid) == before and not _prov(root, sid).get("title")
+    # A choice already made is not overridden.
+    html = _post(client, sid, form | {f"link_{nid}": "drop"}).text
+    assert f"name='link_{nid}' value='drop' checked" in html
+
+
+def test_add_tag_keeps_the_unsaved_choices_and_the_save_still_works(client, vault):
+    root, sid = vault
+    nid = _suggestion(root, sid)
+    form = _form(root, sid, title="Edited Title", tick=True) | _add(add_title="Hand Tag") | {
+        f"link_{nid}": "drop"}
+    resp = client.post(f"/ui/reviews/sources/{sid}/add", data=form)
+    assert resp.status_code == 200 and "Tag “Hand Tag” added and kept" in resp.text
+    html = resp.text
+    assert f"name='link_{nid}' value='drop' checked" in html            # unsaved choice kept
+    assert "value='Edited Title'" in html and "name='add_title'" in html
+    assert "value='Hand Tag'" not in html                               # the add fields are reset
+    view = _view(root, sid)
+    assert "Hand Tag" in {r["title"] for r in view["kept"]}
+    assert nid in {str(r["node_id"]) for r in view["suggestions"]}      # the drop wasn't saved
+    assert not _prov(root, sid).get("title")
+    # The page's own change moved the baseline, so its Save goes through.
+    assert _shown_baseline(html) == _details(root, sid)["baseline"] != form["details_baseline"]
+    save = form | {"details_baseline": _shown_baseline(html)}
+    assert _post(client, sid, save).status_code == 200
+    assert _prov(root, sid)["title"] == "Edited Title"
+    assert nid not in {str(r["node_id"]) for r in _view(root, sid)["suggestions"]}
+
+
+def test_a_refused_add_redraws_the_screen_with_every_field_kept(client, vault):
+    root, sid = vault
+    nid = _suggestion(root, sid)
+    form = _form(root, sid, title="Edited Title", tick=True) | _add(add_description="why") | {
+        f"link_{nid}": "keep"}
+    resp = client.post(f"/ui/reviews/sources/{sid}/add", data=form)
+    assert resp.status_code == 400 and "The tag wasn&#x27;t added: give the tag a title." in resp.text
+    assert f"name='link_{nid}' value='keep' checked" in resp.text and "value='why'" in resp.text
+    assert "value='Edited Title'" in resp.text
+
+
+def test_a_stale_page_stays_stale_after_add(client, vault):
+    root, sid = vault
+    form = _form(root, sid, title="Edited Title", tick=True) | _add(add_title="Hand Tag") | {
+        "details_baseline": "0" * 24}
+    html = client.post(f"/ui/reviews/sources/{sid}/add", data=form).text
+    assert _shown_baseline(html) == "0" * 24
+    assert _post(client, sid, form).status_code == 409 and not _prov(root, sid).get("title")
+
+
+def test_undo_drop_keeps_the_unsaved_choices(client, vault):
+    root, sid = vault
+    nid = _suggestion(root, sid)
+    assert _post(client, sid, {f"link_{nid}": "drop"}).status_code == 200
+    (dropped,) = _view(root, sid)["dropped"]
+    form = _form(root, sid, title="Edited Title", tick=True) | _add() | {"key": dropped["key"]}
+    resp = client.post(f"/ui/reviews/sources/{sid}/undrop", data=form)
+    assert resp.status_code == 200 and f"Drop undone: “{dropped['name']}”" in resp.text
+    assert "value='Edited Title'" in resp.text
+    assert tag_links.load_ledger(root / "reviews", sid)["drops"] == []
+    # Refused on the screen: redrawn with the error and the edits (a bare post keeps its 404 page,
+    # tests/test_tag_links.py).
+    resp = client.post(f"/ui/reviews/sources/{sid}/undrop", data=form | {"key": "nope"})
+    assert resp.status_code == 404 and "The drop wasn&#x27;t undone" in resp.text
+    assert "value='Edited Title'" in resp.text
+
+
+def test_show_page_is_explained_on_the_screen(client, vault):
+    root, sid = vault
+    html = client.get(f"/ui/reviews/sources/{sid}").text
+    assert "<strong>show page</strong>: list this document on the person" in html
+    assert "<code>Authors/</code>" in html
+
+
+# --- review 2026-11-02: Enter never saves; Clear is pending until Save ---------------------------
+
+
+def test_enter_presses_a_hidden_redraw_that_saves_nothing(client, vault):
+    import re
+    root, sid = vault
+    nid = _suggestion(root, sid)
+    html = client.get(f"/ui/reviews/sources/{sid}").text
+    first = re.search(r"<button[^>]*>", html).group(0)              # the form's default button
+    assert "value='redraw'" in first and "form='ks-source-form'" in first
+    assert "Save all changes on this page" in html and "Enter never" in html
+    before = tag_links.load_ledger(root / "reviews", sid)
+    form = _form(root, sid, title="Edited Title", tick=True) | {
+        "_screen": "1", "screen_action": "redraw", f"link_{nid}": "keep"}
+    resp = _post(client, sid, form)
+    assert resp.status_code == 200 and "Nothing was saved (Enter only redraws the page)" in resp.text
+    assert f"name='link_{nid}' value='keep' checked" in resp.text and "value='Edited Title'" in resp.text
+    assert tag_links.load_ledger(root / "reviews", sid) == before and not _prov(root, sid).get("title")
+
+
+def test_clear_is_a_pending_change_saved_with_the_batch(client, vault):
+    root, sid = vault
+    nid = _suggestion(root, sid)
+    manifests.set_provenance(root / "raw" / "manifests", sid, report_family="fam")
+    _post(client, sid, _form(root, sid, tick=True))
+    html = client.get(f"/ui/reviews/sources/{sid}").text
+    assert html.count("<form ") == 1 and "details/clear" not in html   # no separate Clear form
+    # Ticking Clear and also confirming/editing is refused, and nothing is written.
+    resp = _post(client, sid, _form(root, sid, title="Other", tick=True) | {"details_clear": "1"})
+    assert resp.status_code == 409 and "Choose one" in resp.text and "authors" in _prov(root, sid)
+    # Clear + a tag decision, one Save.
+    resp = _post(client, sid, _form(root, sid) | {"details_clear": "1", f"link_{nid}": "drop"})
+    assert resp.status_code == 200 and "clear details" in resp.text
+    assert _prov(root, sid) == {"report_family": "fam"}
+    assert nid not in {str(r["node_id"]) for r in _view(root, sid)["suggestions"]}
+
+
+def test_muted_text_meets_the_contrast_minimum_on_its_backgrounds():
+    import re
+
+    from app.backend import review_html
+
+    def lum(hex_):
+        c = [int(hex_[i:i + 2], 16) / 255 for i in (0, 2, 4)]
+        c = [x / 12.92 if x <= 0.03928 else ((x + 0.055) / 1.055) ** 2.4 for x in c]
+        return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+
+    def ratio(a, b):
+        hi, lo = sorted((lum(a), lum(b)), reverse=True)
+        return (hi + 0.05) / (lo + 0.05)
+    css = review_html._STYLE
+    var = dict(re.findall(r"--([a-z-]+):#([0-9A-Fa-f]{6})", css))
+    muted = var[re.search(r"\.muted\{color:var\(--([a-z-]+)\)\}", css).group(1)]
+    for background in ("FFFFFF", var["suave"]):
+        assert ratio(muted, background) >= 4.5, (muted, background)
+    assert ratio(var["gris"], "FFFFFF") >= 3            # field borders (non-text, 3:1)
+
+
+def test_a_stale_page_stays_stale_after_undo_drop(client, vault):
+    root, sid = vault
+    nid = _suggestion(root, sid)
+    assert _post(client, sid, {f"link_{nid}": "drop"}).status_code == 200
+    (dropped,) = _view(root, sid)["dropped"]
+    form = _form(root, sid, title="Edited Title", tick=True) | _add() | {
+        "key": dropped["key"], "details_baseline": "0" * 24}
+    html = client.post(f"/ui/reviews/sources/{sid}/undrop", data=form).text
+    assert _shown_baseline(html) == "0" * 24
+    assert _post(client, sid, form).status_code == 409 and not _prov(root, sid).get("title")
+
+
+_TYPED = {"add_title": "Half Typed", "add_item_type": "domain", "add_aliases": "HT, Half",
+          "add_description": "not added yet"}
+
+
+def _assert_add_draft_kept(html):
+    assert "name='add_title' size='30' form='ks-source-form' value='Half Typed'" in html
+    assert "<option value='domain' selected>" in html
+    assert "value='HT, Half'" in html and "value='not added yet'" in html
+
+
+@pytest.mark.parametrize("outcome", ["undone", "refused"])
+def test_undo_drop_keeps_an_unsaved_add_tag_draft(client, vault, outcome):
+    """Review 2026-11-02 (P2): only a successful Add tag resets the Add tag fields."""
+    root, sid = vault
+    nid = _suggestion(root, sid)
+    assert _post(client, sid, {f"link_{nid}": "drop"}).status_code == 200
+    (dropped,) = _view(root, sid)["dropped"]
+    key = dropped["key"] if outcome == "undone" else "nope"
+    form = _form(root, sid) | _add(**_TYPED) | {"key": key}
+    resp = client.post(f"/ui/reviews/sources/{sid}/undrop", data=form)
+    assert resp.status_code == (200 if outcome == "undone" else 404)
+    _assert_add_draft_kept(resp.text)
+    assert "Half Typed" not in {r["title"] for r in _view(root, sid)["kept"]}   # nothing added
+
+
+def test_only_a_successful_add_resets_the_add_fields(client, vault):
+    root, sid = vault
+    form = _form(root, sid) | _add(**_TYPED)
+    refused = client.post(f"/ui/reviews/sources/{sid}/add", data=form | {"add_item_type": "nope"})
+    assert refused.status_code == 400 and "value='Half Typed'" in refused.text
+    added = client.post(f"/ui/reviews/sources/{sid}/add", data=form).text
+    assert "Tag “Half Typed” added" in added and "value='Half Typed'" not in added
+    assert "value='not added yet'" not in added

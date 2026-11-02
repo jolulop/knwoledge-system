@@ -107,9 +107,10 @@ model calls, and a keep made meanwhile is published at once and never overwritte
 section confirms a document's title, authors and publisher: tick *These details are correct* and
 Save. A Save that changes the Details without the tick, or from a page shown before a newer change
 (another save, a new Enrich run), is refused with nothing written and the values kept; reload and
-review again. **Add author rows** and **Use these** only redraw the form. **Clear confirmed
-details** removes them (`report_family` and `canonical_url` stay, so independence may still rest on
-them). Confirmed authors decide source independence for synthesis on its next run; until it runs, the
+review again. **Add author rows** and **Use these** only redraw the form. Ticking **Clear the
+confirmed details** and pressing Save removes them (`report_family` and `canonical_url` stay, so
+independence may still rest on them); it is refused together with edits or the confirmation tick,
+and from a stale page. `POST /ui/reviews/sources/<id>/details/clear` remains for scripts. Confirmed authors decide source independence for synthesis on its next run; until it runs, the
 document screen and the lint report (`awaiting_reconciliation`, report-only) name it. Proposed
 contradictions are maintained in the same save (ADR-0069 slice 2(a)): a proposal whose two documents
 are no longer independent is retired at once, and the result says how many.
@@ -292,8 +293,15 @@ nobody keeps is deleted, an active tag that loses its last keep becomes **unused
 list, `/ui/reviews/tags/blocked`); plus that source's type changes/retirements (recorded, applied
 later) and human-added tags. The flat queue stays canonical for everything cross-source. Each screen
 links the source's original file (`/raw/<source_id>` — passive media like PDF/text/images renders inline, sandboxed + nosniff; HTML/SVG/unknown types download as attachments, since raw sources are untrusted; lifecycle status never blocks this operator view) and offers
-an explicit `?preselect=keep` link that pre-checks keep on the suggestions — you still review and
-submit; untouched rows always record nothing. Kept tags live in the per-document ledger
+a **Pre-select keep for all suggestions** button that pre-checks keep on the suggestions not yet
+decided (the older `?preselect=keep` URL still works) — you still review and Save; untouched rows
+always record nothing. The whole screen is **one form, saved only by Save** ("Save all changes on
+this page"): Enter in a field just redraws it, and Pre-select keep, Use these and Add author rows
+write nothing. **Add tag** and **Undo drop** save their one change at once, then redraw the screen
+with the other unsaved choices kept (a plain form post without the screen's `_screen` field still
+gets the redirect). For new scripts, prefer the JSON endpoint `POST /reviews/sources/<id>/links`
+(keep/drop/block/use/cancel/aliases); Add tag and Undo drop have no JSON twin, so script them with
+a plain form post. Kept tags live in the per-document ledger
 `reviews/tag_links/<source_id>.json` (backed up with `reviews/`; every update — tag actions,
 extraction's writes, whole merges and splits — is serialized by `reviews/tag_links/.lock`; a damaged
 ledger refuses decisions instead of being overwritten). Each

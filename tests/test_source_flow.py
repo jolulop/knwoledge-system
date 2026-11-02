@@ -574,10 +574,10 @@ def test_preselect_keep_checks_suggestions_only(client, tmp_path):
     assert f"name='link_{fresh}' value='' checked" in plain         # default = leave undecided
     assert "— leave undecided" in plain
     assert "value='keep' checked" not in plain
-    # The explicit pre-select control is a GET-form button targeting the same URL.
-    assert f"<form method='get' action='/ui/reviews/sources/{a}'>" in plain
-    assert "<input type='hidden' name='preselect' value='keep'>" in plain
-    assert "<button type='submit'>Pre-select keep for all suggestions</button>" in plain
+    # The explicit pre-select control is a button of the batch form (UAT part 3 #7: it keeps the
+    # unsaved choices, tests/test_details.py); the GET URL below still works for a bookmarked link.
+    assert ("<button type='submit' form='ks-source-form' name='screen_action' "
+            "value='preselect_keep'>Pre-select keep for all suggestions</button>") in plain
 
     for value in ("keep", "approve"):                                # approve = legacy synonym
         pre = client.get(f"/ui/reviews/sources/{a}?preselect={value}").text
@@ -597,9 +597,9 @@ def test_type_selects_are_alphabetical(client, tmp_path):
     _extract(tmp_path, RoutingAdapter({"alpha": {"items": [_item("Solo")]}}))
     a = _sids(tmp_path)["a.md"]
     page = client.get(f"/ui/reviews/sources/{a}").text
-    selects = dict(_re.findall(r"<select name='([^']+)'>(.*?)</select>", page, _re.S))
+    selects = dict(_re.findall(r"<select name='([^']+)'[^>]*>(.*?)</select>", page, _re.S))
     # Human-add select: exactly the 15 production values, alphabetical.
-    add_options = _re.findall(r"<option value='([^']*)'", selects["item_type"])
+    add_options = _re.findall(r"<option value='([^']*)'", selects["add_item_type"])
     assert add_options == sorted(taxonomy.ITEM_TYPES)
     # Amendment select: the blank keep-type option, then the same alphabetical 15.
     amend_name = next(k for k in selects if k.startswith("amend_item_type_"))

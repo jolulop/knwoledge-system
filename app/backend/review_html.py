@@ -21,11 +21,14 @@ from app.backend.review_read import reopen_block_reason
 
 # Corporate palette (TIMIA visual guidelines): white background, Negro text, Tierra/Gris secondary
 # text, accents Rojo (brand: titles and buttons), Cielo (links), Mar (focus), Amarillo (notices),
-# Verde (reserved for success). Arial, with metric-compatible fallbacks where it isn't installed.
+# Verde (success notices). Arial, with metric-compatible fallbacks where it isn't installed.
+# Contrast (WCAG 2.1, measured on the real backgrounds): Gris #7C878E is 3.68:1 on white, enough for
+# field borders (3:1) but not for body text (4.5:1), so muted text uses the darker variant #687177
+# (4.98:1 on white, 4.6:1 on the light-grey --suave).
 _STYLE = (
     "<style>"
     ":root{--negro:#2D2926;--tierra:#6F5D58;--gris:#7C878E;--rojo:#A50034;--rojo-oscuro:#82002A;"
-    "--mar:#00A7B5;--amarillo:#FFB81C;--verde:#257226;--cielo:#315AB5;"
+    "--mar:#00A7B5;--amarillo:#FFB81C;--verde:#257226;--cielo:#315AB5;--gris-texto:#687177;"
     "--linea:#D9DDE0;--suave:#F5F6F7}"
     "html{background:#FFFFFF}"
     "body{font-family:Arial,'Liberation Sans',Helvetica,'Helvetica Neue',sans-serif;font-size:15px;"
@@ -48,19 +51,25 @@ _STYLE = (
     "border-radius:6px;padding:.55rem .85rem;margin:.6rem 0}"
     ".err{background:#FBEBEF;border:1px solid #E7B3C2;border-left:4px solid var(--rojo);"
     "border-radius:6px;padding:.55rem .85rem;margin:.6rem 0}"
-    ".muted{color:var(--gris)}"
+    ".ok{background:#EDF5EC;border:1px solid #A9CDA8;border-left:4px solid var(--verde);"
+    "border-radius:6px;padding:.55rem .85rem;margin:.6rem 0}"
+    ".muted{color:var(--gris-texto)}"
+    ".help{color:var(--tierra);font-size:.9rem}"
     "form.decide{display:inline;margin-right:.4rem}"
     "button{font:inherit;font-weight:bold;color:#FFFFFF;background:var(--rojo);border:0;"
     "border-radius:6px;padding:.38rem .9rem;margin:.15rem .2rem .15rem 0;cursor:pointer}"
     "button:hover{background:var(--rojo-oscuro)}"
     "button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,"
     "a:focus-visible{outline:2px solid var(--mar);outline-offset:2px}"
-    "input,select,textarea{font:inherit;color:var(--negro);border:1px solid #C3C9CD;"
+    "input,select,textarea{font:inherit;color:var(--negro);border:1px solid var(--gris);"
     "border-radius:4px;padding:.22rem .4rem;background:#FFFFFF}"
     "input[type=radio],input[type=checkbox]{accent-color:var(--rojo)}"
     "details{border:1px solid var(--linea);border-radius:6px;padding:.4rem .8rem;margin:.6rem 0}"
     "summary{cursor:pointer;font-weight:bold;color:var(--tierra)}"
     "code{background:var(--suave);border-radius:3px;padding:0 .25rem}"
+    # The document screen's Enter-key default (first submit button of its form): off-screen, not
+    # display:none, so every browser still uses it for implicit submission.
+    ".ks-enter{position:absolute;left:-10000px;width:1px;height:1px;overflow:hidden}"
     "</style>"
 )
 
@@ -404,7 +413,17 @@ def render_apply_confirm(scope: dict[str, Any]) -> str:
         body.append(f"<p class='banner'>Approved-queue files skipped: {_h(', '.join(errs))}.</p>")
     # ADR-0068 decision 6: this page is read-only; the preview (which records the authorization
     # Apply needs) runs on an origin-guarded POST.
-    body.append(_PREVIEW_FORM)
+    if not scope.get("executor_backed") and not scope.get("record_only") and not errs:
+        # UAT part 3 #10: say why there is nothing to do instead of offering a bare Preview.
+        body.append("<p class='ok'><strong>Nothing is waiting to be applied.</strong> Only "
+                    "<em>approved</em> review items need Apply. Rejected and deferred decisions "
+                    "need no apply, and tag decisions on a document's screen take effect "
+                    "immediately.</p>"
+                    "<p class='help'>A preview is still possible, for example to finish a merge "
+                    "or split that stopped part-way:</p>")
+        body.append(_PREVIEW_FORM.replace(">Preview<", ">Preview anyway<"))
+    else:
+        body.append(_PREVIEW_FORM)
     return _page("Apply reviews", "".join(body))
 
 
@@ -509,7 +528,7 @@ def render_apply_result(result: dict[str, Any]) -> str:
     if result.get("warnings"):
         body.append(f"<p class='banner'>warnings: {_render_value(result['warnings'])}</p>")
     body.append("<h2>Summary</h2>")
-    body.append(_render_value({
+    summary = {
         "syntheses": s.get("syntheses"), "promotions": s.get("promotions"),
         "contradictions": s.get("contradictions"), "deprecations": s.get("deprecations"),
         "duplicates": s.get("duplicates"), "archives": s.get("archives"),
@@ -522,7 +541,11 @@ def render_apply_result(result: dict[str, Any]) -> str:
         "merged": s.get("merged"), "retyped": s.get("retyped"), "split": s.get("split"),
         "pages_changed": s.get("pages_changed"), "index_rebuilt": s.get("index_rebuilt"),
         "unapplied": s.get("unapplied"),
-    }))
+    }
+    # UAT part 3 #10: list only what happened, not ~20 rows of zero.
+    shown = {k: v for k, v in summary.items() if v not in (None, 0, False, [], {}, "")}
+    body.append(_render_value(shown) if shown else
+                "<p><em>Nothing was changed: there were no approved items to apply.</em></p>")
     if result.get("failed_validators"):
         body.append("<h2 class='err'>Failed validators</h2>")
         body.append(_render_value(result["failed_validators"]))
@@ -701,6 +724,13 @@ def _details_section(data: dict[str, Any], draft: dict[str, Any] | None) -> str:
               if info["confirmed"] else
               f"Not confirmed: {_h(_DETAILS_SOURCE.get(info['source'], info['source']))}.")
     parts = ["<h2>Details</h2>", f"<p>{status}</p>", reconciliation_notices(info.get("pending") or [])]
+    if info["confirmed"]:
+        # Pending until Save, like every other change on the screen (review 2026-11-02).
+        parts.append("<p><label><input type='checkbox' name='details_clear' value='1'"
+                     f"{' checked' if d.get('details_clear') else ''}> <strong>Clear the confirmed "
+                     "details</strong> when I press Save</label> <span class='help'>(removes the "
+                     "confirmed title, authors and publisher; independence may still rest on other "
+                     "provenance)</span></p>")
     if info.get("suggestion_differs") and info.get("suggested"):
         sug = info["suggested"]
         names = ", ".join(a["name"] for a in sug["authors"]) or "no authors"
@@ -723,7 +753,12 @@ def _details_section(data: dict[str, Any], draft: dict[str, Any] | None) -> str:
             f"<td><input type='checkbox' name='author_show_{i}' value='1'"
             f"{' checked' if a.get('show_page') else ''}></td></tr>")
     parts.append("<p>Authors, in document order (clear a name to remove it):</p><table>"
-                 + "".join(table) + "</table>")
+                 + "".join(table) + "</table>"
+                 "<p class='help'><strong>show page</strong>: list this document on the person's "
+                 "(or publisher's) page in the wiki's <code>Authors/</code> folder, linked from the "
+                 "document's Source page. Nothing changes on this screen: the page is written when "
+                 "the details are saved as correct. A ticked box means the name already has a page "
+                 "from a confirmed document.</p>")
     parts.append("<p><button type='submit' name='details_action' value='add_rows'>Add author rows"
                  "</button> (writes nothing)</p>")
     pub = values.get("publisher") or {"name": "", "show_page": False}
@@ -741,13 +776,19 @@ def _details_section(data: dict[str, Any], draft: dict[str, Any] | None) -> str:
 
 
 def render_source_screen(data: dict[str, Any], *, draft: dict[str, Any] | None = None,
-                         errors: list[str] | None = None) -> str:
+                         errors: list[str] | None = None, notices: list[str] | None = None,
+                         warnings: list[str] | None = None) -> str:
     """One source's screen (ADR-0066): the Details section (part 3 slice 3), tag suggestions to
     keep/drop/never-suggest, kept tags (drop to remove), type changes and retirements in ONE batch
     form (untouched rows record nothing), then the dropped-earlier list (undo) and the add-a-tag form.
 
-    `draft` re-renders a submission (a draft action or a form-level refusal) with every submitted
-    value preserved; `errors` are the form-level refusal reasons."""
+    `draft` re-renders a submission (a draft action, a form-level refusal, or an Add tag / Undo drop
+    pressed with other choices still unsaved) with every submitted value preserved; `errors` are the
+    form-level refusal reasons, `notices` what such an action did, `warnings` a failed refresh.
+
+    UAT part 3 #6/#7: every button on the screen except Clear confirmed details submits the ONE
+    batch form (`form='ks-source-form'`, the HTML `form` attribute, since forms can't nest), so
+    pressing it never discards what was chosen elsewhere on the page."""
     sid = _h(data.get("source_id"))
     draft = draft or {}
     totals = data.get("totals") or {}
@@ -755,6 +796,9 @@ def render_source_screen(data: dict[str, Any], *, draft: dict[str, Any] | None =
     preselect = data.get("preselect")
     parts = [
         _nav(),
+        # Enter in any field presses this first: it redraws the page and saves nothing.
+        "<button type='submit' form='ks-source-form' name='screen_action' value='redraw' "
+        "class='ks-enter' tabindex='-1' aria-hidden='true'>Redraw</button>",
         f"<h1>{_h(data.get('title')) if data.get('title') else f'Source {sid}'}</h1>",
         f"<p>{sid} · {_h(data.get('filename'))} — <a href='/raw/{sid}'>view original</a> — source "
         f"{_h(data.get('position'))} of "
@@ -771,20 +815,26 @@ def render_source_screen(data: dict[str, Any], *, draft: dict[str, Any] | None =
          f"(<code>{_h(data['in_flight_review_id'])}</code>). Tag decisions on its tags are refused until "
          "you run <a href='/ui/reviews/apply'>Apply</a> again, which finishes it.</p>"
          if data.get("in_flight_review_id") else ""),
-        "<p>Tag decisions take effect immediately and apply to <strong>this document only</strong>: "
+        "<p>Choices on this page are saved only when you press <strong>Save</strong> (Enter never "
+        "saves). Tag decisions then take effect at once and apply to <strong>this document only"
+        "</strong>: "
         "<em>keep</em> tags it (a tag becomes active with its first keep), <em>drop</em> removes the "
         "link here and is remembered for re-extraction, <em>never suggest</em> blocks the name "
         "everywhere (kept links stay). Type changes and retirements are recorded and applied later "
         "via <a href='/ui/reviews/apply'>Apply</a>. Untouched rows record nothing.</p>",
-        (f"<p><strong>Keep pre-selected on all suggestions</strong> — review, adjust, then submit. "
-         f"<a href='/ui/reviews/sources/{sid}'>Clear pre-selection</a></p>"
+        (f"<p><strong>Keep pre-selected on all suggestions</strong> — review, adjust, then Save. "
+         f"<a href='/ui/reviews/sources/{sid}'>Clear pre-selection</a> (reloads the page and "
+         "discards unsaved choices)</p>"
          if preselect == "keep" else
-         f"<form method='get' action='/ui/reviews/sources/{sid}'>"
-         "<input type='hidden' name='preselect' value='keep'>"
-         "<button type='submit'>Pre-select keep for all suggestions</button></form>"),
+         "<p><button type='submit' form='ks-source-form' name='screen_action' "
+         "value='preselect_keep'>Pre-select keep for all suggestions</button> "
+         "<span class='help'>(keeps your other choices; saves nothing)</span></p>"),
         "".join(f"<p class='err'><strong>Nothing was saved:</strong> {_h(e)}</p>"
                 for e in errors or []),
-        f"<form method='post' action='/ui/reviews/sources/{sid}/decide'>",
+        "".join(f"<p class='ok'>{_h(n)}</p>" for n in notices or []),
+        _refresh_warnings(warnings),
+        f"<form method='post' action='/ui/reviews/sources/{sid}/decide' id='ks-source-form'>"
+        "<input type='hidden' name='_screen' value='1'>",
         _details_section(data, draft),
     ]
 
@@ -884,18 +934,11 @@ def render_source_screen(data: dict[str, Any], *, draft: dict[str, Any] | None =
             if details_info else "")
     parts.append("<p><label>Note (applies to every review-item decision this submit): "
                  f"<input type='text' name='note' size='40' value='{_h(draft.get('note', ''))}'>"
-                 "</label></p>" + tick + "<button type='submit'>Save</button></form>")
-    if details_info and details_info.get("confirmed"):
-        # Its own form: HTML forms can't nest (slice-3 grill Q4).
-        parts.append(
-            f"<form method='post' action='/ui/reviews/sources/{sid}/details/clear'>"
-            # A redrawn draft keeps the baseline the person actually saw, so Clear can't act on a
-            # newer confirmation they never reviewed (slice-3 review round 1).
-            f"<input type='hidden' name='details_baseline' "
-            f"value='{_h(draft.get('details_baseline') or details_info['baseline'])}'>"
-            "<button type='submit'>Clear confirmed details</button> "
-            "<small>(removes the confirmed title, authors and publisher; independence may still rest "
-            "on other provenance)</small></form>")
+                 "</label></p>" + tick
+                 + "<p><button type='submit' name='screen_action' value='save'>Save all changes on "
+                 "this page</button> <span class='help'>Saves every choice above at once: tag "
+                 "decisions, type changes and retirements, the Details (or a Clear). Untouched rows "
+                 "record nothing.</span></p></form>")
 
     dropped = data.get("dropped") or []
     parts.append(f"<h2>Dropped earlier ({len(dropped)})</h2>")
@@ -906,26 +949,33 @@ def render_source_screen(data: dict[str, Any], *, draft: dict[str, Any] | None =
         for d in dropped:
             rows.append(
                 f"<tr><td>{_h(d.get('name'))}</td><td>{_h(d.get('at'))}</td><td>"
-                f"<form method='post' action='/ui/reviews/sources/{sid}/undrop' class='decide'>"
-                f"<input type='hidden' name='key' value='{_h(d.get('key'))}'>"
-                "<button type='submit'>Undo drop</button></form></td></tr>")
-        parts.append("<p>Re-extraction of this document will not suggest these again. Undo makes "
-                     "a tag suggestible here again (it is not kept).</p>")
+                f"<button type='submit' form='ks-source-form' "
+                f"formaction='/ui/reviews/sources/{sid}/undrop' name='key' "
+                f"value='{_h(d.get('key'))}'>Undo drop</button></td></tr>")
+        parts.append("<p>Re-extraction of this document will not suggest these again. "
+                     "<strong>Undo drop</strong> saves at once, separately from Save: it makes a tag "
+                     "suggestible here again (it is not kept). Your other choices stay unsaved.</p>")
         parts.append("<table>" + "".join(rows) + "</table>")
 
+    add_type = str(draft.get("add_item_type") or "")
+    f = "form='ks-source-form'"
     parts.append(
         "<h2>Add a tag</h2>"
-        "<p>Tags this document immediately (an anchorless <code>asserted_by: human</code> link, "
-        "kept): a new tag is created and active; an existing one is reused.</p>"
-        f"<form method='post' action='/ui/reviews/sources/{sid}/add'>"
-        "<p><label>Title: <input type='text' name='title' size='30' required></label> "
-        "<label>Type: <select name='item_type'>"
-        + "".join(f"<option value='{t}'>{t}</option>"
+        "<p>The <strong>Add tag</strong> button saves this one tag at once, separately from Save "
+        "(an anchorless <code>asserted_by: human</code> link, kept): a new tag is created and "
+        "active; an existing one is reused. Your other choices on this page stay as they are, "
+        "unsaved, until you press Save.</p>"
+        f"<p><label>Title: <input type='text' name='add_title' size='30' {f} "
+        f"value='{_h(draft.get('add_title', ''))}'></label> "
+        f"<label>Type: <select name='add_item_type' {f}>"
+        + "".join(f"<option value='{t}'{' selected' if t == add_type else ''}>{t}</option>"
                   for t in sorted(taxonomy.ITEM_TYPES) if t != taxonomy.UNCLASSIFIED)
         + "</select></label></p>"
-        "<p><label>Aliases (comma-sep): <input type='text' name='aliases' size='30'></label></p>"
-        "<p><label>Description: <input type='text' name='description' size='50'></label></p>"
-        "<button type='submit'>Add tag</button></form>")
+        f"<p><label>Aliases (comma-sep): <input type='text' name='add_aliases' size='30' {f} "
+        f"value='{_h(draft.get('add_aliases', ''))}'></label></p>"
+        f"<p><label>Description: <input type='text' name='add_description' size='50' {f} "
+        f"value='{_h(draft.get('add_description', ''))}'></label></p>"
+        f"<button type='submit' {f} formaction='/ui/reviews/sources/{sid}/add'>Add tag</button>")
 
     if data.get("global_remaining_by_type"):
         by_type = ", ".join(f"{_h(t)}: {_h(n)}"
