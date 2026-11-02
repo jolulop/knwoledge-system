@@ -209,6 +209,15 @@ def _insert_row(conn, job_id, job_type, status, source_id, input_path, output_pa
     conn.commit()
 
 
+def failure_message(exc: BaseException) -> str:
+    """The `error_message` of a job that ended in an exception. An interruption (Ctrl-C, a
+    `SystemExit`) is not an `Exception`; producers catch it too and record it as one, so the job is
+    never left `running` (UAT part 3 #3). A hard kill (SIGKILL) still can't be recorded."""
+    if isinstance(exc, Exception):
+        return str(exc)
+    return f"interrupted ({type(exc).__name__})"
+
+
 def update_job(conn: sqlite3.Connection, job_id: str, **fields: Any) -> None:
     """Update a job. The keys `warnings` and `metadata` are JSON-encoded for you."""
     if not fields:

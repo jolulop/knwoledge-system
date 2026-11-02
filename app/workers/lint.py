@@ -765,9 +765,9 @@ def run_lint(
                 "validators": validators, "findings": findings, "by_check": by_check,
                 "review_items_filed": new_items, "review_items_existing": existing_items,
                 "review_items_withdrawn": withdrawn, "graph_available": graph_available}
-    except Exception as exc:
+    except BaseException as exc:  # incl. Ctrl-C (UAT part 3 #3)
         if conn is not None:
-            db.update_job(conn, job_id, status="failed", finished_at=iso_now(), error_message=str(exc))
+            db.update_job(conn, job_id, status="failed", finished_at=iso_now(), error_message=db.failure_message(exc))
         raise
     finally:
         if conn is not None:

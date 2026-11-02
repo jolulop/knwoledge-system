@@ -201,9 +201,9 @@ def run_stale_check(
                 "archive_review_items_filed": sorted(set(archive_filed)),
                 "delete_review_items_filed": sorted(set(delete_filed)),
                 "cache_purge_review_items_filed": sorted(set(cache_purge_filed))}
-    except Exception as exc:
+    except BaseException as exc:  # incl. Ctrl-C (UAT part 3 #3)
         if conn is not None:
-            db.update_job(conn, job_id, status="failed", finished_at=iso_now(), error_message=str(exc))
+            db.update_job(conn, job_id, status="failed", finished_at=iso_now(), error_message=db.failure_message(exc))
         raise
     finally:
         if conn is not None:
@@ -405,9 +405,9 @@ def run_reindex(
         return {"job_id": job_id, "status": status, "index_rebuilt": index_rebuilt,
                 "keyword_reindexed": keyword_reindexed, "warnings": warnings,
                 "publication": publication.summary(pub)}
-    except Exception as exc:
+    except BaseException as exc:  # incl. Ctrl-C (UAT part 3 #3)
         if conn is not None:
-            db.update_job(conn, job_id, status="failed", finished_at=iso_now(), error_message=str(exc))
+            db.update_job(conn, job_id, status="failed", finished_at=iso_now(), error_message=db.failure_message(exc))
         raise
     finally:
         if conn is not None:

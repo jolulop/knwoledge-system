@@ -305,10 +305,10 @@ def generate_wiki(
                 conn, job_id, status=status, finished_at=iso_now(), metadata=summary,
             )
         return summary
-    except Exception as exc:
+    except BaseException as exc:  # incl. Ctrl-C (UAT part 3 #3)
         if conn is not None:
             db.update_job(
-                conn, job_id, status="failed", finished_at=iso_now(), error_message=str(exc)
+                conn, job_id, status="failed", finished_at=iso_now(), error_message=db.failure_message(exc)
             )
         raise
     finally:
