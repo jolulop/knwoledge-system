@@ -19,17 +19,48 @@ from typing import Any
 from app.backend import taxonomy
 from app.backend.review_read import reopen_block_reason
 
+# Corporate palette (TIMIA visual guidelines): white background, Negro text, Tierra/Gris secondary
+# text, accents Rojo (brand: titles and buttons), Cielo (links), Mar (focus), Amarillo (notices),
+# Verde (reserved for success). Arial, with metric-compatible fallbacks where it isn't installed.
 _STYLE = (
     "<style>"
-    "body{font-family:system-ui,sans-serif;margin:2rem;max-width:60rem;color:#1a1a1a}"
-    "table{border-collapse:collapse;margin:.5rem 0}"
-    "th,td{border:1px solid #ccc;padding:.3rem .6rem;text-align:left;vertical-align:top}"
-    "table.kv th{background:#f5f5f5;white-space:nowrap}"
-    ".banner{background:#fff3cd;border:1px solid #e0c069;padding:.5rem .8rem;margin:.5rem 0}"
-    ".err{background:#f8d7da;border:1px solid #d99;padding:.5rem .8rem}"
+    ":root{--negro:#2D2926;--tierra:#6F5D58;--gris:#7C878E;--rojo:#A50034;--rojo-oscuro:#82002A;"
+    "--mar:#00A7B5;--amarillo:#FFB81C;--verde:#257226;--cielo:#315AB5;"
+    "--linea:#D9DDE0;--suave:#F5F6F7}"
+    "html{background:#FFFFFF}"
+    "body{font-family:Arial,'Liberation Sans',Helvetica,'Helvetica Neue',sans-serif;font-size:15px;"
+    "line-height:1.45;margin:2rem auto;padding:0 1.5rem;max-width:60rem;color:var(--negro);"
+    "background:#FFFFFF}"
+    "h1,h2,h3{font-weight:bold;line-height:1.25}"
+    "h1{font-size:1.6rem;color:var(--negro);border-bottom:3px solid var(--rojo);"
+    "padding-bottom:.35rem;margin:1.2rem 0 1rem}"
+    "h2{font-size:1.2rem;color:var(--tierra);margin:1.6rem 0 .6rem}"
+    "h3{font-size:1.05rem;color:var(--tierra)}"
+    "a{color:var(--cielo);text-decoration:none}"
+    "a:hover{text-decoration:underline}"
+    "nav{padding:.5rem 0 .6rem;border-bottom:1px solid var(--linea);margin-bottom:.8rem}"
+    "nav a{margin-right:1rem;font-weight:bold}"
+    "table{border-collapse:collapse;margin:.6rem 0}"
+    "th,td{border:1px solid var(--linea);padding:.35rem .65rem;text-align:left;vertical-align:top}"
+    "th{background:var(--suave);font-weight:bold}"
+    "table.kv th{white-space:nowrap}"
+    ".banner{background:#FFF7E3;border:1px solid #F3D88F;border-left:4px solid var(--amarillo);"
+    "border-radius:6px;padding:.55rem .85rem;margin:.6rem 0}"
+    ".err{background:#FBEBEF;border:1px solid #E7B3C2;border-left:4px solid var(--rojo);"
+    "border-radius:6px;padding:.55rem .85rem;margin:.6rem 0}"
+    ".muted{color:var(--gris)}"
     "form.decide{display:inline;margin-right:.4rem}"
-    "nav a{margin-right:.8rem}"
-    "code{background:#f0f0f0;padding:0 .2rem}"
+    "button{font:inherit;font-weight:bold;color:#FFFFFF;background:var(--rojo);border:0;"
+    "border-radius:6px;padding:.38rem .9rem;margin:.15rem .2rem .15rem 0;cursor:pointer}"
+    "button:hover{background:var(--rojo-oscuro)}"
+    "button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,"
+    "a:focus-visible{outline:2px solid var(--mar);outline-offset:2px}"
+    "input,select,textarea{font:inherit;color:var(--negro);border:1px solid #C3C9CD;"
+    "border-radius:4px;padding:.22rem .4rem;background:#FFFFFF}"
+    "input[type=radio],input[type=checkbox]{accent-color:var(--rojo)}"
+    "details{border:1px solid var(--linea);border-radius:6px;padding:.4rem .8rem;margin:.6rem 0}"
+    "summary{cursor:pointer;font-weight:bold;color:var(--tierra)}"
+    "code{background:var(--suave);border-radius:3px;padding:0 .25rem}"
     "</style>"
 )
 
@@ -527,7 +558,7 @@ def render_sources_index(data: dict[str, Any]) -> str:
     for i, s in enumerate(data.get("sources") or [], start=1):
         sid = _h(s.get("source_id"))
         remaining = (s.get("counts") or {}).get("remaining", 0)
-        style = "" if remaining else " style='color:#999'"
+        style = "" if remaining else " class='muted'"
         rows.append(
             f"<tr{style}><td>{i}</td>"
             f"<td><a href='/ui/reviews/sources/{sid}'>{_h(s.get('title') or s.get('source_id'))}"
@@ -820,7 +851,7 @@ def render_source_screen(data: dict[str, Any], *, draft: dict[str, Any] | None =
                                           if draft else None)
                 table.append(f"<tr>{info}<td>{radios}</td></tr>")
             else:
-                table.append(f"<tr style='color:#777'>{info}<td>{_decided_cell(row)}</td></tr>")
+                table.append(f"<tr class='muted'>{info}<td>{_decided_cell(row)}</td></tr>")
         parts.append("<table>" + "".join(table) + "</table>")
 
     unfinished = data.get("unfinished") or []
