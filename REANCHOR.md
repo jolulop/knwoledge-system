@@ -17,14 +17,22 @@ critical rules and `CONTEXT.md` for the glossary.
 
 ## Where we are
 
-- **2026-11-01 — ADR-0069 slice 3:** evaluator implemented; Codex reviewed the synthetic labels
+- **2026-11-02 — ADR-0069 slice 3 evaluated** (log in ADR-0069 "Slice 3 evaluation log"):
+  `anthropic:claude-opus-4-8` failed the original fixture on two ambiguous wordings; after a
+  documented wording amendment (no label or threshold changed) it passed 7/7 in every order with
+  no false positives and is the hosted baseline. `local:qwen3.6:27b` (Ollama) then passed the same
+  way against that baseline, slowly (~1.7 min per call), with thinking up to 3,846 of 4,096 output
+  tokens. **Recommended judge: `local:qwen3.6:27b` at 4,096 output tokens; 12,000-character windows
+  not validated; `CONTRADICTION_MODEL` stays unset.** The three result files are kept as evidence
+  in `evals/results/` (later runs gitignored). The documented evaluator command is now
+  `uv run --no-sync`.
+- **2026-11-01 — ADR-0069 slice 3 (historical; superseded by the 2026-11-02 entry):** evaluator implemented; Codex reviewed the synthetic labels
   and set the thresholds at the user's explicit request (review identity/date in
   `evals/contradiction_judge.yaml`). C09 now directly denies hybrid/electric ferries entering
   service in 2024. Thresholds: recall ≥0.85 (6/7), false positives agreement 0 / apparent_conflict 1 /
   unrelated 0, worst order. Dry-run: 36 calls over three orders, with non-corresponding-window
   contradictions in every order. Aggregate character caps and hosted-baseline compatibility are
-  checked. **No live model evaluated; `CONTRADICTION_MODEL` stays unset.** Next: explicitly choose
-  and authorize hosted/local evaluations, then record a recommendation or keep it unset.
+  checked. At that point no live model had been evaluated.
   Final gate: **2053 passed, 2 skipped**, ruff clean, 15 validators pass, diff whitespace clean.
 - **Branch:** `main` — tip `1bab3c0` (UAT Guide part-3 steps; before it `0d218b9` ADR-0066 part 3
   slice 4 Authors pages), **pushed, in sync with `origin/main`**, tree clean except the user's
@@ -516,8 +524,9 @@ effective title and `wiki/Authors/`).
 `ENRICH_LOCAL_BASE_URL`, see `docs/Local Models.md`): `scripts/enrich.py` → `extract_claims.py` →
 `extract_items.py` → `promote.py` → `generate_synthesis.py` (no contradiction step — ADR-0069;
 an occasional check on chosen documents is `detect_contradictions.py estimate <sid> <sid> …` →
-`run --token <id> [--allow-paid]`, judge `--model`/`CONTRADICTION_MODEL`, no default until the
-judge evaluation gate `scripts/eval_contradictions.py` passes on `evals/contradiction_judge.yaml`). Tag
+`run --token <id> [--allow-paid]`, judge `--model`/`CONTRADICTION_MODEL`, no default; recommended
+`local:qwen3.6:27b` at 4,096 output tokens after the judge evaluation gate `scripts/eval_contradictions.py`
+passed on `evals/contradiction_judge.yaml`, 12,000-character windows not validated). Tag
 each document on its screen at `/ui/reviews/sources/<source_id>` (keep / drop / never suggest);
 Re-suggest without billing via `extract_items.py --cache-only`; check/repair the tag ledgers with
 `scripts/validate_tag_links.py` / `scripts/rebuild_tag_links.py`. Validate: `scripts/validate_all.py`.

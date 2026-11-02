@@ -1,0 +1,1246 @@
+{
+  "result_version": 1,
+  "evaluated_at": "2026-11-01T17:18:32+00:00",
+  "dry_run": false,
+  "fixture_digest": "431836a7d5b48f56bcf6dc5ec611acb6f05d6922f682aebdf62b21511bc2d023",
+  "review": {
+    "labels_reviewed": true,
+    "reviewed_by": "Codex (AI architecture reviewer, authorized by the user)",
+    "reviewed_at": "2026-11-01",
+    "notes": "Reviewed all 20 explicit labels and the cross-topic unrelated default at the user's request. C09 explicitly denies hybrid or electric ferries entering service in 2024, avoiding the diesel-electric ambiguity. No cross-topic contradiction was identified. Thresholds were fixed before any live model evaluation: at least 6 of 7 contradictions in every order; at most 0 agreement, 1 apparent_conflict and 0 unrelated false positives per order. This is a delegated AI review, not an independently completed human annotation exercise.",
+    "amendments": [
+      {
+        "date": "2026-11-01",
+        "after_evaluation": "evals/results/contradiction_judge_20261101T170347Z_anthropic-claude-opus-4-8.json",
+        "by": "Claude (at the user's explicit request)",
+        "change": "POST-EVALUATION wording fix; no label or threshold changed. C07 \"opened in autumn 2025\" became \"opened in the second half of 2025\" (September is not autumn by the astronomical definition, so the agreement with A07 was ambiguous). B10/C10 now name the season they peak in (\"peaked for the 2025 season in August\" / \"for the 2024 season in July\"); a bare \"peaked\" could be read as an all-time peak, which would make the pair a contradiction. The fixture digest changed, so results measured before this amendment do not count and every candidate is re-run."
+      }
+    ]
+  },
+  "thresholds": {
+    "min_contradiction_recall": 0.85,
+    "max_false_positives": {
+      "agreement": 0,
+      "apparent_conflict": 1,
+      "unrelated": 0
+    }
+  },
+  "model_ref": "local:qwen3.6:27b",
+  "endpoint": "http://localhost:11434/v1",
+  "paid": false,
+  "reported_models": [
+    "qwen3.6:27b"
+  ],
+  "prompt_version": "contradiction-batch-prompt-v1",
+  "schema_version": "contradiction-batch-v1",
+  "settings": {
+    "window_chars": 1200,
+    "max_output_tokens": 4096,
+    "limits": {
+      "max_calls": 50,
+      "max_input_tokens": 400000
+    },
+    "strategy": "window-cross-v1",
+    "chars_per_token": 2,
+    "permutations": 3,
+    "order_seeds": [
+      null,
+      1,
+      2
+    ]
+  },
+  "planned": {
+    "calls": 36,
+    "estimated_input_tokens": 66598
+  },
+  "permutations": [
+    {
+      "index": 0,
+      "order_seed": null,
+      "window_plan": [
+        {
+          "id": "src_321e9af8ff98a902~src_72867287879d4fc6#a1/2xb1/2",
+          "claims_a": [
+            "B07",
+            "B03",
+            "B12",
+            "B09",
+            "B11",
+            "B10"
+          ],
+          "claims_b": [
+            "C12",
+            "C07",
+            "C09",
+            "C04",
+            "C06",
+            "C11"
+          ],
+          "input_chars": 3815
+        },
+        {
+          "id": "src_321e9af8ff98a902~src_72867287879d4fc6#a1/2xb2/2",
+          "claims_a": [
+            "B07",
+            "B03",
+            "B12",
+            "B09",
+            "B11",
+            "B10"
+          ],
+          "claims_b": [
+            "C03",
+            "C02",
+            "C08",
+            "C05",
+            "C01",
+            "C10"
+          ],
+          "input_chars": 3733
+        },
+        {
+          "id": "src_321e9af8ff98a902~src_72867287879d4fc6#a2/2xb1/2",
+          "claims_a": [
+            "B04",
+            "B01",
+            "B06",
+            "B08",
+            "B05",
+            "B02"
+          ],
+          "claims_b": [
+            "C12",
+            "C07",
+            "C09",
+            "C04",
+            "C06",
+            "C11"
+          ],
+          "input_chars": 3761
+        },
+        {
+          "id": "src_321e9af8ff98a902~src_72867287879d4fc6#a2/2xb2/2",
+          "claims_a": [
+            "B04",
+            "B01",
+            "B06",
+            "B08",
+            "B05",
+            "B02"
+          ],
+          "claims_b": [
+            "C03",
+            "C02",
+            "C08",
+            "C05",
+            "C01",
+            "C10"
+          ],
+          "input_chars": 3679
+        },
+        {
+          "id": "src_321e9af8ff98a902~src_d6ba740d24e6515d#a1/2xb1/2",
+          "claims_a": [
+            "B07",
+            "B03",
+            "B12",
+            "B09",
+            "B11",
+            "B10"
+          ],
+          "claims_b": [
+            "A08",
+            "A07",
+            "A05",
+            "A03",
+            "A11",
+            "A12",
+            "A10"
+          ],
+          "input_chars": 3876
+        },
+        {
+          "id": "src_321e9af8ff98a902~src_d6ba740d24e6515d#a1/2xb2/2",
+          "claims_a": [
+            "B07",
+            "B03",
+            "B12",
+            "B09",
+            "B11",
+            "B10"
+          ],
+          "claims_b": [
+            "A02",
+            "A06",
+            "A01",
+            "A09",
+            "A04"
+          ],
+          "input_chars": 3513
+        },
+        {
+          "id": "src_321e9af8ff98a902~src_d6ba740d24e6515d#a2/2xb1/2",
+          "claims_a": [
+            "B04",
+            "B01",
+            "B06",
+            "B08",
+            "B05",
+            "B02"
+          ],
+          "claims_b": [
+            "A08",
+            "A07",
+            "A05",
+            "A03",
+            "A11",
+            "A12",
+            "A10"
+          ],
+          "input_chars": 3822
+        },
+        {
+          "id": "src_321e9af8ff98a902~src_d6ba740d24e6515d#a2/2xb2/2",
+          "claims_a": [
+            "B04",
+            "B01",
+            "B06",
+            "B08",
+            "B05",
+            "B02"
+          ],
+          "claims_b": [
+            "A02",
+            "A06",
+            "A01",
+            "A09",
+            "A04"
+          ],
+          "input_chars": 3459
+        },
+        {
+          "id": "src_72867287879d4fc6~src_d6ba740d24e6515d#a1/2xb1/2",
+          "claims_a": [
+            "C12",
+            "C07",
+            "C09",
+            "C04",
+            "C06",
+            "C11"
+          ],
+          "claims_b": [
+            "A08",
+            "A07",
+            "A05",
+            "A03",
+            "A11",
+            "A12",
+            "A10"
+          ],
+          "input_chars": 3906
+        },
+        {
+          "id": "src_72867287879d4fc6~src_d6ba740d24e6515d#a1/2xb2/2",
+          "claims_a": [
+            "C12",
+            "C07",
+            "C09",
+            "C04",
+            "C06",
+            "C11"
+          ],
+          "claims_b": [
+            "A02",
+            "A06",
+            "A01",
+            "A09",
+            "A04"
+          ],
+          "input_chars": 3543
+        },
+        {
+          "id": "src_72867287879d4fc6~src_d6ba740d24e6515d#a2/2xb1/2",
+          "claims_a": [
+            "C03",
+            "C02",
+            "C08",
+            "C05",
+            "C01",
+            "C10"
+          ],
+          "claims_b": [
+            "A08",
+            "A07",
+            "A05",
+            "A03",
+            "A11",
+            "A12",
+            "A10"
+          ],
+          "input_chars": 3824
+        },
+        {
+          "id": "src_72867287879d4fc6~src_d6ba740d24e6515d#a2/2xb2/2",
+          "claims_a": [
+            "C03",
+            "C02",
+            "C08",
+            "C05",
+            "C01",
+            "C10"
+          ],
+          "claims_b": [
+            "A02",
+            "A06",
+            "A01",
+            "A09",
+            "A04"
+          ],
+          "input_chars": 3461
+        }
+      ],
+      "noncorresponding_contradictions": [
+        "A09/C09"
+      ],
+      "cache": {
+        "expected_hits": 0,
+        "from_cache": 0
+      },
+      "run": {
+        "job_id": "job_223b30c362b44bf3",
+        "status": "succeeded",
+        "coverage": {
+          "complete": true,
+          "windows": 12,
+          "completed": [
+            "src_321e9af8ff98a902~src_72867287879d4fc6#a1/2xb1/2",
+            "src_321e9af8ff98a902~src_72867287879d4fc6#a1/2xb2/2",
+            "src_321e9af8ff98a902~src_72867287879d4fc6#a2/2xb1/2",
+            "src_321e9af8ff98a902~src_72867287879d4fc6#a2/2xb2/2",
+            "src_321e9af8ff98a902~src_d6ba740d24e6515d#a1/2xb1/2",
+            "src_321e9af8ff98a902~src_d6ba740d24e6515d#a1/2xb2/2",
+            "src_321e9af8ff98a902~src_d6ba740d24e6515d#a2/2xb1/2",
+            "src_321e9af8ff98a902~src_d6ba740d24e6515d#a2/2xb2/2",
+            "src_72867287879d4fc6~src_d6ba740d24e6515d#a1/2xb1/2",
+            "src_72867287879d4fc6~src_d6ba740d24e6515d#a1/2xb2/2",
+            "src_72867287879d4fc6~src_d6ba740d24e6515d#a2/2xb1/2",
+            "src_72867287879d4fc6~src_d6ba740d24e6515d#a2/2xb2/2"
+          ],
+          "failed": {},
+          "remaining": [],
+          "in_progress": null,
+          "from_cache": 0
+        },
+        "stopped": null,
+        "budget": {
+          "calls": 12,
+          "input_chars": 44392,
+          "reported_input_tokens": 14352,
+          "estimated_input_tokens_not_reported": 0,
+          "reported_output_tokens": 32322,
+          "reserved_output_tokens_not_reported": 0,
+          "limits": {
+            "max_calls": 50,
+            "max_input_chars": 800000,
+            "max_input_tokens": 400000,
+            "max_output_tokens_per_call": 4096,
+            "output_allowance": 204800
+          },
+          "output_limit_violation": null,
+          "reported_models": [
+            "qwen3.6:27b"
+          ]
+        },
+        "out_of_scope_pairs_dropped": 0,
+        "maintenance": {
+          "retired": 0,
+          "error": null
+        },
+        "contradictions_proposed": 7
+      },
+      "predictions": [
+        {
+          "claims": [
+            "A06",
+            "B05"
+          ],
+          "confidence": 0.98,
+          "explanation": "The claims contradict because they assign mutually exclusive start years for Rhea Dunmore's appointment as harbour master, citing 2023 versus 2021."
+        },
+        {
+          "claims": [
+            "A01",
+            "B01"
+          ],
+          "confidence": 0.95,
+          "explanation": "The claims contradict because they report mutually exclusive trends and values for ferry passenger numbers in 2025, with one stating a decrease to 380,000 and the other an increase to 412,000."
+        },
+        {
+          "claims": [
+            "B06",
+            "C05"
+          ],
+          "confidence": 0.98,
+          "explanation": "Claim A specifies that the number 14 bus operates every 20 minutes on weekdays, while Claim B states it runs hourly on weekdays, making both frequency assertions mutually exclusive for the identical route and schedule."
+        },
+        {
+          "claims": [
+            "C09",
+            "A09"
+          ],
+          "confidence": 1.0,
+          "explanation": "Claim A states that zero hybrid or electric ferries entered service in 2024, which is directly contradicted by Claim B's assertion that two hybrid ferries entered service that same year."
+        },
+        {
+          "claims": [
+            "B07",
+            "C06"
+          ],
+          "confidence": 0.95,
+          "explanation": "Claim A states that charges for the harbour car park were introduced in April 2025, whereas Claim B asserts it has been free of charge since its opening, making both statements mutually exclusive regarding the facility's pricing history."
+        },
+        {
+          "claims": [
+            "B01",
+            "C01"
+          ],
+          "confidence": 0.92,
+          "explanation": "Claim A states that ferry passenger numbers fell in 2025, whereas Claim B asserts that more people travelled on the ferries in 2025 than in 2024, presenting mutually exclusive trends for the same service and timeframe."
+        },
+        {
+          "claims": [
+            "B03",
+            "A03"
+          ],
+          "confidence": 0.98,
+          "explanation": "The claims present mutually exclusive timelines for the same construction project, as dredging cannot simultaneously be completed in March 2025 and still ongoing in June 2025."
+        }
+      ],
+      "score": {
+        "contradictions": 7,
+        "found": [
+          "A01/B01",
+          "A03/B03",
+          "A06/B05",
+          "A09/C09",
+          "B01/C01",
+          "B06/C05",
+          "B07/C06"
+        ],
+        "missed": [],
+        "recall": 1.0,
+        "false_positives": {
+          "agreement": [],
+          "apparent_conflict": [],
+          "unrelated": []
+        },
+        "false_positive_counts": {
+          "agreement": 0,
+          "apparent_conflict": 0,
+          "unrelated": 0
+        },
+        "unscored": []
+      }
+    },
+    {
+      "index": 1,
+      "order_seed": 1,
+      "window_plan": [
+        {
+          "id": "src_321e9af8ff98a902~src_72867287879d4fc6#a1/2xb1/2",
+          "claims_a": [
+            "B05",
+            "B08",
+            "B06",
+            "B01",
+            "B02",
+            "B04"
+          ],
+          "claims_b": [
+            "C12",
+            "C04",
+            "C06",
+            "C10",
+            "C08",
+            "C03"
+          ],
+          "input_chars": 3705
+        },
+        {
+          "id": "src_321e9af8ff98a902~src_72867287879d4fc6#a1/2xb2/2",
+          "claims_a": [
+            "B05",
+            "B08",
+            "B06",
+            "B01",
+            "B02",
+            "B04"
+          ],
+          "claims_b": [
+            "C01",
+            "C05",
+            "C07",
+            "C09",
+            "C11",
+            "C02"
+          ],
+          "input_chars": 3735
+        },
+        {
+          "id": "src_321e9af8ff98a902~src_72867287879d4fc6#a2/2xb1/2",
+          "claims_a": [
+            "B10",
+            "B09",
+            "B03",
+            "B12",
+            "B11",
+            "B07"
+          ],
+          "claims_b": [
+            "C12",
+            "C04",
+            "C06",
+            "C10",
+            "C08",
+            "C03"
+          ],
+          "input_chars": 3759
+        },
+        {
+          "id": "src_321e9af8ff98a902~src_72867287879d4fc6#a2/2xb2/2",
+          "claims_a": [
+            "B10",
+            "B09",
+            "B03",
+            "B12",
+            "B11",
+            "B07"
+          ],
+          "claims_b": [
+            "C01",
+            "C05",
+            "C07",
+            "C09",
+            "C11",
+            "C02"
+          ],
+          "input_chars": 3789
+        },
+        {
+          "id": "src_321e9af8ff98a902~src_d6ba740d24e6515d#a1/2xb1/2",
+          "claims_a": [
+            "B05",
+            "B08",
+            "B06",
+            "B01",
+            "B02",
+            "B04"
+          ],
+          "claims_b": [
+            "A02",
+            "A10",
+            "A06",
+            "A09",
+            "A01",
+            "A08",
+            "A04"
+          ],
+          "input_chars": 3751
+        },
+        {
+          "id": "src_321e9af8ff98a902~src_d6ba740d24e6515d#a1/2xb2/2",
+          "claims_a": [
+            "B05",
+            "B08",
+            "B06",
+            "B01",
+            "B02",
+            "B04"
+          ],
+          "claims_b": [
+            "A05",
+            "A07",
+            "A11",
+            "A03",
+            "A12"
+          ],
+          "input_chars": 3530
+        },
+        {
+          "id": "src_321e9af8ff98a902~src_d6ba740d24e6515d#a2/2xb1/2",
+          "claims_a": [
+            "B10",
+            "B09",
+            "B03",
+            "B12",
+            "B11",
+            "B07"
+          ],
+          "claims_b": [
+            "A02",
+            "A10",
+            "A06",
+            "A09",
+            "A01",
+            "A08",
+            "A04"
+          ],
+          "input_chars": 3805
+        },
+        {
+          "id": "src_321e9af8ff98a902~src_d6ba740d24e6515d#a2/2xb2/2",
+          "claims_a": [
+            "B10",
+            "B09",
+            "B03",
+            "B12",
+            "B11",
+            "B07"
+          ],
+          "claims_b": [
+            "A05",
+            "A07",
+            "A11",
+            "A03",
+            "A12"
+          ],
+          "input_chars": 3584
+        },
+        {
+          "id": "src_72867287879d4fc6~src_d6ba740d24e6515d#a1/2xb1/2",
+          "claims_a": [
+            "C12",
+            "C04",
+            "C06",
+            "C10",
+            "C08",
+            "C03"
+          ],
+          "claims_b": [
+            "A02",
+            "A10",
+            "A06",
+            "A09",
+            "A01",
+            "A08",
+            "A04"
+          ],
+          "input_chars": 3779
+        },
+        {
+          "id": "src_72867287879d4fc6~src_d6ba740d24e6515d#a1/2xb2/2",
+          "claims_a": [
+            "C12",
+            "C04",
+            "C06",
+            "C10",
+            "C08",
+            "C03"
+          ],
+          "claims_b": [
+            "A05",
+            "A07",
+            "A11",
+            "A03",
+            "A12"
+          ],
+          "input_chars": 3558
+        },
+        {
+          "id": "src_72867287879d4fc6~src_d6ba740d24e6515d#a2/2xb1/2",
+          "claims_a": [
+            "C01",
+            "C05",
+            "C07",
+            "C09",
+            "C11",
+            "C02"
+          ],
+          "claims_b": [
+            "A02",
+            "A10",
+            "A06",
+            "A09",
+            "A01",
+            "A08",
+            "A04"
+          ],
+          "input_chars": 3809
+        },
+        {
+          "id": "src_72867287879d4fc6~src_d6ba740d24e6515d#a2/2xb2/2",
+          "claims_a": [
+            "C01",
+            "C05",
+            "C07",
+            "C09",
+            "C11",
+            "C02"
+          ],
+          "claims_b": [
+            "A05",
+            "A07",
+            "A11",
+            "A03",
+            "A12"
+          ],
+          "input_chars": 3588
+        }
+      ],
+      "noncorresponding_contradictions": [
+        "A09/C09",
+        "B01/C01",
+        "B06/C05",
+        "B07/C06"
+      ],
+      "cache": {
+        "expected_hits": 0,
+        "from_cache": 0
+      },
+      "run": {
+        "job_id": "job_766e889aa6684608",
+        "status": "succeeded",
+        "coverage": {
+          "complete": true,
+          "windows": 12,
+          "completed": [
+            "src_321e9af8ff98a902~src_72867287879d4fc6#a1/2xb1/2",
+            "src_321e9af8ff98a902~src_72867287879d4fc6#a1/2xb2/2",
+            "src_321e9af8ff98a902~src_72867287879d4fc6#a2/2xb1/2",
+            "src_321e9af8ff98a902~src_72867287879d4fc6#a2/2xb2/2",
+            "src_321e9af8ff98a902~src_d6ba740d24e6515d#a1/2xb1/2",
+            "src_321e9af8ff98a902~src_d6ba740d24e6515d#a1/2xb2/2",
+            "src_321e9af8ff98a902~src_d6ba740d24e6515d#a2/2xb1/2",
+            "src_321e9af8ff98a902~src_d6ba740d24e6515d#a2/2xb2/2",
+            "src_72867287879d4fc6~src_d6ba740d24e6515d#a1/2xb1/2",
+            "src_72867287879d4fc6~src_d6ba740d24e6515d#a1/2xb2/2",
+            "src_72867287879d4fc6~src_d6ba740d24e6515d#a2/2xb1/2",
+            "src_72867287879d4fc6~src_d6ba740d24e6515d#a2/2xb2/2"
+          ],
+          "failed": {},
+          "remaining": [],
+          "in_progress": null,
+          "from_cache": 0
+        },
+        "stopped": null,
+        "budget": {
+          "calls": 12,
+          "input_chars": 44392,
+          "reported_input_tokens": 14352,
+          "estimated_input_tokens_not_reported": 0,
+          "reported_output_tokens": 27645,
+          "reserved_output_tokens_not_reported": 0,
+          "limits": {
+            "max_calls": 38,
+            "max_input_chars": 755608,
+            "max_input_tokens": 377804,
+            "max_output_tokens_per_call": 4096,
+            "output_allowance": 155648
+          },
+          "output_limit_violation": null,
+          "reported_models": [
+            "qwen3.6:27b"
+          ]
+        },
+        "out_of_scope_pairs_dropped": 0,
+        "maintenance": {
+          "retired": 0,
+          "error": null
+        },
+        "contradictions_proposed": 7
+      },
+      "predictions": [
+        {
+          "claims": [
+            "A06",
+            "B05"
+          ],
+          "confidence": 1.0,
+          "explanation": "The claims specify mutually exclusive start years (2023 versus 2021) for when Rhea Dunmore began serving as harbour master."
+        },
+        {
+          "claims": [
+            "A01",
+            "B01"
+          ],
+          "confidence": 1.0,
+          "explanation": "The claims assert opposite directional changes and different final values for ferry passenger numbers in the same year."
+        },
+        {
+          "claims": [
+            "B06",
+            "C05"
+          ],
+          "confidence": 1.0,
+          "explanation": "List A states the number 14 bus runs every 20 minutes on weekdays, while List B claims it runs hourly, presenting mutually exclusive frequencies for the same route and schedule."
+        },
+        {
+          "claims": [
+            "C09",
+            "A09"
+          ],
+          "confidence": 0.95,
+          "explanation": "List A states that zero hybrid or electric ferries entered service in Brennock during 2024, directly contradicting List B's assertion that two hybrid ferries began operations that same year."
+        },
+        {
+          "claims": [
+            "B07",
+            "C06"
+          ],
+          "confidence": 1.0,
+          "explanation": "Claim A states that parking charges were introduced in April 2025, while Claim B asserts the car park has been free of charge since it opened, making both statements mutually exclusive regarding the facility's pricing history."
+        },
+        {
+          "claims": [
+            "B01",
+            "C01"
+          ],
+          "confidence": 0.95,
+          "explanation": "List A indicates that ferry passenger numbers decreased in 2025 compared to the prior period, whereas List B asserts a year-over-year increase from 2024 to 2025, directly opposing each other on the same metric and timeframe."
+        },
+        {
+          "claims": [
+            "B03",
+            "A03"
+          ],
+          "confidence": 1.0,
+          "explanation": "Claim A states that dredging of the north channel was still underway in June 2025, while Claim B asserts it finished in March 2025, which are mutually exclusive timelines for the same project."
+        }
+      ],
+      "score": {
+        "contradictions": 7,
+        "found": [
+          "A01/B01",
+          "A03/B03",
+          "A06/B05",
+          "A09/C09",
+          "B01/C01",
+          "B06/C05",
+          "B07/C06"
+        ],
+        "missed": [],
+        "recall": 1.0,
+        "false_positives": {
+          "agreement": [],
+          "apparent_conflict": [],
+          "unrelated": []
+        },
+        "false_positive_counts": {
+          "agreement": 0,
+          "apparent_conflict": 0,
+          "unrelated": 0
+        },
+        "unscored": []
+      }
+    },
+    {
+      "index": 2,
+      "order_seed": 2,
+      "window_plan": [
+        {
+          "id": "src_321e9af8ff98a902~src_72867287879d4fc6#a1/2xb1/2",
+          "claims_a": [
+            "B01",
+            "B08",
+            "B09",
+            "B05",
+            "B04",
+            "B03",
+            "B12"
+          ],
+          "claims_b": [
+            "C03",
+            "C08",
+            "C07",
+            "C01",
+            "C11",
+            "C02"
+          ],
+          "input_chars": 3806
+        },
+        {
+          "id": "src_321e9af8ff98a902~src_72867287879d4fc6#a1/2xb2/2",
+          "claims_a": [
+            "B01",
+            "B08",
+            "B09",
+            "B05",
+            "B04",
+            "B03",
+            "B12"
+          ],
+          "claims_b": [
+            "C09",
+            "C06",
+            "C12",
+            "C10",
+            "C05",
+            "C04"
+          ],
+          "input_chars": 3900
+        },
+        {
+          "id": "src_321e9af8ff98a902~src_72867287879d4fc6#a2/2xb1/2",
+          "claims_a": [
+            "B10",
+            "B11",
+            "B02",
+            "B07",
+            "B06"
+          ],
+          "claims_b": [
+            "C03",
+            "C08",
+            "C07",
+            "C01",
+            "C11",
+            "C02"
+          ],
+          "input_chars": 3594
+        },
+        {
+          "id": "src_321e9af8ff98a902~src_72867287879d4fc6#a2/2xb2/2",
+          "claims_a": [
+            "B10",
+            "B11",
+            "B02",
+            "B07",
+            "B06"
+          ],
+          "claims_b": [
+            "C09",
+            "C06",
+            "C12",
+            "C10",
+            "C05",
+            "C04"
+          ],
+          "input_chars": 3688
+        },
+        {
+          "id": "src_321e9af8ff98a902~src_d6ba740d24e6515d#a1/2xb1/2",
+          "claims_a": [
+            "B01",
+            "B08",
+            "B09",
+            "B05",
+            "B04",
+            "B03",
+            "B12"
+          ],
+          "claims_b": [
+            "A06",
+            "A11",
+            "A10",
+            "A03",
+            "A12",
+            "A05",
+            "A09"
+          ],
+          "input_chars": 3964
+        },
+        {
+          "id": "src_321e9af8ff98a902~src_d6ba740d24e6515d#a1/2xb2/2",
+          "claims_a": [
+            "B01",
+            "B08",
+            "B09",
+            "B05",
+            "B04",
+            "B03",
+            "B12"
+          ],
+          "claims_b": [
+            "A01",
+            "A08",
+            "A07",
+            "A02",
+            "A04"
+          ],
+          "input_chars": 3583
+        },
+        {
+          "id": "src_321e9af8ff98a902~src_d6ba740d24e6515d#a2/2xb1/2",
+          "claims_a": [
+            "B10",
+            "B11",
+            "B02",
+            "B07",
+            "B06"
+          ],
+          "claims_b": [
+            "A06",
+            "A11",
+            "A10",
+            "A03",
+            "A12",
+            "A05",
+            "A09"
+          ],
+          "input_chars": 3752
+        },
+        {
+          "id": "src_321e9af8ff98a902~src_d6ba740d24e6515d#a2/2xb2/2",
+          "claims_a": [
+            "B10",
+            "B11",
+            "B02",
+            "B07",
+            "B06"
+          ],
+          "claims_b": [
+            "A01",
+            "A08",
+            "A07",
+            "A02",
+            "A04"
+          ],
+          "input_chars": 3371
+        },
+        {
+          "id": "src_72867287879d4fc6~src_d6ba740d24e6515d#a1/2xb1/2",
+          "claims_a": [
+            "C03",
+            "C08",
+            "C07",
+            "C01",
+            "C11",
+            "C02"
+          ],
+          "claims_b": [
+            "A06",
+            "A11",
+            "A10",
+            "A03",
+            "A12",
+            "A05",
+            "A09"
+          ],
+          "input_chars": 3827
+        },
+        {
+          "id": "src_72867287879d4fc6~src_d6ba740d24e6515d#a1/2xb2/2",
+          "claims_a": [
+            "C03",
+            "C08",
+            "C07",
+            "C01",
+            "C11",
+            "C02"
+          ],
+          "claims_b": [
+            "A01",
+            "A08",
+            "A07",
+            "A02",
+            "A04"
+          ],
+          "input_chars": 3446
+        },
+        {
+          "id": "src_72867287879d4fc6~src_d6ba740d24e6515d#a2/2xb1/2",
+          "claims_a": [
+            "C09",
+            "C06",
+            "C12",
+            "C10",
+            "C05",
+            "C04"
+          ],
+          "claims_b": [
+            "A06",
+            "A11",
+            "A10",
+            "A03",
+            "A12",
+            "A05",
+            "A09"
+          ],
+          "input_chars": 3921
+        },
+        {
+          "id": "src_72867287879d4fc6~src_d6ba740d24e6515d#a2/2xb2/2",
+          "claims_a": [
+            "C09",
+            "C06",
+            "C12",
+            "C10",
+            "C05",
+            "C04"
+          ],
+          "claims_b": [
+            "A01",
+            "A08",
+            "A07",
+            "A02",
+            "A04"
+          ],
+          "input_chars": 3540
+        }
+      ],
+      "noncorresponding_contradictions": [
+        "A01/B01",
+        "A09/C09"
+      ],
+      "cache": {
+        "expected_hits": 0,
+        "from_cache": 0
+      },
+      "run": {
+        "job_id": "job_cae050a29188400b",
+        "status": "succeeded",
+        "coverage": {
+          "complete": true,
+          "windows": 12,
+          "completed": [
+            "src_321e9af8ff98a902~src_72867287879d4fc6#a1/2xb1/2",
+            "src_321e9af8ff98a902~src_72867287879d4fc6#a1/2xb2/2",
+            "src_321e9af8ff98a902~src_72867287879d4fc6#a2/2xb1/2",
+            "src_321e9af8ff98a902~src_72867287879d4fc6#a2/2xb2/2",
+            "src_321e9af8ff98a902~src_d6ba740d24e6515d#a1/2xb1/2",
+            "src_321e9af8ff98a902~src_d6ba740d24e6515d#a1/2xb2/2",
+            "src_321e9af8ff98a902~src_d6ba740d24e6515d#a2/2xb1/2",
+            "src_321e9af8ff98a902~src_d6ba740d24e6515d#a2/2xb2/2",
+            "src_72867287879d4fc6~src_d6ba740d24e6515d#a1/2xb1/2",
+            "src_72867287879d4fc6~src_d6ba740d24e6515d#a1/2xb2/2",
+            "src_72867287879d4fc6~src_d6ba740d24e6515d#a2/2xb1/2",
+            "src_72867287879d4fc6~src_d6ba740d24e6515d#a2/2xb2/2"
+          ],
+          "failed": {},
+          "remaining": [],
+          "in_progress": null,
+          "from_cache": 0
+        },
+        "stopped": null,
+        "budget": {
+          "calls": 12,
+          "input_chars": 44392,
+          "reported_input_tokens": 14352,
+          "estimated_input_tokens_not_reported": 0,
+          "reported_output_tokens": 28532,
+          "reserved_output_tokens_not_reported": 0,
+          "limits": {
+            "max_calls": 26,
+            "max_input_chars": 711216,
+            "max_input_tokens": 355608,
+            "max_output_tokens_per_call": 4096,
+            "output_allowance": 106496
+          },
+          "output_limit_violation": null,
+          "reported_models": [
+            "qwen3.6:27b"
+          ]
+        },
+        "out_of_scope_pairs_dropped": 0,
+        "maintenance": {
+          "retired": 0,
+          "error": null
+        },
+        "contradictions_proposed": 7
+      },
+      "predictions": [
+        {
+          "claims": [
+            "A06",
+            "B05"
+          ],
+          "confidence": 0.95,
+          "explanation": "Claim A states Rhea Dunmore became harbour master in 2023, while Claim B asserts she has held the position since 2021, presenting mutually exclusive start dates for the same role."
+        },
+        {
+          "claims": [
+            "A01",
+            "B01"
+          ],
+          "confidence": 1.0,
+          "explanation": "These claims directly contradict because they assert mutually exclusive trends and specific figures for ferry passenger numbers in the same year."
+        },
+        {
+          "claims": [
+            "B06",
+            "C05"
+          ],
+          "confidence": 0.95,
+          "explanation": "Claim A asserts a weekday frequency of every 20 minutes for the number 14 bus, whereas Claim B states it runs hourly, making these two schedules mutually exclusive for the same route and days."
+        },
+        {
+          "claims": [
+            "C09",
+            "A09"
+          ],
+          "confidence": 1.0,
+          "explanation": "Claim A states that no hybrid or electric ferries entered service in 2024, whereas Claim B asserts that two hybrid ferries did so."
+        },
+        {
+          "claims": [
+            "B07",
+            "C06"
+          ],
+          "confidence": 0.95,
+          "explanation": "Claim A states that parking fees were implemented in April 2025, which directly conflicts with Claim B's assertion that the car park has been free of charge since it opened."
+        },
+        {
+          "claims": [
+            "B01",
+            "C01"
+          ],
+          "confidence": 0.95,
+          "explanation": "List A states that ferry passenger numbers declined in 2025, whereas List B claims they increased compared to 2024, making these mutually exclusive trends for the same subject and timeframe."
+        },
+        {
+          "claims": [
+            "B03",
+            "A03"
+          ],
+          "confidence": 0.95,
+          "explanation": "Claim A indicates dredging of the north channel was still ongoing in June 2025, whereas Claim B states it finished in March 2025, which cannot both be true for the same project timeline."
+        }
+      ],
+      "score": {
+        "contradictions": 7,
+        "found": [
+          "A01/B01",
+          "A03/B03",
+          "A06/B05",
+          "A09/C09",
+          "B01/C01",
+          "B06/C05",
+          "B07/C06"
+        ],
+        "missed": [],
+        "recall": 1.0,
+        "false_positives": {
+          "agreement": [],
+          "apparent_conflict": [],
+          "unrelated": []
+        },
+        "false_positive_counts": {
+          "agreement": 0,
+          "apparent_conflict": 0,
+          "unrelated": 0
+        },
+        "unscored": []
+      }
+    }
+  ],
+  "verdict": {
+    "status": "pass",
+    "reasons": [],
+    "worst_recall": 1.0,
+    "worst_false_positives": {
+      "agreement": 0,
+      "apparent_conflict": 0,
+      "unrelated": 0
+    },
+    "order_sensitive_pairs": [],
+    "relative": {
+      "status": "pass",
+      "reasons": [],
+      "baseline_model_ref": "anthropic:claude-opus-4-8",
+      "baseline_recall": 1.0,
+      "baseline_apparent_conflict_false_positives": 0
+    },
+    "note": "a pass supports a recommendation for this task; it does not establish real-corpus accuracy"
+  },
+  "workdir": "/tmp/ks-eval-contradictions-x4dv5lks"
+}

@@ -92,6 +92,13 @@ evals/reports/*
 # real source_ids — so only the committed example schema (golden_answers.example.yaml) is tracked.
 # Run reports live under evals/reports/answers/ (already covered by evals/reports/* above).
 evals/golden_answers.local.yaml
+# Contradiction-judge evaluation results (ADR-0069 slice 3): routine runs stay local. Only the curated
+# evidence behind the evaluation log in ADR-0069 is tracked (each file records its fixture digest and
+# settings), including the superseded first failure.
+evals/results/*
+!evals/results/contradiction_judge_20261101T170347Z_anthropic-claude-opus-4-8.json
+!evals/results/contradiction_judge_20261101T170851Z_anthropic-claude-opus-4-8.json
+!evals/results/contradiction_judge_20261101T171832Z_local-qwen3.6-27b.json
 # Windows copy cruft that leaks into evals/corpus/ when docs are copied off NTFS.
 *.Zone.Identifier
 * - Copy.md

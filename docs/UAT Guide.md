@@ -521,7 +521,8 @@ Run this **after** you have kept tags in §9.0: lint proposes merges only betwee
 
 Not a pipeline step: run it on a few documents you choose. The selected documents need claims
 (step 6) and confirmed Details that make them independent (§9.0.1). `CONTRADICTION_MODEL` has no
-default, so pass `--model`. A hosted model is billable: estimate first.
+default, so pass `--model`; the recommended judge is `local:qwen3.6:27b` (validated on the evaluation
+fixture only, not at 12,000-character windows). A hosted model is billable: estimate first.
 
 ```bash
 # 1. Plan (no model call): pairs, skipped pairs with their reason, the window cross-product,

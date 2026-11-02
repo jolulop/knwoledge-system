@@ -5,8 +5,10 @@
   1"); **slice 2(a) implemented 2026-10-31** (see "Implementation — slice 2(a)"); **slice 2(b)
   implemented 2026-10-31** (see "Implementation — slice 2(b)"); **slice 3 evaluator built
   2026-11-01** (see "Implementation — slice 3"): fixture labels reviewed by Codex at the user's
-  explicit request, thresholds set before evaluation, no model evaluated, `CONTRADICTION_MODEL`
-  unset. Candidate evaluations and the recommendation remain pending.
+  explicit request, thresholds set before evaluation; **candidates evaluated 2026-11-01** (see
+  "Slice 3 evaluation log"): after one fixture wording amendment, `anthropic:claude-opus-4-8` and
+  `local:qwen3.6:27b` both pass. **Recommended judge (2026-11-02): `local:qwen3.6:27b` at 4,096
+  output tokens**; 12,000-character windows not validated; `CONTRADICTION_MODEL` stays unset.
 - **Date:** 2026-10-31
 - **Drivers:** part-3 UAT (2026-10-30, fresh clone at `de91d28`, 12 PDFs, ~995 active claims, 37 kept
   tags), findings #1 and #2:
@@ -653,8 +655,10 @@ the model unset.
   default 50). `review.labels_reviewed: true`, reviewed by Codex on 2026-11-01. Thresholds are fixed
   before any live evaluation: `min_contradiction_recall: 0.85` (at least 6 of 7 in every order),
   maximum false positives `agreement: 0`, `apparent_conflict: 1`, `unrelated: 0`.
-- **Evaluator** `uv run --extra eval python scripts/eval_contradictions.py --model REF
-  [--allow-paid] [--baseline RESULT] [--dry-run]`. The `eval` extra declares PyYAML for the full YAML
+- **Evaluator** `uv run --no-sync python scripts/eval_contradictions.py --model REF
+  [--allow-paid] [--baseline RESULT] [--dry-run]`. `--no-sync` runs in the existing environment,
+  which needs the `eval`, `enrich` and `enrich-openai` extras installed; a syncing `uv run` can
+  remove the out-of-lock GPU overlay. The `eval` extra declares PyYAML for the full YAML
   fixture; the same dependency is included in `dev` for the evaluator tests and pinned in `uv.lock`.
   Core policy parsing keeps its dependency-free loader. The installed GPU overlay was not synced.
   - It builds a throwaway vault in a temporary directory through the production pipeline (intake,
@@ -731,5 +735,48 @@ the model unset.
     updated for the `model` field.
   - Final review gate (2026-11-01): **2053 passed, 2 skipped**, ruff clean, all **15 validators**
     passing, `git diff --check` clean. Fixture dry-run plans **36 calls** over three orders with
-    cross-window contradictions in all three. No live judge call was made; candidate evaluations
-    and a documented model recommendation remain pending.
+    cross-window contradictions in all three. No live judge call had been made at that point;
+    the evaluations and the recommendation followed (see "Slice 3 evaluation log").
+
+### Slice 3 evaluation log
+
+1. **2026-11-01, `anthropic:claude-opus-4-8`, original fixture: FAIL.** Every run was clean.
+   Recall was 6/7, 7/7 and 7/7. In claim-id order the judge called A07/C07 a contradiction
+   ("September 2025" vs "autumn 2025": "September is technically not autumn"), which exceeds the
+   agreement threshold of 0. It also flagged B10/C10 in every order ("peaked in August 2025" vs
+   "peaked in July 2024"), within the apparent-conflict threshold of 1. Result:
+   `evals/results/contradiction_judge_20261101T170347Z_anthropic-claude-opus-4-8.json`.
+2. **Fixture amendment, after that evaluation, at the user's request.** Both pairs were worded
+   ambiguously. September is not autumn by the astronomical definition, and a bare "peaked" can
+   mean an all-time peak. C07 now reads "opened in the second half of 2025", and B10/C10 name the
+   season they peak in. **No label or threshold changed.** The change is recorded in the
+   fixture's `review.amendments`. The fixture digest changed, so result 1 no longer counts and
+   every candidate is re-run on the amended fixture.
+3. **2026-11-01, `anthropic:claude-opus-4-8`, amended fixture (digest `431836a7…`): PASS.** Every
+   run was clean, with recall 7/7 in all three orders, 0 false positives of any kind and no
+   order-sensitive pairs. Usage was about 20.6k input and 0.8k output tokens per order; the
+   provider reported `claude-opus-4-8`. Result:
+   `evals/results/contradiction_judge_20261101T170851Z_anthropic-claude-opus-4-8.json`. This is
+   the hosted baseline for local candidates. The pass supports recommending this model for the
+   task; it does not establish real-corpus accuracy, and the amendment after result 1 means the
+   fixture was revised once with this model's errors in view. The recommendation is decided in
+   item 5.
+4. **2026-11-01, `local:qwen3.6:27b` (Ollama), amended fixture, with `--baseline` result 3:
+   PASS.** Every run was clean, with recall 7/7 in all three orders, 0 false positives of any
+   kind and no order-sensitive pairs. The relative criterion passed: recall and
+   `apparent_conflict` false positives both equal the hosted judge's. The answers are short, but
+   the model thinks first: it averaged about 2,460 output tokens per call, at most 3,846, close to
+   the 4,096 limit. It took about 60 minutes for 36 calls (roughly 1.7 minutes per call). The
+   provider reported `qwen3.6:27b`. Result:
+   `evals/results/contradiction_judge_20261101T171832Z_local-qwen3.6-27b.json`. Caveat: this
+   evaluation used 1,200-character windows and does not measure the production default of 12,000.
+   Larger windows may raise the truncation risk at this output limit. A truncated window is
+   reported as a failed window, not passed over.
+5. **Recommendation (2026-11-02, the user's decision): `local:qwen3.6:27b` at the 4,096-token
+   output limit.** The pass holds only for the amended fixture at 1,200-character windows and
+   4,096 output tokens. Real checks at 12,000-character windows are **not validated**.
+   `CONTRADICTION_MODEL` stays unset; the recommendation is documented, not configured. Raising
+   `CONTRADICTION_MAX_OUTPUT_TOKENS` changes the evaluation settings: a 4,096-token baseline is then
+   refused before any call, and without a baseline a local verdict is `incomplete`. So a higher limit
+   needs a new hosted baseline at that limit (billed) and a Qwen re-run. The three result files
+   above are kept as evidence; later routine results are not tracked.

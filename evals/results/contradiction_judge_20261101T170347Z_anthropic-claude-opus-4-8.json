@@ -1,0 +1,1268 @@
+{
+  "result_version": 1,
+  "evaluated_at": "2026-11-01T17:03:47+00:00",
+  "dry_run": false,
+  "fixture_digest": "c1d68577b5e2bcdd29474e538a5feea0f58325670b7208450829642c87567994",
+  "review": {
+    "labels_reviewed": true,
+    "reviewed_by": "Codex (AI architecture reviewer, authorized by the user)",
+    "reviewed_at": "2026-11-01",
+    "notes": "Reviewed all 20 explicit labels and the cross-topic unrelated default at the user's request. C09 explicitly denies hybrid or electric ferries entering service in 2024, avoiding the diesel-electric ambiguity. No cross-topic contradiction was identified. Thresholds were fixed before any live model evaluation: at least 6 of 7 contradictions in every order; at most 0 agreement, 1 apparent_conflict and 0 unrelated false positives per order. This is a delegated AI review, not an independently completed human annotation exercise."
+  },
+  "thresholds": {
+    "min_contradiction_recall": 0.85,
+    "max_false_positives": {
+      "agreement": 0,
+      "apparent_conflict": 1,
+      "unrelated": 0
+    }
+  },
+  "model_ref": "anthropic:claude-opus-4-8",
+  "endpoint": "https://api.anthropic.com",
+  "paid": true,
+  "reported_models": [
+    "claude-opus-4-8"
+  ],
+  "prompt_version": "contradiction-batch-prompt-v1",
+  "schema_version": "contradiction-batch-v1",
+  "settings": {
+    "window_chars": 1200,
+    "max_output_tokens": 4096,
+    "limits": {
+      "max_calls": 50,
+      "max_input_tokens": 400000
+    },
+    "strategy": "window-cross-v1",
+    "chars_per_token": 2,
+    "permutations": 3,
+    "order_seeds": [
+      null,
+      1,
+      2
+    ]
+  },
+  "planned": {
+    "calls": 36,
+    "estimated_input_tokens": 66094
+  },
+  "permutations": [
+    {
+      "index": 0,
+      "order_seed": null,
+      "window_plan": [
+        {
+          "id": "src_263c84ad60013597~src_286cd0a132b68648#a1/2xb1/2",
+          "claims_a": [
+            "B07",
+            "B03",
+            "B12",
+            "B09",
+            "B11",
+            "B10",
+            "B04"
+          ],
+          "claims_b": [
+            "C12",
+            "C09",
+            "C04",
+            "C06",
+            "C11",
+            "C10"
+          ],
+          "input_chars": 3930
+        },
+        {
+          "id": "src_263c84ad60013597~src_286cd0a132b68648#a1/2xb2/2",
+          "claims_a": [
+            "B07",
+            "B03",
+            "B12",
+            "B09",
+            "B11",
+            "B10",
+            "B04"
+          ],
+          "claims_b": [
+            "C07",
+            "C03",
+            "C02",
+            "C08",
+            "C05",
+            "C01"
+          ],
+          "input_chars": 3822
+        },
+        {
+          "id": "src_263c84ad60013597~src_286cd0a132b68648#a2/2xb1/2",
+          "claims_a": [
+            "B01",
+            "B06",
+            "B08",
+            "B05",
+            "B02"
+          ],
+          "claims_b": [
+            "C12",
+            "C09",
+            "C04",
+            "C06",
+            "C11",
+            "C10"
+          ],
+          "input_chars": 3588
+        },
+        {
+          "id": "src_263c84ad60013597~src_286cd0a132b68648#a2/2xb2/2",
+          "claims_a": [
+            "B01",
+            "B06",
+            "B08",
+            "B05",
+            "B02"
+          ],
+          "claims_b": [
+            "C07",
+            "C03",
+            "C02",
+            "C08",
+            "C05",
+            "C01"
+          ],
+          "input_chars": 3480
+        },
+        {
+          "id": "src_263c84ad60013597~src_d6ba740d24e6515d#a1/2xb1/2",
+          "claims_a": [
+            "B07",
+            "B03",
+            "B12",
+            "B09",
+            "B11",
+            "B10",
+            "B04"
+          ],
+          "claims_b": [
+            "A08",
+            "A07",
+            "A05",
+            "A03",
+            "A11",
+            "A12",
+            "A10"
+          ],
+          "input_chars": 4005
+        },
+        {
+          "id": "src_263c84ad60013597~src_d6ba740d24e6515d#a1/2xb2/2",
+          "claims_a": [
+            "B07",
+            "B03",
+            "B12",
+            "B09",
+            "B11",
+            "B10",
+            "B04"
+          ],
+          "claims_b": [
+            "A02",
+            "A06",
+            "A01",
+            "A09",
+            "A04"
+          ],
+          "input_chars": 3642
+        },
+        {
+          "id": "src_263c84ad60013597~src_d6ba740d24e6515d#a2/2xb1/2",
+          "claims_a": [
+            "B01",
+            "B06",
+            "B08",
+            "B05",
+            "B02"
+          ],
+          "claims_b": [
+            "A08",
+            "A07",
+            "A05",
+            "A03",
+            "A11",
+            "A12",
+            "A10"
+          ],
+          "input_chars": 3663
+        },
+        {
+          "id": "src_263c84ad60013597~src_d6ba740d24e6515d#a2/2xb2/2",
+          "claims_a": [
+            "B01",
+            "B06",
+            "B08",
+            "B05",
+            "B02"
+          ],
+          "claims_b": [
+            "A02",
+            "A06",
+            "A01",
+            "A09",
+            "A04"
+          ],
+          "input_chars": 3300
+        },
+        {
+          "id": "src_286cd0a132b68648~src_d6ba740d24e6515d#a1/2xb1/2",
+          "claims_a": [
+            "C12",
+            "C09",
+            "C04",
+            "C06",
+            "C11",
+            "C10"
+          ],
+          "claims_b": [
+            "A08",
+            "A07",
+            "A05",
+            "A03",
+            "A11",
+            "A12",
+            "A10"
+          ],
+          "input_chars": 3892
+        },
+        {
+          "id": "src_286cd0a132b68648~src_d6ba740d24e6515d#a1/2xb2/2",
+          "claims_a": [
+            "C12",
+            "C09",
+            "C04",
+            "C06",
+            "C11",
+            "C10"
+          ],
+          "claims_b": [
+            "A02",
+            "A06",
+            "A01",
+            "A09",
+            "A04"
+          ],
+          "input_chars": 3529
+        },
+        {
+          "id": "src_286cd0a132b68648~src_d6ba740d24e6515d#a2/2xb1/2",
+          "claims_a": [
+            "C07",
+            "C03",
+            "C02",
+            "C08",
+            "C05",
+            "C01"
+          ],
+          "claims_b": [
+            "A08",
+            "A07",
+            "A05",
+            "A03",
+            "A11",
+            "A12",
+            "A10"
+          ],
+          "input_chars": 3784
+        },
+        {
+          "id": "src_286cd0a132b68648~src_d6ba740d24e6515d#a2/2xb2/2",
+          "claims_a": [
+            "C07",
+            "C03",
+            "C02",
+            "C08",
+            "C05",
+            "C01"
+          ],
+          "claims_b": [
+            "A02",
+            "A06",
+            "A01",
+            "A09",
+            "A04"
+          ],
+          "input_chars": 3421
+        }
+      ],
+      "noncorresponding_contradictions": [
+        "A09/C09"
+      ],
+      "cache": {
+        "expected_hits": 0,
+        "from_cache": 0
+      },
+      "run": {
+        "job_id": "job_a8c3c135ce144b2f",
+        "status": "succeeded",
+        "coverage": {
+          "complete": true,
+          "windows": 12,
+          "completed": [
+            "src_263c84ad60013597~src_286cd0a132b68648#a1/2xb1/2",
+            "src_263c84ad60013597~src_286cd0a132b68648#a1/2xb2/2",
+            "src_263c84ad60013597~src_286cd0a132b68648#a2/2xb1/2",
+            "src_263c84ad60013597~src_286cd0a132b68648#a2/2xb2/2",
+            "src_263c84ad60013597~src_d6ba740d24e6515d#a1/2xb1/2",
+            "src_263c84ad60013597~src_d6ba740d24e6515d#a1/2xb2/2",
+            "src_263c84ad60013597~src_d6ba740d24e6515d#a2/2xb1/2",
+            "src_263c84ad60013597~src_d6ba740d24e6515d#a2/2xb2/2",
+            "src_286cd0a132b68648~src_d6ba740d24e6515d#a1/2xb1/2",
+            "src_286cd0a132b68648~src_d6ba740d24e6515d#a1/2xb2/2",
+            "src_286cd0a132b68648~src_d6ba740d24e6515d#a2/2xb1/2",
+            "src_286cd0a132b68648~src_d6ba740d24e6515d#a2/2xb2/2"
+          ],
+          "failed": {},
+          "remaining": [],
+          "in_progress": null,
+          "from_cache": 0
+        },
+        "stopped": null,
+        "budget": {
+          "calls": 12,
+          "input_chars": 44056,
+          "reported_input_tokens": 20464,
+          "estimated_input_tokens_not_reported": 0,
+          "reported_output_tokens": 900,
+          "reserved_output_tokens_not_reported": 0,
+          "limits": {
+            "max_calls": 50,
+            "max_input_chars": 800000,
+            "max_input_tokens": 400000,
+            "max_output_tokens_per_call": 4096,
+            "output_allowance": 204800
+          },
+          "output_limit_violation": null,
+          "reported_models": [
+            "claude-opus-4-8"
+          ]
+        },
+        "out_of_scope_pairs_dropped": 0,
+        "maintenance": {
+          "retired": 0,
+          "error": null
+        },
+        "contradictions_proposed": 8
+      },
+      "predictions": [
+        {
+          "claims": [
+            "A06",
+            "B05"
+          ],
+          "confidence": 0.95,
+          "explanation": "Rhea Dunmore became harbour master in 2023 versus since 2021, conflicting start dates."
+        },
+        {
+          "claims": [
+            "A01",
+            "B01"
+          ],
+          "confidence": 0.98,
+          "explanation": "One says ferry passengers fell to 380,000 in 2025 while the other says they rose to 412,000 in 2025."
+        },
+        {
+          "claims": [
+            "B10",
+            "C10"
+          ],
+          "confidence": 0.9,
+          "explanation": "They give different peak tourist times for Brennock (August 2025 vs July 2024)."
+        },
+        {
+          "claims": [
+            "B06",
+            "C05"
+          ],
+          "confidence": 0.97,
+          "explanation": "One says the number 14 bus runs every 20 minutes on weekdays, the other says it runs hourly on weekdays."
+        },
+        {
+          "claims": [
+            "A07",
+            "C07"
+          ],
+          "confidence": 0.75,
+          "explanation": "List A says the quay cycle lane opened in autumn 2025 while list B specifies September 2025, which is technically not autumn, creating a minor timing contradiction."
+        },
+        {
+          "claims": [
+            "C09",
+            "A09"
+          ],
+          "confidence": 0.98,
+          "explanation": "List A says no hybrid or electric ferries entered service in 2024, while list B says two hybrid ferries entered service in 2024."
+        },
+        {
+          "claims": [
+            "B07",
+            "C06"
+          ],
+          "confidence": 0.97,
+          "explanation": "One says harbour car park charges began April 2025, the other says the car park has been free since it opened."
+        },
+        {
+          "claims": [
+            "B03",
+            "A03"
+          ],
+          "confidence": 0.97,
+          "explanation": "List A says north channel dredging was still under way in June 2025, while list B says it finished in March 2025."
+        }
+      ],
+      "score": {
+        "contradictions": 7,
+        "found": [
+          "A01/B01",
+          "A03/B03",
+          "A06/B05",
+          "A09/C09",
+          "B06/C05",
+          "B07/C06"
+        ],
+        "missed": [
+          "B01/C01"
+        ],
+        "recall": 0.8571428571428571,
+        "false_positives": {
+          "agreement": [
+            "A07/C07"
+          ],
+          "apparent_conflict": [
+            "B10/C10"
+          ],
+          "unrelated": []
+        },
+        "false_positive_counts": {
+          "agreement": 1,
+          "apparent_conflict": 1,
+          "unrelated": 0
+        },
+        "unscored": []
+      }
+    },
+    {
+      "index": 1,
+      "order_seed": 1,
+      "window_plan": [
+        {
+          "id": "src_263c84ad60013597~src_286cd0a132b68648#a1/2xb1/2",
+          "claims_a": [
+            "B02",
+            "B01",
+            "B06",
+            "B07",
+            "B04",
+            "B12"
+          ],
+          "claims_b": [
+            "C08",
+            "C02",
+            "C07",
+            "C09",
+            "C11",
+            "C01"
+          ],
+          "input_chars": 3705
+        },
+        {
+          "id": "src_263c84ad60013597~src_286cd0a132b68648#a1/2xb2/2",
+          "claims_a": [
+            "B02",
+            "B01",
+            "B06",
+            "B07",
+            "B04",
+            "B12"
+          ],
+          "claims_b": [
+            "C04",
+            "C03",
+            "C10",
+            "C05",
+            "C12",
+            "C06"
+          ],
+          "input_chars": 3725
+        },
+        {
+          "id": "src_263c84ad60013597~src_286cd0a132b68648#a2/2xb1/2",
+          "claims_a": [
+            "B03",
+            "B09",
+            "B11",
+            "B08",
+            "B05",
+            "B10"
+          ],
+          "claims_b": [
+            "C08",
+            "C02",
+            "C07",
+            "C09",
+            "C11",
+            "C01"
+          ],
+          "input_chars": 3685
+        },
+        {
+          "id": "src_263c84ad60013597~src_286cd0a132b68648#a2/2xb2/2",
+          "claims_a": [
+            "B03",
+            "B09",
+            "B11",
+            "B08",
+            "B05",
+            "B10"
+          ],
+          "claims_b": [
+            "C04",
+            "C03",
+            "C10",
+            "C05",
+            "C12",
+            "C06"
+          ],
+          "input_chars": 3705
+        },
+        {
+          "id": "src_263c84ad60013597~src_d6ba740d24e6515d#a1/2xb1/2",
+          "claims_a": [
+            "B02",
+            "B01",
+            "B06",
+            "B07",
+            "B04",
+            "B12"
+          ],
+          "claims_b": [
+            "A02",
+            "A10",
+            "A06",
+            "A09",
+            "A01",
+            "A08",
+            "A04"
+          ],
+          "input_chars": 3773
+        },
+        {
+          "id": "src_263c84ad60013597~src_d6ba740d24e6515d#a1/2xb2/2",
+          "claims_a": [
+            "B02",
+            "B01",
+            "B06",
+            "B07",
+            "B04",
+            "B12"
+          ],
+          "claims_b": [
+            "A05",
+            "A07",
+            "A11",
+            "A03",
+            "A12"
+          ],
+          "input_chars": 3552
+        },
+        {
+          "id": "src_263c84ad60013597~src_d6ba740d24e6515d#a2/2xb1/2",
+          "claims_a": [
+            "B03",
+            "B09",
+            "B11",
+            "B08",
+            "B05",
+            "B10"
+          ],
+          "claims_b": [
+            "A02",
+            "A10",
+            "A06",
+            "A09",
+            "A01",
+            "A08",
+            "A04"
+          ],
+          "input_chars": 3753
+        },
+        {
+          "id": "src_263c84ad60013597~src_d6ba740d24e6515d#a2/2xb2/2",
+          "claims_a": [
+            "B03",
+            "B09",
+            "B11",
+            "B08",
+            "B05",
+            "B10"
+          ],
+          "claims_b": [
+            "A05",
+            "A07",
+            "A11",
+            "A03",
+            "A12"
+          ],
+          "input_chars": 3532
+        },
+        {
+          "id": "src_286cd0a132b68648~src_d6ba740d24e6515d#a1/2xb1/2",
+          "claims_a": [
+            "C08",
+            "C02",
+            "C07",
+            "C09",
+            "C11",
+            "C01"
+          ],
+          "claims_b": [
+            "A02",
+            "A10",
+            "A06",
+            "A09",
+            "A01",
+            "A08",
+            "A04"
+          ],
+          "input_chars": 3757
+        },
+        {
+          "id": "src_286cd0a132b68648~src_d6ba740d24e6515d#a1/2xb2/2",
+          "claims_a": [
+            "C08",
+            "C02",
+            "C07",
+            "C09",
+            "C11",
+            "C01"
+          ],
+          "claims_b": [
+            "A05",
+            "A07",
+            "A11",
+            "A03",
+            "A12"
+          ],
+          "input_chars": 3536
+        },
+        {
+          "id": "src_286cd0a132b68648~src_d6ba740d24e6515d#a2/2xb1/2",
+          "claims_a": [
+            "C04",
+            "C03",
+            "C10",
+            "C05",
+            "C12",
+            "C06"
+          ],
+          "claims_b": [
+            "A02",
+            "A10",
+            "A06",
+            "A09",
+            "A01",
+            "A08",
+            "A04"
+          ],
+          "input_chars": 3777
+        },
+        {
+          "id": "src_286cd0a132b68648~src_d6ba740d24e6515d#a2/2xb2/2",
+          "claims_a": [
+            "C04",
+            "C03",
+            "C10",
+            "C05",
+            "C12",
+            "C06"
+          ],
+          "claims_b": [
+            "A05",
+            "A07",
+            "A11",
+            "A03",
+            "A12"
+          ],
+          "input_chars": 3556
+        }
+      ],
+      "noncorresponding_contradictions": [
+        "A06/B05",
+        "B06/C05",
+        "B07/C06"
+      ],
+      "cache": {
+        "expected_hits": 0,
+        "from_cache": 0
+      },
+      "run": {
+        "job_id": "job_89dbdd870df94bee",
+        "status": "succeeded",
+        "coverage": {
+          "complete": true,
+          "windows": 12,
+          "completed": [
+            "src_263c84ad60013597~src_286cd0a132b68648#a1/2xb1/2",
+            "src_263c84ad60013597~src_286cd0a132b68648#a1/2xb2/2",
+            "src_263c84ad60013597~src_286cd0a132b68648#a2/2xb1/2",
+            "src_263c84ad60013597~src_286cd0a132b68648#a2/2xb2/2",
+            "src_263c84ad60013597~src_d6ba740d24e6515d#a1/2xb1/2",
+            "src_263c84ad60013597~src_d6ba740d24e6515d#a1/2xb2/2",
+            "src_263c84ad60013597~src_d6ba740d24e6515d#a2/2xb1/2",
+            "src_263c84ad60013597~src_d6ba740d24e6515d#a2/2xb2/2",
+            "src_286cd0a132b68648~src_d6ba740d24e6515d#a1/2xb1/2",
+            "src_286cd0a132b68648~src_d6ba740d24e6515d#a1/2xb2/2",
+            "src_286cd0a132b68648~src_d6ba740d24e6515d#a2/2xb1/2",
+            "src_286cd0a132b68648~src_d6ba740d24e6515d#a2/2xb2/2"
+          ],
+          "failed": {},
+          "remaining": [],
+          "in_progress": null,
+          "from_cache": 0
+        },
+        "stopped": null,
+        "budget": {
+          "calls": 12,
+          "input_chars": 44056,
+          "reported_input_tokens": 20464,
+          "estimated_input_tokens_not_reported": 0,
+          "reported_output_tokens": 928,
+          "reserved_output_tokens_not_reported": 0,
+          "limits": {
+            "max_calls": 38,
+            "max_input_chars": 755944,
+            "max_input_tokens": 377972,
+            "max_output_tokens_per_call": 4096,
+            "output_allowance": 155648
+          },
+          "output_limit_violation": null,
+          "reported_models": [
+            "claude-opus-4-8"
+          ]
+        },
+        "out_of_scope_pairs_dropped": 0,
+        "maintenance": {
+          "retired": 0,
+          "error": null
+        },
+        "contradictions_proposed": 8
+      },
+      "predictions": [
+        {
+          "claims": [
+            "A06",
+            "B05"
+          ],
+          "confidence": 0.95,
+          "explanation": "One says Rhea Dunmore became harbour master in 2023, the other says since 2021, conflicting start dates."
+        },
+        {
+          "claims": [
+            "A01",
+            "B01"
+          ],
+          "confidence": 0.98,
+          "explanation": "List A says passenger numbers fell to 380,000 in 2025 while List B says they rose to 412,000 in 2025."
+        },
+        {
+          "claims": [
+            "B10",
+            "C10"
+          ],
+          "confidence": 0.97,
+          "explanation": "One claims tourist visits peaked in August 2025 while the other says they peaked in July 2024, which cannot both be true."
+        },
+        {
+          "claims": [
+            "B06",
+            "C05"
+          ],
+          "confidence": 0.97,
+          "explanation": "List A says the weekday number 14 bus runs every 20 minutes while list B says it runs hourly."
+        },
+        {
+          "claims": [
+            "C09",
+            "A09"
+          ],
+          "confidence": 0.97,
+          "explanation": "List A says no hybrid or electric ferries entered service in 2024, while list B says two hybrid ferries entered service in 2024."
+        },
+        {
+          "claims": [
+            "B07",
+            "C06"
+          ],
+          "confidence": 0.96,
+          "explanation": "List A says harbour car park charges were introduced in April 2025 while list B says the car park has been free since it opened."
+        },
+        {
+          "claims": [
+            "B01",
+            "C01"
+          ],
+          "confidence": 0.8,
+          "explanation": "List A says ferry passengers fell in 2025 while list B says more people travelled on the ferries in 2025 than in 2024, which cannot both be true if referring to the same ferries."
+        },
+        {
+          "claims": [
+            "B03",
+            "A03"
+          ],
+          "confidence": 0.97,
+          "explanation": "List A says north channel dredging was still ongoing in June 2025 while list B says it finished in March 2025."
+        }
+      ],
+      "score": {
+        "contradictions": 7,
+        "found": [
+          "A01/B01",
+          "A03/B03",
+          "A06/B05",
+          "A09/C09",
+          "B01/C01",
+          "B06/C05",
+          "B07/C06"
+        ],
+        "missed": [],
+        "recall": 1.0,
+        "false_positives": {
+          "agreement": [],
+          "apparent_conflict": [
+            "B10/C10"
+          ],
+          "unrelated": []
+        },
+        "false_positive_counts": {
+          "agreement": 0,
+          "apparent_conflict": 1,
+          "unrelated": 0
+        },
+        "unscored": []
+      }
+    },
+    {
+      "index": 2,
+      "order_seed": 2,
+      "window_plan": [
+        {
+          "id": "src_263c84ad60013597~src_286cd0a132b68648#a1/2xb1/2",
+          "claims_a": [
+            "B03",
+            "B08",
+            "B02",
+            "B05",
+            "B11",
+            "B01"
+          ],
+          "claims_b": [
+            "C10",
+            "C01",
+            "C04",
+            "C03",
+            "C07",
+            "C12"
+          ],
+          "input_chars": 3715
+        },
+        {
+          "id": "src_263c84ad60013597~src_286cd0a132b68648#a1/2xb2/2",
+          "claims_a": [
+            "B03",
+            "B08",
+            "B02",
+            "B05",
+            "B11",
+            "B01"
+          ],
+          "claims_b": [
+            "C06",
+            "C05",
+            "C02",
+            "C11",
+            "C09",
+            "C08"
+          ],
+          "input_chars": 3731
+        },
+        {
+          "id": "src_263c84ad60013597~src_286cd0a132b68648#a2/2xb1/2",
+          "claims_a": [
+            "B06",
+            "B12",
+            "B04",
+            "B10",
+            "B07",
+            "B09"
+          ],
+          "claims_b": [
+            "C10",
+            "C01",
+            "C04",
+            "C03",
+            "C07",
+            "C12"
+          ],
+          "input_chars": 3679
+        },
+        {
+          "id": "src_263c84ad60013597~src_286cd0a132b68648#a2/2xb2/2",
+          "claims_a": [
+            "B06",
+            "B12",
+            "B04",
+            "B10",
+            "B07",
+            "B09"
+          ],
+          "claims_b": [
+            "C06",
+            "C05",
+            "C02",
+            "C11",
+            "C09",
+            "C08"
+          ],
+          "input_chars": 3695
+        },
+        {
+          "id": "src_263c84ad60013597~src_d6ba740d24e6515d#a1/2xb1/2",
+          "claims_a": [
+            "B03",
+            "B08",
+            "B02",
+            "B05",
+            "B11",
+            "B01"
+          ],
+          "claims_b": [
+            "A06",
+            "A11",
+            "A10",
+            "A03",
+            "A12",
+            "A05",
+            "A09"
+          ],
+          "input_chars": 3861
+        },
+        {
+          "id": "src_263c84ad60013597~src_d6ba740d24e6515d#a1/2xb2/2",
+          "claims_a": [
+            "B03",
+            "B08",
+            "B02",
+            "B05",
+            "B11",
+            "B01"
+          ],
+          "claims_b": [
+            "A01",
+            "A08",
+            "A07",
+            "A02",
+            "A04"
+          ],
+          "input_chars": 3480
+        },
+        {
+          "id": "src_263c84ad60013597~src_d6ba740d24e6515d#a2/2xb1/2",
+          "claims_a": [
+            "B06",
+            "B12",
+            "B04",
+            "B10",
+            "B07",
+            "B09"
+          ],
+          "claims_b": [
+            "A06",
+            "A11",
+            "A10",
+            "A03",
+            "A12",
+            "A05",
+            "A09"
+          ],
+          "input_chars": 3825
+        },
+        {
+          "id": "src_263c84ad60013597~src_d6ba740d24e6515d#a2/2xb2/2",
+          "claims_a": [
+            "B06",
+            "B12",
+            "B04",
+            "B10",
+            "B07",
+            "B09"
+          ],
+          "claims_b": [
+            "A01",
+            "A08",
+            "A07",
+            "A02",
+            "A04"
+          ],
+          "input_chars": 3444
+        },
+        {
+          "id": "src_286cd0a132b68648~src_d6ba740d24e6515d#a1/2xb1/2",
+          "claims_a": [
+            "C10",
+            "C01",
+            "C04",
+            "C03",
+            "C07",
+            "C12"
+          ],
+          "claims_b": [
+            "A06",
+            "A11",
+            "A10",
+            "A03",
+            "A12",
+            "A05",
+            "A09"
+          ],
+          "input_chars": 3839
+        },
+        {
+          "id": "src_286cd0a132b68648~src_d6ba740d24e6515d#a1/2xb2/2",
+          "claims_a": [
+            "C10",
+            "C01",
+            "C04",
+            "C03",
+            "C07",
+            "C12"
+          ],
+          "claims_b": [
+            "A01",
+            "A08",
+            "A07",
+            "A02",
+            "A04"
+          ],
+          "input_chars": 3458
+        },
+        {
+          "id": "src_286cd0a132b68648~src_d6ba740d24e6515d#a2/2xb1/2",
+          "claims_a": [
+            "C06",
+            "C05",
+            "C02",
+            "C11",
+            "C09",
+            "C08"
+          ],
+          "claims_b": [
+            "A06",
+            "A11",
+            "A10",
+            "A03",
+            "A12",
+            "A05",
+            "A09"
+          ],
+          "input_chars": 3855
+        },
+        {
+          "id": "src_286cd0a132b68648~src_d6ba740d24e6515d#a2/2xb2/2",
+          "claims_a": [
+            "C06",
+            "C05",
+            "C02",
+            "C11",
+            "C09",
+            "C08"
+          ],
+          "claims_b": [
+            "A01",
+            "A08",
+            "A07",
+            "A02",
+            "A04"
+          ],
+          "input_chars": 3474
+        }
+      ],
+      "noncorresponding_contradictions": [
+        "A01/B01",
+        "A09/C09"
+      ],
+      "cache": {
+        "expected_hits": 0,
+        "from_cache": 0
+      },
+      "run": {
+        "job_id": "job_d0c3c9a27af24d9f",
+        "status": "succeeded",
+        "coverage": {
+          "complete": true,
+          "windows": 12,
+          "completed": [
+            "src_263c84ad60013597~src_286cd0a132b68648#a1/2xb1/2",
+            "src_263c84ad60013597~src_286cd0a132b68648#a1/2xb2/2",
+            "src_263c84ad60013597~src_286cd0a132b68648#a2/2xb1/2",
+            "src_263c84ad60013597~src_286cd0a132b68648#a2/2xb2/2",
+            "src_263c84ad60013597~src_d6ba740d24e6515d#a1/2xb1/2",
+            "src_263c84ad60013597~src_d6ba740d24e6515d#a1/2xb2/2",
+            "src_263c84ad60013597~src_d6ba740d24e6515d#a2/2xb1/2",
+            "src_263c84ad60013597~src_d6ba740d24e6515d#a2/2xb2/2",
+            "src_286cd0a132b68648~src_d6ba740d24e6515d#a1/2xb1/2",
+            "src_286cd0a132b68648~src_d6ba740d24e6515d#a1/2xb2/2",
+            "src_286cd0a132b68648~src_d6ba740d24e6515d#a2/2xb1/2",
+            "src_286cd0a132b68648~src_d6ba740d24e6515d#a2/2xb2/2"
+          ],
+          "failed": {},
+          "remaining": [],
+          "in_progress": null,
+          "from_cache": 0
+        },
+        "stopped": null,
+        "budget": {
+          "calls": 12,
+          "input_chars": 44056,
+          "reported_input_tokens": 20464,
+          "estimated_input_tokens_not_reported": 0,
+          "reported_output_tokens": 916,
+          "reserved_output_tokens_not_reported": 0,
+          "limits": {
+            "max_calls": 26,
+            "max_input_chars": 711888,
+            "max_input_tokens": 355944,
+            "max_output_tokens_per_call": 4096,
+            "output_allowance": 106496
+          },
+          "output_limit_violation": null,
+          "reported_models": [
+            "claude-opus-4-8"
+          ]
+        },
+        "out_of_scope_pairs_dropped": 0,
+        "maintenance": {
+          "retired": 0,
+          "error": null
+        },
+        "contradictions_proposed": 8
+      },
+      "predictions": [
+        {
+          "claims": [
+            "A06",
+            "B05"
+          ],
+          "confidence": 0.96,
+          "explanation": "The two sources give different start dates for Rhea Dunmore as harbour master (2023 vs 2021)."
+        },
+        {
+          "claims": [
+            "A01",
+            "B01"
+          ],
+          "confidence": 0.98,
+          "explanation": "List A says ferry passengers fell to 380,000 in 2025 while list B says they rose to 412,000 in 2025, contradicting both the direction and value."
+        },
+        {
+          "claims": [
+            "B10",
+            "C10"
+          ],
+          "confidence": 0.95,
+          "explanation": "They assign different peak dates for Brennock tourist visits (August 2025 vs July 2024)."
+        },
+        {
+          "claims": [
+            "B06",
+            "C05"
+          ],
+          "confidence": 0.97,
+          "explanation": "One says the number 14 bus runs every 20 minutes on weekdays, the other says it runs hourly."
+        },
+        {
+          "claims": [
+            "C09",
+            "A09"
+          ],
+          "confidence": 0.95,
+          "explanation": "One claims no hybrid or electric ferries entered service in 2024 while the other says two hybrid ferries entered service in 2024."
+        },
+        {
+          "claims": [
+            "B07",
+            "C06"
+          ],
+          "confidence": 0.96,
+          "explanation": "One says car park charges were introduced in April 2025, the other says the car park has been free since it opened."
+        },
+        {
+          "claims": [
+            "B01",
+            "C01"
+          ],
+          "confidence": 0.9,
+          "explanation": "List A says ferry passengers fell in 2025 while List B says more people travelled on the ferries in 2025 than 2024, which cannot both be true."
+        },
+        {
+          "claims": [
+            "B03",
+            "A03"
+          ],
+          "confidence": 0.97,
+          "explanation": "List A says dredging of the north channel was still ongoing in June 2025, while list B says it finished in March 2025."
+        }
+      ],
+      "score": {
+        "contradictions": 7,
+        "found": [
+          "A01/B01",
+          "A03/B03",
+          "A06/B05",
+          "A09/C09",
+          "B01/C01",
+          "B06/C05",
+          "B07/C06"
+        ],
+        "missed": [],
+        "recall": 1.0,
+        "false_positives": {
+          "agreement": [],
+          "apparent_conflict": [
+            "B10/C10"
+          ],
+          "unrelated": []
+        },
+        "false_positive_counts": {
+          "agreement": 0,
+          "apparent_conflict": 1,
+          "unrelated": 0
+        },
+        "unscored": []
+      }
+    }
+  ],
+  "verdict": {
+    "status": "fail",
+    "reasons": [
+      "1 agreement false positive(s), above the threshold 0"
+    ],
+    "worst_recall": 0.8571428571428571,
+    "worst_false_positives": {
+      "agreement": 1,
+      "apparent_conflict": 1,
+      "unrelated": 0
+    },
+    "order_sensitive_pairs": [
+      "A07/C07",
+      "B01/C01"
+    ],
+    "relative": null,
+    "note": "a pass supports a recommendation for this task; it does not establish real-corpus accuracy"
+  }
+}

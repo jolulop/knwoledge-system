@@ -36,9 +36,13 @@ the hosted judge's. Without a baseline its verdict is `incomplete`. A pass suppo
 recommendation for this task only. It does not establish real-corpus accuracy.
 
 Usage:
-    uv run --extra eval python scripts/eval_contradictions.py --model REF --dry-run  # no call
-    uv run --extra eval python scripts/eval_contradictions.py --model REF [--allow-paid] [--baseline RESULT]
+    uv run --no-sync python scripts/eval_contradictions.py --model REF --dry-run  # no call
+    uv run --no-sync python scripts/eval_contradictions.py --model REF [--allow-paid] [--baseline RESULT]
         [--fixture PATH] [--out-dir DIR] [--keep-workdir]
+
+`--no-sync` runs in the existing environment, which needs the `eval` extra and the provider SDK
+extras `enrich` / `enrich-openai` installed; a syncing `uv run` can remove the out-of-lock GPU
+overlay (docs/Environment Setup v0.1.md).
 
 Exit status: 0 for a pass or a dry run; 1 for a fail or an incomplete verdict (a result file is
 written); 2 when the fixture, a gate or a refusal stops the evaluation before any model call.

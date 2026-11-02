@@ -138,7 +138,8 @@ documents' claims, evidence or Details, the window size, the output limit or the
 (estimate again); unrelated edits don't, and lowering a `CONTRADICTION_MAX_*` limit binds
 existing tokens too. Each side shows the model only its own document's evidence, even for a claim
 shared with another document. The judge is one `provider:model` (`--model`, else
-`CONTRADICTION_MODEL`, which has no default until the ADR-0069 evaluation gate passes); chains are
+`CONTRADICTION_MODEL`, which has no default; the recommended judge is `local:qwen3.6:27b`, see below);
+chains are
 refused and nothing is substituted. Any non-`local:` model needs `--allow-paid` on the run. Limits
 (`CONTRADICTION_MAX_CALLS`, `CONTRADICTION_MAX_INPUT_TOKENS`, per-call
 `CONTRADICTION_MAX_OUTPUT_TOKENS`, window size `CONTRADICTION_WINDOW_CHARS`): calls and input
@@ -153,7 +154,10 @@ violation and no failed maintenance. A re-run resumes completed windows from the
 `resolve_contradiction` review items, decided and applied as before.
 
 **Judge evaluation gate (ADR-0069 slice 3).** Manual, never in CI.
-`uv run --extra eval python scripts/eval_contradictions.py --model REF [--allow-paid] [--baseline RESULT]`
+`uv run --no-sync python scripts/eval_contradictions.py --model REF [--allow-paid] [--baseline RESULT]`
+(`--no-sync` runs in the existing environment, which needs the `eval` extra and the provider SDK
+extras `enrich` / `enrich-openai` installed; a syncing `uv run` can remove the out-of-lock GPU
+overlay described in `docs/Environment Setup v0.1.md`)
 scores a candidate judge on the synthetic fixture `evals/contradiction_judge.yaml`: three invented
 documents, labels `contradiction` / `agreement` / `apparent_conflict` / `unrelated`, and a window
 size small enough that every pair needs non-corresponding windows. It builds a throwaway vault in a
@@ -172,8 +176,13 @@ accuracy.
 
 The fixture's labels were reviewed by Codex at the user's explicit request on 2026-11-01, before
 any live evaluation. Its thresholds are recall ≥ 0.85 in every order (at least 6 of 7 contradictions),
-with at most 0 agreement, 1 apparent-conflict and 0 unrelated false positives per order. No model
-has yet been evaluated or selected as default. A supplied hosted baseline must have all expected
+with at most 0 agreement, 1 apparent-conflict and 0 unrelated false positives per order.
+**Recommended judge: `local:qwen3.6:27b`** (Ollama) at the default 4,096 output tokens. It passed
+on the amended fixture (7/7 in every order, no false positives), matching the hosted baseline
+`anthropic:claude-opus-4-8`. It is slow (about 1.7 minutes per call on this machine) and its
+thinking used up to 3,846 of the 4,096 output tokens. Its pass covers 1,200-character windows only:
+**the production default of 12,000 characters is not validated.** `CONTRADICTION_MODEL` is left
+unset, so pass `--model`. See the ADR-0069 evaluation log. A supplied hosted baseline must have all expected
 permutations complete and match the fixture, prompt/schema, output limit and ordering settings;
 otherwise the evaluator refuses before candidate calls. The hard character cap applies across all
 permutations independently of reported token counts.

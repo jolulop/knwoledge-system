@@ -30,6 +30,18 @@ review:
     fixed before any live model evaluation: at least 6 of 7 contradictions in every order;
     at most 0 agreement, 1 apparent_conflict and 0 unrelated false positives per order.
     This is a delegated AI review, not an independently completed human annotation exercise.
+  amendments:
+    - date: "2026-11-01"
+      after_evaluation: "evals/results/contradiction_judge_20261101T170347Z_anthropic-claude-opus-4-8.json"
+      by: "Claude (at the user's explicit request)"
+      change: >-
+        POST-EVALUATION wording fix; no label or threshold changed. C07 "opened in autumn
+        2025" became "opened in the second half of 2025" (September is not autumn by the
+        astronomical definition, so the agreement with A07 was ambiguous). B10/C10 now name
+        the season they peak in ("peaked for the 2025 season in August" / "for the 2024
+        season in July"); a bare "peaked" could be read as an all-time peak, which would make
+        the pair a contradiction. The fixture digest changed, so results measured before this
+        amendment do not count and every candidate is re-run.
 
 thresholds:                     # set before any evaluation; the result records them
   min_contradiction_recall: 0.85      # at least 6/7 in the worst permutation
@@ -104,8 +116,9 @@ documents:
          quote: "The lighthouse keeper's cottage became a museum in 2010."}
       - {id: B09, topic: fish-market, text: "The fish market moved to the east quay in 2024",
          quote: "The fish market moved to the east quay in 2024."}
-      - {id: B10, topic: tourism, text: "Tourist visits to Brennock peaked in August 2025",
-         quote: "Tourist visits to Brennock peaked in August 2025."}
+      - {id: B10, topic: tourism,
+         text: "Tourist visits to Brennock peaked for the 2025 season in August",
+         quote: "Tourist visits to Brennock peaked for the 2025 season in August."}
       - {id: B11, topic: staff,
          text: "The harbour authority employs 85 people, a quarter of them seasonal",
          quote: "The harbour authority employs 85 people, a quarter of them seasonal."}
@@ -133,15 +146,16 @@ documents:
       - {id: C06, topic: parking,
          text: "The harbour car park has been free of charge since it opened",
          quote: "The harbour car park has been free of charge since it opened."}
-      - {id: C07, topic: cycle-lane, text: "The quay cycle lane opened in autumn 2025",
-         quote: "The quay cycle lane opened in autumn 2025."}
+      - {id: C07, topic: cycle-lane, text: "The quay cycle lane opened in the second half of 2025",
+         quote: "The quay cycle lane opened in the second half of 2025."}
       - {id: C08, topic: fish-market, text: "Fish market trading starts at 5 a.m.",
          quote: "Fish market trading starts at 5 a.m. on weekdays."}
       - {id: C09, topic: ferry-fleet,
          text: "No hybrid or electric ferries entered service in Brennock in 2024",
          quote: "No hybrid or electric ferries entered service in Brennock in 2024."}
-      - {id: C10, topic: tourism, text: "Tourist visits to Brennock peaked in July 2024",
-         quote: "Tourist visits to Brennock peaked in July 2024."}
+      - {id: C10, topic: tourism,
+         text: "Tourist visits to Brennock peaked for the 2024 season in July",
+         quote: "Tourist visits to Brennock peaked for the 2024 season in July."}
       - {id: C11, topic: maintenance-budget,
          text: "The authority's 2023 maintenance budget was 1.6 million euros",
          quote: "The authority's 2023 maintenance budget was 1.6 million euros."}
@@ -165,13 +179,13 @@ labels:
     - [B02, C02, apparent_conflict, "6 euros throughout 2025 vs 4 euros in 2019"]
     - [A04, C03, apparent_conflict, "9 m at low tide vs 11 m at high tide"]
     - [B06, C04, apparent_conflict, "every 20 minutes on weekdays vs every 40 minutes on Sundays"]
-    - [B10, C10, apparent_conflict, "peak in August 2025 vs peak in July 2024"]
+    - [B10, C10, apparent_conflict, "2025 season peaked in August vs 2024 season peaked in July"]
     - [A11, C11, apparent_conflict, "2.1 M in 2025 vs 1.6 M in 2023"]
     # agreement (5)
     - [A01, C01, agreement, "a rise to 412,000 in 2025 is more travellers than 2024"]
     - [A02, B02, agreement, "6 euros in 2025 / stayed at 6 euros throughout 2025"]
     - [A05, B04, agreement, "tonnage fell 3 percent / less cargo than 2024"]
-    - [A07, C07, agreement, "opened in September 2025 / opened in autumn 2025"]
+    - [A07, C07, agreement, "opened in September 2025 / opened in the second half of 2025"]
     - [A10, B11, agreement, "85 staff / 85 people"]
     # unrelated, listed because they share a topic (2)
     - [A08, B08, unrelated, "lighthouse automation vs cottage museum"]
