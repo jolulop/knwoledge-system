@@ -1,6 +1,6 @@
 # REANCHOR — session status
 
-_Last updated: 2026-10-30. **Reanchor command:** "read REANCHOR.md and reanchor". Read this
+_Last updated: 2026-11-03. **Reanchor command:** "read REANCHOR.md and reanchor". Read this
 first after an app restart, then `wiki/index.md` if working in the vault._
 
 > [!warning] This is a periodically-refreshed snapshot and can lag the live state. The authoritative
@@ -12,11 +12,31 @@ first after an app restart, then `wiki/index.md` if working in the vault._
 
 Local-first **LLM Wiki** knowledge-system. Immutable `raw/` → derived `normalized/` →
 generated `wiki/` (gitignored, regenerable) → `db/` SQLite (graph, jobs, llm_cache) →
-`reviews/`, `policies/`. ADR-driven (`docs/adr/0001–0068`). See `CLAUDE.md` for the
+`reviews/`, `policies/`. ADR-driven (`docs/adr/0001–0069`). See `CLAUDE.md` for the
 critical rules and `CONTEXT.md` for the glossary.
 
 ## Where we are
 
+- **2026-11-03 — part-3 UAT done and torn down; tip `297187d`, pushed, in sync with
+  `origin/main`**, tree clean except the user's `.vscode/`. Since the last refresh (`1bab3c0`):
+  ADR-0069 slices 0–3 + evaluation results (`8e61c1f` … `795fd46`); TIMIA corporate palette and
+  Arial typography on the web UI (`bc7a51e`); an interrupted producer run (incl. Ctrl-C) is
+  recorded as failed, not left running (`ad6391a`); the document screen is **one form saved only
+  by "Save all changes on this page"** — Enter only redraws (hidden first submit button), *Add
+  tag*, *Undo drop*, *Pre-select keep* and *Clear the confirmed details* are pending changes that
+  keep the unsaved choices, and Apply explains an empty queue (`ec3a48b`, design note in ADR-0066
+  "Document screen: one form, saved only by Save"); empty `app/frontend/` removed (`665b6ba`);
+  UAT layout fixes — Clear beside the "These details are correct" tick, choice labels on one row,
+  page 80rem wide (`297187d`). Final gate before the last commit: **2074 passed, 2 skipped**, ruff
+  clean, 15 validators, whitespace clean.
+  **UAT (2026-11-02/03, `/tmp/ks-uat`, zero cost — every model call a cache hit):** 12 documents;
+  enrich/claims/items all cached; the user reviewed 10 of 12 (45 keeps, 94 drops, 10 Details
+  confirmed). Passed except checklist step 6 comments: 3 (Clear hard to find) and 5 (choice row
+  wrapping) fixed in `297187d`; 2 (the synthesis reconciliation notice) is expected behaviour;
+  1 (only one Authors page) is correct — only *BIRD Consortium* had **show page** ticked;
+  **4 (Obsidian's Tags pane empty while tag pages exist) set aside by the user — still open.**
+  The clone is deleted; its cache (byte-identical to the 2026-10-31 one, 3,242 entries) is saved
+  at `~/ks-saved/2026-11-02/llm_cache.ks-uat.sqlite`. The main repo's `wiki/` is empty.
 - **2026-11-02 — ADR-0069 slice 3 evaluated** (log in ADR-0069 "Slice 3 evaluation log"):
   `anthropic:claude-opus-4-8` failed the original fixture on two ambiguous wordings; after a
   documented wording amendment (no label or threshold changed) it passed 7/7 in every order with
@@ -34,11 +54,12 @@ critical rules and `CONTEXT.md` for the glossary.
   contradictions in every order. Aggregate character caps and hosted-baseline compatibility are
   checked. At that point no live model had been evaluated.
   Final gate: **2053 passed, 2 skipped**, ruff clean, 15 validators pass, diff whitespace clean.
-- **Branch:** `main` — tip `1bab3c0` (UAT Guide part-3 steps; before it `0d218b9` ADR-0066 part 3
+- **2026-10-30 (historical; superseded by the 2026-11-03 entry) — branch:** `main` was at tip
+  `1bab3c0` (UAT Guide part-3 steps; before it `0d218b9` ADR-0066 part 3
   slice 4 Authors pages), **pushed, in sync with `origin/main`**, tree clean except the user's
   `.vscode/`. **ADR-0068 (all slices + decision 7) and ADR-0066 part 3 (slices 1–4) are complete
-  and pushed** (bullets below). The main repo's `wiki/` is empty. **Next = a fresh-start part-3
-  UAT following `docs/UAT Guide.md` from §1**: `rm -rf /tmp/ks-uat` first (§1 clones into that
+  and pushed** (bullets below). The main repo's `wiki/` is empty. **Next was a fresh-start part-3
+  UAT following `docs/UAT Guide.md` from §1 (done 2026-11-02/03)**. The setup it described, still the recipe for the next UAT: `rm -rf /tmp/ks-uat` first (§1 clones into that
   path; its `db/llm_cache.sqlite` is byte-identical to the saved
   `~/ks-saved/2026-10-28/llm_cache.ks-demo.sqlite`, so nothing is lost), then
   `uv sync --all-extras` + the pinned cu128 torch overlay, optionally seed `db/` with the saved
@@ -416,12 +437,17 @@ critical rules and `CONTEXT.md` for the glossary.
 - **Display aliases (ADR-0060):** links render human-readable labels via `[[id|label]]` and pages
   carry `title:`/`aliases:` frontmatter; page **filenames remain id-keyed**, and the file
   explorer/tabs/graph therefore show ids — that is by design, not a bug.
-- **Obsidian is installed in WSL** (apt `.deb`, WSLg). Launch `GALLIUM_DRIVER=d3d12 obsidian --no-sandbox --ozone-platform=wayland --use-gl=angle --use-angle=gl &`
-  (WSL has no `/dev/dri`, so Chromium's default GPU start-up fails; Mesa's D3D12 driver plus
-  ANGLE-over-OpenGL renders on the real GPU — without `GALLIUM_DRIVER=d3d12` Mesa picks llvmpipe and
-  WebGL is turned off; the software fallback is `--disable-gpu`. Without native Wayland, clicks land
-  off-target on a maximized window at 125% Windows scaling — X11 path). On this machine `~/.local/bin/obsidian` and `~/.local/share/applications/obsidian.desktop` already
-  add these flags, so plain `obsidian &` works. Use the WSL Obsidian, not Windows-over-`\\wsl$`.
+- **Obsidian is installed in WSL** (apt `.deb`, WSLg; it self-updated to 1.15.0 on 2026-11-02 via
+  `~/.config/obsidian/obsidian-1.15.0.asar` — renaming that file falls back to the installed 1.14.5).
+  Since 2026-10-31 the launcher uses **software rendering**:
+  `obsidian --no-sandbox --disable-gpu --ozone-platform=wayland` — the GPU line
+  (`GALLIUM_DRIVER=d3d12 … --use-gl=angle --use-angle=gl`) blanked the window on the graph view; it
+  is kept commented in the launcher. Native Wayland, because under X11 clicks land off-target on a
+  maximized window at 125% Windows scaling. On this machine `~/.local/bin/obsidian` and
+  `~/.local/share/applications/obsidian.desktop` carry these flags, so start it with
+  `setsid nohup obsidian &` (a plain `obsidian &` dies with its shell). **If it runs but shows no
+  window** (seen 2026-11-03): stop it with `pgrep -f '^/opt/Obsidian/obsidian' | xargs kill` and
+  start it again. Use the WSL Obsidian, not Windows-over-`\\wsl$`.
 - The committed graph preset filters `-path:Claims -file:index -file:log`; to hide unreviewed tags
   too, add `-[status:candidate]` (the space before it matters).
 - **Authors pages** live in `wiki/Authors/` (colour group `path:Authors` in the committed preset);
@@ -456,10 +482,12 @@ critical rules and `CONTEXT.md` for the glossary.
 | **UAT rounds 4–6** (fresh clones, 5→9 sources) | **Done** — item fragmentation → ADR-0064; bookmark/tag model → ADR-0066 |
 | **ADR-0064 item consolidation Part A** (merge-candidate lint + human-filed merge) | **Complete + pushed** (`ea88f64` · `ed6cd00` · `3b6e4ca`) |
 | **ADR-0065 item-type management** | **Deferred placeholder** (not scheduled) |
-| **ADR-0066 item curation as tagging** | **Parts 1–3 + decision 9 complete + pushed** (`16f9619` design · `d17e7a7` part 1 + rounds 2–5 · `705d029` decision 8 alias hygiene · `71051ac` rounds 6–7 · `5be2e50` part-2 grill · `f0e43f1` part 2 + round 8 · `20f6885` UAT r8 fixes + rounds 9–10 · part 3: `bd99dba` grill 2 · `3efc7e7` · `71e26b7` · `5bc5882` · `0d218b9` · `1bab3c0` UAT Guide); decisions 10, 11 open; part-3 UAT next |
+| **ADR-0066 item curation as tagging** | **Parts 1–3 + decision 9 complete + pushed** (`16f9619` design · `d17e7a7` part 1 + rounds 2–5 · `705d029` decision 8 alias hygiene · `71051ac` rounds 6–7 · `5be2e50` part-2 grill · `f0e43f1` part 2 + round 8 · `20f6885` UAT r8 fixes + rounds 9–10 · part 3: `bd99dba` grill 2 · `3efc7e7` · `71e26b7` · `5bc5882` · `0d218b9` · `1bab3c0` UAT Guide); decisions 10, 11 open; part-3 UAT done 2026-11-02/03 |
 | **ADR-0067 request-origin guard** (+ ADR-0039 consistent-backup amendment) | **Complete + pushed** (`71051ac`) |
 | **UAT rounds 7–8** (r7 fresh clone at `d17e7a7`; r8 = part-2 UAT) | **Done** — r8 fixes in `20f6885` |
 | **ADR-0068 vault consistency contract** (write lock · publication queue · per-document producer commits · preview tokens · bounded traversal) | **Complete + pushed** (`4ed3e13` · `0d75234` · `e3558c6` · `b13f513` · `d11945b`); validators 12→15 |
+| **ADR-0069 scoped contradiction checks + LLM usage ledger** | **Complete + pushed** (`8e61c1f` design · `57b1dd1` · `a22d642` · `a9efe06` · `b17e254` · `c6a51f2` · `795fd46` evaluation); recommended judge `local:qwen3.6:27b` at 4,096 output tokens, `CONTRADICTION_MODEL` unset |
+| **Web UI tidy + part-3 UAT** (palette · interrupted runs · one-form document screen · UAT fixes) | **Done + pushed** (`bc7a51e` · `ad6391a` · `ec3a48b` · `665b6ba` · `297187d`); UAT 2026-11-02/03 passed, comment 4 open |
 
 ## Next step
 
@@ -475,23 +503,28 @@ critical rules and `CONTEXT.md` for the glossary.
 - **To run enrichment/query on a LOCAL model** (Ollama/vLLM/LM Studio): see `docs/Local Models.md`
   — set `ENRICH_LOCAL_BASE_URL` + add `local:<model>` to a tier chain (start with
   `ENRICH_MODEL_LIGHT`). No-cost resolve-check snippet in that doc.
-- **NEXT (each step on the user's go):**
-  1. **Fresh-start part-3 UAT** following `docs/UAT Guide.md` from §1 (`rm -rf /tmp/ks-uat`
-     first). Part 3 is covered in §6 (Enrich outputs, effective title, `keywords:`), **§9.0.1
-     Confirm each document's Details** and four checklist lines. The Enrich, claims and items
-     prompts all bumped, so the paid stages re-bill (the saved cache only helps for unchanged
-     calls). Run the API with `cd /tmp/ks-uat && uv run --no-sync python -m app.backend` (port
-     18000) — **`--no-sync`**: a plain `uv sync` strips the GPU overlay (torch cu128 /
-     FlagEmbedding) and the API won't start; restore with `uv sync --all-extras` + the pinned cu128
-     torch, never `-U`. After the paid run, save the new cache to `~/ks-saved/<date>/`. Also
-     click-check the open-original link (`19c720a`). The user's own §11 Front Matter Title note
-     ("title = filename") is now only the fallback — theirs to edit, don't touch it.
+- **NEXT (each step on the user's go; each new design starts with a `grill-phase`):**
+  1. **Slice B** (ADR-0066 deferred list) **+ button styling** — real titles on review screens, a
+     readable apply preview, untouched-row warning + "next document", queue UX, **hiding
+     candidate/unused/dropped tags in Obsidian and `index.md`** (unkept suggestions such as
+     "Software Development" currently show as free graph nodes; the graph filter
+     `-[status:candidate]` is the stopgap), and quieter secondary / destructive buttons on the
+     document screen. Fold in the small open UAT questions: **comment 4** (Obsidian's Tags pane
+     empty while tag pages are full — by design: ADR-0066 part 3 Q3 replaced the Source page's
+     `tags:` with the ordinary `keywords:` property so unreviewed names stay out of Obsidian's
+     tags; decide whether the **kept** tags alone should go back into `tags:`), **author-name variants** ("McKinsey" vs "McKinsey &
+     Company" make separate Authors pages), and **competing `change_item_type` proposals** for
+     one tag (applying one withdrew the other — ADR-0066's deferred conflict case; decide the UX).
   2. **Part 4** — decision 11: `scripts/eval_item_tags.py` (deterministic, manual run) against
      `evals/golden_item_tags.yaml` (pre-restart baseline, then measured on the rebuilt vault).
-  3. **Decision 10 clean restart** at the new prompt versions → fresh UAT + scoring.
-  4. **Slice B** (ADR-0066 deferred list): real titles on review screens, a readable apply preview,
-     untouched-row warning + "next document", queue UX, hiding candidate/unused/dropped tags in
-     Obsidian and `index.md`, UAT Guide §10.1 step 3 wording.
+  3. **Decision 10 clean restart** at the new prompt versions → fresh full UAT + scoring, including
+     a real-window `local:qwen3.6:27b` contradiction check (§10.2; 12,000-character windows are
+     not yet validated). UAT setup: clone into `/tmp/ks-uat` per `docs/UAT Guide.md` §1, seed
+     `db/llm_cache.sqlite` from `~/ks-saved/2026-11-02/llm_cache.ks-uat.sqlite`, run every stage
+     with `ANTHROPIC_API_KEY=sk-ant-invalid-cache-replay-only` until the user approves paid calls
+     (cache misses then fail instead of billing; the process environment overrides `.env`), and
+     serve with `cd /tmp/ks-uat && uv run --no-sync python -m app.backend` on
+     **`http://127.0.0.1:18000`** (`localhost` is refused by the ADR-0067 origin guard).
 - ADR-0064 deferrals still stand: manual `mark_semantic_duplicate` filing, token-containment /
   embedding signals (eval-gated). Rejected: fuzzier id normalization.
 - **Other queue (user picks, each starts with a `grill-phase`):** F4 reference-chunk down-ranking
@@ -588,13 +621,16 @@ merge/split, journaled identity operations, under_supported_item retired; part 2
 the first keep and editable, decided statuses outrank re-extraction, lock order ledger-then-graph;
 part 3 = effective titles, Enrich v2 provenance + typed tags into the suggestions, `keywords:`,
 Details confirmation + independence/reconciliation notices, `wiki/Authors/` pages; part 4 + the
-clean restart open)**, **0067 (request-origin guard: loopback `Host` allowlist + same-origin state
+clean restart open; the document screen is one form saved only by Save)**, **0067 (request-origin guard: loopback `Host` allowlist + same-origin state
 changes; amends 0009's CSRF deferral; with the 0039 consistent-backup / vault writer lock
 amendment)**, **0068 (vault consistency contract: one exclusive write lock for every commit phase,
 per-producer run guards, publication inside the lock + `db/publication_pending.json` queue and
 `saved_publication_pending`, per-document producer commits + commit journal, `(epoch, counter)`
 revision + preview tokens + code/settings fingerprints, bounded graph traversal; amends Build Spec
-§3.2, 0029, 0039, 0040)** — full glossary entries in `CONTEXT.md` (historical superseded entries
+§3.2, 0029, 0039, 0040)**, **0069 (scoped contradiction checks: no whole-vault judging; an
+occasional check on chosen documents via `detect_contradictions.py estimate` → `run --token`,
+paid judges need `--allow-paid`; a per-attempt LLM usage ledger; a reviewed judge evaluation gate
+`scripts/eval_contradictions.py`; recommended judge `local:qwen3.6:27b` at 4,096 output tokens)** — full glossary entries in `CONTEXT.md` (historical superseded entries
 carry supersession notes).
 
 **Path safety:** `app/backend/paths.py` (`safe_under` containment, `safe_child` basename-only) is the
