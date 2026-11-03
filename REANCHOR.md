@@ -22,9 +22,10 @@ critical rules and `CONTEXT.md` for the glossary.
   ADR-0069 slices 0–3 + evaluation results (`8e61c1f` … `795fd46`); TIMIA corporate palette and
   Arial typography on the web UI (`bc7a51e`); an interrupted producer run (incl. Ctrl-C) is
   recorded as failed, not left running (`ad6391a`); the document screen is **one form saved only
-  by "Save all changes on this page"** — Enter only redraws (hidden first submit button), *Add
-  tag*, *Undo drop*, *Pre-select keep* and *Clear the confirmed details* are pending changes that
-  keep the unsaved choices, and Apply explains an empty queue (`ec3a48b`, design note in ADR-0066
+  by "Save all changes on this page"** — Enter only redraws (hidden first submit button);
+  *Pre-select keep* only pre-ticks and writes nothing; *Clear the confirmed details* is a pending
+  checkbox persisted by Save; *Add tag* and *Undo drop* each save their one change at once and
+  redraw the screen with the other unsaved choices kept; and Apply explains an empty queue (`ec3a48b`, design note in ADR-0066
   "Document screen: one form, saved only by Save"); empty `app/frontend/` removed (`665b6ba`);
   UAT layout fixes — Clear beside the "These details are correct" tick, choice labels on one row,
   page 80rem wide (`297187d`). Final gate before the last commit: **2074 passed, 2 skipped**, ruff

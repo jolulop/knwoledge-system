@@ -61,7 +61,7 @@ The system is not merely an Obsidian vault and not merely a RAG pipeline. It com
    Provides keyword search, vector search, graph traversal, and summary-first wiki navigation.
 
 4. **Agentic maintenance loop**
-   Runs autonomous ingest, lint, stale-content review, contradiction detection, duplicate detection, citation verification, and index refresh.
+   Runs autonomous ingest, lint, stale-content review, duplicate detection, citation verification, and index refresh. Contradiction detection is not part of this loop: it is an occasional check the user starts on a chosen list of documents (ADR-0069).
 
 5. **Human-in-the-loop review**
    Requires approval for deletion, contradiction resolution, knowledge-item merge/split, and deprecation decisions.
@@ -488,7 +488,7 @@ Create review items when confidence is low or changes are semantic/destructive
 | Citation verifier | During ingest/query | Validate that generated claims cite real sources. |
 | Graph curator | Daily/weekly | Suggest links, duplicates, merges, splits, and review items. |
 | Lint agent | Weekly | Detect broken links, orphan nodes, stale stubs, missing metadata, uncited claims. |
-| Contradiction agent | Weekly | Detect conflicting claims and create review items. |
+| Contradiction check | On demand only (ADR-0069) | Compare the claims of a document list the user chooses — never a scheduled or whole-vault sweep — after an estimate and an explicit run; create review items. |
 | Stale-content agent | Monthly | Rank old documents and pages for archive/deprecation review. |
 | Retention agent | Monthly | Apply retention policy and propose archive/delete candidates. |
 | Backup agent | Daily/weekly | Snapshot raw manifests, DB (incl. graph), wiki, and policies. (ADR-0032 §7 supersedes "indexes": the keyword index is never backed up — cheap rebuild — and the vector index is opt-in only.) |
