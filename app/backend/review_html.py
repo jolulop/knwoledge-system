@@ -32,7 +32,7 @@ _STYLE = (
     "--linea:#D9DDE0;--suave:#F5F6F7}"
     "html{background:#FFFFFF}"
     "body{font-family:Arial,'Liberation Sans',Helvetica,'Helvetica Neue',sans-serif;font-size:15px;"
-    "line-height:1.45;margin:2rem auto;padding:0 1.5rem;max-width:60rem;color:var(--negro);"
+    "line-height:1.45;margin:2rem auto;padding:0 1.5rem;max-width:80rem;color:var(--negro);"
     "background:#FFFFFF}"
     "h1,h2,h3{font-weight:bold;line-height:1.25}"
     "h1{font-size:1.6rem;color:var(--negro);border-bottom:3px solid var(--rojo);"
@@ -64,6 +64,9 @@ _STYLE = (
     "input,select,textarea{font:inherit;color:var(--negro);border:1px solid var(--gris);"
     "border-radius:4px;padding:.22rem .4rem;background:#FFFFFF}"
     "input[type=radio],input[type=checkbox]{accent-color:var(--rojo)}"
+    # UAT 2026-11-02: one decision option (radio + label) never wraps inside itself, and a row's
+    # options stay on one line in the wider layout.
+    "label.opt{white-space:nowrap;margin-right:.35rem}"
     "details{border:1px solid var(--linea);border-radius:6px;padding:.4rem .8rem;margin:.6rem 0}"
     "summary{cursor:pointer;font-weight:bold;color:var(--tierra)}"
     "code{background:var(--suave);border-radius:3px;padding:0 .25rem}"
@@ -605,7 +608,7 @@ def _decision_radios(rid: str, *, preselect: str | None = None, chosen: str | No
     rid = _h(rid)
     default = chosen if chosen is not None else ("approve" if preselect == "approve" else "")
     return ("".join(
-        f"<label><input type='radio' name='decision_{rid}' value='{v}'"
+        f"<label class='opt'><input type='radio' name='decision_{rid}' value='{v}'"
         f"{' checked' if v == default else ''}> {label}</label> "
         for v, label in (("", "— leave pending"), ("approve", "approve"),
                          ("reject", "reject"), ("defer", "defer"))))
@@ -633,7 +636,7 @@ def _link_radios(nid: str, *, kept: bool, preselect: str | None = None,
     default = (chosen if chosen is not None
                else "keep" if (preselect == "keep" and not kept and not ambiguous) else "")
     return "".join(
-        f"<label><input type='radio' name='link_{nid}' value='{_h(v)}'"
+        f"<label class='opt'><input type='radio' name='link_{nid}' value='{_h(v)}'"
         f"{' checked' if v == default else ''}> {_h(label)}</label> " for v, label in options)
 
 
@@ -724,13 +727,6 @@ def _details_section(data: dict[str, Any], draft: dict[str, Any] | None) -> str:
               if info["confirmed"] else
               f"Not confirmed: {_h(_DETAILS_SOURCE.get(info['source'], info['source']))}.")
     parts = ["<h2>Details</h2>", f"<p>{status}</p>", reconciliation_notices(info.get("pending") or [])]
-    if info["confirmed"]:
-        # Pending until Save, like every other change on the screen (review 2026-11-02).
-        parts.append("<p><label><input type='checkbox' name='details_clear' value='1'"
-                     f"{' checked' if d.get('details_clear') else ''}> <strong>Clear the confirmed "
-                     "details</strong> when I press Save</label> <span class='help'>(removes the "
-                     "confirmed title, authors and publisher; independence may still rest on other "
-                     "provenance)</span></p>")
     if info.get("suggestion_differs") and info.get("suggested"):
         sug = info["suggested"]
         names = ", ".join(a["name"] for a in sug["authors"]) or "no authors"
@@ -916,7 +912,7 @@ def render_source_screen(data: dict[str, Any], *, draft: dict[str, Any] | None =
             if u.get("chosen"):
                 options.append((f"use:{u['chosen']}", f"finish: use {u.get('chosen_title')}"))
             options.append(("cancel", "cancel"))
-            cell = "".join(f"<label><input type='radio' name='link_{nid}' value='{_h(v)}'> "
+            cell = "".join(f"<label class='opt'><input type='radio' name='link_{nid}' value='{_h(v)}'> "
                            f"{_h(label)}</label> " for v, label in options)
             table.append(f"<tr><td>{_h(u.get('name'))}</td><td>{_h(u.get('chosen_title'))}</td>"
                          f"<td>{_h(u.get('at'))}</td><td>{cell}</td></tr>")
@@ -932,6 +928,13 @@ def render_source_screen(data: dict[str, Any], *, draft: dict[str, Any] | None =
             f"{' checked' if draft.get('details_confirm') and not draft.get('_use_suggestion') else ''}"
             "> <strong>These details are correct</strong> (confirms the Details above)</label></p>"
             if details_info else "")
+    if details_info and details_info.get("confirmed"):
+        # The other Details choice, next to the tick (UAT 2026-11-02: it was easy to miss at the top
+        # of the section). Pending until Save, like every other change on the screen.
+        tick += ("<p><label><input type='checkbox' name='details_clear' value='1'"
+                 f"{' checked' if draft.get('details_clear') else ''}> <strong>Clear the confirmed "
+                 "details</strong> instead</label> <span class='help'>(removes the confirmed title, "
+                 "authors and publisher; independence may still rest on other provenance)</span></p>")
     parts.append("<p><label>Note (applies to every review-item decision this submit): "
                  f"<input type='text' name='note' size='40' value='{_h(draft.get('note', ''))}'>"
                  "</label></p>" + tick

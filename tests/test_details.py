@@ -533,3 +533,17 @@ def test_only_a_successful_add_resets_the_add_fields(client, vault):
     added = client.post(f"/ui/reviews/sources/{sid}/add", data=form).text
     assert "Tag “Half Typed” added" in added and "value='Half Typed'" not in added
     assert "value='not added yet'" not in added
+
+
+def test_clear_sits_next_to_the_confirmation_tick_and_options_stay_on_one_line(client, vault):
+    """UAT 2026-11-02: Clear was easy to miss at the top of the Details section; the decision
+    options wrapped inside a narrow column."""
+    from app.backend import review_html
+    root, sid = vault
+    _post(client, sid, _form(root, sid, tick=True))                # confirmed
+    html = client.get(f"/ui/reviews/sources/{sid}").text
+    tick, clear = html.index("name='details_confirm'"), html.index("name='details_clear'")
+    save = html.index("Save all changes on this page")
+    assert tick < clear < save and html.count("name='details_clear'") == 1
+    assert "<label class='opt'><input type='radio' name='link_" in html
+    assert "label.opt{white-space:nowrap" in review_html._STYLE and "max-width:80rem" in review_html._STYLE
