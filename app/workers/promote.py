@@ -23,7 +23,7 @@ from typing import Any
 
 from app.backend import db, graph, taxonomy
 from app.backend.manifests import iso_now, valid_manifests
-from app.workers import items, publication, reviews
+from app.workers import item_pages, items, publication, reviews
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter, render_item_page
 
 PROMOTABLE = ("item",)
@@ -167,9 +167,17 @@ def activate_node(gconn, *, node: dict[str, Any], wiki_dir: Path, reviews_dir: P
         return {"outcome": "skipped", "reason": "missing_required_item_type"}
     slug = items._slug(eff["title"]) if amendments else node["slug"]
     new_page = page_dir / f"{slug}.md"
-    if slug != node["slug"] and new_page.exists():
-        # Another page already owns the amended slug — scope-guard skip, no writes.
-        return {"outcome": "skipped", "reason": "amended_slug_collision"}
+    # ADR-0070 B1 review: the current page must be this tag's own, and a moved slug's destination
+    # must be free (no file, no other item recording it) or already this tag's — checked before any
+    # write, so the keep that calls this (dry run first) never half-writes.
+    if (problem := item_pages.page_problem(gconn, wiki_dir, nid, node["slug"])) is not None:
+        return {"outcome": "skipped", "reason": problem["reason"], "problem": problem}
+    if slug != node["slug"]:
+        if new_page.exists() and item_pages.page_state(wiki_dir, slug, nid)[0] != "own":
+            # Another page already owns the amended slug — scope-guard skip, no writes.
+            return {"outcome": "skipped", "reason": "amended_slug_collision"}
+        if (problem := item_pages.page_problem(gconn, wiki_dir, nid, slug)) is not None:
+            return {"outcome": "skipped", "reason": "amended_slug_collision", "problem": problem}
     if dry_run:
         return {"outcome": "would_activate", "slug": slug, "amended": bool(amendments),
                 "affected_sources": []}
@@ -192,7 +200,7 @@ def activate_node(gconn, *, node: dict[str, Any], wiki_dir: Path, reviews_dir: P
     # suggestion lists show the title too), not only on a slug move: the caller publishes them all.
     affected = list(sources) + list(suggested)
     if slug != node["slug"]:
-        old_page.unlink(missing_ok=True)
+        item_pages.remove_page(wiki_dir, nid, node["slug"])     # its own page (checked above)
         # Inbound links hold the old slug: the mentioning Source pages are in `affected`; duplicate
         # partners re-render here, AFTER the slug mirror update their ## Duplicates projection reads.
         for dup in graph.active_duplicates(gconn, nid):

@@ -28,8 +28,7 @@ from typing import Any
 
 from app.backend import graph, publication_queue, taxonomy
 from app.backend.manifests import iso_now
-from app.workers import identity_journal, items, reviews, tag_links
-from app.workers.wiki_render import NODE_DIR, parse_frontmatter
+from app.workers import identity_journal, item_pages, items, reviews, tag_links
 
 _MAX_DESCRIPTION = 2000
 
@@ -110,16 +109,18 @@ def add_candidate(
     # --- producer writes (mirror extract_items' _emit, asserted_by=human, anchorless) ---
     node_created = node is None
     slug = items._slug(title) if node_created else node["slug"]
-    if node_created:
-        # Slug-collision guard (review round, B2): different titles can hash to different ids
-        # yet normalize to the same slug — never overwrite another node's page; block BEFORE
-        # any write (the promote executor's amended_slug_collision mirror).
-        page_path = wiki_dir / NODE_DIR["item"] / f"{slug}.md"
-        if page_path.exists():
-            fm = parse_frontmatter(page_path.read_text(encoding="utf-8", errors="replace"))
-            if fm.get("item_id") != nid:
-                return _blocked("slug_collision", slug=slug,
-                                existing_node_id=fm.get("item_id"))
+    # Slug-collision guard (review round, B2; ADR-0070 B1 review): different titles can hash to
+    # different ids yet normalize to the same slug — never write another item's page, nor a page name
+    # another item records (any status), nor a page whose owner can't be established; block BEFORE
+    # any write (the promote executor's amended_slug_collision mirror).
+    problem = item_pages.page_problem(gconn, wiki_dir, nid, slug)
+    if problem is None:
+        problem = item_pages.first_problem(
+            gconn, wiki_dir, [d["node_id"] for d in graph.active_duplicates(gconn, nid)])
+    if problem is not None:
+        return _blocked("slug_collision", slug=problem.get("slug"),
+                        existing_node_id=problem.get("owner") or (problem.get("holders") or [None])[0],
+                        detail=problem["reason"])
     # ADR-0068 decision 4: record the publication intent before the first write.
     intent = publication_queue.record(root, origin="tag_action", sources=[source_id], items=[nid],
                                       now=now)

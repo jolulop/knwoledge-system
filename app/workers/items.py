@@ -45,7 +45,7 @@ from app.llm import prompts
 from app.llm.client import CacheMiss, LLMClient, ParseError
 from app.workers import citations, publication, reconcile, reviews, titles
 from app.workers import enrichment_artifact as art
-from app.workers import labels
+from app.workers import item_pages, labels
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter, render_item_page
 
 _ENRICHABLE_STATUSES = {"extracted", "partial"}
@@ -564,6 +564,8 @@ def _recompose_node(gconn, *, node_id, wiki_dir, reviews_dir, now, text_hint=Non
         status = "active"
     else:
         status = "candidate"
+    if item_pages.page_problem(gconn, wiki_dir, node_id, slug) is not None:
+        return "page_conflict"                     # ADR-0070 B1 review: never another item's page
     page_dir.mkdir(parents=True, exist_ok=True)
     duplicates = graph.active_duplicates(gconn, node_id)
     kept, suggested = graph.tag_projection(gconn, node_id, status)
@@ -616,6 +618,8 @@ def recompose_semantic_node_page(
     if node_type != "item":
         return "unsupported_node_type"
     page_path = wiki_dir / NODE_DIR[node_type] / f"{slug}.md"
+    if item_pages.page_problem(gconn, wiki_dir, node_id, slug) is not None:
+        return "page_conflict"                     # ADR-0070 B1 review: never another item's page
     meta = _read_node_meta(page_path)
     if meta is None:
         return "page_missing"
@@ -720,6 +724,8 @@ def extract_items(
     cache_miss_sources: list[str] = []
     in_flight_sources: list[dict[str, str]] = []
     input_changed_sources: list[str] = []
+    # ADR-0070 B1 review: suggestions not written because their page name is taken or unowned.
+    slug_skips: list[dict[str, Any]] = []
     texts: dict[str, dict[str, Any]] = {}     # one document's page hints, by node id
     touched: set[str] = set()                  # the nodes one document's suggestions emit
     page_outcomes: dict[str, str] = {}         # node id -> its last page outcome this run
@@ -754,6 +760,18 @@ def extract_items(
         # authority) and a `change_item_type` review is filed; nothing auto-retypes. The sentinel
         # never proposes a retype (an unsure classification is not a correction).
         existing = graph.get_node(gconn, nid)
+        # ADR-0070 B1 review: never write a tag whose page name another item holds (any status) or
+        # whose page can't be proven to be its own — checked before the node or its mention exists,
+        # so a skipped suggestion leaves nothing behind. Human decisions are untouched.
+        # The slug this write will use (the same rule as the upsert below).
+        page_slug = (existing["slug"] if existing is not None and (
+            entry["resolution"] in ("resolved", "redirected")
+            or existing.get("status") in _RESOLVABLE) else _slug(name))
+        if (problem := item_pages.page_problem(gconn, wiki_dir, nid, page_slug)) is not None:
+            slug_skips.append({"source_id": sid, "name": name, "node_id": nid, "slug": page_slug,
+                               "reason": problem["reason"], "owner": problem.get("owner"),
+                               "holders": problem.get("holders") or []})
+            return
         used_type = (existing.get("item_type") if existing else None) or item_type
         type_conflict = (existing is not None and existing.get("item_type") is not None
                          and item_type != existing["item_type"]
@@ -1055,7 +1073,8 @@ def extract_items(
         # A document this run attempted whose commit is still unfinished is never a clean success.
         left_attempted = sorted(set(left) & attempted)
 
-        if errors or cache_miss_sources or in_flight_sources or left_attempted or replan_unavailable:
+        if (errors or cache_miss_sources or in_flight_sources or left_attempted or replan_unavailable
+                or slug_skips):
             status = "partial"
         elif not has_key and not cache_only and considered > 0 and not replanned_sources:
             # Derived from the work done (slice 2 review round 1): a provider-free run that re-planned
@@ -1101,6 +1120,10 @@ def extract_items(
             "cache_only": cache_only, "cache_misses": len(cache_miss_sources),
             "cache_miss_sources": sorted(cache_miss_sources),
             "in_flight_sources": in_flight_sources,
+            # ADR-0070 B1 review: suggestions skipped because their page name is taken by another
+            # tag or its page's owner can't be established (source, proposed name, slug, holder).
+            "suggestions_skipped_slug_taken": len(slug_skips),
+            "slug_taken_details": slug_skips,
             # ADR-0068 producer journal: documents whose commit is still unfinished (redone by the
             # next run that reaches them), and the ones finished here from authority.
             "unfinished_commits": sorted(left), "journal_reconciled": journal_reconciled,

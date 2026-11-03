@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import re
 import sys
+from typing import Any
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +25,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.backend import graph
+from app.backend.manifests import load_manifest
+from app.backend.search import RETENTION_DEFAULT_STATUSES
+from app.workers import tag_projection
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter
 
 _LINK = re.compile(r"\[\[([^\]]+)\]\]")
@@ -112,6 +116,21 @@ def _check(root: Path, db_path: Path) -> list[str]:
 
         # --- Source pages: claims + mentions both directions ---
         sources_dir = root / "wiki" / "Sources"
+        # ADR-0070 B1: `tags:` is the projection of the document's kept, active tags through the
+        # vault's derived tag mapping (default-visible documents only). The mapping is built (strictly)
+        # the first time a Source page has an active kept tag to project; one that can't be built is
+        # reported once.
+        mapping_state: dict[str, Any] = {}
+
+        def tag_mapping() -> dict[str, str] | None:
+            if "value" not in mapping_state:
+                try:
+                    mapping_state["value"] = tag_projection.active_mapping(conn, root / "wiki")
+                except tag_projection.TagMappingError as exc:
+                    mapping_state["value"] = None
+                    errors.append(f"tag mapping cannot be built: {exc}")
+            return mapping_state["value"]
+
         for page in sorted(sources_dir.glob("*.md")) if sources_dir.exists() else []:
             sid = page.stem
             text = page.read_text(encoding="utf-8", errors="replace")
@@ -130,8 +149,19 @@ def _check(root: Path, db_path: Path) -> list[str]:
                              if node_status.get(cid) != "hidden"}
             # ADR-0066 review round 6: the page links only the tags the document keeps (plus legacy
             # tags); unkept suggestions are listed unlinked, so they are not part of the projection.
-            active_mentions = {(m["node_type"], m["slug"])
-                               for m in graph.source_tag_projection(conn, sid)[0]}
+            curated = graph.source_tag_projection(conn, sid)[0]
+            active_mentions = {(m["node_type"], m["slug"]) for m in curated}
+            manifest = load_manifest(root / "raw" / "manifests", sid) or {}
+            visible = (manifest.get("status") or "active") in RETENTION_DEFAULT_STATUSES
+            projectable = manifest and visible and any(
+                m.get("node_type") == "item" and m.get("status") == "active" for m in curated)
+            mapping = tag_mapping() if projectable else {}
+            if mapping is not None:
+                expected = tag_projection.source_tags(curated, mapping) if projectable else []
+                found = fm.get("tags") or []
+                if sorted(found) != sorted(expected):
+                    errors.append(f"{sid}: frontmatter tags={sorted(found)} != the kept-tag "
+                                  f"projection {sorted(expected)} (republish the Source page)")
 
             for cid in active_claims:
                 if f"Claims/{cid}" not in targets:
@@ -209,6 +239,10 @@ def _check(root: Path, db_path: Path) -> list[str]:
                 # UNUSED — a tag that lost its last kept link stays a valid redirect target), SAME-TYPE,
                 # non-self survivor; it has no Mentioned-by/Duplicates projection to check.
                 fm = parse_frontmatter(text)
+                # ADR-0070 B1 review: the page must name the item that owns it.
+                if node_type == "item" and fm.get("item_id") != node_id:
+                    errors.append(f"{subdir}/{page.stem}: page item_id {fm.get('item_id')!r} is not "
+                                  f"the graph item recording this page name ({node_id})")
                 if fm.get("status") == "merged":
                     surv = fm.get("merged_into")
                     if not surv:

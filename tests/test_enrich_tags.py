@@ -368,7 +368,9 @@ def test_keywords_list_kept_and_eligible_suggestions_and_feed_search(tmp_path, a
     _act(api, sid, "Banking", "drop")
     page = tmp_path / "wiki" / "Sources" / f"{sid}.md"
     fm = parse_frontmatter(page.read_text(encoding="utf-8"))
-    assert "tags" not in fm
+    # ADR-0070 B1 (superseding part 3 Q3's "no tags:"): `tags:` carries only the KEPT tag, nested
+    # by type; suggestions (Securitization, Large Language Model) and the dropped Banking never do.
+    assert len(fm["tags"]) == 1 and fm["tags"][0].endswith("/Retrieval")
     assert fm["keywords"][0] == "Retrieval"                          # kept first
     assert set(fm["keywords"]) == {"Retrieval", "Securitization", "Large Language Model"}
     keyword_index.reindex(tmp_path)

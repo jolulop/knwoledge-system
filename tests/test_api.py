@@ -215,8 +215,8 @@ def test_graph_neighborhood_endpoint(client, tmp_path):
 
 def test_graph_endpoints_404_without_graph_db(client):
     # No graph built yet (the client fixture lays down no db/graph.sqlite).
-    assert client.get("/graph/node/itm_x").status_code == 404
-    assert client.get("/graph/neighborhood/itm_x").status_code == 404
+    assert client.get("/graph/node/itm_00000000000000aa").status_code == 404
+    assert client.get("/graph/neighborhood/itm_00000000000000aa").status_code == 404
 
 
 def _build_graph_with_contradiction(tmp_path: Path) -> tuple[str, str]:
@@ -1156,16 +1156,16 @@ def _approved_concept_deprecation(tmp_path):
     gdb.parent.mkdir(parents=True, exist_ok=True)
     graph.init_db(gdb)
     conn = graph.connect(gdb)
-    graph.upsert_node(conn, node_id="itm_x", node_type="item", item_type="method_technique", slug="thing", status="active")
+    graph.upsert_node(conn, node_id="itm_00000000000000aa", node_type="item", item_type="method_technique", slug="thing", status="active")
     conn.commit()
     conn.close()
     page = tmp_path / "wiki" / "Items" / "thing.md"
     page.parent.mkdir(parents=True, exist_ok=True)
-    page.write_text('---\ntype: item\nitem_id: "itm_x"\nitem_type: method_technique\ntitle: "Thing"\nstatus: active\n'
+    page.write_text('---\ntype: item\nitem_id: "itm_00000000000000aa"\nitem_type: method_technique\ntitle: "Thing"\nstatus: active\n'
                     "review_status: none\naliases: []\n---\n\n# Thing\n", encoding="utf-8")
     _write_review(tmp_path, "approved", {
         "review_id": "rev_d", "type": "deprecate_wiki_page", "status": "approved",
-        "subject": {"node_id": "itm_x", "page": "Items/thing.md"},
+        "subject": {"node_id": "itm_00000000000000aa", "page": "Items/thing.md"},
         "proposal": {"to_status": "deprecated_candidate", "reason": "x"},
         "context": {"node_type": "item"}})
     return page
@@ -1187,7 +1187,7 @@ def test_apply_runs_deprecation_executor_and_summary(client, tmp_path):
     fm = main_module.parse_frontmatter(page.read_text(encoding="utf-8"))
     assert fm["status"] == "deprecated_candidate" and fm["review_status"] == "approved"
     assert graph.connect(tmp_path / "db" / "graph.sqlite").execute(
-        "SELECT status FROM nodes WHERE node_id='itm_x'").fetchone()["status"] == "deprecated_candidate"
+        "SELECT status FROM nodes WHERE node_id='itm_00000000000000aa'").fetchone()["status"] == "deprecated_candidate"
 
 
 def test_apply_is_idempotent(client, tmp_path):
@@ -1227,7 +1227,7 @@ def test_apply_graph_missing_with_approved_items_is_503(client, tmp_path):
     # silent "applied" (and before promote_candidates would init an empty graph)
     _write_review(tmp_path, "approved", {
         "review_id": "rev_d", "type": "deprecate_wiki_page", "status": "approved",
-        "subject": {"node_id": "itm_x", "page": "Items/thing.md"},
+        "subject": {"node_id": "itm_00000000000000aa", "page": "Items/thing.md"},
         "proposal": {"to_status": "deprecated_candidate"}, "context": {"node_type": "item"}})
     assert fixtures.apply(client).status_code == 503
 

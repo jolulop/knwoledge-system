@@ -72,6 +72,10 @@ REASON_HINTS = {
     "manifest_missing": "the document has no manifest",
     "manifest_unreadable": "the document's manifest is invalid",
     "graph_missing": "there is no graph to render from",
+    # ADR-0070 B1 review: two tags share one page name, or a page's owner can't be established.
+    "page_conflict": "the tag's page file belongs to another tag, or its owner can't be established "
+                     "(two names give the same page name); nothing was written — see "
+                     "`scripts/validate_graph.py`",
 }
 _FAMILY_LABELS = {"claims": "claim", "syntheses": "synthesis", "items": "tag", "sources": "Source"}
 
@@ -188,6 +192,48 @@ def _scope(entry: dict[str, Any], gconn, wiki_dir: Path, extracted: set[str]) ->
         for nid in scope["items"]:
             scope["sources"] |= set(graph.sources_for_node(gconn, nid))
     return scope
+
+
+def _widen_for_tag_labels(root: Path, gconn, wiki_dir: Path, scopes: list[dict[str, set[str]]],
+                         extracted: set[str]) -> dict[str, str] | None:
+    """ADR-0070 B1: widen the Source scope when the derived tag mapping changed, and return it.
+
+    The labels in a Source page's `tags:` depend on every active tag (a collision suffixes all its
+    members), so a write can change the pages of documents it never touched. The mapping is compared
+    with the one the Source pages were last fully published with (`db/tag_labels.json`): a change to
+    any tag the entries did not act on, or an unknown published mapping, adds **every** extracted
+    Source page; a change confined to the tags acted on (or to active tags whose every document is
+    already in scope) adds the documents keeping them. Computed at
+    publication from durable state, so an interrupted write is covered by the retry. A mapping that
+    cannot be built (TagMappingError) also adds every Source page: each fails to render and stays
+    pending with the reason, so nothing ambiguous is published. Returns the mapping to save once the
+    Source pages are published, or None."""
+    from app.workers import tag_projection
+    if gconn is None:
+        return None
+    try:
+        current = tag_projection.active_mapping(gconn, wiki_dir)
+    except tag_projection.TagMappingError:
+        current, changed = None, None
+    else:
+        changed = tag_projection.changed_ids(tag_projection.load_published(root), current)
+    acted = set().union(*(s["items"] for s in scopes))
+    in_scope = set().union(*(s["sources"] for s in scopes))
+    holders = {n: set(graph.sources_for_node(gconn, n)) for n in changed or ()}
+
+    def covered(nid: str) -> bool:
+        # A change reaches only pages already being refreshed: a tag the entries acted on, or a
+        # still-active tag whose every document is in scope. A removed tag the entries did not name
+        # (its earlier documents are unknown) or a change reaching other documents is not covered.
+        return nid in acted or (current is not None and nid in current and holders[nid] <= in_scope)
+
+    if changed is None or not all(covered(n) for n in changed):
+        extra = set(extracted)
+    else:
+        extra = set().union(*holders.values())
+    for scope in scopes:
+        scope["sources"] |= extra
+    return current
 
 
 def _dependents(gconn, failed: dict[str, dict[str, str]]) -> dict[str, dict[str, set[str]]]:
@@ -366,9 +412,14 @@ def publish(root: Path, *, intent: str | None = None, sources: Any = (), items: 
                 else:
                     render(gconn, todo[family], wiki_dir=wiki_dir, root=root, now=now,
                            failed=failed[family])
+            mapping = _widen_for_tag_labels(root, gconn, wiki_dir, scopes, documents[0])
+            todo["sources"] = sorted(set().union(*(s["sources"] for s in scopes)))
             out["sources_rendered"] = _render_sources(root, todo["sources"], documents=documents,
                                                       wiki_dir=wiki_dir, templates_dir=templates_dir,
                                                       failed=failed["sources"])
+            if mapping is not None and not failed["sources"]:
+                from app.workers import tag_projection
+                tag_projection.save_published(root, mapping)
             deps = _dependents(gconn, failed)
         finally:
             if gconn is not None:

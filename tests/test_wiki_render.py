@@ -227,29 +227,76 @@ def test_source_items_block_sentinel_renders_only_as_qa_bucket_last():
     assert "### Unclassified Review Required" not in block
 
 
-def test_index_sentinel_renders_only_as_qa_bucket_last(tmp_path):
+def _rebuild_index_module():
     import importlib.util
     spec = importlib.util.spec_from_file_location(
         "rebuild_index_qa", Path(__file__).resolve().parents[1] / "scripts" / "rebuild_index.py")
     rebuild_index = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(rebuild_index)
+    return rebuild_index
+
+
+def _item_page(wiki, slug, title, item_type, status):
+    (wiki / "Items").mkdir(parents=True, exist_ok=True)
+    (wiki / "Items" / f"{slug}.md").write_text(
+        f'---\ntype: item\nitem_id: "itm_{slug}"\nitem_type: {item_type}\ntitle: "{title}"\n'
+        f"status: {status}\n---\n\n> [!summary] s\n> {title}.\n", encoding="utf-8")
+
+
+def test_index_sentinel_renders_only_as_qa_bucket_last(tmp_path):
+    rebuild_index = _rebuild_index_module()
     wiki = tmp_path / "wiki"
-    (wiki / "Items").mkdir(parents=True)
-    (wiki / "Items" / "alpha.md").write_text(
-        '---\ntype: item\nitem_id: "itm_a"\nitem_type: model\ntitle: "Alpha"\n'
-        "status: candidate\n---\n\n> [!summary] s\n> Alpha.\n", encoding="utf-8")
-    (wiki / "Items" / "zeta.md").write_text(
-        '---\ntype: item\nitem_id: "itm_z"\nitem_type: unclassified_review_required\n'
-        'title: "Zeta"\nstatus: candidate\n---\n\n> [!summary] s\n> Zeta.\n', encoding="utf-8")
+    _item_page(wiki, "alpha", "Alpha", "model", "active")
+    # An unknown/missing type sorts into the QA bucket (an active sentinel is validator-forbidden,
+    # but the pure renderer still groups by the same rule).
+    _item_page(wiki, "zeta", "Zeta", "unclassified_review_required", "active")
     text = rebuild_index.render_index(rebuild_index.collect_pages(wiki))
-    # Full listing preserved: BOTH pages are indexed (ADR-0060: primary links carry the
-    # display alias); the sentinel only under its QA bucket, last.
     assert "[[Items/alpha|Alpha]]" in text and "[[Items/zeta|Zeta]]" in text
     assert "### Model (1)" in text
     assert "### Unclassified (review required) (1)" in text
     assert text.index("### Model (1)") < text.index("### Unclassified (review required) (1)")
     assert "### unclassified_review_required" not in text
     assert "### Unclassified Review Required" not in text
+
+
+def test_index_lists_only_active_tags_with_counts_linked_only_to_real_screens(tmp_path):
+    # ADR-0070 B1 decision 2: active tags only; one count line per hidden status; a link only where
+    # a screen lists that status; other families unchanged.
+    rebuild_index = _rebuild_index_module()
+    wiki = tmp_path / "wiki"
+    _item_page(wiki, "kept", "Kept", "domain", "active")
+    _item_page(wiki, "sugg1", "Sugg One", "domain", "candidate")
+    _item_page(wiki, "sugg2", "Sugg Two", "unclassified_review_required", "candidate")
+    _item_page(wiki, "spare", "Spare", "domain", "unused")
+    _item_page(wiki, "gone", "Gone", "domain", "merged")
+    _item_page(wiki, "old", "Old", "domain", "deprecated_candidate")
+    _item_page(wiki, "quiet", "Quiet", "domain", "hidden")
+    (wiki / "Synthesis").mkdir(parents=True)
+    (wiki / "Synthesis" / "syn_x.md").write_text(
+        '---\ntype: synthesis\ntitle: "Cand Syn"\nstatus: candidate\n---\n\n> [!summary] s\n> x.\n',
+        encoding="utf-8")
+    base = "http://127.0.0.1:18000"
+    text = rebuild_index.render_index(rebuild_index.collect_pages(wiki), ui_base=base)
+    items = text.split("## Items", 1)[1].split("\n## ", 1)[0]
+    assert "[[Items/kept|Kept]]" in items
+    for hidden in ("sugg1", "sugg2", "spare", "gone", "old", "quiet"):
+        assert f"[[Items/{hidden}" not in text
+    assert "- Items: 1" in text and "## Items (1)" in text
+    assert f"- 2 suggested, not kept on any document yet — [review by document]({base}/ui/reviews/sources)" in items
+    assert f"- 1 unused (no document keeps them) — [Unused tags]({base}/ui/reviews/tags/unused)" in items
+    assert "- 1 merged into another tag (redirect pages)\n" in items
+    assert "- 1 pending deprecation\n" in items
+    assert "- 1 hidden\n" in items
+    assert "Unclassified (review required)" not in text      # the sentinel can only be a candidate
+    assert "[[Synthesis/syn_x|Cand Syn]]" in text            # other families, incl. candidates, unchanged
+
+
+def test_index_without_hidden_tags_has_no_count_block(tmp_path):
+    rebuild_index = _rebuild_index_module()
+    wiki = tmp_path / "wiki"
+    _item_page(wiki, "kept", "Kept", "domain", "active")
+    text = rebuild_index.render_index(rebuild_index.collect_pages(wiki), ui_base="http://h:1")
+    assert "Not listed here" not in text
 
 
 def test_source_details_link_the_original_and_drop_dead_sections():

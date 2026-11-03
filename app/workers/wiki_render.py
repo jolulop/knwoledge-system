@@ -297,6 +297,7 @@ def build_source_values(
     title: str | None = None,
     keywords: list[str] | None = None,
     names: dict[str, list[tuple[str, str | None]]] | None = None,
+    tags: list[str] | None = None,
 ) -> dict[str, Any]:
     sid = manifest["source_id"]
     # ADR-0066 part 3: the caller passes the effective title (app/workers/titles.py).
@@ -350,6 +351,9 @@ def build_source_values(
         # ADR-0066 part 3 slice 2: search terms (the kept tags plus the eligible suggestions, from
         # the graph projection), an ordinary property, never Obsidian tags; it replaced `tags:`.
         "keywords": _render_tag_list(list(keywords or [])),
+        # ADR-0070 B1: the kept tags as nested Obsidian tags (`<item_type>/<label>`), a generated
+        # projection of the keep ledger (app/workers/tag_projection.py), independent of `keywords:`.
+        "tags_fm": _render_tag_list(list(tags or [])),
         "details_block": _details_block(manifest, raw_url, names),
         "claims_block": _claims_block(claims),
         "items_block": _items_block(items) + _suggested_block(suggested_items),
@@ -800,6 +804,7 @@ def render_source_page(
     title: str | None = None,
     keywords: list[str] | None = None,
     names: dict[str, list[tuple[str, str | None]]] | None = None,
+    tags: list[str] | None = None,
 ) -> str:
     """Render a Source page, stamping its input_fingerprint.
 
@@ -814,6 +819,7 @@ def render_source_page(
         manifest, normalized_markdown, summary_max=summary_max, summary_min=summary_min,
         enrichment=enrichment, claims=claims, items=items, suggested_items=suggested_items,
         raw_url=raw_url, title=title, keywords=keywords, names=names,
+        tags=tags,
     )
     draft = render_template(template, {**values, "input_fingerprint": ""})
     fingerprint = _fingerprint(_FP_LINE.sub("", draft))

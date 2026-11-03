@@ -26,7 +26,7 @@ def _graph(tmp_path):
     return graph.connect(gdb)
 
 
-def _write_item(tmp_path, conn, *, node_id="itm_x", slug="thing", node_status="active",
+def _write_item(tmp_path, conn, *, node_id="itm_00000000000000aa", slug="thing", node_status="active",
                 review_status="none"):
     page = tmp_path / "wiki" / "Items" / f"{slug}.md"
     page.parent.mkdir(parents=True, exist_ok=True)
@@ -70,12 +70,12 @@ def _apply(tmp_path, conn):
 def test_apply_in_scope_concept(tmp_path):
     conn = _graph(tmp_path)
     page = _write_item(tmp_path, conn)
-    _approve(tmp_path, node_id="itm_x", page="Items/thing.md", node_type="item")
+    _approve(tmp_path, node_id="itm_00000000000000aa", page="Items/thing.md", node_type="item")
     res = _apply(tmp_path, conn)
     assert res["applied"] == 1 and res["normalized"] == 0 and res["skipped"] == []
     fm = parse_frontmatter(page.read_text(encoding="utf-8"))
     assert fm["status"] == "deprecated_candidate" and fm["review_status"] == "approved"
-    assert graph.get_node(conn, "itm_x")["status"] == "deprecated_candidate"
+    assert graph.get_node(conn, "itm_00000000000000aa")["status"] == "deprecated_candidate"
 
 
 def test_apply_in_scope_claim(tmp_path):
@@ -92,7 +92,7 @@ def test_apply_in_scope_claim(tmp_path):
 def test_idempotent_true_no_op(tmp_path):
     conn = _graph(tmp_path)
     _write_item(tmp_path, conn)
-    _approve(tmp_path, node_id="itm_x", page="Items/thing.md", node_type="item")
+    _approve(tmp_path, node_id="itm_00000000000000aa", page="Items/thing.md", node_type="item")
     _apply(tmp_path, conn)            # first apply
     res = _apply(tmp_path, conn)      # second apply -> fully effected, silent no-op
     assert res["applied"] == 0 and res["normalized"] == 0 and res["changed_pages"] == []
@@ -102,7 +102,7 @@ def test_normalization_apply_when_only_review_status_off(tmp_path):
     # page + graph already deprecated_candidate, but review_status is wrong -> normalization apply
     conn = _graph(tmp_path)
     _write_item(tmp_path, conn, node_status="deprecated_candidate", review_status="pending")
-    _approve(tmp_path, node_id="itm_x", page="Items/thing.md", node_type="item")
+    _approve(tmp_path, node_id="itm_00000000000000aa", page="Items/thing.md", node_type="item")
     res = _apply(tmp_path, conn)
     assert res["normalized"] == 1 and res["applied"] == 0
     fm = parse_frontmatter((tmp_path / "wiki" / "Items" / "thing.md").read_text(encoding="utf-8"))
@@ -116,13 +116,13 @@ def test_graph_only_mirror_update_succeeds_without_page_change(tmp_path):
     # no changed_pages.
     conn = _graph(tmp_path)
     _write_item(tmp_path, conn, node_status="deprecated_candidate", review_status="approved")
-    graph.upsert_node(conn, node_id="itm_x", node_type="item", slug="thing", status="active")  # stale
-    _approve(tmp_path, node_id="itm_x", page="Items/thing.md", node_type="item")
+    graph.upsert_node(conn, node_id="itm_00000000000000aa", node_type="item", slug="thing", status="active")  # stale
+    _approve(tmp_path, node_id="itm_00000000000000aa", page="Items/thing.md", node_type="item")
     res = _apply(tmp_path, conn)
     assert res["skipped"] == []                  # not recorded as a skip
     assert res["changed_pages"] == []            # page already canonical -> no page write
     assert res["applied"] == 1 and res["graph_changed"] is True
-    assert graph.get_node(conn, "itm_x")["status"] == "deprecated_candidate"  # mirror updated
+    assert graph.get_node(conn, "itm_00000000000000aa")["status"] == "deprecated_candidate"  # mirror updated
 
 
 def test_legacy_missing_context_node_type_absorbed_not_skipped(tmp_path):
@@ -149,8 +149,8 @@ def test_page_node_mismatch_wrong_dir_is_skipped(tmp_path):
 def test_page_node_mismatch_wrong_slug_is_skipped(tmp_path):
     # well-formed in-scope path, but it is not the node's canonical page (different slug)
     conn = _graph(tmp_path)
-    _write_item(tmp_path, conn)  # node itm_x, slug "thing" -> canonical Items/thing.md
-    _approve(tmp_path, node_id="itm_x", page="Items/other.md", node_type="item")
+    _write_item(tmp_path, conn)  # node itm_00000000000000aa, slug "thing" -> canonical Items/thing.md
+    _approve(tmp_path, node_id="itm_00000000000000aa", page="Items/other.md", node_type="item")
     res = _apply(tmp_path, conn)
     assert res["applied"] == 0
     assert res["skipped"] == [{"review_id": "rev_d", "reason": "page_node_mismatch"}]
@@ -161,10 +161,10 @@ def test_trailing_newline_page_is_invalid_page_path(tmp_path):
     # rejected as invalid_page_path, not silently accepted.
     conn = _graph(tmp_path)
     _write_item(tmp_path, conn)
-    _approve(tmp_path, node_id="itm_x", page="Items/thing.md\n", node_type="item")
+    _approve(tmp_path, node_id="itm_00000000000000aa", page="Items/thing.md\n", node_type="item")
     res = _apply(tmp_path, conn)
     assert res["skipped"] == [{"review_id": "rev_d", "reason": "invalid_page_path"}]
-    assert graph.get_node(conn, "itm_x")["status"] == "active"  # untouched
+    assert graph.get_node(conn, "itm_00000000000000aa")["status"] == "active"  # untouched
 
 
 def test_malicious_traversal_page_is_invalid_and_never_read(tmp_path):
@@ -175,11 +175,11 @@ def test_malicious_traversal_page_is_invalid_and_never_read(tmp_path):
     secret = tmp_path / "raw" / "permanent" / "x.md"
     secret.parent.mkdir(parents=True, exist_ok=True)
     secret.write_text("---\nstatus: active\n---\n", encoding="utf-8")
-    _approve(tmp_path, node_id="itm_x", page="Claims/../../raw/permanent/x.md", node_type="item")
+    _approve(tmp_path, node_id="itm_00000000000000aa", page="Claims/../../raw/permanent/x.md", node_type="item")
     res = _apply(tmp_path, conn)
     assert res["applied"] == 0 and res["changed_pages"] == []
     assert res["skipped"] == [{"review_id": "rev_d", "reason": "invalid_page_path"}]
-    assert graph.get_node(conn, "itm_x")["status"] == "active"  # untouched
+    assert graph.get_node(conn, "itm_00000000000000aa")["status"] == "active"  # untouched
 
 
 def test_item_types_share_the_scope_seam(tmp_path):

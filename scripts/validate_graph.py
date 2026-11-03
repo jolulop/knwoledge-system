@@ -74,6 +74,18 @@ def _check(db_path: Path) -> list[str]:
             if slug is not None and not graph.is_safe_slug(slug):
                 errors.append(f"node {node_id}: unsafe slug (structural corruption — path separator or '.'/'..')")
 
+        # ADR-0070 B1 review: an item's page is Items/<slug>.md, so two item nodes recording one slug
+        # (in ANY status) share one page file — a write or delete for one destroys the other's
+        # authority. Writers refuse this; any existing case is reported here.
+        by_slug: dict[str, list[str]] = {}
+        for r in node_rows:
+            if r["node_type"] == "item" and r["slug"]:
+                by_slug.setdefault(r["slug"], []).append(r["node_id"])
+        for slug, ids in sorted(by_slug.items()):
+            if len(ids) > 1 and graph.is_safe_slug(slug):
+                errors.append(f"items {', '.join(sorted(ids))} share the page name Items/{slug}.md "
+                              f"(their statuses: {', '.join(str(node_status.get(i)) for i in sorted(ids))})")
+
         known = set(node_types)
         for e in conn.execute("SELECT * FROM edges"):
             ref = e["edge_id"]

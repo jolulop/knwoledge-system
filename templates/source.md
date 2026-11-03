@@ -18,6 +18,7 @@ created: "{{created_at}}"
 ingested: "{{ingested_at}}"
 input_fingerprint: "{{input_fingerprint}}"
 keywords: {{keywords}}
+tags: {{tags_fm}}
 items: {{items_fm}}
 ---
 

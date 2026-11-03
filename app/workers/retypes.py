@@ -25,7 +25,7 @@ from typing import Any
 
 from app.backend import graph, taxonomy
 from app.backend.manifests import iso_now
-from app.workers import items, reviews
+from app.workers import item_pages, items, reviews
 from app.workers.wiki_render import NODE_DIR, render_item_page
 
 _RETYPABLE_STATUSES = frozenset({"active", "candidate"})   # live statuses only (ADR-0051 decision D)
@@ -110,6 +110,8 @@ def retype_check(gconn, item: dict[str, Any], *, wiki_dir: Path) -> tuple[str, A
         return "skip", "node_not_retypable"
     page_rel = f"{NODE_DIR['item']}/{node['slug']}.md"
     page_path = Path(wiki_dir) / page_rel
+    if (problem := item_pages.page_problem(gconn, wiki_dir, nid, node["slug"])) is not None:
+        return "skip", problem["reason"]         # ADR-0070 B1 review: never another item's page
     meta = items._read_node_meta(page_path)
     if meta is None:
         return "skip", "page_missing"
@@ -149,8 +151,7 @@ def _apply_retypes(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None)
         if state == "done":
             continue
         nid, to_type, node = ctx["nid"], ctx["to_type"], ctx["node"]
-        page_rel, page_path, meta, from_type = (ctx["page_rel"], ctx["page_path"], ctx["meta"],
-                                                ctx["from_type"])
+        page_rel, meta, from_type = ctx["page_rel"], ctx["meta"], ctx["from_type"]
 
         # --- APPLY: the metadata flip — re-render the page with the new item_type (status,
         # review_status, and every page-owned field preserved), mirror the graph row, done. ---
@@ -166,7 +167,7 @@ def _apply_retypes(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None)
             "split_review_id": meta.get("split_review_id"),
             "description": meta.get("description"),
         }, labels=items._link_labels(wiki_dir, node_sources + suggested, duplicates))
-        page_path.write_text(rendered, encoding="utf-8")
+        item_pages.write_page(gconn, wiki_dir, nid, node["slug"], rendered)
         graph.upsert_node(gconn, node_id=nid, node_type="item", slug=node["slug"],
                           status=node["status"], item_type=to_type, now=now)
         changed_pages.append(page_rel)

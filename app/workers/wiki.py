@@ -23,7 +23,8 @@ from typing import Any
 from app.backend import db, graph, write_lock
 from app.backend.config import get_settings
 from app.backend.manifests import iso_now, load_manifest, valid_manifests
-from app.workers import authors, enrichment_artifact, labels, titles, wiki_render
+from app.backend.search import RETENTION_DEFAULT_STATUSES
+from app.workers import authors, enrichment_artifact, labels, tag_projection, titles, wiki_render
 
 
 def _claim_label(claims_dir: Path, claim_id: str) -> str | None:
@@ -184,6 +185,19 @@ def generate_wiki(
         skipped_not_extracted = 0
         errors: list[dict[str, str]] = []
 
+        # ADR-0070 B1: the vault's tag mapping, derived from the active tags. A caller that publishes
+        # holds the write lock across the whole call, so one mapping serves every page; a run takes
+        # the lock per page and derives it again inside each hold (a keep in between may change it).
+        shared_mapping: dict[str, str] | None = None
+
+        def _tag_mapping() -> dict[str, str]:
+            nonlocal shared_mapping
+            if run is not None:
+                return tag_projection.active_mapping(gconn, wiki_dir)
+            if shared_mapping is None:
+                shared_mapping = tag_projection.active_mapping(gconn, wiki_dir)
+            return shared_mapping
+
         def _render_one(manifest: dict[str, Any]) -> str | dict[str, str]:
             """Render and write one Source page from current state (ADR-0068: called under
             the write lock, so the manifest, ledger and graph it reads are consistent)."""
@@ -206,6 +220,7 @@ def generate_wiki(
                 items = None
                 suggested_items = None
                 keywords: list[str] = []
+                tags: list[str] = []
                 if gconn is not None:
                     claims = [
                         {"claim_id": cid, "title": _claim_label(claims_dir, cid)}
@@ -232,6 +247,9 @@ def generate_wiki(
                         for m in suggested
                     ]
                     keywords = _keywords(enrichment_dir, source_id, curated, suggested, wiki_dir)
+                    # ADR-0070 B1: only on default-visible documents, like the Authors pages.
+                    if (manifest.get("status") or "active") in RETENTION_DEFAULT_STATUSES:
+                        tags = tag_projection.source_tags(curated, _tag_mapping())
                 candidate = wiki_render.render_source_page(
                     template, manifest, normalized_markdown,
                     summary_max=summary_max, summary_min=summary_min,
@@ -242,6 +260,7 @@ def generate_wiki(
                         hint=titles.read_metadata_hint(logs_dir, source_id)),
                     keywords=keywords,
                     names=authors.linked_names(manifest),   # ADR-0066 part 3 slice 4
+                    tags=tags,
                 )
             except Exception as exc:  # one page's failure must not abort the run
                 return {"source_id": source_id, "error": f"{type(exc).__name__}: {exc}"}

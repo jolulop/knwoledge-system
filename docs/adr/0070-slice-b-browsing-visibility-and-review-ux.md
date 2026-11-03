@@ -384,6 +384,147 @@ accepted the proposed resolutions with six adjustments (marked "user" below). Do
 | N3 | Plural folding | Omitted for names, as in `name_identity` |
 | N4 | "Never saved" needs durable evidence | `first_tag_decision_at` in the ledger, never cleared by undo; **"never suggest" counts (user)**; **evidence-based migration, "tagging history unknown" when evidence is missing (user)** |
 
+## Implementation — B1 (2026-11-03)
+
+- **`app/workers/tag_projection.py` (new):**
+  - `encode_label` and `build_mapping` implement the encoding rule and the fixed-point collision
+    rule.
+  - `active_mapping` builds the vault's mapping: every `active` item, the title from **its own**
+    page (the authority) and its graph `item_type`. Review round 2: there is no fallback. A
+    missing or unreadable page, a page whose `item_id` names another item, an empty title or a
+    missing type raises `TagMappingError`, so publication stays pending rather than publish a
+    borrowed or invented name.
+  - `source_tags` returns a document's `tags:`.
+  - `load_published`, `save_published` and `changed_ids` handle the last published mapping.
+- **Apostrophes are deleted before *and* after NFKC.** NFKC turns `´` U+00B4 into a space plus a
+  combining accent, so deleting only after NFKC never saw it. Found by the encoding tests.
+- **Source page:** the template gains `tags: {{tags_fm}}` after `keywords:`.
+  - `generate_wiki` passes the curated (kept) active tags through the mapping, on default-visible
+    documents only.
+  - Within one locked call the mapping is derived once. A run derives it again inside each per-page
+    hold.
+  - Legacy tags (active, linked before the keep ledger) are curated rows on the page, so they appear
+    too.
+- **Publication: how "a write records a full Source-page intent" is realized.** Publication compares
+  the current mapping with the **last published mapping**, `db/tag_labels.json` (`_widen_for_tag_labels`).
+  - A change to a tag is *covered* when the entries acted on it, or when it is still active and
+    every document keeping it is already in scope.
+  - Any uncovered change, or an unknown published mapping (missing or malformed file), adds
+    **every** extracted Source page to the scope of every entry, so a failure stays queued.
+  - The snapshot is saved only when every Source page in that publication rendered.
+  - **Crash safety:** the comparison runs at publication from durable state, so a write that
+    commits and dies before publishing is covered by the retry. The pending entry is widened and
+    the old snapshot still differs.
+  - The snapshot holds labels, never identity. Deleting it costs one full Source-page refresh.
+  - A `TagMappingError` adds every Source page too. Each fails to render and stays pending.
+- **Hand edits to `tags:`:** the Source-page fingerprint skip leaves a hand-edited page alone until
+  its inputs change, as for every generated page. `validate_projection` reports the drift, and
+  `scripts/generate_wiki.py --force` restores it. Keeps are never read from the page.
+- **Index** (`scripts/rebuild_index.py`):
+  - Items lists active pages only. "Not listed here" count lines link to `/ui/reviews/sources`
+    (candidate) and `/ui/reviews/tags/unused` (unused), and give plain counts for merged,
+    deprecated_candidate, hidden and any other status.
+  - The base URL comes from the "open original" link (`raw_view_base`).
+  - Navigation Counts shows the listed (active) Items.
+- **Graph preset:** `-path:Claims -file:index -file:log -(path:Items -[status:active])`. **Not yet
+  verified in Obsidian:** this is Obsidian acceptance requirement 1.
+- **Validator:** `validate_projection` checks each Source page's `tags:` against the projection
+  (archived documents: empty) and reports a mapping that cannot be built.
+- **Tests:**
+  - `tests/test_tag_projection.py` (new): encoding, collisions (order, case-only, 6 → 8, the full
+    16, a suffixed label equal to a plain one, the id fallback), and integration through real
+    keep, drop, undo and block actions. The integration covers a collision rewriting another
+    document's page and disappearing again, an interrupted publication completed by the retry, a
+    lost snapshot, a keep that refreshes only its own documents, an unbuildable mapping, a
+    blocked-but-kept tag, a title amendment, an archived document, and hand-edit drift.
+  - `tests/test_wiki_render.py`: the active-only index and its count lines.
+  - Retype, merge and split publish through Apply's full publication. Real Apply tests were
+    added in review round 2.
+- **Found while testing, pre-existing:** two different tags whose names slugify the same share
+  one page file. Examples: `Café` and `Caf` → `wiki/Items/caf.md`; any all-non-Latin name →
+  `unnamed`; `C++` / `C` when neither is kept, since an active tag absorbs the other by
+  `merge_key`. Writing or deleting that file for one tag destroyed the other's page-held title,
+  aliases, description and status. Review round 2 makes B1 fail safe. **The permanent
+  filename policy is a separate design.**
+
+## Review round 2 on B1 (2026-11-03)
+
+One external review of the B1 implementation: three blocking issues (P1 shared page files, P2
+resolver, P3 mapper), plus requested tests. The user accepted the fixes with tightened safeguards.
+
+- **P2, resolver:** in each clashing group only the members below 16 hex extend; saturated
+  members stay. `TagMappingError` is raised only when no member of a group can extend (duplicate
+  ids). The reviewer's three-item case (two `X` needing full suffixes, and a third literally named
+  one of the results) now resolves.
+- **P3, mapper:** strict ownership and authority, as above.
+- **P1, page ownership** (`app/workers/item_pages.py`, new). One rule decides who may write or
+  delete `Items/<slug>.md`:
+  - **the item's own page** (`item_id` equals the item): writable;
+  - **absent:** writable only when no other item node, **in any status** (candidate, active,
+    unused, hidden, merged, deprecated_candidate, …), records the same slug;
+  - **another item's page, or a page whose owner can't be established** (unreadable, no
+    frontmatter, missing or malformed `item_id`): refused. It fails closed.
+  - Deleting is allowed only for the item's own page or an absent one.
+- **Checks run before authority changes, under the existing write/ledger lock.** Multi-item
+  operations check every destination before their first write:
+  - **Extraction** (`items._emit`): a suggestion whose page name is taken or unowned is skipped
+    before its node or mention exists. Human decisions are untouched. The run is `partial`, with
+    `suggestions_skipped_slug_taken` and `slug_taken_details` (source, proposed name, slug,
+    reason, owner, holders).
+  - **Tag actions:** keep, drop, edit aliases, undo drop and "use X" check the tag and its
+    `duplicates` partners. A block checks every matching tag and partner before writing the
+    list entry. `delete_tag` checks before its deletion intent, and Delete unused reports a
+    refused tag under `skipped`.
+  - **Human-add** checks graph holders as well as the file.
+  - **Promote** (`activate_node`) checks the current page and a moved slug's destination,
+    including in its dry run, which is the keep preflight.
+  - **Apply executors:** retype (in `retype_check`, so the queue's applied column agrees), merge
+    (survivor, absorbed tombstone, duplicate partners) and split (primary, spin-off) refuse as
+    typed skips before the journal.
+  - The page renderers (`_recompose_node`, `recompose_semantic_node_page`) return
+    `page_conflict` without writing. Publication keeps such a page pending with a hint.
+  - `write_page` / `remove_page` enforce the same rule at the point of IO, as a backstop.
+- **Validation:** `validate_projection` builds the tag mapping (strictly) only when a Source page
+  has an active kept tag to project, so a vault with no such page is not failed for unrelated
+  item pages. Test fixtures with non-canonical ids (`itm_x`) now use canonical ones: the
+  ownership rule rejects a malformed `item_id`.
+  `validate_graph` reports item nodes that share a slug (any status).
+  `validate_projection` reports an item page whose `item_id` is not the graph item recording that
+  page name.
+- **A block cannot see a tag through a borrowed page.** A tag's names are read from its page, so
+  a tag whose recorded page belongs to another item matches no block. The block only records the
+  name and neither withdraws nor deletes anything for that tag.
+- **Tests:**
+  - `tests/test_item_page_ownership.py` (new, 20): the rule, plus fail-closed ownership (no
+    frontmatter, no `item_id`, malformed, non-string, unreadable).
+  - Extraction: skip-and-report, a page name held in every status with the file gone, an unowned
+    hand-made file.
+  - Human-add refusal; keep, drop and block on an existing collision, with no ledger or graph
+    change; `delete_tag` and Delete unused.
+  - Apply: retype, merge and split skips, and a split spin-off onto a page name held by a file or
+    only in the graph (journal never opened).
+  - Both validators.
+  - `tests/test_tag_projection.py` (57): the saturated-member resolver case; the mapper refusing a
+    missing, unreadable, wrong-owner or untitled page (publication pending, then recovered);
+    repeated recovery failures staying queued until fixed.
+  - Interruption: a crash after the authority commit (intent recorded, keep committed, nothing
+    published), recovered by the next publication; a partial Source refresh that keeps the
+    snapshot, then the retry finishing.
+  - **Real Apply** (`POST /reviews/apply` with a preview token): a retype ending and then
+    re-creating a collision, a merge ending one, and a split creating one, each rewriting the
+    untouched document's `tags:`.
+
+## Review round 3 on B1 (2026-11-04)
+
+One remaining blocker: "use X" checked only the suggestion and the chosen tag. The inner `drop()`
+then checked the suggestion's duplicate partners after the chosen tag had already been kept, and
+left a resolving record behind. `use_existing` now checks every affected page first: the chosen
+tag, the suggestion, and both sides' duplicate partners. The check runs before cancelling an
+earlier resolution or writing the resolving record. Regression tests (`tests/test_item_page_ownership.py`)
+cover a foreign-owned partner on either side, with and without an earlier pending resolution.
+Each asserts the ledger, the graph and the pending resolution are unchanged. All four fail
+against the old preflight.
+
 ## Implementation notes
 
 - Each sub-slice follows the usual rhythm: implement on "implement now" → tests → external review

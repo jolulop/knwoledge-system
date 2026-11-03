@@ -159,9 +159,48 @@ def authors_section(people: list[dict[str, Any]]) -> list[str]:
     return lines + [""]
 
 
+# ADR-0070 B1: the index lists only ACTIVE tag pages; every other item status is a count line. A
+# count links only to a screen that really lists that status (`/ui/reviews/sources` shows suggestions
+# as rows, `/ui/reviews/tags/unused` the unused tags); the others have no screen, so no link.
+_HIDDEN_ITEM_STATUSES = (
+    ("candidate", "suggested, not kept on any document yet", "/ui/reviews/sources",
+     "review by document"),
+    ("unused", "unused (no document keeps them)", "/ui/reviews/tags/unused", "Unused tags"),
+    ("merged", "merged into another tag (redirect pages)", None, None),
+    ("deprecated_candidate", "pending deprecation", None, None),
+    ("hidden", "hidden", None, None),
+)
+
+
+def _hidden_item_lines(hidden: dict[str, int], ui_base: str | None) -> list[str]:
+    known = [s for s, *_ in _HIDDEN_ITEM_STATUSES]
+    lines = []
+    for status, label, path, link_text in _HIDDEN_ITEM_STATUSES:
+        n = hidden.get(status, 0)
+        if not n:
+            continue
+        line = f"- {n} {label}"
+        if path and ui_base:
+            line += f" — [{link_text}]({ui_base}{path})"
+        lines.append(line)
+    for status in sorted(s for s in hidden if s not in known):
+        lines.append(f"- {hidden[status]} with status {status}")
+    if not lines:
+        return []
+    return ["Not listed here (only active tags are):", "", *lines, ""]
+
+
 def render_index(sections: dict[str, list[dict[str, Any]]],
-                 people: list[dict[str, Any]] | None = None) -> str:
+                 people: list[dict[str, Any]] | None = None, *, ui_base: str | None = None) -> str:
     # Deterministic: a pure function of the wiki pages, no wall-clock (ADR-0023).
+    hidden_items: dict[str, int] = {}
+    listed = dict(sections)
+    if "Items" in listed:
+        for page in listed["Items"]:
+            if page["status"] != "active":
+                hidden_items[page["status"]] = hidden_items.get(page["status"], 0) + 1
+        listed["Items"] = [p for p in listed["Items"] if p["status"] == "active"]
+    sections = listed
     lines: list[str] = [
         "# Index",
         "",
@@ -186,6 +225,8 @@ def render_index(sections: dict[str, list[dict[str, Any]]],
     for section, pages in sections.items():
         lines.append(f"## {section} ({len(pages)})")
         lines.append("")
+        if section == "Items":
+            lines.extend(_hidden_item_lines(hidden_items, ui_base))
         if not pages:
             lines.append("_No pages yet._")
             lines.append("")
@@ -193,7 +234,7 @@ def render_index(sections: dict[str, list[dict[str, Any]]],
         if section == "Items":
             # ADR-0059: group by item_type (priority order; the sentinel's QA bucket renders
             # last and never as a taxonomy group). Unknown/missing types sort into the QA
-            # bucket rather than being dropped — the index is the full page listing.
+            # bucket rather than being dropped. Only active tags are listed (ADR-0070 B1).
             groups: dict[str, list[dict[str, Any]]] = {}
             for page in pages:
                 itype = page.get("item_type") or ""
@@ -228,9 +269,16 @@ def _people(project_root: Path) -> list[dict[str, Any]]:
     return authors.inventory(project_root)
 
 
+def _ui_base(project_root: Path) -> str:
+    """The web app's base URL for the index's count links: the same host and port as the Source
+    page's "open original" link (`app.workers.wiki.raw_view_base`)."""
+    from app.workers.wiki import raw_view_base
+    return raw_view_base(project_root).removesuffix("/raw/")
+
+
 def _build(project_root: Path, wiki_root: Path) -> int:
     sections = collect_pages(wiki_root)
-    output = render_index(sections, _people(project_root))
+    output = render_index(sections, _people(project_root), ui_base=_ui_base(project_root))
     index_path = wiki_root / "index.md"
     index_path.write_text(output, encoding="utf-8")
     print(f"rebuilt {index_path} with {sum(len(v) for v in sections.values())} pages", file=sys.stderr)

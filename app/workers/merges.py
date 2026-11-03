@@ -24,6 +24,7 @@ from typing import Any
 
 from app.backend import graph, taxonomy
 from app.backend.manifests import iso_now
+from app.workers import item_pages as ownership
 from app.workers import items, labels, reviews
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter, render_item_page
 
@@ -219,8 +220,7 @@ def _render_survivor(gconn, *, a: str, na: dict[str, Any], nt: str, aliases: lis
     }, labels=items._link_labels(wiki_dir, node_sources + suggested, duplicates))
     changed = (not page.exists()) or page.read_text(encoding="utf-8") != rendered
     if changed:
-        page.parent.mkdir(parents=True, exist_ok=True)
-        page.write_text(rendered, encoding="utf-8")
+        ownership.write_page(gconn, wiki_dir, a, na["slug"], rendered)
     graph.upsert_node(gconn, node_id=a, node_type=nt, slug=na["slug"], status=status,
                       item_type=item_type, now=now)
     return f"{NODE_DIR[nt]}/{na['slug']}.md" if changed else None
@@ -233,14 +233,13 @@ def _render_tombstone(gconn, *, b: str, nb: dict[str, Any], nt: str, a: str, a_s
     page = wiki_dir / NODE_DIR[nt] / f"{nb['slug']}.md"
     meta = items._read_node_meta(page)
     item_type = (meta or {}).get("item_type") or nb.get("item_type")
-    page.parent.mkdir(parents=True, exist_ok=True)
     survivor_link = f"{NODE_DIR[nt]}/{a_slug}"
-    page.write_text(render_item_page({
+    ownership.write_page(gconn, wiki_dir, b, nb["slug"], render_item_page({
         "node_id": b, "item_type": item_type, "title": b_title,
         "aliases": b_aliases, "confidence": (meta or {}).get("confidence", "low"), "status": "merged",
         "merged_into": a, "merged_into_link": survivor_link,
         "merged_at": now, "merge_review_id": rid,
-    }, labels=labels.display_labels(wiki_dir, [survivor_link])), encoding="utf-8")
+    }, labels=labels.display_labels(wiki_dir, [survivor_link])))
     graph.upsert_node(gconn, node_id=b, node_type=nt, slug=nb["slug"], status="merged",
                       item_type=item_type, now=now)
     return f"{NODE_DIR[nt]}/{nb['slug']}.md"
@@ -371,6 +370,14 @@ def apply_merges(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = 
                 continue
             if tag_links.corrupt_ledgers(reviews_dir):
                 _skip("tag_ledger_corrupt")                  # decisions must move with the merge, intact
+                continue
+            # ADR-0070 B1 review: every page this merge writes — the survivor, the absorbed tag's
+            # tombstone and the duplicate partners re-rendered — must be that item's own (or free),
+            # checked before the journal, the first write.
+            dup_partners = {e["src_id"] if e["dst_id"] == b else e["dst_id"]
+                            for e in edges if e["edge_type"] == "duplicates"} - {a, b}
+            if (problem := ownership.first_problem(gconn, wiki_dir, [a, b, *sorted(dup_partners)])):
+                _skip(problem["reason"])
                 continue
 
             # --- LEDGER FIRST (ADR-0066 review round 3): journal the operation, then move B's keeps and

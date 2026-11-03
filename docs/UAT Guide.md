@@ -197,8 +197,10 @@ One that prints "publication incomplete" left work queued: run `uv run python sc
 list of typed tags. Its tags join the tag suggestions, so run it before `extract_items.py` (the
 order above). A Source page shows the **effective title**: the confirmed title (§9.0.1), else
 Enrich's title, else the PDF metadata title when it passes a filter, else the filename. A confirmed
-title is display-only: it never re-runs or re-bills claims or items. Source pages list their tags
-as `keywords:` (kept tags and the eligible suggestions) instead of `tags:`.
+title is display-only: it never re-runs or re-bills claims or items. Source pages list their search
+terms as `keywords:` (kept tags and the eligible suggestions). `tags:` holds only the tags the
+document **keeps**, as `<item_type>/<name>` (ADR-0070 B1), so Obsidian's Tags pane browses kept
+tags by type.
 
 > [!note] Synthesis reports 0 on a fresh vault
 > `generate_synthesis` considers only **active** tags kept on documents from at least two
@@ -567,10 +569,29 @@ find wiki -maxdepth 2 -type f | sort | less
 ### Obsidian graph
 
 The clone ships a committed graph-view preset (`wiki/.obsidian/graph.json`): the **Claims** layer is
-filtered out (`-path:Claims`), the `index`/`log` hub pages are hidden (`-file:index -file:log`), and
+filtered out (`-path:Claims`), the `index`/`log` hub pages are hidden (`-file:index -file:log`),
+tag pages that are not **active** are hidden (`-(path:Items -[status:active])`, ADR-0070 B1:
+suggestions, unused, merged, pending-deprecation and hidden tags; their pages stay on disk), and
 **Sources**/**Items**/**Authors** are color-coded, so the graph opens as a
 readable ~120-node knowledge map instead of all ~460 pages. To see a page's claims, open it and use
 **"Open local graph"** (command palette) rather than un-filtering the global view.
+
+**Kept tags and the Tags pane (ADR-0070 B1).** `index.md` lists only active tags, with one count
+line per hidden status (suggestions link to the document screens, unused tags to the Unused tags
+list). Each Source page's `tags:` holds the document's kept tags as `<item_type>/<name>`, so the
+**Tags** pane is a tree by type; its numbers count **documents** using a tag, not tag pages. The
+names are made tag-safe (spaces and punctuation → `_`, `&` → `and`); two tags that would read the
+same get a short id suffix (`domain/Straße_787f47`). The list is generated: editing it in Obsidian
+changes nothing you kept, and `validate_projection` reports the edit. To check on this clone
+(ADR-0070 Obsidian acceptance requirements):
+
+1. The graph hides non-active tag pages only. Sources, Authors and Synthesis, including candidate
+   synthesis, stay visible.
+2. A digits-only tag such as `domain/2024` is accepted as a nested tag.
+3. Unicode: note which of these Obsidian treats as the same tag: `Café` / `Cafe`, `ai` / `AI`,
+   `ß` / `ss`, Turkish `İ` / `i`, and composed vs decomposed accents.
+4. Suffixed tags (`…_3fa9c1`) and an id-named tag (`domain/itm_…`) appear as nested tags.
+5. The Tags pane shows the `<item_type>/` tree with document counts.
 
 **Authors & publishers pages** (`wiki/Authors/`, ADR-0066 part 3) have their own colour group
 (`path:Authors`, in the same preset). They are **generated**: a page appears when a document's

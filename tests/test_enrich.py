@@ -126,7 +126,7 @@ def test_enriched_summary_is_composed_with_generated_label(tmp_path):
     assert fm["generation_status"] == "enriched"
     # ADR-0066 part 3 slice 2: Enrich's tags are tag suggestions (after the items pass), never a
     # free-text `tags:` list; `keywords:` lists the document's kept and suggested tags.
-    assert "tags" not in fm and fm["keywords"] == []
+    assert fm["tags"] == [] and fm["keywords"] == []   # ADR-0070 B1: kept tags only, none yet
     assert [t["name"] for t in json.loads(
         (tmp_path / "normalized" / "enrichment" / f"{sid}.json").read_text())["tags"]] == \
         ["alpha", "beta"]

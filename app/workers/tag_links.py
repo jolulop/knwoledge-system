@@ -50,7 +50,7 @@ from typing import Any
 
 from app.backend import graph, taxonomy, write_lock
 from app.backend.manifests import is_source_id, iso_now
-from app.workers import identity_journal, items, merge_candidates, merges, promote
+from app.workers import identity_journal, item_pages, items, merge_candidates, merges, promote
 from app.workers.wiki_render import NODE_DIR, REVIEW_STATUSES, parse_frontmatter
 
 LEDGER_DIR = "tag_links"
@@ -70,6 +70,22 @@ def tag_key(name: Any) -> str:
 
 def _blocked(reason: str, **extra: Any) -> dict[str, Any]:
     return {"outcome": "blocked", "reason": reason, **extra}
+
+
+def _page_refusal(gconn, wiki_dir: Path, node_ids: Any) -> dict[str, Any] | None:
+    """ADR-0070 B1 review: the typed refusal when any of these tags' pages is another item's, has an
+    owner that can't be established, or its page name is held by another item — checked before the
+    first ledger or graph write, so a refused action leaves nothing implying success."""
+    problem = item_pages.first_problem(gconn, Path(wiki_dir), [n for n in node_ids if n])
+    if problem is None:
+        return None
+    return _blocked(problem["reason"], node_id=problem["node_id"], slug=problem.get("slug"),
+                    page_owner=problem.get("owner"), holders=problem.get("holders") or [])
+
+
+def _partner_ids(gconn, node_id: str) -> list[str]:
+    """The tag's active `duplicates` partners (their pages re-render when it activates, moves or goes)."""
+    return [d["node_id"] for d in graph.active_duplicates(gconn, node_id)]
 
 
 def _in_flight(reviews_dir: Path, node_ids: Any) -> dict[str, Any] | None:
@@ -415,6 +431,8 @@ def keep(gconn, *, source_id: str, node_id: str, wiki_dir: Path, reviews_dir: Pa
         return _blocked("item_not_linkable", node_id=node_id, node_status=node["status"])
     if (busy := _in_flight(reviews_dir, [node_id])) is not None:
         return busy
+    if (refused := _page_refusal(gconn, wiki_dir, [node_id, *_partner_ids(gconn, node_id)])) is not None:
+        return refused
     try:
         amendments = promote.normalize_amendments(amendments)     # the shared ADR-0058 rules
     except promote.AmendmentError as exc:
@@ -483,6 +501,8 @@ def drop(gconn, *, source_id: str, node_id: str, wiki_dir: Path, reviews_dir: Pa
         return _blocked("item_not_linkable", node_id=node_id, node_status=node["status"])
     if (busy := _in_flight(reviews_dir, [node_id])) is not None:
         return busy
+    if (refused := _page_refusal(gconn, wiki_dir, [node_id, *_partner_ids(gconn, node_id)])) is not None:
+        return refused
     meta = _node_meta(wiki_dir, node) or {}
     title = meta.get("title") or node["slug"]
 
@@ -535,6 +555,8 @@ def edit_aliases(gconn, *, source_id: str, node_id: str, aliases: list[str], wik
         return _blocked("item_not_in_use", node_id=node_id, node_status=node["status"])
     if (busy := _in_flight(reviews_dir, [node_id])) is not None:
         return busy
+    if (refused := _page_refusal(gconn, wiki_dir, [node_id])) is not None:
+        return refused
     if node_id not in load_ledger(reviews_dir, source_id)["kept"]:
         return _blocked("not_kept_here", node_id=node_id, source_id=source_id)
     try:
@@ -577,6 +599,8 @@ def undo_drop(gconn, *, source_id: str, key: str, wiki_dir: Path, reviews_dir: P
         return _blocked("no_such_drop", key=key)
     if (busy := _in_flight(reviews_dir, [record.get("item_id")])) is not None:
         return busy
+    if (refused := _page_refusal(gconn, wiki_dir, [record.get("item_id")])) is not None:
+        return refused
     ledger["drops"] = [d for d in ledger["drops"] if d["key"] != key]
     _save_ledger(reviews_dir, ledger)
     restored = False
@@ -698,6 +722,15 @@ def use_existing(gconn, *, source_id: str, node_id: str, chosen: str, wiki_dir: 
             return _blocked("item_not_linkable", node_id=node_id, node_status=suggestion["status"])
     if (busy := _in_flight(reviews_dir, [node_id, chosen])) is not None:
         return busy
+    # ADR-0070 B1 review round 3: every page this operation may write — the chosen tag (keep), the
+    # suggestion (drop, possibly a deletion) and both sides' duplicate partners (re-rendered by the
+    # keep and the drop) — checked before cancelling an earlier resolution or writing the resolving
+    # record, so a refusal leaves the ledger, the graph and any pending resolution as they were.
+    affected_tags = [chosen, *_partner_ids(gconn, chosen)]
+    if suggestion is not None:
+        affected_tags += [node_id, *_partner_ids(gconn, node_id)]
+    if (refused := _page_refusal(gconn, wiki_dir, affected_tags)) is not None:
+        return refused
     cancelled: list[dict[str, Any]] = []
     if resume:
         record = pending
@@ -849,8 +882,15 @@ def delete_tag(gconn, *, node_id: str, wiki_dir: Path, reviews_dir: Path, reason
     node = _item_node(gconn, node_id)
     if node is None:
         return _blocked("unknown_item", node_id=node_id)
-    page_rel = f"{NODE_DIR['item']}/{node['slug']}.md"
+    # ADR-0070 B1 review: only this tag's own page (or none) may go, and its duplicate partners'
+    # pages are re-rendered below — all checked before the deletion intent, the first write.
     partners = [d["node_id"] for d in graph.active_duplicates(gconn, node_id)]
+    if (problem := item_pages.delete_problem(wiki_dir, node_id, node["slug"])) is not None:
+        return _blocked(problem["reason"], node_id=node_id, slug=node["slug"],
+                        page_owner=problem.get("owner"))
+    if (refused := _page_refusal(gconn, wiki_dir, partners)) is not None:
+        return refused
+    page_rel = f"{NODE_DIR['item']}/{node['slug']}.md"
     mentioning = sorted({r["src_id"] for r in gconn.execute(
         "SELECT DISTINCT src_id FROM edges WHERE dst_id = ? AND edge_type = 'mentions' "
         "AND status = 'active'", (node_id,))})
@@ -862,7 +902,7 @@ def delete_tag(gconn, *, node_id: str, wiki_dir: Path, reviews_dir: Path, reason
                                "title": meta.get("title"), "at": now}, indent=2) + "\n",
                    encoding="utf-8")
     os.replace(tmp, intent)
-    (wiki_dir / page_rel).unlink(missing_ok=True)
+    item_pages.remove_page(wiki_dir, node_id, node["slug"])
     edges_removed = graph.delete_node(gconn, node_id)
     withdrawn = merges._withdraw_b_subjects(reviews_dir, node_id, page_rel, now, reason="tag_deleted")
     for pid in partners:
@@ -910,6 +950,9 @@ def delete_unused(gconn, *, wiki_dir: Path, reviews_dir: Path,
             continue
         out = delete_tag(gconn, node_id=row["node_id"], wiki_dir=wiki_dir, reviews_dir=reviews_dir,
                          reason="delete_unused", now=now)
+        if out["outcome"] == "blocked":                   # e.g. a page another tag owns: skipped
+            skipped.append({"node_id": row["node_id"], "reason": out["reason"]})
+            continue
         deleted.append(row["node_id"])
         affected.update(out.get("affected_sources") or [])
     return {"deleted": deleted, "skipped": skipped, "affected_sources": sorted(affected)}
@@ -933,6 +976,11 @@ def block(gconn, *, name: str, policies_dir: Path, wiki_dir: Path, reviews_dir: 
                 if n["status"] in _LINKABLE_STATUSES and key in _node_keys(wiki_dir, n)]
     if (busy := _in_flight(reviews_dir, matching)) is not None:
         return busy                                       # nothing written, not even the list entry
+    # ADR-0070 B1 review: every tag this block may rewrite or delete (and their duplicate partners)
+    # is checked before the list entry, the first write.
+    partners = [d["node_id"] for n in matching for d in graph.active_duplicates(gconn, n)]
+    if (refused := _page_refusal(gconn, wiki_dir, matching + partners)) is not None:
+        return refused
     added = _add_blocked(policies_dir, name)
     withdrawn: list[dict[str, str]] = []
     affected: set[str] = set()
