@@ -346,6 +346,10 @@ pipeline from `raw/`, then keep or drop on each document screen. No conversion s
   (decision 7) and Enrich re-runs because of its prompt bump (decision 6), so the cost is about one
   paid Enrich pass plus one paid items pass, plus the user's review time. **Part 3 (Q1)** adds one
   paid claims pass: the claims prompt now takes the Enrich title.
+- **Backup precondition (ADR-0071 decision 4, 2026-11-04):** before the restart, verify the backup
+  holds the human state that regenerating from `raw/` cannot reproduce: item-page edits (titles,
+  aliases, descriptions, statuses), `reviews/tag_links/`, the blocked list, confirmed Details in the
+  manifests, and every review decision and the audit log under `reviews/`.
 
 ### 11. Success measure
 

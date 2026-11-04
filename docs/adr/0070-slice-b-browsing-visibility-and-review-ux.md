@@ -19,6 +19,8 @@ Slice B is built as **sub-slices**, each implemented, reviewed and committed on 
 order:
 
 1. **B1 — Obsidian and `index.md` visibility**, plus comment 4 (kept tags in `tags:`).
+   **B1b — item page filenames** (added 2026-11-04): ADR-0071, the permanent policy B1 left open
+   (filename rule, duplicate-name checks, Use existing / Add separately, Authors helper).
 2. **B2 — review-screen UX:** real titles on the remaining screens, a readable Apply preview, an
    untouched-row warning plus "next document", a "not yet tagged" marker, queue UX.
 3. **B3 — button styling:** quieter secondary and destructive buttons on the document screen.
