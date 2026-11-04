@@ -12,16 +12,50 @@ first after an app restart, then `wiki/index.md` if working in the vault._
 
 Local-first **LLM Wiki** knowledge-system. Immutable `raw/` → derived `normalized/` →
 generated `wiki/` (gitignored, regenerable) → `db/` SQLite (graph, jobs, llm_cache) →
-`reviews/`, `policies/`. ADR-driven (`docs/adr/0001–0070`). See `CLAUDE.md` for the
+`reviews/`, `policies/`. ADR-driven (`docs/adr/0001–0071`). See `CLAUDE.md` for the
 critical rules and `CONTEXT.md` for the glossary.
 
 ## Where we are
 
-- **2026-11-04 — ADR-0070 Slice B: design locked, B1 implemented; tip `c722f9c`, pushed, in sync
-  with `origin/main`**, tree clean except the user's `.vscode/`. No UAT clone exists (`/tmp/ks-uat`
-  was torn down 2026-11-03; the `backups/` zips are from July and unusable) — the next Obsidian
-  check needs a fresh clone per `docs/UAT Guide.md` §1, seeded with
-  `~/ks-saved/2026-11-02/llm_cache.ks-uat.sqlite` (B1 changed no prompts, so the cache still hits).
+- **2026-11-04 (late) — ADR-0070 B1 accepted in Obsidian; ADR-0071 B1b (item page filenames)
+  implemented; tip `661b877`, pushed, in sync with `origin/main`**, tree clean except the user's
+  `.vscode/`. Since `c722f9c`:
+  - `c4bf0fb` — the previous refresh of this file.
+  - **B1 Obsidian acceptance passed** on a fresh UAT clone (`/tmp/ks-uat`, built at `c4bf0fb`):
+    `domain/2024`; `Café`/`Cafe` separate; `İstanbul`; `!!!` → id fallback; `Straße`/`Strasse`
+    suffixed and independent; the Tags pane browses the kept tags (the "empty Tags" report was the
+    leftover empty `wiki/Tags/` folder); the graph shows only active tag pages. `AI`/`ai` are one
+    tag by design (the id hashes the lower-cased name). `318166a` removed the empty `wiki/Tags/`
+    scaffold. The Obsidian launcher gained `--enable-unsafe-swiftshader` (local file, not in git).
+  - `d59ef84` — **ADR-0071** design lock (item-filename grill Q1–Q5) + `CONTEXT.md` term *Item page
+    filename*; ADR-0070's order gains B1b; ADR-0066 decision 10 gains a backup precondition.
+  - `661b877` — **B1b** + external review rounds 1–2:
+    - **Filenames:** a lossless name (`[a-z0-9]+( [a-z0-9]+)*` after the id normalization) keeps
+      its plain slug; any other gets `<readable base>--<8 hex of its frozen item id>` (`item--…`
+      when the base is empty). The base strips accents (NFKD) and folds `ß`/`æ`/`ø`; shared with
+      Authors (`app/workers/page_names.py`). Recorded paths are never recomputed; only a real
+      title change re-derives one. The B1 ownership guards stay mandatory (8-hex collisions are
+      refused).
+    - **Duplicate names** (`app/workers/item_names.py`): an exact title match (id normalization)
+      **blocks** Add tag, a title amendment and a split spin-off (merged tombstones resolve to the
+      survivor; an unreadable title refuses). A similar `merge_key` match only **advises**: Add tag
+      offers **Use existing / Add separately** with the screen's draft kept; title amendments,
+      promotions and spin-offs report structured advisories. A rename refusal links the merge
+      preview when `plan_merge` allows it, otherwise says what the merge needs. Refusals read as
+      plain sentences on the document screen.
+    - **Lint:** report-only `item_filename_nonconforming` (actual vs expected path). No item
+      migration: old vaults keep working; the decision-10 clean restart yields conforming names.
+    - **Authors filename migration:** a Source page is written only when every Authors link it
+      carries points at a verified page — enforced in `wiki.generate_wiki`, the one Source-page
+      writer; replacements are written first; an old page is pruned only when no Source page links
+      it, and an incomplete link scan never prunes; unfinished Authors work stays pending.
+    - Gate before commit: **2242 passed, 2 skipped**, ruff clean, 15 validators, whitespace clean.
+  - **UAT clone `/tmp/ks-uat` is still at `c4bf0fb` (the old filename rule)** and may still have
+    its API running on `127.0.0.1:18000`. To see B1b end to end, rebuild it fresh per
+    `docs/UAT Guide.md` §1 (seed `~/ks-saved/2026-11-02/llm_cache.ks-uat.sqlite`; B1b changed no
+    prompts) — patching it in place keeps old-rule pages such as `Items/data-mesh.md`.
+- **2026-11-04 (historical; superseded by the entry above) — ADR-0070 Slice B: design locked, B1
+  implemented; tip `c722f9c`, pushed, in sync with `origin/main`.**
   - `4e02520` — two doc fixes (this file's *Add tag / Undo drop* wording; the Build Spec's weekly
     contradiction agent vs ADR-0069) + **ADR-0070** design lock (grill Q1–Q12: sub-slices B1–B5,
     visibility first) + review round 1 amendments + `CONTEXT.md` terms *Tag projection (`tags:`)*
@@ -43,8 +77,7 @@ critical rules and `CONTEXT.md` for the glossary.
       absent → allowed only if no other item node in any status holds the slug, other/unknown
       owner → refused (fail closed). Extraction skips are reported (`slug_taken_details`, run
       status `partial`); `validate_graph` reports shared slugs, `validate_projection` checks
-      `tags:` and page owners. **The permanent item-filename policy is deliberately left to a
-      separate design review.**
+      `tags:` and page owners. (The permanent item-filename policy followed in ADR-0071 / B1b.)
     - Gate before commit: **2157 passed, 2 skipped**, ruff clean, 15 validators, whitespace clean.
 - **2026-11-03 (historical; superseded by the 2026-11-04 entry) — part-3 UAT done and torn down; tip `297187d`, pushed, in sync with
   `origin/main`**, tree clean except the user's `.vscode/`. Since the last refresh (`1bab3c0`):
@@ -465,12 +498,15 @@ critical rules and `CONTEXT.md` for the glossary.
   real vault by opening **`/home/jolulop/code/knowledge-system/wiki`** as a vault. Semantic pages
   live flat under `wiki/Items/` (one folder for all 15 types; `item_type` in frontmatter).
 - **Display aliases (ADR-0060):** links render human-readable labels via `[[id|label]]` and pages
-  carry `title:`/`aliases:` frontmatter; page **filenames remain id-keyed**, and the file
-  explorer/tabs/graph therefore show ids — that is by design, not a bug.
+  carry `title:`/`aliases:` frontmatter; Source/Claim/Synthesis page **filenames remain
+  id-keyed**, and the file explorer/tabs/graph therefore show ids — that is by design, not a bug.
+  Tag pages in `Items/` are named by slug (ADR-0071: plain for a lossless name, otherwise
+  `<base>--<8 hex>`).
 - **Obsidian is installed in WSL** (apt `.deb`, WSLg; it self-updated to 1.15.0 on 2026-11-02 via
   `~/.config/obsidian/obsidian-1.15.0.asar` — renaming that file falls back to the installed 1.14.5).
   Since 2026-10-31 the launcher uses **software rendering**:
-  `obsidian --no-sandbox --disable-gpu --ozone-platform=wayland` — the GPU line
+  `obsidian --no-sandbox --disable-gpu --enable-unsafe-swiftshader --ozone-platform=wayland`
+  (the SwiftShader flag since 2026-11-04, for the graph view's WebGL fallback) — the GPU line
   (`GALLIUM_DRIVER=d3d12 … --use-gl=angle --use-angle=gl`) blanked the window on the graph view; it
   is kept commented in the launcher. Native Wayland, because under X11 clicks land off-target on a
   maximized window at 125% Windows scaling. On this machine `~/.local/bin/obsidian` and
@@ -479,8 +515,8 @@ critical rules and `CONTEXT.md` for the glossary.
   window** (seen 2026-11-03): stop it with `pgrep -f '^/opt/Obsidian/obsidian' | xargs kill` and
   start it again. Use the WSL Obsidian, not Windows-over-`\\wsl$`.
 - The committed graph preset filters `-path:Claims -file:index -file:log -(path:Items -[status:active])`
-  (ADR-0070 B1: only active tag pages show; the `Items/` scoping is still to be verified in
-  Obsidian — ADR-0070 acceptance requirements 1–5). Source pages' `tags:` list the kept tags as
+  (ADR-0070 B1: only active tag pages show; verified in Obsidian 2026-11-04). The **Tags pane** is
+  in the right sidebar — not the `wiki/Tags/` folder, which no longer exists. Source pages' `tags:` list the kept tags as
   nested `<item_type>/<label>`, so the **Tags pane** browses kept tags by type (it counts document
   uses, not tag pages).
 - **Authors pages** live in `wiki/Authors/` (colour group `path:Authors` in the committed preset);
@@ -521,7 +557,8 @@ critical rules and `CONTEXT.md` for the glossary.
 | **ADR-0068 vault consistency contract** (write lock · publication queue · per-document producer commits · preview tokens · bounded traversal) | **Complete + pushed** (`4ed3e13` · `0d75234` · `e3558c6` · `b13f513` · `d11945b`); validators 12→15 |
 | **ADR-0069 scoped contradiction checks + LLM usage ledger** | **Complete + pushed** (`8e61c1f` design · `57b1dd1` · `a22d642` · `a9efe06` · `b17e254` · `c6a51f2` · `795fd46` evaluation); recommended judge `local:qwen3.6:27b` at 4,096 output tokens, `CONTRADICTION_MODEL` unset |
 | **Web UI tidy + part-3 UAT** (palette · interrupted runs · one-form document screen · UAT fixes) | **Done + pushed** (`bc7a51e` · `ad6391a` · `ec3a48b` · `665b6ba` · `297187d`); UAT 2026-11-02/03 passed, comment 4 answered by ADR-0070 B1 |
-| **ADR-0070 Slice B browsing visibility + review UX** | **Design locked + B1 complete + pushed** (`4e02520` design + round 1 · `c722f9c` B1 + rounds 2–3); B1 Obsidian acceptance, the item-filename policy grill and B2–B5 open |
+| **ADR-0070 Slice B browsing visibility + review UX** | **Design locked; B1 + B1b complete + pushed** (`4e02520` design + round 1 · `c722f9c` B1 + rounds 2–3 · `318166a` · B1b below); B1 Obsidian acceptance passed 2026-11-04; B2–B5 open |
+| **ADR-0071 item page filenames (B1b)** | **Complete + pushed** (`d59ef84` design · `661b877` B1b + review rounds 1–2) |
 
 ## Next step
 
@@ -538,16 +575,14 @@ critical rules and `CONTEXT.md` for the glossary.
   — set `ENRICH_LOCAL_BASE_URL` + add `local:<model>` to a tier chain (start with
   `ENRICH_MODEL_LIGHT`). No-cost resolve-check snippet in that doc.
 - **NEXT (each step on the user's go; each new design starts with a `grill-phase`):**
-  1. **Slice B — ADR-0070** (design locked; read its B1–B5 sections and the review rounds):
-     a. **B1 Obsidian acceptance** on a fresh UAT clone (ADR-0070 acceptance requirements 1–5:
-        graph filter scoped to `Items/`; a digit-only label like `domain/2024`; Unicode labels —
-        `Café`/`Cafe`, `ai`/`AI`, `ß`/`ss`, Turkish `İ`, NFC/NFD — added by hand with **Add tag**;
-        suffixed and id-fallback labels; the Tags pane tree). Steps in the UAT Guide's Obsidian
-        section. Re-install the Front Matter Title plugin in the clone.
-     b. **Item-filename policy grill** (`grill-phase`) — the permanent fix for names that share a
-        slug; B1 only refuses/skips them safely.
-     c. **B2–B5 implementation**, each on "implement now": **B2** review-screen UX — real
-        titles, readable apply preview (plain list, detail folded), bulk reject/defer, untouched-row
+  1. **Slice B — ADR-0070** (design locked; read its B1–B5 sections and the review rounds; B1,
+     its Obsidian acceptance and B1b / ADR-0071 are done):
+     a. *(optional)* **B1b look-through** on a fresh UAT clone: Add tag `Data-Mesh` then `Data Mesh`
+        (the similar-tag choice), a title amendment onto a taken name (the plain refusal), and the
+        new filenames in Obsidian.
+     b. **B2–B5 implementation**, each on "implement now": **B2** review-screen UX — real
+        titles, readable apply preview (plain list, detail folded; also words the flat-queue
+        refusals that Apply still shows as codes, e.g. a title amendment's `name_taken`), bulk reject/defer, untouched-row
         warning + durable `first_tag_decision_at` marker + "next document", queue count (all rows
         awaiting a choice, by kind); **B3** button styling (three tiers, red stays primary);
         **B4** competing `change_item_type` proposals (keep separate, show + guard); **B5**
@@ -670,7 +705,12 @@ paid judges need `--allow-paid`; a per-attempt LLM usage ledger; a reviewed judg
 `scripts/eval_contradictions.py`; recommended judge `local:qwen3.6:27b` at 4,096 output tokens)**,
 **0070 (Slice B browsing visibility + review UX: B1 active-only tags in the index/graph, kept tags
 as nested `tags:` with casefold-collision id suffixes and a last-published snapshot, interim
-page-ownership guard for shared slugs; B2–B5 review-screen changes designed, not built)** — full glossary entries in `CONTEXT.md` (historical superseded entries
+page-ownership guard for shared slugs; B2–B5 review-screen changes designed, not built)**,
+**0071 (item page filenames, B1b: plain slug for a lossless name, else `<base>--<8 hex of the item
+id>`; shared base helper with Authors; exact-name duplicates block, `merge_key` matches advise
+(Use existing / Add separately); report-only `item_filename_nonconforming`, no item migration;
+Authors filename migration publishes verified replacements before Source links change and prunes
+only unlinked pages)** — full glossary entries in `CONTEXT.md` (historical superseded entries
 carry supersession notes).
 
 **Path safety:** `app/backend/paths.py` (`safe_under` containment, `safe_child` basename-only) is the
