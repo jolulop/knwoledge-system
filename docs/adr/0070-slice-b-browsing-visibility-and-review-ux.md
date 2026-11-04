@@ -22,7 +22,9 @@ order:
    **B1b — item page filenames** (added 2026-11-04): ADR-0071, the permanent policy B1 left open
    (filename rule, duplicate-name checks, Use existing / Add separately, Authors helper).
 2. **B2 — review-screen UX:** real titles on the remaining screens, a readable Apply preview, an
-   untouched-row warning plus "next document", a "not yet tagged" marker, queue UX.
+   untouched-row warning plus "next document", a "not yet tagged" marker, queue UX. **Refined by
+   ADR-0072** (B2 grill, 2026-11-04): built as **B2a** readable Apply (preview + result page) →
+   **B2c** tagging progress → **B2b** flat queue.
 3. **B3 — button styling:** quieter secondary and destructive buttons on the document screen.
 4. **B4 — competing `change_item_type` proposals** on one tag.
 5. **B5 — author-name variants.**
@@ -195,7 +197,9 @@ with a flag (a tag would go missing from the pane until fixed).
   - **blocked / not appliable:** each with its reason and a link to its review page (where Reopen
     lives).
 - **Names:** readable names (tag titles, document titles). Ids appear in the folded details when
-  needed to tell duplicates apart.
+  needed to tell duplicates apart. *(Amended by ADR-0072 decision 3: names come from the
+  executors' per-review outcome details, captured before mutation; when two subjects on the page
+  show the same name for different ids, each such sentence also shows its id inline.)*
 - **Document counts** ("links on 3 documents move") appear only when the preview establishes
   them. Nothing is estimated.
 - **Validators** are shown as passed, failed or not run.
@@ -206,6 +210,9 @@ with a flag (a tag would go missing from the pane until fixed).
   stale preview refused on Apply.
 
 ### 5. The flat queue
+
+*(Bulk reject/defer refined by ADR-0072 decision 6: a two-step confirmation with a per-review
+stale-selection fingerprint.)*
 
 - **Readable subject.** A "What" column with the readable subject: a tag name, "*X* into *Y*" for
   a merge, a document title. The review detail page heads with the same subject, plus the id.
@@ -227,6 +234,10 @@ with a flag (a tag would go missing from the pane until fixed).
     and their retry.
 
 ### 6. Untagged documents, undecided rows and "next document" (grill Q8–Q9)
+
+*(The stored marker, its migration and tracking completeness are refined by ADR-0072 decisions
+4–5: `tagging: {state, first_decision_at, earliest_known_decision_at}` per ledger and a vault-level
+`reviews/tag_links/_tracking.json`.)*
 
 Two states, kept distinct:
 - **Not yet tagged:** no **tag** decision has ever been saved for the document. A Details-only save

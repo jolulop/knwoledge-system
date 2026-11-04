@@ -1,7 +1,8 @@
 # ADR-0071 — Item page filenames
 
 - **Status:** accepted — design-locked by grill-phase 2026-11-04 (Q1–Q5); **implemented 2026-11-04**
-  as ADR-0070 sub-slice **B1b** (see "Implementation" at the end), awaiting external review.
+  as ADR-0070 sub-slice **B1b** (see "Implementation" at the end); external review rounds 1–2
+  passed; committed `661b877`.
 - **Date:** 2026-11-04
 - **Drivers:** ADR-0070 B1 found that two different tags whose names slugify alike share one
   `wiki/Items/<slug>.md` (`Café` / `Caf` → `caf`, any non-Latin name → `unnamed`, `Data-Mesh` /
