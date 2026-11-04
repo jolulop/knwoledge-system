@@ -91,9 +91,14 @@ def test_lossless_names_keep_their_plain_slug(name, stem):
 def test_lossy_names_get_a_reserved_hash_suffix_that_never_collides_with_a_plain_slug():
     accented = authors.filename_for(manifests.name_identity("José"))
     non_latin = authors.filename_for(manifests.name_identity("山田 太郎"))
-    assert accented.startswith("jos--") and non_latin.startswith("unnamed--")
-    lookalike = authors.filename_for(manifests.name_identity("jos " + accented.split("--")[1]))
+    # ADR-0071 decision 2: the shared base strips accents; an empty base is `author`, not `item`.
+    assert accented.startswith("jose--") and non_latin.startswith("author--")
+    lookalike = authors.filename_for(manifests.name_identity("jose " + accented.split("--")[1]))
     assert lookalike != accented and "--" not in lookalike
+    assert authors.filename_for(manifests.name_identity("Jose")) == "jose" != accented
+    # The previous rule's names are still recognised (to retire them), never written.
+    assert authors.legacy_filename_for(manifests.name_identity("José")).startswith("jos--")
+    assert authors.legacy_filename_for(manifests.name_identity("山田 太郎")).startswith("unnamed--")
 
 
 # --- the inventory (slice-4 grill Q2) ------------------------------------------------------------
@@ -428,8 +433,8 @@ def test_a_failed_write_never_leaves_a_page_retry_cannot_replace(vault, monkeypa
         real(path, data[: len(data) // 2])                          # half written, then the crash
         raise OSError(28, "No space left on device")
     monkeypatch.setattr(authors, "_write_durably", dies)
-    with pytest.raises(OSError):
-        _publish(root)
+    failed = _publish(root)                     # ADR-0071 round 1: reported, not raised
+    assert failed["write_failed"] == [{"file": "Authors/ada-lovelace.md", "error": "OSError"}]
     page = _page(root, "ada-lovelace")
     assert (page.read_text(encoding="utf-8") == before) if existing else not page.exists()
     assert not [p for p in (root / "wiki" / "Authors").iterdir() if ".tmp-" in p.name]

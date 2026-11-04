@@ -135,3 +135,27 @@ def apply(client, **kw):
 def apply_ui(client, **kw):
     """`POST /ui/reviews/apply` with a token from :func:`authorize_apply`."""
     return client.post("/ui/reviews/apply", data={"preview_token": authorize_apply()}, **kw)
+
+
+def legacy_item_slug(root: Path, node_id: str, slug: str) -> None:
+    """Make an existing item look minted by the pre-ADR-0071 filename rule: its page moves to
+    `Items/<slug>.md` and the recorded `nodes.slug` follows, then everything republishes from that
+    authority (links included). Used to build the shared-page-name states only an older vault can
+    still contain (`Café` and `Caf` both at `caf`)."""
+    from app.backend import graph
+    from app.workers import publication
+
+    root = Path(root)
+    gconn = graph.connect(root / "db" / "graph.sqlite")
+    try:
+        node = graph.get_node(gconn, node_id)
+        old = root / "wiki" / "Items" / f"{node['slug']}.md"
+        new = root / "wiki" / "Items" / f"{slug}.md"
+        if old != new:
+            new.write_text(old.read_text(encoding="utf-8"), encoding="utf-8")
+            old.unlink()
+        gconn.execute("UPDATE nodes SET slug = ? WHERE node_id = ?", (slug, node_id))
+        gconn.commit()
+    finally:
+        gconn.close()
+    publication.republish_all(root)

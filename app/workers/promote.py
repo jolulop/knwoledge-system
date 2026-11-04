@@ -23,7 +23,7 @@ from typing import Any
 
 from app.backend import db, graph, taxonomy
 from app.backend.manifests import iso_now, valid_manifests
-from app.workers import item_pages, items, publication, reviews
+from app.workers import item_names, item_pages, items, publication, reviews
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter, render_item_page
 
 PROMOTABLE = ("item",)
@@ -165,8 +165,13 @@ def activate_node(gconn, *, node: dict[str, Any], wiki_dir: Path, reviews_dir: P
     eff = _apply_amendments(meta, amendments)
     if not taxonomy.is_production_item_type(eff.get("item_type")):
         return {"outcome": "skipped", "reason": "missing_required_item_type"}
-    slug = items._slug(eff["title"]) if amendments else node["slug"]
+    # ADR-0071: the recorded path is kept unless the title actually changes; a new title gets the
+    # filename rule (frozen id suffix for a lossy name) and the exact-name check (decision 3).
+    renamed = eff["title"] != meta["title"]
+    slug = items.page_slug(eff["title"], nid) if renamed else node["slug"]
     new_page = page_dir / f"{slug}.md"
+    if renamed and (conflict := item_names.exact_conflict(gconn, wiki_dir, eff["title"], nid)):
+        return {"outcome": "skipped", "reason": conflict["reason"], "problem": conflict}
     # ADR-0070 B1 review: the current page must be this tag's own, and a moved slug's destination
     # must be free (no file, no other item recording it) or already this tag's — checked before any
     # write, so the keep that calls this (dry run first) never half-writes.
@@ -181,6 +186,10 @@ def activate_node(gconn, *, node: dict[str, Any], wiki_dir: Path, reviews_dir: P
     if dry_run:
         return {"outcome": "would_activate", "slug": slug, "amended": bool(amendments),
                 "affected_sources": []}
+    # ADR-0071 decision 3, level 2: a similar existing tag is reported with the outcome (after every
+    # gate, before the writes, so the renamed page itself is never matched).
+    advisory = (item_names.similar_advisory(gconn, wiki_dir, eff["title"], nid)
+                if renamed else None)
     sources, suggested = graph.tag_projection(gconn, nid, "active")
     duplicates = graph.active_duplicates(gconn, nid)
     new_page.write_text(
@@ -207,7 +216,7 @@ def activate_node(gconn, *, node: dict[str, Any], wiki_dir: Path, reviews_dir: P
             items._recompose_node(gconn, node_id=dup["node_id"], wiki_dir=wiki_dir,
                                   reviews_dir=reviews_dir, now=now)
     return {"outcome": "activated", "slug": slug, "amended": bool(amendments),
-            "affected_sources": affected}
+            "affected_sources": affected, "advisories": [advisory] if advisory else []}
 
 
 def promote_candidates(
@@ -266,7 +275,8 @@ def _promote_candidates(
     try:
         _valid, _skipped_invalid = valid_manifests(manifests_dir)
         considered = promoted_review = amended = 0
-        skipped: list[dict[str, str]] = []
+        skipped: list[dict[str, Any]] = []
+        advisories: list[dict[str, Any]] = []
         affected_sources: set[str] = set()
         if graph_db.exists():
             graph.init_db(graph_db)
@@ -293,9 +303,12 @@ def _promote_candidates(
                         if run:
                             run.publish(intent)           # nothing changed: clears the intent
                         if out["reason"] != "page_missing":
-                            skipped.append({"review_id": rid, "reason": out["reason"]})
+                            skipped.append({"review_id": rid, "reason": out["reason"],
+                                            **({"problem": out["problem"]}
+                                               if out.get("problem") else {})})
                         continue
                     amended += bool(out["amended"])
+                    advisories += [{"review_id": rid, **a} for a in out.get("advisories") or []]
                     affected_sources.update(out["affected_sources"])
                     if run:                       # every Source page that lists the tag
                         run.publish(intent, sources=_with_page(wiki_dir, out["affected_sources"]),
@@ -312,7 +325,7 @@ def _promote_candidates(
         summary = {
             "job_id": job_id, "candidates_considered": considered, "promoted": promoted,
             "promoted_by_review": promoted_review,
-            "amended": amended, "skipped": skipped,
+            "amended": amended, "skipped": skipped, "advisories": advisories,
             "affected_sources": sorted(affected_sources),
             "manifests_skipped_invalid": len(_skipped_invalid),
             "index_rebuilt": bool(pub and pub["index_rebuilt"]),

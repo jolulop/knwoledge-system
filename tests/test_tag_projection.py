@@ -161,7 +161,7 @@ def _projection_errors(tmp_path):
 def vault(tmp_path):
     _build(tmp_path, {"a.md": "alpha Straße Graph Rewriting body", "b.md": "beta STRASSE body"})
     sids = _sids(tmp_path)
-    # Different ids and slugs (stra-e / strasse), but the same tag under casefold(): a collision.
+    # Different ids and slugs (strasse--<hex> / strasse), but the same tag under casefold(): a collision.
     _extract(tmp_path, {"alpha": [_item("Straße", "domain"), _item("Graph Rewriting")],
                         "beta": [_item("STRASSE", "domain")]})
     return tmp_path, sids["a.md"], sids["b.md"]
@@ -336,7 +336,7 @@ def _set_page(root, name, text):
 def test_the_mapper_refuses_a_tag_without_a_valid_page_of_its_own(vault, damage):
     root, a, b = vault
     _keep(root, a, "Straße")
-    page = root / "wiki" / "Items" / "stra-e.md"
+    page = root / "wiki" / "Items" / f"{items._slug('Straße')}.md"   # ADR-0071: strasse--<hex>
     original = page.read_bytes()
     text = original.decode("utf-8")
     _set_page(root, "Straße", {

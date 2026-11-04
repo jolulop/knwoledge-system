@@ -11,8 +11,13 @@ ticked "show page", and whose source is default-visible (search's `RETENTION_DEF
   "Authors & publishers" index section). An unreadable manifest raises :class:`InventoryError`
   before anything is pruned.
 - **Filenames** never depend on other names: the plain slug of a lossless identity (only `a–z`,
-  `0–9` and spaces), otherwise `<slug>--<8 hex of sha256(identity)>`; `--` never occurs in a plain
-  slug, so the two namespaces can't collide.
+  `0–9` and spaces), otherwise `<base>--<8 hex of sha256(identity)>`; `--` never occurs in a plain
+  slug, so the two namespaces can't collide. ADR-0071 decision 2: the base and the lossless test are
+  the shared `page_names` helpers (accents stripped, `ß`/`æ`/`ø` folded); an empty base is `author`.
+  A page named by the previous rule (`legacy_filename_for`) is still recognised as owned, so the
+  change migrates: the Source pages are refreshed to the new names first (publication widens to
+  them), the replacement pages are written, and an old page is removed only once no Source page
+  links it.
 - **Ownership** (overwrite and prune): a file in `wiki/Authors/` with `type: author`,
   `generated_by: authors-v1`, `author_id` equal to its filename stem, and that stem equal to the
   filename derived from its `name_identity`. A file claiming the marker but failing a check is
@@ -32,17 +37,24 @@ from typing import Any
 from app.backend import manifests
 from app.backend.search import RETENTION_DEFAULT_STATUSES
 from app.backend.publication_queue import _sync_dir, _write_durably
+from app.workers import page_names
 from app.workers.wiki_render import display_link_label
 
 DIR = "Authors"
 GENERATOR = "authors-v1"
 ROLES = ("author", "publisher")
-_LOSSLESS = re.compile(r"[a-z0-9]+( [a-z0-9]+)*")
+_LEGACY_LOSSLESS = re.compile(r"[a-z0-9]+( [a-z0-9]+)*")
+_SOURCE_AUTHOR_LINK = re.compile(r"\[\[Authors/([^\]|#]+)")
 _TITLE_RE = re.compile(r'(?m)^title:\s*"(.*)"\s*$')
 
 
 class InventoryError(RuntimeError):
     """The manifests can't be read reliably: nothing is rendered or pruned."""
+
+
+class LinkScanError(RuntimeError):
+    """`wiki/Sources/` exists but can't be listed, or a Source page in it can't be read: the link
+    scan is incomplete, so nothing may be pruned on its strength (ADR-0071 review round 1)."""
 
 
 def _q(value: str) -> str:
@@ -74,12 +86,69 @@ def read_frontmatter(path: Path) -> dict[str, Any] | None:
     return out
 
 
+def _identity_hex(identity: str) -> str:
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:8]
+
+
 def filename_for(identity: str) -> str:
-    """The page's filename stem for a name identity (grill 2 Q3)."""
+    """The page's filename stem for a name identity (grill 2 Q3; base per ADR-0071 decision 2)."""
+    base = page_names.base_slug(identity)
+    if page_names.is_lossless(identity):
+        return base
+    return f"{base or 'author'}--{_identity_hex(identity)}"
+
+
+def legacy_filename_for(identity: str) -> str:
+    """The stem the pre-ADR-0071 rule gave (no transliteration, `unnamed` fallback). Used only to
+    recognise and retire a page written before the change, never to write one."""
     slug = re.sub(r"[^a-z0-9]+", "-", identity).strip("-") or "unnamed"
-    if _LOSSLESS.fullmatch(identity):
+    if _LEGACY_LOSSLESS.fullmatch(identity):
         return slug
-    return f"{slug}--{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:8]}"
+    return f"{slug}--{_identity_hex(identity)}"
+
+
+def source_links(wiki_dir: Path) -> dict[str, set[str]]:
+    """`{Authors filename stem: {source ids whose Source page links it}}`, read from the pages.
+
+    A missing `wiki/Sources/` is a vault with no Source pages yet (`{}`). A folder that exists but
+    can't be listed, or any page in it that can't be read, raises :class:`LinkScanError`: an
+    incomplete scan must never look like "nothing links this page"."""
+    folder = Path(wiki_dir) / "Sources"
+    try:
+        paths = sorted(p for p in folder.iterdir() if p.suffix == ".md")
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        raise LinkScanError(f"wiki/Sources can't be listed ({type(exc).__name__})") from exc
+    out: dict[str, set[str]] = {}
+    for path in paths:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            raise LinkScanError(f"Sources/{path.name} can't be read ({type(exc).__name__})") from exc
+        for stem in _SOURCE_AUTHOR_LINK.findall(text):
+            out.setdefault(stem.strip(), set()).add(path.stem)
+    return out
+
+
+def stale_link_sources(root: Path, *, wiki_dir: Path | None = None) -> set[str]:
+    """Source ids whose page links an Authors page the current rule no longer names for it — the
+    pages a filename-rule change must refresh before the old Authors pages may go. Raises
+    :class:`LinkScanError` when the Source pages can't all be read."""
+    root = Path(root)
+    wiki_dir = Path(wiki_dir) if wiki_dir else root / "wiki"
+    valid, _skipped = manifests.valid_manifests(root / "raw" / "manifests")
+    wanted: dict[str, set[str]] = {}
+    for m in valid:
+        try:
+            names = linked_names(m)
+        except (KeyError, TypeError, ValueError):
+            continue
+        wanted[m["source_id"]] = {f for role in names.values() for _n, f in role if f}
+    stale = set()
+    for stem, sids in source_links(wiki_dir).items():
+        stale |= {s for s in sids if stem not in wanted.get(s, set())}
+    return stale
 
 
 def linked_names(manifest: dict[str, Any]) -> dict[str, list[tuple[str, str | None]]]:
@@ -200,7 +269,8 @@ def ownership(path: Path) -> str:
         return "handwritten" if fm is not None or GENERATOR not in _head(path) else "invalid"
     ident = fm.get("name_identity")
     if (fm.get("type") == "author" and fm.get("author_id") == path.stem
-            and isinstance(ident, str) and ident and filename_for(ident) == path.stem):
+            and isinstance(ident, str) and ident
+            and path.stem in (filename_for(ident), legacy_filename_for(ident))):
         return "owned"
     return "invalid"
 
@@ -225,18 +295,48 @@ def _write_atomically(path: Path, content: str) -> None:
     _sync_dir(path.parent)
 
 
-def publish(root: Path, *, wiki_dir: Path | None = None) -> dict[str, Any]:
+UNAVAILABLE = "authors_page_unavailable"
+
+
+def unavailable_links(wiki_dir: Path, manifest: dict[str, Any]) -> list[str]:
+    """The Authors filenames a document's Source page would link (every one, new or already on the
+    page — :func:`linked_names`, exactly what the renderer writes) that are not verified pages
+    (:func:`link_target_ok`). Empty means the Source page may be written (ADR-0071 review round 2)."""
+    missing = {filename for role in linked_names(manifest).values() for name, filename in role
+               if filename is not None
+               and not link_target_ok(wiki_dir, filename, manifests.name_identity(name))}
+    return sorted(missing)
+
+
+def link_target_ok(wiki_dir: Path, filename: str, identity: str) -> bool:
+    """Whether `Authors/<filename>.md` is a page a Source link may point at: present, generated and
+    consistent (:func:`ownership`), and written for this name identity — read from disk, so it holds
+    whatever the inventory or the last write did (ADR-0071 review round 1)."""
+    path = Path(wiki_dir) / DIR / f"{filename}.md"
+    if not path.is_file() or ownership(path) != "owned":
+        return False
+    return (read_frontmatter(path) or {}).get("name_identity") == identity
+
+
+def publish(root: Path, *, wiki_dir: Path | None = None, prune: bool = True) -> dict[str, Any]:
     """Render and prune `wiki/Authors/` from the inventory (the caller holds the write lock).
 
     Writes only changed pages; removes only owned pages the inventory no longer has. A page whose
     file is handwritten, invalid, or owned by another identity (a hash collision) is a conflict:
-    left untouched and reported. Raises :class:`InventoryError` (before any write) when the
-    manifests can't be read. Returns `{pages, written, removed, conflicts}`."""
+    left untouched and reported. A page whose write fails is reported in `write_failed` and the
+    others still go ahead. ADR-0071: an owned page the inventory no longer has is removed only when
+    no Source page links it any more; a still-linked one is kept and reported in `still_linked`, and
+    when the Source pages can't all be read (`link_scan_failed`, the reason) nothing is removed.
+    The caller keeps the publication pending on any of these. `prune=False` only writes
+    (publication runs that first, before the Source pages render, so a new link never points at a
+    page not yet written). Raises :class:`InventoryError` (before any write) when the manifests
+    can't be read. Returns `{pages, written, removed, conflicts, write_failed, still_linked,
+    link_scan_failed}`."""
     root = Path(root)
     wiki_dir = Path(wiki_dir) if wiki_dir else root / "wiki"
     pages = inventory(root, wiki_dir=wiki_dir)
     folder = wiki_dir / DIR
-    written, removed, conflicts = [], [], []
+    written, removed, conflicts, write_failed = [], [], [], []
     wanted = {p["filename"] for p in pages}
     for page in pages:
         path = folder / f"{page['filename']}.md"
@@ -248,11 +348,28 @@ def publish(root: Path, *, wiki_dir: Path | None = None) -> dict[str, Any]:
                                   else "another_identity", "name": page["title"]})
                 continue
         content = render_page(page)
-        if not path.exists() or path.read_text(encoding="utf-8") != content:
-            _write_atomically(path, content)
-            written.append(page["filename"])
-    for path in sorted(folder.glob("*.md")) if folder.exists() else []:
-        if path.stem not in wanted and ownership(path) == "owned":
-            path.unlink()
-            removed.append(path.stem)
-    return {"pages": len(pages), "written": written, "removed": removed, "conflicts": conflicts}
+        try:
+            if not path.exists() or path.read_text(encoding="utf-8") != content:
+                _write_atomically(path, content)
+                written.append(page["filename"])
+        except (OSError, UnicodeDecodeError) as exc:
+            write_failed.append({"file": f"{DIR}/{path.name}", "error": type(exc).__name__})
+    still_linked: list[dict[str, Any]] = []
+    link_scan_failed = None
+    if prune:
+        try:
+            linked = source_links(wiki_dir)
+        except LinkScanError as exc:
+            link_scan_failed = str(exc)
+    if prune and link_scan_failed is None:
+        for path in sorted(folder.glob("*.md")) if folder.exists() else []:
+            if path.stem not in wanted and ownership(path) == "owned":
+                if linked.get(path.stem):
+                    still_linked.append({"file": f"{DIR}/{path.name}",
+                                         "sources": sorted(linked[path.stem])})
+                    continue
+                path.unlink()
+                removed.append(path.stem)
+    return {"pages": len(pages), "written": written, "removed": removed, "conflicts": conflicts,
+            "write_failed": write_failed, "still_linked": still_linked,
+            "link_scan_failed": link_scan_failed}

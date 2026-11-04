@@ -30,6 +30,7 @@ from app.llm.cache import ResponseCache
 from app.llm.client import LLMClient
 from app.workers import extract, human_add, intake, items, reviews, tag_links, wiki
 from app.workers.wiki_render import parse_frontmatter
+from tests.fixtures import legacy_item_slug  # noqa: E402
 
 
 MODEL_REF = "anthropic:claude-sonnet-4-6"
@@ -322,12 +323,15 @@ def test_keep_amendments_frozen_id_slug_move_and_description(tmp_path):
     assert fm2["description"] == "human prose" and fm2["status"] == "active"
 
 
-def test_keep_amended_slug_collision_blocks_before_any_write(tmp_path):
+def test_keep_amended_name_collision_blocks_before_any_write(tmp_path):
     _build(tmp_path, {"a.md": "alpha body"})
     _extract(tmp_path, RoutingAdapter({"alpha": {"items": [_item("First"), _item("Second")]}}))
     a = _sids(tmp_path)["a.md"]
     out = _keep(tmp_path, a, "Second", title="First")
-    assert out["outcome"] == "blocked" and out["reason"] == "amended_slug_collision"
+    # ADR-0071 decision 3: renaming onto another tag's exact name is refused by the name check
+    # (before the filename guard), naming that tag.
+    assert out["outcome"] == "blocked" and out["reason"] == "name_taken"
+    assert out["problem"]["conflict_node_id"] == items.node_id("First")
     # Nothing written: Second stays a candidate suggestion at its own slug, no ledger keep.
     fm = parse_frontmatter(
         (tmp_path / "wiki" / "Items" / "second.md").read_text(encoding="utf-8"))
@@ -497,18 +501,19 @@ def test_batch_rejects_non_visible_and_global_rows(client, tmp_path):
 
 def test_human_add_slug_collision_blocks_before_any_write(tmp_path):
     _build(tmp_path, {"a.md": "alpha body"})
-    _extract(tmp_path, RoutingAdapter({"alpha": {"items": [_item("Foo Bar")]}}))
+    _extract(tmp_path, RoutingAdapter({"alpha": {"items": [_item("Foo-Bar")]}}))
     a = _sids(tmp_path)["a.md"]
-    # "Foo-Bar" normalizes to a DIFFERENT name-hash than "Foo Bar" but the SAME slug.
-    new_id = items.node_id("Foo-Bar")
-    assert new_id != items.node_id("Foo Bar")
-    assert items._slug("Foo-Bar") == items._slug("Foo Bar") == "foo-bar"
+    # ADR-0071: "Foo-Bar" (lossy) and "Foo Bar" (lossless) now get different page names; the shared
+    # name survives only in a vault minted by the older rule, where "Foo-Bar" sits at foo-bar.
+    old_id, new_id = items.node_id("Foo-Bar"), items.node_id("Foo Bar")
+    assert old_id != new_id and items._slug("Foo-Bar") != items._slug("Foo Bar") == "foo-bar"
+    legacy_item_slug(tmp_path, old_id, "foo-bar")
     rdir = tmp_path / "reviews"
     audits_before = len(list((rdir / "audit_log").glob("*-human-added-*.json")))
 
-    out = _human_add(tmp_path, source_id=a, item_type="method_technique", title="Foo-Bar")
+    out = _human_add(tmp_path, source_id=a, item_type="method_technique", title="Foo Bar")
     assert out["outcome"] == "blocked" and out["reason"] == "slug_collision"
-    assert out["existing_node_id"] == items.node_id("Foo Bar")
+    assert out["existing_node_id"] == old_id and out["existing_title"] == "Foo-Bar"
     # Zero partial writes: no node, no mention, no ledger keep, no audit; page keeps its owner.
     gconn = graph.connect(tmp_path / "db" / "graph.sqlite")
     assert graph.get_node(gconn, new_id) is None
@@ -517,7 +522,7 @@ def test_human_add_slug_collision_blocks_before_any_write(tmp_path):
     assert len(list((rdir / "audit_log").glob("*-human-added-*.json"))) == audits_before
     fm = parse_frontmatter(
         (tmp_path / "wiki" / "Items" / "foo-bar.md").read_text(encoding="utf-8"))
-    assert fm["item_id"] == items.node_id("Foo Bar")
+    assert fm["item_id"] == old_id
 
 
 def test_human_add_rebuilds_wiki_index(tmp_path):

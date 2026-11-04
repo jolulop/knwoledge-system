@@ -1,7 +1,7 @@
 # ADR-0071 — Item page filenames
 
-- **Status:** accepted — design-locked by grill-phase 2026-11-04 (Q1–Q5). Not implemented; built as
-  ADR-0070 sub-slice **B1b**, before B2.
+- **Status:** accepted — design-locked by grill-phase 2026-11-04 (Q1–Q5); **implemented 2026-11-04**
+  as ADR-0070 sub-slice **B1b** (see "Implementation" at the end), awaiting external review.
 - **Date:** 2026-11-04
 - **Drivers:** ADR-0070 B1 found that two different tags whose names slugify alike share one
   `wiki/Items/<slug>.md` (`Café` / `Caf` → `caf`, any non-Latin name → `unnamed`, `Data-Mesh` /
@@ -191,3 +191,84 @@ settled behaviour instead of placeholders.
   the execution-time recheck, draft preservation;
 - **Authors publication recovery:** the filename change publishing replacements and Source links
   before pruning, interrupted at each step and completed by the retry, with links never dangling.
+
+## Implementation (B1b, 2026-11-04)
+
+- **`app/workers/page_names.py`** (new): `base_slug` and `is_lossless`, shared by items and Authors.
+- **`items.page_slug(name, node_id)`** is the item rule; `items._slug(name)` is now the name a
+  *fresh* item gets (`page_slug(name, node_id(name))`). Minting calls `page_slug` with the real id:
+  extraction (`_emit`, only for a new node — an existing node of any status keeps its recorded
+  slug), human-add, split spin-off (a resumed spin-off keeps its recorded slug) and promote. Promote
+  re-derives the slug **only when the effective title differs from the page title**, so an
+  aliases-only or type-only amendment no longer moves a page.
+- **`app/workers/item_names.py`** (new): `exact_conflict` (level 1; reasons `name_taken`,
+  `title_authority_unreadable`) and `similar_tags` (level 2). Called under the ledger lock by
+  human-add (only when it would create a tag), by `promote.activate_node` on a title change (so the
+  keep's dry run refuses before any write) and by the split executor on the fresh path. A level-1
+  refusal carries the conflicting tag (`conflict_node_id`, `conflict_title`, `conflict_status`,
+  `via_tombstone`); `tag_links.keep` now passes the activation's `problem` through.
+- **Add tag** (`POST /ui/reviews/sources/{sid}/add`): `add_use=<id>` is **Use existing** (the tag is
+  kept as it is: its own title and type, no routed retype); `add_separately=<ids>` acknowledges the
+  similar tags shown. A `needs_choice` outcome redraws the screen (409) with the choice box and every
+  other unsaved field kept; a match not among the acknowledged ids asks again. A `name_taken`
+  refusal shows Use existing for the conflicting tag when it can be reused.
+- **Readable refusals:** `review_html.refusal_text` words the slug, ownership and name refusals
+  (and a few others) on the document screen and its batch results.
+- **Lint:** `item_filename_nonconforming` (`lint._check_item_filenames`), low, graph-gated,
+  report-only; skips merged tombstones and unreadable titles.
+- **Authors migration:** `authors.filename_for` uses the shared helper (empty base → `author`);
+  `legacy_filename_for` recognises pages written by the previous rule as owned. Publication, when
+  its index step will run, (1) adds every Source page linking an Authors page the rule no longer
+  names (`authors.stale_link_sources`), (2) **writes** the Authors pages before the Source pages
+  render (`_prewrite_authors`, no pruning), so a refreshed link never points at a missing page, and
+  (3) in the index step prunes an old page only when no Source page links it; a still-linked one is
+  kept and reported (`authors_still_linked:…`), and the publication stays pending.
+- **Tests:** `tests/test_item_filenames.py` (allocation), `tests/test_duplicate_names.py` (duplicate
+  decisions, including the screen), `tests/test_authors_filenames.py` (Authors publication
+  recovery). Guard tests that need a shared page name now build it as an older vault would have
+  one (`tests/fixtures.legacy_item_slug`).
+
+### Review round 1 (2026-11-04)
+
+Two blocking findings in the Authors migration (reproduced in synthetic vaults), two design gaps.
+
+- **Source links are gated on verified Authors pages.** `_prewrite_authors` now runs whenever
+  Source pages render (not only with the index step) and reports its problems instead of swallowing
+  them (`authors_publication_failed:…`, `authors_conflict:…`, `authors_write_failed:…`).
+  `authors.publish` reports a failed page write in `write_failed` and still writes the others.
+  Before rendering, `_gate_author_links` checks **every** Authors link each Source page will carry
+  (from its manifest, exactly as the renderer computes them, so links already on the page count
+  too) against the page on disk (`authors.link_target_ok`: present, generated, this name's
+  identity). A Source page that fails is not rendered: it keeps its previous version and old
+  links, and stays pending as `authors_page_unavailable`. A page that exists with the right
+  identity but whose update failed passes the gate (no dangling link), but the unfinished Authors
+  work keeps the index step pending, **also for a Source-only refresh**.
+- **An incomplete link scan never prunes.** `authors.source_links` treats a missing
+  `wiki/Sources/` as no Source pages (a new vault), and raises `LinkScanError` when the folder
+  can't be listed or any page can't be read. Pruning is then skipped
+  (`authors_link_scan_failed:…`) and the publication stays pending.
+- **Merge action on a rename refusal.** A `name_taken` refusal of a title amendment on the document
+  screen asks `human_merge.plan_merge` (the existing tag surviving) for eligibility and direction:
+  if the merge isn't blocked, it links the merge **preview** (which writes nothing); otherwise it says
+  what the merge needs first. Title amendments only apply to suggestions, so today the renamed tag
+  is never in use and the advice is what shows. No new rename path was added to reach the link.
+- **Level 2 on all three paths.** `item_names.similar_advisory` returns structured data,
+  `{kind: "similar_tags", name, node_id, matches}`. It is reported by a keep with a title amendment
+  (`tag_links.keep` / `promote.activate_node` → `advisories`), by flat-queue promotions and by split
+  spin-offs (Apply summary `promotions.advisories` / `split.advisories`). It is computed after every
+  gate, and a failure to compute it gives no advisory, so it never changes whether the action runs.
+  The batch results show it as an escaped note, apart from refusals. Use existing / Add separately
+  stay on Add tag only: the other paths can't reuse a tag.
+
+### Review round 2 (2026-11-04)
+
+- **The gate moved to where Source pages are written.** A direct `generate_wiki` run wrote Source
+  pages before its end refresh reached publication, so an interruption there left a dangling link.
+  `wiki.generate_wiki` (the only writer of Source pages) now checks each page's Authors links before
+  writing it (`authors.unavailable_links`, from the manifest). If a target isn't a verified page,
+  it writes the Authors pages (no pruning, at most once per filename per call) and checks again.
+  A page whose links still don't resolve is not written: it keeps its previous version and links,
+  is reported with reason `authors_page_unavailable`, and stays queued. This covers direct runs,
+  `scripts/generate_wiki.py` and callers using `rebuild_index=False`. Publication keeps its
+  pre-write (for reporting and for keeping unfinished Authors work pending) and passes the typed
+  reason through; its own per-Source gate from round 1 is removed as redundant.

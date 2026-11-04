@@ -44,7 +44,7 @@ from typing import Any
 from app.backend import graph, taxonomy
 from app.backend.manifests import is_source_id, iso_now
 from app.workers import item_pages as ownership
-from app.workers import items, merges, retypes
+from app.workers import item_names, items, merges, retypes
 from app.workers.wiki_render import NODE_DIR, render_item_page
 
 _SPLITTABLE_STATUSES = frozenset({"active", "candidate", "unused"})   # ADR-0066: unused tags split too
@@ -122,7 +122,8 @@ def apply_splits(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = 
     a half-applied split is completed idempotently, a fully-applied one is a true no-op."""
     now = now or iso_now()
     applied = 0
-    skipped: list[dict[str, str]] = []
+    skipped: list[dict[str, Any]] = []
+    advisories: list[dict[str, Any]] = []
     changed_pages: list[str] = []
     affected_sources: set[str] = set()
     journaled: list[str] = []                            # in-flight markers the caller must close
@@ -186,7 +187,11 @@ def apply_splits(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = 
             srcs_set = set(srcs)
 
             # A's page (needed to render on both the fresh and repair paths)
-            b_slug = items._slug(spinoff_name)
+            # ADR-0071: a spin-off already minted (a resume) keeps its recorded slug; a new one gets
+            # the filename rule with its own id.
+            n_b_rec = graph.get_node(gconn, b)
+            advisory = None
+            b_slug = n_b_rec["slug"] if n_b_rec is not None else items.page_slug(spinoff_name, b)
             b_page_rel = f"{NODE_DIR[a_type]}/{b_slug}.md"
             a_page = f"{NODE_DIR[a_type]}/{n_a['slug']}.md"
             meta_a = items._read_node_meta(wiki_dir / a_page)
@@ -254,6 +259,15 @@ def apply_splits(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = 
                 if merges._approved_unapplied_block(gconn, reviews_dir, wiki_dir, a, a_page, rid):
                     _skip("approved_unapplied_references_primary")
                     continue
+                # ADR-0071 decision 3: the spin-off's new name must not be another live item's title
+                # (a spin-off can't reuse an item, so this is a refusal naming that tag).
+                conflict = item_names.exact_conflict(gconn, wiki_dir, spinoff_name, b)
+                if conflict is not None:
+                    skipped.append({"review_id": rid, "reason": conflict["reason"],
+                                    "problem": conflict})
+                    continue
+                # Level 2 (review round 1): a similar existing tag is reported, never a refusal.
+                advisory = item_names.similar_advisory(gconn, wiki_dir, spinoff_name, b)
 
             if any(c["source_id"] in srcs_set for c in tag_links.corrupt_ledgers(reviews_dir)):
                 _skip("tag_ledger_corrupt")                  # a damaged ledger's decisions can't move
@@ -327,7 +341,9 @@ def apply_splits(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = 
             identity_journal.set_stage(reviews_dir, rid, "graph_done")
             journaled.append(rid)
             applied += 1
+            if advisory is not None:
+                advisories.append({"review_id": rid, **advisory})
 
     return {"applied": applied, "skipped": skipped, "changed_pages": sorted(set(changed_pages)),
             "graph_changed": applied > 0, "affected_sources": sorted(affected_sources),
-            "journaled": journaled}
+            "journaled": journaled, "advisories": advisories}

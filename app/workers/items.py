@@ -43,7 +43,7 @@ from app.backend import producer_journal as journal
 from app.backend.manifests import get_status, iso_now, load_manifest, valid_manifests
 from app.llm import prompts
 from app.llm.client import CacheMiss, LLMClient, ParseError
-from app.workers import citations, publication, reconcile, reviews, titles
+from app.workers import citations, page_names, publication, reconcile, reviews, titles
 from app.workers import enrichment_artifact as art
 from app.workers import item_pages, labels
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter, render_item_page
@@ -93,9 +93,22 @@ def node_id(name: str) -> str:
     return f"itm_{_name_hash(name)}"
 
 
+def page_slug(name: str, node_id: str) -> str:
+    """The page-name stem an item minted or renamed to `name` gets (ADR-0071 decision 1): the plain
+    slug of a lossless normalized name, else `<base>--<first 8 hex of the item id>` (`item` when the
+    readable base is empty). Collision-resistant, not collision-free: every writer still runs the
+    ADR-0070 B1 ownership checks. Only minting and an explicit title amendment call this; an existing
+    item keeps its recorded `nodes.slug` (never recomputed from the title)."""
+    normalized = _normalize_name(name)
+    base = page_names.base_slug(normalized)
+    if page_names.is_lossless(normalized):
+        return base
+    return f"{base or 'item'}--{node_id[len('itm_'):len('itm_') + 8]}"
+
+
 def _slug(name: str) -> str:
-    s = re.sub(r"[^a-z0-9]+", "-", _normalize_name(name)).strip("-")
-    return s or "unnamed"
+    """The page-name stem a FRESH item named `name` gets (its id is `node_id(name)`)."""
+    return page_slug(name, node_id(name))
 
 
 def _clean_aliases(aliases: Any) -> list[str]:
@@ -763,12 +776,11 @@ def extract_items(
         # ADR-0070 B1 review: never write a tag whose page name another item holds (any status) or
         # whose page can't be proven to be its own — checked before the node or its mention exists,
         # so a skipped suggestion leaves nothing behind. Human decisions are untouched.
-        # The slug this write will use (the same rule as the upsert below).
-        page_slug = (existing["slug"] if existing is not None and (
-            entry["resolution"] in ("resolved", "redirected")
-            or existing.get("status") in _RESOLVABLE) else _slug(name))
-        if (problem := item_pages.page_problem(gconn, wiki_dir, nid, page_slug)) is not None:
-            slug_skips.append({"source_id": sid, "name": name, "node_id": nid, "slug": page_slug,
+        # The slug this write will use (the same rule as the upsert below). ADR-0071: an existing
+        # item keeps its recorded slug whatever its status; only a new item mints one.
+        write_slug = existing["slug"] if existing is not None else page_slug(name, nid)
+        if (problem := item_pages.page_problem(gconn, wiki_dir, nid, write_slug)) is not None:
+            slug_skips.append({"source_id": sid, "name": name, "node_id": nid, "slug": write_slug,
                                "reason": problem["reason"], "owner": problem.get("owner"),
                                "holders": problem.get("holders") or []})
             return
@@ -783,7 +795,7 @@ def extract_items(
             # name's); anything else is (re)created as a candidate. Decided tags never get here.
             keep_status = existing is not None and existing.get("status") in _RESOLVABLE
             graph.upsert_node(gconn, node_id=nid, node_type="item",
-                              slug=existing["slug"] if keep_status else _slug(name),
+                              slug=write_slug,
                               status=existing["status"] if keep_status else "candidate",
                               item_type=used_type, now=now)
             # A never-kept suggestion's page unions in this run's (body-checked) aliases. After the

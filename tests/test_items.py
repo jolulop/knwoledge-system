@@ -28,6 +28,7 @@ import tagging  # noqa: E402
 
 TEMPLATES = ROOT / "templates"
 MODEL_REF = "anthropic:claude-sonnet-4-6"
+PMI_SLUG = items._slug("Post-Merger Integration")   # ADR-0071: lossy (hyphen) → suffixed
 
 _DEFAULT = {
     "items": [
@@ -102,7 +103,12 @@ def test_node_id_and_slug():
     # Source-agnostic + case/space-insensitive identity; type never enters the hash.
     assert items.node_id("post-merger  integration") == items.node_id("Post-Merger Integration")
     assert items.node_id("Acme") != items.node_id("AlphaFold")
-    assert items._slug("Post-Merger Integration") == "post-merger-integration"
+    # ADR-0071: a lossy name (here the hyphen) gets its base plus the first 8 hex of its frozen id;
+    # a lossless one keeps its plain slug.
+    pmi = items.node_id("Post-Merger Integration")
+    assert items._slug("Post-Merger Integration") == f"post-merger-integration--{pmi[4:12]}"
+    assert items.page_slug("Post-Merger Integration", pmi) == items._slug("Post-Merger Integration")
+    assert items._slug("Acme Corp") == "acme-corp"
 
 
 # --- worker ----------------------------------------------------------------
@@ -118,7 +124,7 @@ def test_extracts_items_routes_pages_and_writes_mentions(tmp_path):
     assert summary["status"] == "succeeded"
 
     # ADR-0059: ALL items live flat in wiki/Items/ regardless of item_type.
-    pmi = tmp_path / "wiki" / "Items" / "post-merger-integration.md"
+    pmi = tmp_path / "wiki" / "Items" / f"{PMI_SLUG}.md"
     acme = tmp_path / "wiki" / "Items" / "acme-corp.md"
     model = tmp_path / "wiki" / "Items" / "alphafold.md"
     assert pmi.exists() and acme.exists() and model.exists()
@@ -152,7 +158,7 @@ def test_item_need_not_appear_verbatim(tmp_path):
     _build(tmp_path)
     summary = _extract(tmp_path, FakeAdapter(payload=_payload(_item("Post-Merger Integration"))))
     assert summary["nodes_written"] == 1
-    assert (tmp_path / "wiki" / "Items" / "post-merger-integration.md").exists()
+    assert (tmp_path / "wiki" / "Items" / f"{PMI_SLUG}.md").exists()
 
 
 def test_unknown_item_type_coerced_to_sentinel(tmp_path):
@@ -207,8 +213,8 @@ def test_source_page_projects_item_mentions(tmp_path):
     tagging.keep_all(tmp_path)                       # keeping them makes them the document's tags
     text = (tmp_path / "wiki" / "Sources" / f"{sid}.md").read_text(encoding="utf-8")
     assert "### Suggested (not reviewed)" not in text
-    assert "[[Items/post-merger-integration|" in text
-    assert f"[[Sources/{sid}|" in (tmp_path / "wiki" / "Items" / "post-merger-integration.md").read_text(
+    assert f"[[Items/{PMI_SLUG}|" in text
+    assert f"[[Sources/{sid}|" in (tmp_path / "wiki" / "Items" / f"{PMI_SLUG}.md").read_text(
         encoding="utf-8")                            # mentioned-by (aliased, ADR-0060)
     assert "[[Items/acme-corp|" in text
     assert "[[Items/alphafold|" in text
@@ -387,7 +393,7 @@ def test_source_items_section_groups_by_type_in_priority_order(tmp_path):
              ("### Model", "### Method Technique", "### Provider Institution")]
     assert order == sorted(order)
     assert "[[Items/alphafold" in section.split("### Method Technique")[0]
-    assert "[[Items/post-merger-integration" in section.split("### Method Technique")[1]
+    assert f"[[Items/{PMI_SLUG}" in section.split("### Method Technique")[1]
     assert "[[Items/acme-corp" in section.split("### Provider Institution")[1]
 
 
@@ -402,7 +408,7 @@ def test_source_frontmatter_items_array_mirrors_body(tmp_path):
     text = page.read_text(encoding="utf-8")
     fm = parse_frontmatter(text)
     # ONE items array (replaces the five old per-family arrays), slug-ordered.
-    assert fm["items"] == ["acme-corp", "alphafold", "post-merger-integration"]
+    assert fm["items"] == ["acme-corp", "alphafold", PMI_SLUG]
     for gone in ("concepts", "entities", "people", "organizations", "projects"):
         assert gone not in fm
 
@@ -422,7 +428,7 @@ def test_projection_validator_fails_on_missing_link(tmp_path):
     tagging.keep_all(tmp_path)
     page = tmp_path / "wiki" / "Sources" / f"{_sids(tmp_path)['doc.md']}.md"
     # Drop a projected mention link the graph still has active -> forward check fails.
-    page.write_text(page.read_text(encoding="utf-8").replace("[[Items/post-merger-integration", "Items/x"),
+    page.write_text(page.read_text(encoding="utf-8").replace(f"[[Items/{PMI_SLUG}", "Items/x"),
                     encoding="utf-8")
     assert validate_projection.main([str(tmp_path)]) == 1
 
@@ -634,7 +640,7 @@ class WrongShapeAdapter(FakeAdapter):
 
 def _topic_layer_intact(tmp_path, sid):
     from app.backend import graph as g
-    page = tmp_path / "wiki" / "Items" / "post-merger-integration.md"
+    page = tmp_path / "wiki" / "Items" / f"{PMI_SLUG}.md"
     assert parse_frontmatter(page.read_text(encoding="utf-8"))["status"] == "candidate"
     gconn = g.connect(tmp_path / "db" / "graph.sqlite")
     try:

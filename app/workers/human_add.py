@@ -18,6 +18,12 @@ production type — the sentinel is model-only (ADR-0059 decision 5). The blocke
 apply: it filters machine suggestions only. A pre-ADR-0066 rejected promotion no longer blocks (a
 rejection is per document now). A create whose slug is already owned by a DIFFERENT id blocks
 (`slug_collision`) before any write. After a successful add, `wiki/index.md` is rebuilt.
+
+ADR-0071 decision 3, both checked under the ledger lock before any write, only when the add would
+CREATE a tag: a new name equal (id normalization) to another live tag's title blocks (`name_taken`,
+naming that tag); a name with the same `merge_key` as an active/unused tag's title or alias returns
+`needs_choice` (nothing written) until the caller acknowledges every match (`acknowledged`, "Add
+separately") or picks one (`existing_node_id`, "Use existing", which keeps that tag as it is).
 """
 from __future__ import annotations
 
@@ -28,7 +34,7 @@ from typing import Any
 
 from app.backend import graph, publication_queue, taxonomy
 from app.backend.manifests import iso_now
-from app.workers import identity_journal, item_pages, items, reviews, tag_links
+from app.workers import identity_journal, item_names, item_pages, items, reviews, tag_links
 
 _MAX_DESCRIPTION = 2000
 
@@ -54,6 +60,8 @@ def add_candidate(
     wiki_dir: Path,
     reviews_dir: Path,
     now: str | None = None,
+    existing_node_id: str | None = None,
+    acknowledged: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """Perform one human-add. Returns a typed outcome dict; `blocked` outcomes write NOTHING.
 
@@ -61,7 +69,12 @@ def add_candidate(
     kept → active), `mention_added_active` (active/unused item, kept), `routed_retype` (kept on the
     existing node + a change_item_type item), or `blocked` with a `reason` (`invalid_*`,
     `unknown_source`, `node_not_addable`, `slug_collision`, `ledger_corrupt`,
-    `identity_operation_in_flight`, or a keep gate).
+    `identity_operation_in_flight`, or a keep gate), `name_taken` / `title_authority_unreadable`
+    (ADR-0071 level 1), or `needs_choice` (level 2: `matches` to choose from; nothing written).
+
+    `existing_node_id` ("Use existing"): keep that tag on the document as it is (its own title and
+    type; no retype is routed). `acknowledged`: the tag ids the human saw and chose to add separately
+    from; a match not among them (one that appeared since) asks again.
     """
     now = now or iso_now()
     wiki_dir, reviews_dir = Path(wiki_dir), Path(reviews_dir)
@@ -80,11 +93,30 @@ def add_candidate(
         return _blocked("unknown_source", source_id=source_id)
     tag_links.load_ledger(reviews_dir, source_id)      # LedgerCorrupt here — before ANY write
 
-    nid = items.node_id(title)
+    if existing_node_id is not None:
+        # "Use existing" (ADR-0071 decision 3): the human picked a tag; keep it exactly as it is.
+        chosen = graph.get_node(gconn, existing_node_id) if isinstance(existing_node_id, str) else None
+        if chosen is None or chosen.get("node_type") != "item":
+            return _blocked("unknown_item", node_id=existing_node_id)
+        if taxonomy.is_production_item_type(chosen.get("item_type")):
+            item_type = chosen["item_type"]               # kept as it is: no retype is routed
+        nid = existing_node_id
+        title = item_names.title_of(wiki_dir, chosen) or title
+    else:
+        nid = items.node_id(title)
     if (rid_busy := identity_journal.operation_for(reviews_dir, [nid])) is not None:
         return _blocked("identity_operation_in_flight", review_id=rid_busy,
                         hint="run /reviews/apply to finish it first")
     existing = graph.get_node(gconn, nid)
+    if existing is None and existing_node_id is None:
+        # ADR-0071 decision 3: a NEW tag's name, checked under the ledger lock before any write.
+        if (conflict := item_names.exact_conflict(gconn, wiki_dir, title, None)) is not None:
+            return _blocked(conflict.pop("reason"), **conflict)
+        seen = set(acknowledged or ())
+        matches = item_names.similar_tags(gconn, wiki_dir, title, None)
+        if any(m["node_id"] not in seen for m in matches):
+            return {"outcome": "needs_choice", "reason": "similar_tags", "title": title,
+                    "matches": matches}
     routed_retype: tuple[str, str] | None = None
     if (existing is not None and existing.get("item_type")
             and existing["item_type"] != item_type):
@@ -108,7 +140,7 @@ def add_candidate(
 
     # --- producer writes (mirror extract_items' _emit, asserted_by=human, anchorless) ---
     node_created = node is None
-    slug = items._slug(title) if node_created else node["slug"]
+    slug = items.page_slug(title, nid) if node_created else node["slug"]
     # Slug-collision guard (review round, B2; ADR-0070 B1 review): different titles can hash to
     # different ids yet normalize to the same slug — never write another item's page, nor a page name
     # another item records (any status), nor a page whose owner can't be established; block BEFORE
@@ -118,8 +150,11 @@ def add_candidate(
         problem = item_pages.first_problem(
             gconn, wiki_dir, [d["node_id"] for d in graph.active_duplicates(gconn, nid)])
     if problem is not None:
-        return _blocked("slug_collision", slug=problem.get("slug"),
-                        existing_node_id=problem.get("owner") or (problem.get("holders") or [None])[0],
+        holder = problem.get("owner") or (problem.get("holders") or [None])[0]
+        holder_node = graph.get_node(gconn, holder) if holder else None
+        return _blocked("slug_collision", slug=problem.get("slug"), existing_node_id=holder,
+                        existing_title=(item_names.title_of(wiki_dir, holder_node)
+                                        if holder_node else None),
                         detail=problem["reason"])
     # ADR-0068 decision 4: record the publication intent before the first write.
     intent = publication_queue.record(root, origin="tag_action", sources=[source_id], items=[nid],
@@ -174,7 +209,8 @@ def add_candidate(
                else "created" if node_created
                else "mention_added_active" if node_status in ("active", "unused")
                else "mention_added")
-    return {"outcome": outcome, "node_id": nid, "item_type": used_type, "review_id": rid,
+    return {"outcome": outcome, "node_id": nid, "title": title, "item_type": used_type,
+            "review_id": rid,
             "node_created": node_created, "keep_effect": kept.get("effect"),
             "index_rebuilt": refresh["index_rebuilt"],
             "keyword_reindexed": refresh["keyword_reindexed"], "warnings": refresh["warnings"]}

@@ -41,7 +41,8 @@ from app.backend.manifests import get_provenance, is_source_id, iso_now, valid_m
 from app.backend.paths import safe_child, safe_under
 from app.backend.policy import load_yaml
 from app.llm.client import ConfigError, parse_chain
-from app.workers import citations, enrichment_artifact, labels, merge_candidates, reviews, synthesis, tag_links
+from app.workers import (citations, enrichment_artifact, item_names, items, labels, merge_candidates,
+                         reviews, synthesis, tag_links)
 from app.workers.enrichment_artifact import artifact_fingerprint
 from app.workers.wiki_render import display_link_label, parse_frontmatter
 
@@ -205,6 +206,30 @@ def _check_graph(gconn, wiki_dir: Path, reviews_dir: Path, *, file_items: bool, 
         if claim["status"] == "active" and not graph.sources_for_claim(gconn, claim["node_id"]):
             findings.append({"check": "uncited_claim", "severity": "medium",
                              "subject": claim["node_id"], "detail": "active claim with no active source"})
+    return findings
+
+
+def _check_item_filenames(gconn, wiki_dir: Path) -> list[dict[str, Any]]:
+    """`item_filename_nonconforming` (ADR-0071 decision 4): an item page whose recorded path differs
+    from the path the filename rule gives for its current title and id — e.g. a page minted by the
+    pre-ADR-0071 rule. Report-only (low): it never renames, files nothing, never fails lint. Merged
+    tombstones (kept at their old path by design) and pages whose title can't be read are skipped;
+    shared slugs and ownership conflicts are the validators' integrity errors, not this finding."""
+    findings: list[dict[str, Any]] = []
+    for node in graph.nodes_of_type(gconn, "item"):
+        if node["status"] in ("merged", "deleted"):
+            continue
+        title = item_names.title_of(wiki_dir, node)
+        if title is None:
+            continue
+        expected = items.page_slug(title, node["node_id"])
+        if expected != node["slug"]:
+            findings.append({
+                "check": "item_filename_nonconforming", "severity": "low",
+                "subject": node["node_id"],
+                "detail": "item page path differs from the filename rule (ADR-0071); report only",
+                "data": {"title": title, "actual": f"Items/{node['slug']}.md",
+                         "expected": f"Items/{expected}.md"}})
     return findings
 
 
@@ -718,6 +743,7 @@ def run_lint(
                     findings += _check_graph(
                         gconn, wiki_dir, reviews_dir, file_items=file_review_items, now=now,
                         filed=filed, existing=existing)
+                    findings += _check_item_filenames(gconn, wiki_dir)  # report-only (ADR-0071)
                     findings += _check_merge_candidates(  # graph-gated (ADR-0064)
                         gconn, wiki_dir, reviews_dir, policy_path=root / "policies" / "review.yaml",
                         file_items=file_review_items, now=now,

@@ -198,12 +198,33 @@ def generate_wiki(
                 shared_mapping = tag_projection.active_mapping(gconn, wiki_dir)
             return shared_mapping
 
+        authors_attempted: set[str] = set()
+
+        def _authors_ready(manifest: dict[str, Any]) -> list[str]:
+            """ADR-0071 review round 2 — the Authors prerequisite, at the one place Source pages are
+            written: every Authors page the page will link must be a verified page first. A missing
+            one is written now (the whole inventory, no pruning; at most once per filename per call),
+            then checked again. Returns the filenames still unavailable (the page is then not
+            written: it keeps its previous version and links, and stays queued)."""
+            missing = authors.unavailable_links(wiki_dir, manifest)
+            if missing and not set(missing) <= authors_attempted:
+                authors_attempted.update(missing)
+                try:
+                    authors.publish(root, wiki_dir=wiki_dir, prune=False)
+                except Exception:  # noqa: BLE001 - re-checked below; publication reports it
+                    pass
+                missing = authors.unavailable_links(wiki_dir, manifest)
+            return missing
+
         def _render_one(manifest: dict[str, Any]) -> str | dict[str, str]:
             """Render and write one Source page from current state (ADR-0068: called under
             the write lock, so the manifest, ledger and graph it reads are consistent)."""
             source_id = manifest["source_id"]
             page_path = sources_dir / f"{source_id}.md"
             try:
+                if missing := _authors_ready(manifest):
+                    return {"source_id": source_id, "reason": authors.UNAVAILABLE,
+                            "error": f"{authors.UNAVAILABLE}: Authors/{', Authors/'.join(missing)}"}
                 md_path = markdown_dir / f"{source_id}.md"
                 normalized_markdown = (
                     md_path.read_text(encoding="utf-8") if md_path.exists() else ""

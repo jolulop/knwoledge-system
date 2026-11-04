@@ -1089,7 +1089,7 @@ def test_tag_actions_on_an_unfinished_merge_are_refused(client, tmp_path, monkey
     screen = client.get(f"/ui/reviews/sources/{b}").text
     assert "A merge/split touching this document is unfinished" in screen and "rev_m" in screen
     resp = client.post(f"/ui/reviews/sources/{b}/decide", data={f"link_{absorbed}": "drop"})
-    assert resp.status_code == 200 and "identity_operation_in_flight" in resp.text
+    assert resp.status_code == 200 and "a merge or split on this tag is unfinished" in resp.text
     resp = client.post(f"/reviews/sources/{b}/links", json={"node_id": absorbed, "action": "drop"})
     assert resp.status_code == 409 and resp.json()["detail"] == "identity_operation_in_flight"
     assert _ledger_file(tmp_path, b).read_text(encoding="utf-8") == ledger_before   # nothing written

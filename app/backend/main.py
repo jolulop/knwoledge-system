@@ -888,6 +888,33 @@ def _not_in_use_advice(name: str, status: Any, merged_into: str | None) -> str:
     return f"{name!r} is not in use (status: {status}) — only a tag in use can be merged"
 
 
+def _rename_merge_action(gconn: Any, out: dict[str, Any], renamed: str,
+                         renamed_title: Any) -> dict[str, Any]:
+    """ADR-0071 decision 3: a title amendment refused because another tag already has the name gets
+    the merge the person could file instead — `merge_preview` (a link to the preview, which writes
+    nothing) when `human_merge.plan_merge` with the existing tag surviving is not blocked, else
+    `merge_advice`, what that merge needs first. Read-only; `{}` for any other refusal."""
+    problem = out.get("problem") if isinstance(out.get("problem"), dict) else {}
+    survivor = problem.get("conflict_node_id")
+    if out.get("reason") != "name_taken" or not isinstance(survivor, str):
+        return {}
+    plan = human_merge.plan_merge(gconn, survivor=survivor, absorbed=renamed,
+                                  reviews_dir=settings.reviews_dir)
+    if plan["outcome"] != "blocked":
+        return {"merge_preview": {"survivor": plan["survivor"]["node_id"],
+                                  "absorbed": plan["absorbed"]["node_id"],
+                                  "survivor_title": problem.get("conflict_title")}}
+    reason = plan["reason"]
+    if reason == "absorbed_not_active":
+        advice = _not_in_use_advice(str(renamed_title or renamed), plan.get("node_status"), None)
+    elif reason == "survivor_not_active":
+        advice = _not_in_use_advice(str(problem.get("conflict_title") or survivor),
+                                    plan.get("node_status"), None)
+    else:
+        advice = str(_merge_block_error(plan).detail)
+    return {"merge_advice": advice}
+
+
 def _merged_into_title(slug: Any) -> str | None:
     """The title of the tag a merged tag now points to (its tombstone's `merged_into` id, resolved
     through the graph to the survivor's page), or None when it isn't a tombstone or anything is
@@ -1389,7 +1416,8 @@ def _run_apply(st: Any, intent: str | None = None) -> dict[str, Any]:
         "publication": {"status": pub["status"], "pending": pub["pending"]},
         "summary": {
             "syntheses": {"promoted": syntheses["promoted"], "rejected": syntheses["rejected"]},
-            "promotions": {"promoted": promo["promoted"]},
+            "promotions": {"promoted": promo["promoted"],
+                           "advisories": promo.get("advisories") or []},
             "contradictions": {
                 "acknowledged": contra["resolution"]["acknowledged"],
                 "rejected": contra["resolution"]["rejected"],
@@ -1424,7 +1452,8 @@ def _run_apply(st: Any, intent: str | None = None) -> dict[str, Any]:
                                    "unreconciled": syn_fanout_unreconciled},
             "merged": {"applied": merged["applied"], "skipped": merged["skipped"]},
             "retyped": {"applied": rekeyed["applied"], "skipped": rekeyed["skipped"]},
-            "split": {"applied": split_res["applied"], "skipped": split_res["skipped"]},
+            "split": {"applied": split_res["applied"], "skipped": split_res["skipped"],
+                      "advisories": split_res.get("advisories") or []},
             "pages_changed": pages_changed,
             "index_rebuilt": pub["index_rebuilt"],
             "unapplied": _unapplied_by_type(reviews_dir),
@@ -2111,10 +2140,12 @@ def _source_decide(source_id: str, form: dict[str, Any]) -> HTMLResponse:
                 affected.update(out.get("affected_sources") or [])
                 warnings += _cancel_warnings(out.get("cancelled") or [])
                 if out["outcome"] == "blocked":
-                    results.append(row | {"skip_reason": out["reason"]})
+                    info = out | _rename_merge_action(gconn, out, nid, row.get("title"))
+                    results.append(row | {"skip_reason": out["reason"], "skip_info": info})
                 else:
                     results.append(row | {"recorded": True, "amended": bool(amendments),
-                                          "status": out.get("effect") or out["outcome"]})
+                                          "status": out.get("effect") or out["outcome"],
+                                          "advisories": out.get("advisories") or []})
             if details_save is not None:                   # after the tag rows, same commit phase
                 manifests.confirm_details(
                     settings.manifests_dir, source_id, title=details_save["title"],
@@ -2315,7 +2346,7 @@ def post_source_link(source_id: str, payload: dict[str, Any]) -> dict[str, Any]:
 _ADD_FIELDS = ("add_title", "add_item_type", "add_aliases", "add_description")
 # Fields a redraw doesn't carry over: the pressed action itself, and the Add tag fields unless the
 # caller keeps them (only a successful Add tag resets them).
-_SCREEN_DRAFT_DROP = ("key", "screen_action", *_ADD_FIELDS)
+_SCREEN_DRAFT_DROP = ("key", "screen_action", "add_use", "add_separately", *_ADD_FIELDS)
 
 
 def _source_view(source_id: str) -> dict[str, Any] | None:
@@ -2472,6 +2503,13 @@ def _source_add(source_id: str, form: dict[str, Any]) -> HTMLResponse | Redirect
     if not manifests.is_source_id(source_id):
         return HTMLResponse(
             review_html.render_error(404, f"unknown source: {source_id}"), status_code=404)
+    # ADR-0071 decision 3: "Use existing" names the chosen tag; "Add separately" lists the similar
+    # tags the person saw. Both are rechecked under the ledger lock inside add_candidate.
+    use = str(form.get("add_use") or "").strip() or None
+    if use is not None and not _NODE_ID_RE.fullmatch(use):
+        use = "invalid"
+    acknowledged = [s for s in str(form.get("add_separately") or "").split(",")
+                    if _NODE_ID_RE.fullmatch(s.strip())]
     gconn = _open_graph_safe()
     if gconn is None:
         return _source_flow_unavailable()
@@ -2481,22 +2519,41 @@ def _source_add(source_id: str, form: dict[str, Any]) -> HTMLResponse | Redirect
             gconn, root=settings.root, source_id=source_id, item_type=item_type.strip(),
             title=title, aliases=[a.strip() for a in aliases.split(",") if a.strip()],
             description=description, wiki_dir=settings.wiki_dir,
-            reviews_dir=settings.reviews_dir)
+            reviews_dir=settings.reviews_dir, existing_node_id=use,
+            acknowledged=[s.strip() for s in acknowledged])
     finally:
         gconn.close()
+    if result["outcome"] == "needs_choice":
+        choice = {"kind": "similar", "title": result["title"], "matches": result["matches"]}
+        if screen:
+            return _redraw_screen(source_id, form, before, status_code=409, keep=_ADD_FIELDS,
+                                  add_choice=choice)
+        names = ", ".join(f"{m['title']} ({m['node_id']})" for m in result["matches"])
+        return HTMLResponse(review_html.render_error(
+            409, f"similar tags exist: {names}; resend with add_use=<id> or "
+                 f"add_separately=<ids>"), status_code=409)
     if result["outcome"] == "blocked":
         reason = result["reason"]
         status = 400 if reason.startswith("invalid") else \
-            404 if reason == "unknown_source" else 409
+            404 if reason in ("unknown_source", "unknown_item") else 409
         if screen:
-            text = {"invalid_title": "give the tag a title"}.get(reason, reason)
+            choice = None
+            if reason == "name_taken":
+                choice = {"kind": "exact", "title": title, "matches": [{
+                    "node_id": result.get("conflict_node_id"),
+                    "title": result.get("conflict_title"),
+                    "item_type": result.get("conflict_item_type"),
+                    "status": result.get("conflict_status")}]}
             return _redraw_screen(source_id, form, before, status_code=status, keep=_ADD_FIELDS,
-                                  errors=[f"The tag wasn't added: {text}."])
+                                  errors=[f"The tag wasn't added: "
+                                          f"{review_html.refusal_text(reason, result).rstrip('.')}."],
+                                  add_choice=choice)
         return HTMLResponse(
             review_html.render_error(status, f"add blocked: {reason}"), status_code=status)
     if screen:
+        added = result.get("title") or " ".join(title.split())
         return _redraw_screen(source_id, form, before, notices=[
-            f"Tag “{' '.join(title.split())}” added and kept on this document. Your other choices "
+            f"Tag “{added}” added and kept on this document. Your other choices "
             "on this page are not saved yet."])
     return RedirectResponse(f"/ui/reviews/sources/{source_id}", status_code=303)
 

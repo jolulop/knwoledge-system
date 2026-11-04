@@ -441,7 +441,8 @@ def keep(gconn, *, source_id: str, node_id: str, wiki_dir: Path, reviews_dir: Pa
         pre = promote.activate_node(gconn, node=node, wiki_dir=wiki_dir, reviews_dir=reviews_dir,
                                     amendments=amendments, now=now, dry_run=True)
         if pre["outcome"] == "skipped":
-            return _blocked(pre["reason"], node_id=node_id)
+            return _blocked(pre["reason"], node_id=node_id,
+                            **({"problem": pre["problem"]} if pre.get("problem") else {}))
     elif not taxonomy.is_production_item_type(node.get("item_type")):
         return _blocked("missing_required_item_type", node_id=node_id)
 
@@ -468,10 +469,12 @@ def keep(gconn, *, source_id: str, node_id: str, wiki_dir: Path, reviews_dir: Pa
     if was_legacy:
         affected.update(graph.sources_for_node(gconn, node_id))
     effect = "already_kept" if was_kept else "kept"
+    advisories: list[dict[str, Any]] = []
     if node["status"] == "candidate":
         out = promote.activate_node(gconn, node=node, wiki_dir=wiki_dir, reviews_dir=reviews_dir,
                                     amendments=amendments, now=now)
         affected.update(out.get("affected_sources") or [])
+        advisories = out.get("advisories") or []         # ADR-0071 level 2: reported, never a gate
         effect = "activated"
     elif node["status"] == "unused":
         _refresh_page(gconn, node_id=node_id, wiki_dir=wiki_dir, reviews_dir=reviews_dir, now=now)
@@ -482,7 +485,7 @@ def keep(gconn, *, source_id: str, node_id: str, wiki_dir: Path, reviews_dir: Pa
         _audit(reviews_dir, node_id, "tag-kept", {"source_id": source_id, "node_id": node_id,
                                                    "effect": effect, "amendments": amendments}, now)
     return {"outcome": "kept" if effect != "already_kept" else "already_kept", "effect": effect,
-            "node_id": node_id, "affected_sources": sorted(affected)}
+            "node_id": node_id, "affected_sources": sorted(affected), "advisories": advisories}
 
 
 @ledger_action

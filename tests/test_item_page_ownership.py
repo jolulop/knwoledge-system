@@ -1,6 +1,10 @@
 """ADR-0070 B1 review: two tags whose names give one page name (`Café` and `Caf` → `Items/caf.md`) must
 never overwrite or delete each other's page — the page holds the tag's title, aliases, description
-and status. Every writer refuses before changing authority; extraction skips and reports."""
+and status. Every writer refuses before changing authority; extraction skips and reports.
+
+ADR-0071 gives `Café` its own name (`cafe--<hex>`), so the shared name now exists only in a vault
+minted by the older rule: the fixture moves `Café` to its legacy page `caf` (`legacy_item_slug`).
+The guards stay mandatory for exactly that case (and for an 8-hex suffix collision)."""
 from __future__ import annotations
 
 import json
@@ -22,6 +26,7 @@ from app.backend import graph  # noqa: E402
 from app.backend.manifests import iso_now  # noqa: E402
 from app.workers import human_add, item_pages, items, merges, retypes, splits, tag_links  # noqa: E402
 from app.workers.wiki_render import parse_frontmatter  # noqa: E402
+from tests.fixtures import legacy_item_slug  # noqa: E402
 from tests.test_tag_links import (  # noqa: E402
     _block, _build, _call, _drop, _extract, _g, _item, _keep, _sids)
 
@@ -48,6 +53,7 @@ def vault(tmp_path):
     a, b = sids["a.md"], sids["b.md"]
     _extract(tmp_path, {"alpha": [_item("Café", "technology_capability")]}, source_ids=[a])
     _keep(tmp_path, a, "Café")
+    legacy_item_slug(tmp_path, CPP, "caf")              # minted by the pre-ADR-0071 rule
     return tmp_path, a, b
 
 
@@ -284,6 +290,7 @@ def test_a_split_spinoff_onto_a_held_page_name_is_refused_before_any_write(tmp_p
     _keep(tmp_path, a, "Primary")
     _keep(tmp_path, b, "Primary")
     _keep(tmp_path, a, "Café")
+    legacy_item_slug(tmp_path, CPP, "caf")               # minted by the pre-ADR-0071 rule
     appr = tmp_path / "reviews" / "approved"
     appr.mkdir(parents=True, exist_ok=True)
     (appr / "rev_s.json").write_text(json.dumps({
@@ -333,7 +340,10 @@ def test_a_split_spinoff_onto_a_page_name_held_only_in_the_graph_is_refused(tmp_
             "proposal": {"spinoff_name": "Caf", "spinoff_sources": [b], "spinoff_aliases": []}}),
             encoding="utf-8")
         sp = splits.apply_splits(gconn, tmp_path / "reviews", wiki_dir=tmp_path / "wiki")
-        assert sp["skipped"] == [{"review_id": "rev_s", "reason": item_pages.SLUG_TAKEN}]
+        # ADR-0071: Café's title can't be read (no page), so the spin-off's name can't be shown to
+        # be free — the duplicate-name check refuses first, still before any write.
+        assert [(s["review_id"], s["reason"]) for s in sp["skipped"]] == [
+            ("rev_s", "title_authority_unreadable")]
         assert graph.get_node(gconn, C) is None and not _page(tmp_path).exists()
     finally:
         gconn.close()

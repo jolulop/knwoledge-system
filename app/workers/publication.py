@@ -72,6 +72,11 @@ REASON_HINTS = {
     "manifest_missing": "the document has no manifest",
     "manifest_unreadable": "the document's manifest is invalid",
     "graph_missing": "there is no graph to render from",
+    # ADR-0071 review round 1: the page would link an Authors page that isn't (yet) a valid page.
+    "authors_page_unavailable": "an Authors page it links couldn't be written or verified, so the "
+                                "Source page keeps its previous version; see the "
+                                "`authors_conflict` / `authors_write_failed` warnings and retry with "
+                                "`uv run python scripts/republish.py`",
     # ADR-0070 B1 review: two tags share one page name, or a page's owner can't be established.
     "page_conflict": "the tag's page file belongs to another tag, or its owner can't be established "
                      "(two names give the same page name); nothing was written — see "
@@ -143,9 +148,23 @@ def _publish_authors(root: Path, wiki_dir: Path, out: dict[str, Any]) -> bool:
         out["warnings"].append(f"authors_publication_failed:{type(exc).__name__}")
         return False
     out["authors_written"], out["authors_removed"] = res["written"], res["removed"]
-    for c in res["conflicts"]:
-        out["warnings"].append(f"authors_conflict:{c['file']}:{c['state']}")
-    return not res["conflicts"]
+    _authors_warnings(res, out)
+    for s in res.get("still_linked") or []:              # ADR-0071: an old page still linked
+        out["warnings"].append(f"authors_still_linked:{s['file']}")
+    if res.get("link_scan_failed"):                      # ADR-0071: nothing pruned on a partial scan
+        out["warnings"].append(f"authors_link_scan_failed:{res['link_scan_failed']}")
+    return not (res["conflicts"] or res.get("write_failed") or res.get("still_linked")
+                or res.get("link_scan_failed"))
+
+
+def _authors_warnings(res: dict[str, Any], out: dict[str, Any]) -> None:
+    """The conflicts and failed writes of one Authors publication, once each in `out["warnings"]`
+    (the pre-write and the index step may report the same page)."""
+    for line in ([f"authors_conflict:{c['file']}:{c['state']}" for c in res["conflicts"]]
+                 + [f"authors_write_failed:{w['file']}:{w['error']}"
+                    for w in res.get("write_failed") or []]):
+        if line not in out["warnings"]:
+            out["warnings"].append(line)
 
 
 def _open_graph(root: Path) -> tuple[Any, bool]:
@@ -234,6 +253,42 @@ def _widen_for_tag_labels(root: Path, gconn, wiki_dir: Path, scopes: list[dict[s
     for scope in scopes:
         scope["sources"] |= extra
     return current
+
+
+def _widen_for_author_links(root: Path, wiki_dir: Path, scopes: list[dict[str, set[str]]],
+                            extracted: set[str]) -> None:
+    """ADR-0071 decision 2: before the index step publishes `wiki/Authors/`, add every Source page
+    that links an Authors page the current filename rule no longer names for it. Those pages render
+    first (with the new links); only then may the old Authors pages go. A failure keeps them pending
+    with the entry, and the old page stays (it is still linked)."""
+    from app.workers import authors
+    try:
+        stale = authors.stale_link_sources(root, wiki_dir=wiki_dir) & set(extracted)
+    except Exception:  # noqa: BLE001 - the Authors step reports an unreadable inventory itself
+        return
+    for scope in scopes:
+        scope["sources"] |= stale
+
+
+def _prewrite_authors(root: Path, wiki_dir: Path, out: dict[str, Any]) -> bool:
+    """ADR-0071 decision 2: write the Authors pages the inventory calls for BEFORE the Source pages
+    render, so a refreshed link never points at a page that isn't there yet (a crash between the two
+    steps leaves only extra, unlinked pages). Nothing is pruned here. Returns whether the Authors
+    pages are complete: False on an unreadable inventory, a conflict or a failed write, each reported
+    in `out["warnings"]`; the caller then keeps the Authors work (the index step) pending even for a
+    Source-only refresh. Each Source page whose Authors links would not resolve is kept back where
+    Source pages are written (`wiki.generate_wiki`, review round 2)."""
+    from app.workers import authors
+    try:
+        res = authors.publish(root, wiki_dir=wiki_dir, prune=False)
+    except authors.InventoryError as exc:
+        out["warnings"].append(f"authors_publication_failed:{exc}")
+        return False
+    except Exception as exc:  # noqa: BLE001 - outstanding, reported
+        out["warnings"].append(f"authors_publication_failed:{type(exc).__name__}")
+        return False
+    _authors_warnings(res, out)
+    return not (res["conflicts"] or res["write_failed"])
 
 
 def _dependents(gconn, failed: dict[str, dict[str, str]]) -> dict[str, dict[str, set[str]]]:
@@ -331,13 +386,16 @@ def _render_sources(root: Path, sids: list[str], *, documents: tuple[set[str], s
     try:
         gen = wiki.generate_wiki(root, source_ids=render, wiki_dir=wiki_dir, rebuild_index=False,
                                  record_job=False, templates_dir=templates_dir)
-        errors = {str(e.get("source_id")) for e in gen.get("error_details") or []}
+        # A typed reason (e.g. ADR-0071 `authors_page_unavailable`) is kept; anything else is a
+        # render failure.
+        errors = {str(e.get("source_id")): str(e.get("reason") or "render_failed")
+                  for e in gen.get("error_details") or []}
     except Exception as exc:  # noqa: BLE001 - every source stays outstanding
-        errors = set(render)
+        errors = dict.fromkeys(render, "render_failed")
         for sid in render:
             failed[sid] = f"render_failed:{type(exc).__name__}"
-    for sid in errors & set(render):
-        failed.setdefault(sid, "render_failed")
+    for sid in set(errors) & set(render):
+        failed.setdefault(sid, errors[sid])
     return [s for s in render if s not in errors]
 
 
@@ -399,6 +457,7 @@ def publish(root: Path, *, intent: str | None = None, sources: Any = (), items: 
 
         failed = out["failed"]
         documents = _documents(root)
+        run_index = authors_unfinished = False
         try:
             scopes = [_scope(e, gconn, wiki_dir, documents[0]) for e in entries]
             todo = {f: sorted(set().union(*(s[f] for s in scopes))) for f in FAMILIES}
@@ -413,7 +472,14 @@ def publish(root: Path, *, intent: str | None = None, sources: Any = (), items: 
                     render(gconn, todo[family], wiki_dir=wiki_dir, root=root, now=now,
                            failed=failed[family])
             mapping = _widen_for_tag_labels(root, gconn, wiki_dir, scopes, documents[0])
+            run_index = any(e["index"] or e["full"] for e in entries)
+            if run_index:
+                _widen_for_author_links(root, wiki_dir, scopes, documents[0])
             todo["sources"] = sorted(set().union(*(s["sources"] for s in scopes)))
+            if run_index or todo["sources"]:
+                # ADR-0071: Authors pages first (reported; unfinished work stays queued). Each Source
+                # page is then written only when its Authors links resolve (`generate_wiki`).
+                authors_unfinished = not _prewrite_authors(root, wiki_dir, out)
             out["sources_rendered"] = _render_sources(root, todo["sources"], documents=documents,
                                                       wiki_dir=wiki_dir, templates_dir=templates_dir,
                                                       failed=failed["sources"])
@@ -426,7 +492,7 @@ def publish(root: Path, *, intent: str | None = None, sources: Any = (), items: 
                 gconn.close()
 
         index_failed = keyword_failed = False
-        if any(e["index"] or e["full"] for e in entries):
+        if run_index:
             # Authors pages → index.md → search (ADR-0066 part 3 slice 4): a failure of the first two
             # keeps the index and the keyword work pending, so search never links pages that failed.
             if _publish_authors(root, wiki_dir, out):
@@ -455,7 +521,11 @@ def publish(root: Path, *, intent: str | None = None, sources: Any = (), items: 
                 for f in FAMILIES:
                     left[f] |= deps[f].get(uid, set())
             pages_left = any(left[f] for f in FAMILIES)
-            left_index = pages_left or ((e["index"] or e["full"]) and index_failed)
+            # ADR-0071 review round 1: unfinished Authors pages keep the index step (which publishes
+            # them) pending, even for an entry that only refreshed Source pages.
+            left_index = (pages_left or ((e["index"] or e["full"]) and index_failed)
+                          or (authors_unfinished and bool(scope["sources"] or e["index"]
+                                                          or e["full"])))
             left_keyword = pages_left or ((e["keyword"] or e["full"]) and keyword_failed)
             if not (pages_left or left_index or left_keyword):
                 continue

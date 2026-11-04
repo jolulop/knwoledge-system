@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import html
 import json
+import urllib.parse
 from typing import Any
 
 from app.backend import taxonomy
@@ -80,6 +81,111 @@ _STYLE = (
 def _h(value: Any) -> str:
     """The one mandatory escape: every dynamic value passes through here (quote=True)."""
     return html.escape(str(value), quote=True)
+
+
+_ADDABLE_FOR_REUSE = frozenset({"candidate", "active", "unused", "deprecated_candidate",
+                                "stale_candidate"})
+
+
+def _tag_named(info: dict[str, Any], title_key: str, id_key: str) -> str:
+    title = info.get(title_key)
+    return f"“{title}”" if title else f"another tag ({info.get(id_key) or 'unknown'})"
+
+
+def refusal_text(reason: str, info: dict[str, Any] | None = None) -> str:
+    """Plain wording for a typed refusal (ADR-0071 decision 5: no raw codes on screen). `info` is the
+    outcome or its `problem` (names, ids, paths); unknown reasons fall back to the code itself."""
+    info = info or {}
+    problem = info.get("problem") if isinstance(info.get("problem"), dict) else {}
+    merged = {**problem, **{k: v for k, v in info.items() if k != "problem"}}
+    page = f"Items/{merged.get('slug')}.md" if merged.get("slug") else "its page"
+    if reason == "name_taken":
+        status = merged.get("conflict_status")
+        status_txt = f" ({status})" if status and status != "active" else ""
+        return (f"a tag named {_tag_named(merged, 'conflict_title', 'conflict_node_id')}"
+                f"{status_txt} already exists. Use that tag, or choose a different name"
+                + (" (it is hidden or retired — restore it first, or choose a different name)"
+                   if status and status not in _ADDABLE_FOR_REUSE else "") + ".")
+    if reason == "title_authority_unreadable":
+        return (f"the title of tag {merged.get('node_id')} ({page}) can't be read, so a duplicate "
+                "name can't be ruled out. Nothing was changed; run scripts/validate_all.py and "
+                "repair that page first.")
+    if reason in ("slug_collision", "amended_slug_collision", "page_owned_by_other_item",
+                  "slug_taken"):
+        return (f"the page name {page} already belongs to "
+                f"{_tag_named(merged, 'existing_title', 'existing_node_id')}"
+                ". Nothing was changed; rename the tag, or merge the two tags.")
+    if reason == "page_owner_unknown":
+        return (f"{page} exists but doesn't say which tag owns it, so it is left alone. Nothing was "
+                "changed; repair or remove that file first.")
+    return {"invalid_title": "give the tag a title",
+            "invalid_item_type": "choose a type",
+            "unknown_item": "that tag no longer exists — reload the page",
+            "node_not_addable": "that tag is hidden or retired and can't be added",
+            "identity_operation_in_flight": "a merge or split on this tag is unfinished — run "
+                                            "Apply first",
+            "ledger_corrupt": "this document's tag ledger is damaged — restore it from backup",
+            }.get(reason, reason)
+
+
+def _merge_action(info: dict[str, Any] | None) -> str:
+    """ADR-0071 decision 3: under a rename refusal, the merge preview link when the two tags can be
+    merged (the preview writes nothing), else what the merge needs first."""
+    info = info or {}
+    preview = info.get("merge_preview")
+    if isinstance(preview, dict) and preview.get("survivor") and preview.get("absorbed"):
+        query = urllib.parse.urlencode({"survivor": preview["survivor"],
+                                        "absorbed": preview["absorbed"]})
+        return (f" <a href='/ui/reviews/merge/preview?{_h(query)}'>Preview merging this tag into "
+                f"“{_h(preview.get('survivor_title') or preview['survivor'])}”…</a>")
+    if info.get("merge_advice"):
+        return f" <span class='help'>(A merge isn't possible yet: {_h(info['merge_advice'])}.)</span>"
+    return ""
+
+
+def _advisories(advisories: list[dict[str, Any]] | None) -> str:
+    """ADR-0071 decision 3, level 2: similar existing tags reported with a recorded action — kept
+    apart from refusals; the action already happened, so this is information only."""
+    parts = []
+    for adv in advisories or []:
+        for m in adv.get("matches") or []:
+            how = (f" (matched its alias “{_h(m['matched'])}”)"
+                   if m.get("matched") and m.get("matched") != m.get("title") else "")
+            parts.append(f"<div class='help'>Note: a similar tag already exists — "
+                         f"“{_h(m.get('title'))}” ({_h(m.get('status'))}){how}. If they are the "
+                         "same, merge them.</div>")
+    return "".join(parts)
+
+
+def _add_choice(sid: str, choice: dict[str, Any] | None) -> str:
+    """ADR-0071 decision 3: the choices shown under Add tag when the new name matches an existing tag
+    — Use existing (each match) and, for a similar name only, Add separately. Both submit the whole
+    screen form, so the other unsaved choices are kept, and the server checks again."""
+    if not choice:
+        return ""
+    f = "form='ks-source-form'"
+    rows = []
+    for m in choice.get("matches") or []:
+        how = (f" (matched its alias “{_h(m['matched'])}”)"
+               if m.get("matched") and m.get("matched") != m.get("title") else "")
+        use = (f"<button type='submit' {f} formaction='/ui/reviews/sources/{sid}/add' "
+               f"name='add_use' value='{_h(m['node_id'])}'>Use existing “{_h(m.get('title'))}”"
+               "</button>" if m.get("status") in _ADDABLE_FOR_REUSE else
+               "<em>(hidden or retired — can't be reused here)</em>")
+        rows.append(f"<li>“{_h(m.get('title'))}” — {_h(m.get('item_type'))}, "
+                    f"{_h(m.get('status'))}{how} {use}</li>")
+    separately = ""
+    if choice.get("kind") == "similar":
+        ids = ",".join(m["node_id"] for m in choice.get("matches") or [])
+        separately = (f"<p><button type='submit' {f} formaction='/ui/reviews/sources/{sid}/add' "
+                      f"name='add_separately' value='{_h(ids)}'>Add “{_h(choice.get('title'))}” "
+                      "separately</button> <span class='help'>(a different tag with a similar "
+                      "name)</span></p>")
+        intro = (f"<p><strong>A similar tag already exists.</strong> “{_h(choice.get('title'))}” "
+                 "wasn't added yet. Use the existing tag, or add yours as a separate tag:</p>")
+    else:
+        intro = ("<p><strong>A tag with this name already exists.</strong> Use it instead:</p>")
+    return (f"<div class='banner'>{intro}<ul>{''.join(rows)}</ul>{separately}</div>")
 
 
 def _page(title: str, body: str) -> str:
@@ -773,7 +879,8 @@ def _details_section(data: dict[str, Any], draft: dict[str, Any] | None) -> str:
 
 def render_source_screen(data: dict[str, Any], *, draft: dict[str, Any] | None = None,
                          errors: list[str] | None = None, notices: list[str] | None = None,
-                         warnings: list[str] | None = None) -> str:
+                         warnings: list[str] | None = None,
+                         add_choice: dict[str, Any] | None = None) -> str:
     """One source's screen (ADR-0066): the Details section (part 3 slice 3), tag suggestions to
     keep/drop/never-suggest, kept tags (drop to remove), type changes and retirements in ONE batch
     form (untouched rows record nothing), then the dropped-earlier list (undo) and the add-a-tag form.
@@ -978,7 +1085,8 @@ def render_source_screen(data: dict[str, Any], *, draft: dict[str, Any] | None =
         f"value='{_h(draft.get('add_aliases', ''))}'></label></p>"
         f"<p><label>Description: <input type='text' name='add_description' size='50' {f} "
         f"value='{_h(draft.get('add_description', ''))}'></label></p>"
-        f"<button type='submit' {f} formaction='/ui/reviews/sources/{sid}/add'>Add tag</button>")
+        f"<button type='submit' {f} formaction='/ui/reviews/sources/{sid}/add'>Add tag</button>"
+        + _add_choice(sid, add_choice))
 
     if data.get("global_remaining_by_type"):
         by_type = ", ".join(f"{_h(t)}: {_h(n)}"
@@ -1035,7 +1143,9 @@ def render_source_decide_result(source_id: str, results: list[dict[str, Any]], *
                 label = f"<a href='/ui/reviews/{rid}'>{rid}</a>"
             else:
                 label = _h(r.get("title") or r.get("node_id"))
-            outcome = _h(r.get("skip_reason") or r.get("status") or "")
+            outcome = _h(refusal_text(r["skip_reason"], r.get("skip_info"))
+                         if r.get("skip_reason") else r.get("status") or "")
+            outcome += _merge_action(r.get("skip_info")) + _advisories(r.get("advisories"))
             amended = " (amended)" if r.get("amended") else ""
             rows.append(f"<tr><td>{label}</td>"
                         f"<td>{_h(r.get('action'))}</td><td>{_h(r.get('recorded'))}</td>"
