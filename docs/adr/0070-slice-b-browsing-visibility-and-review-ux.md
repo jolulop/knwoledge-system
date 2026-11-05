@@ -24,7 +24,7 @@ order:
 2. **B2 — review-screen UX:** real titles on the remaining screens, a readable Apply preview, an
    untouched-row warning plus "next document", a "not yet tagged" marker, queue UX. **Refined by
    ADR-0072** (B2 grill, 2026-11-04): built as **B2a** readable Apply (preview + result page) →
-   **B2c** tagging progress → **B2b** flat queue.
+   **B2c** tagging progress → **B2b** flat queue (all three implemented 2026-11-05).
 3. **B3 — button styling:** quieter secondary and destructive buttons on the document screen.
 4. **B4 — competing `change_item_type` proposals** on one tag.
 5. **B5 — author-name variants.**

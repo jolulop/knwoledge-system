@@ -1700,7 +1700,100 @@ def ui_review_queue(
         finally:
             if gconn is not None:
                 gconn.close()
+    pages = review_read._family_page_meta(settings.wiki_dir)        # ADR-0070 §5: the "What"
+    data["subjects"] = {str(it.get("review_id")): review_read.readable_subject(
+        it, wiki_dir=settings.wiki_dir, pages=pages) for it in data["items"]}
     return HTMLResponse(review_html.render_queue(data, status=status))
+
+
+# --- bulk reject / defer (ADR-0070 §5, ADR-0072 decision 6) ------------------------------------
+
+
+def _bulk_ids(form: Any) -> list[str]:
+    """The selected review ids, deduplicated in order (a duplicate counts once)."""
+    seen: dict[str, None] = {}
+    for rid in form.getlist("rid"):
+        rid = str(rid).strip()
+        if rid:
+            seen.setdefault(rid, None)
+    return list(seen)
+
+
+@app.post("/ui/reviews/bulk/confirm", response_class=HTMLResponse)
+async def ui_bulk_confirm(request: Request) -> HTMLResponse:
+    """Bulk step 2: show the selected reviews, their lasting effects and an optional note. Writes
+    NOTHING; its form carries each review's decision fingerprint for the recheck at recording."""
+    form = await request.form()
+    action = str(form.get("bulk_action") or "")
+    if action not in ("reject", "defer"):
+        return HTMLResponse(review_html.render_error(400, f"unknown bulk action: {action}"),
+                            status_code=400)
+    pages = review_read._family_page_meta(settings.wiki_dir)
+    rows, missing = [], []
+    for rid in _bulk_ids(form):
+        item, _err = review_read.find_review(settings.reviews_dir, rid)
+        if item is None:
+            missing.append(rid)
+            continue
+        rows.append({"review_id": rid, "type": item.get("type"),
+                     "subject": review_read.readable_subject(item, wiki_dir=settings.wiki_dir,
+                                                             pages=pages),
+                     "fingerprint": review_read.decision_fingerprint(item)})
+    return HTMLResponse(review_html.render_bulk_confirm(action, rows, missing))
+
+
+@app.post("/ui/reviews/bulk", response_class=HTMLResponse)
+async def ui_bulk_record(request: Request) -> HTMLResponse:
+    """Bulk step 3: record one decision per review through the single-item decision path. Not
+    atomic: each recorded decision stays recorded if the batch stops; a retry skips reviews that
+    already carry the decision (the primitives are idempotent). Never runs Apply."""
+    form = await request.form()
+    action = str(form.get("bulk_action") or "")
+    if action not in ("reject", "defer"):
+        return HTMLResponse(review_html.render_error(400, f"unknown bulk action: {action}"),
+                            status_code=400)
+    ids = _bulk_ids(form)
+    fingerprints = {rid: str(form.get(f"fp_{rid}") or "") for rid in ids}
+    note = str(form.get("note") or "")
+    recorded, skipped = await anyio.to_thread.run_sync(
+        _bulk_record, action, ids, fingerprints, note)
+    return HTMLResponse(review_html.render_bulk_result(action, recorded, skipped))
+
+
+@_commit_phase
+def _bulk_record(action: str, ids: list[str], fingerprints: dict[str, str],
+                 note: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Under the write lock: recheck each selected review (still open, same content, not already
+    carrying the decision) and record it, one decision per review."""
+    decision = _UI_DECISIONS[action]
+    pages = review_read._family_page_meta(settings.wiki_dir)
+    recorded: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for rid in ids:
+        item, _err = review_read.find_review(settings.reviews_dir, rid)
+        if item is None:
+            skipped.append({"review_id": rid, "reason": "not found"})
+            continue
+        row = {"review_id": rid, "subject": review_read.readable_subject(
+            item, wiki_dir=settings.wiki_dir, pages=pages)}
+        status = item.get("status")
+        if status == decision:
+            skipped.append(row | {"reason": f"already {decision}"})
+            continue
+        if status not in ("pending", "deferred"):
+            skipped.append(row | {"reason": f"no longer open (it is {status})"})
+            continue
+        if review_read.decision_fingerprint(item) != fingerprints.get(rid):
+            skipped.append(row | {"reason": "changed — review again"})
+            continue
+        try:
+            out = _record_decision(rid, decision, ReviewDecisionRequest(note=note))
+        except HTTPException as exc:
+            skipped.append(row | {"reason": str(exc.detail)})
+            continue
+        (recorded if out["decision_recorded"] else skipped).append(
+            row if out["decision_recorded"] else row | {"reason": f"already {decision}"})
+    return recorded, skipped
 
 
 @app.get("/ui/reviews/apply", response_class=HTMLResponse)
@@ -2643,6 +2736,8 @@ def ui_review_detail(review_id: str) -> HTMLResponse:
     if result is None or result.get("parse_error") or result.get("schema_error"):
         return HTMLResponse(
             review_html.render_error(404, f"review not found: {review_id}"), status_code=404)
+    result = {**result, "subject": review_read.readable_subject(        # ADR-0070 §5 heading
+        result["item"], wiki_dir=settings.wiki_dir)}
     return HTMLResponse(review_html.render_detail(result, review_id=review_id))
 
 

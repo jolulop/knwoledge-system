@@ -27,7 +27,7 @@ from fastapi.testclient import TestClient
 
 from app.backend import graph
 from app.backend import main as main_module
-from app.backend import review_read
+from app.backend import review_html, review_read
 from app.backend.config import get_settings
 from app.workers import identity_journal, items, merge_candidates, tag_links
 from app.workers.wiki_render import render_item_page
@@ -303,8 +303,10 @@ def test_the_approved_queue_says_what_apply_carried_out(client, tmp_path):
         "decided_at": "2026-10-27T20:00:00+00:00"}), encoding="utf-8")
     page = client.get("/ui/reviews?status=approved").text
     assert "<th>applied</th>" in page
-    assert "applied 2026-10-27T21:33:54+00:00</td>" in page
-    assert ("cannot verify — Apply re-checks it (last applied 2026-10-27T20:00:00+00:00, before this "
+    # ADR-0072 B2: shown in the runtime's local zone
+    assert f"applied {review_html.local_time('2026-10-27T21:33:54+00:00')}</td>" in page
+    assert (f"cannot verify — Apply re-checks it (last applied "
+            f"{review_html.local_time('2026-10-27T20:00:00+00:00')}, before this "
             "approval)") in page
     assert "<td>—</td>" in page
     assert "<th>applied</th>" not in client.get("/ui/reviews").text      # pending view unchanged
@@ -392,7 +394,8 @@ def test_the_applied_column_uses_the_executors_completion_checks(client, tmp_pat
     cells = _cells(client.get("/ui/reviews?status=approved").text)
     want = {"in effect": "already in effect — nothing left to apply",
             "not yet": "not yet — run Apply",
-            "cannot": ("cannot verify — Apply re-checks it (last applied 2026-10-27T21:33:54+00:00, "
+            "cannot": (f"cannot verify — Apply re-checks it (last applied "
+                       f"{review_html.local_time('2026-10-27T21:33:54+00:00')}, "
                        "before this approval)")}
     assert {rid: cells[rid] for rid in cases} == {rid: want[w] for rid, (w, _f) in cases.items()}
     # Without the graph nothing can be checked.

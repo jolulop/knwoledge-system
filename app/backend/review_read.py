@@ -1881,3 +1881,74 @@ def details_section(reviews_dir: Path, source_id: str, *, manifests_dir: Path,
     return {"details": shown | {"known_names": known,
                                 "baseline": details_mod.baseline_token(manifest, ledger, shown),
                                 "pending": pending}}
+
+
+# --- B2b: the flat queue's readable subject and decision fingerprint (ADR-0070 §5, ADR-0072 d6) ----
+
+
+def _label_at(wiki_dir: Path | None, rel: Any) -> str | None:
+    """A page's display title (`labels._page_label`), for a safe relative page path only."""
+    if wiki_dir is None or not isinstance(rel, str) or not re.fullmatch(
+            r"(Items|Claims|Synthesis|Sources)/[A-Za-z0-9_.-]+\.md", rel):
+        return None
+    from app.workers import labels
+    try:
+        label = labels._page_label(Path(wiki_dir) / rel, rel[:-3])
+    except Exception:  # noqa: BLE001 - display only
+        return None
+    return label or None
+
+
+def readable_subject(item: dict[str, Any], *, wiki_dir: Path | None,
+                     pages: dict[str, dict[str, Any]] | None = None) -> str:
+    """The flat queue's "What" (ADR-0070 §5): a tag name, "X into Y" for a merge, "A vs B" for a
+    contradiction, a document title — read from page authority, never from the vault's ids alone;
+    each part falls back to its id, and the whole to the review id. Display only (escape it)."""
+    subj = item.get("subject") if isinstance(item.get("subject"), dict) else {}
+    pages = pages if pages is not None else _family_page_meta(wiki_dir)
+
+    def tag(nid: Any) -> str:
+        title = (pages.get(nid) or {}).get("title") if isinstance(nid, str) else None
+        return str(title or nid or "?")
+
+    def claim(cid: Any) -> str:
+        return (_label_at(wiki_dir, f"Claims/{cid}.md") if isinstance(cid, str) else None) or str(cid)
+
+    if subj.get("survivor_node_id") or subj.get("absorbed_node_id"):
+        return f"{tag(subj.get('absorbed_node_id'))} into {tag(subj.get('survivor_node_id'))}"
+    if subj.get("claim_a") or subj.get("claim_b"):
+        return f"{claim(subj.get('claim_a'))} vs {claim(subj.get('claim_b'))}"
+    if isinstance(subj.get("source_id"), str):
+        sid = subj["source_id"]
+        return (_source_title(wiki_dir, sid) if manifests.is_source_id(sid) else None) or sid
+    nid = subj.get("node_id")
+    if isinstance(nid, str) and nid:
+        name = (pages.get(nid) or {}).get("title") or _label_at(wiki_dir, subj.get("page")) or nid
+        if item.get("type") == "split_item":
+            spin = (item.get("proposal") or {}).get("spinoff_name")
+            return f"{name} → split off “{spin}”" if spin else str(name)
+        if subj.get("to_item_type"):
+            return f"{name} → {subj['to_item_type']}"
+        return str(name)
+    topic = subj.get("topic_node_id")
+    if isinstance(topic, str) and topic:
+        title = (item.get("proposal") or {}).get("title")
+        return str(title or tag(topic))
+    return str(item.get("review_id") or "?")
+
+
+def decision_fingerprint(item: dict[str, Any]) -> str:
+    """ADR-0072 decision 6: the decision-relevant content of a review — its type, subject, proposal,
+    evidence and its whole `context` (producers keep the real evidence there: a merge's
+    `match_evidence`, a contradiction's `judged_evidence` and scope; B2b review round 1) — as a
+    sha256 of deterministic canonical JSON. Conservative: any change inside `context`, nested
+    timestamps included, counts as a change. A bulk confirmation carries it per review; a review
+    whose fingerprint changed since the page was shown is skipped ("changed — review again"), since
+    an id alone survives withdrawal and re-proposal."""
+    import hashlib
+    payload = {"type": item.get("type"), "subject": item.get("subject"),
+               "proposal": item.get("proposal"), "evidence": item.get("evidence"),
+               "context": item.get("context")}
+    canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+                           default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

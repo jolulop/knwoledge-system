@@ -292,6 +292,56 @@ def render_publication_result(result: dict[str, Any], *, repaired: str | None = 
 _STATUSES = ("pending", "deferred", "approved", "rejected")
 
 
+def local_time(value: Any) -> str:
+    """ADR-0072 B2: an ISO timestamp in the runtime's detected local zone, each with the zone that
+    applied to IT (so the two sides of a daylight-saving change show CET / CEST). Anything that isn't
+    an ISO timestamp with a zone is shown as it is."""
+    from datetime import datetime
+    if not isinstance(value, str) or not value:
+        return "" if value is None else str(value)
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return value
+    if dt.tzinfo is None:
+        return value
+    local = dt.astimezone()
+    zone = local.strftime("%Z") or local.strftime("UTC%z")
+    return f"{local.strftime('%Y-%m-%d %H:%M')} {zone}"
+
+
+# The review types' readable names (the flat queue groups by these).
+_TYPE_LABELS = {
+    "promote_candidate_node": "Promote tags", "merge_items": "Merge tags",
+    "change_item_type": "Change tag types", "split_item": "Split tags",
+    "propose_synthesis": "Syntheses", "resolve_contradiction": "Contradictions",
+    "deprecate_wiki_page": "Deprecations", "mark_semantic_duplicate": "Duplicates",
+    "archive_source": "Archive documents", "hide_content": "Hide documents",
+    "unhide_content": "Unhide documents", "hide_semantic_page": "Hide pages",
+    "unhide_semantic_page": "Unhide pages", "hide_claim": "Hide claims",
+    "unhide_claim": "Unhide claims", "hide_synthesis": "Hide syntheses",
+    "unhide_synthesis": "Unhide syntheses",
+}
+
+
+def type_label(review_type: Any) -> str:
+    return _TYPE_LABELS.get(str(review_type), str(review_type or "other"))
+
+
+# What a decision leaves behind, per the repository's actual rules (ADR-0072 decision 6).
+def lasting_effect(review_type: Any, action: str) -> str:
+    if action == "defer":
+        return ("Stays in the queue as deferred; nothing changes, and you can decide it later.")
+    effect = ("This exact proposal is not filed again while the rejection stands (reopen it on its "
+              "review page to change your mind).")
+    if review_type == "merge_items":
+        effect += (" A rejected merge also blocks filing this merge, or the reverse merge, by hand "
+                   "until it is reopened.")
+    if review_type in ("resolve_contradiction", "propose_synthesis"):
+        effect += " The next Apply carries out the rejection for this kind of review."
+    return effect
+
+
 def render_queue(data: dict[str, Any], *, status: str) -> str:
     filters = " ".join(
         (f"<strong>{_h(s)}</strong>" if s == status
@@ -316,30 +366,32 @@ def render_queue(data: dict[str, Any], *, status: str) -> str:
         parts.append("<p><em>No items.</em></p>")
     else:
         applied = data.get("applied")       # approved view only: {review_id: applied_state}
-        rows = ["<tr><th>review_id</th><th>type</th><th>status</th><th>priority</th>"
-                "<th>created_at</th>" + ("<th>applied</th>" if applied is not None else "") + "</tr>"]
+        subjects = data.get("subjects") or {}
+        # ADR-0070 §5 / ADR-0072 decision 6: explicit selection (none ticked), current page only,
+        # for the views whose reviews can still be rejected or deferred.
+        bulk = status in ("pending", "deferred")
+        rows: list[str] = []
+        groups: dict[str, list[dict[str, Any]]] = {}
         for it in data["items"]:
-            rid = _h(it.get("review_id"))
-            cell = ""
-            if applied is not None:
-                state = applied.get(it.get("review_id")) or {}
-                if state.get("state") == "applied":
-                    cell = f"<td>applied {_h(state.get('at'))}</td>"
-                elif state.get("state") == "in_effect":
-                    cell = "<td>already in effect — nothing left to apply</td>"
-                elif state.get("state") == "cannot_verify":
-                    last = (f" (last applied {_h(state['at'])}, before this approval)"
-                            if state.get("at") else "")
-                    cell = f"<td>cannot verify — Apply re-checks it{last}</td>"
-                elif state.get("state") == "not_yet":
-                    cell = "<td><strong>not yet</strong> — run Apply</td>"
-                else:
-                    cell = "<td>—</td>"
-            rows.append(
-                f"<tr><td><a href='/ui/reviews/{rid}'>{rid}</a></td>"
-                f"<td>{_h(it.get('type'))}</td><td>{_h(it.get('status'))}</td>"
-                f"<td>{_h(it.get('priority'))}</td><td>{_h(it.get('created_at'))}</td>{cell}</tr>")
+            groups.setdefault(str(it.get("type")), []).append(it)
+        for gtype in sorted(groups, key=lambda t: (type_label(t), t)):
+            rows.append(f"<tr><th colspan='{7 if bulk or applied is not None else 6}'>"
+                        f"{_h(type_label(gtype))} ({_h(len(groups[gtype]))})</th></tr>")
+            rows.append(("<tr><th></th>" if bulk else "<tr>")
+                        + "<th>what</th><th>review</th><th>status</th><th>priority</th>"
+                        "<th>created</th>" + ("<th>applied</th>" if applied is not None else "")
+                        + "</tr>")
+            for it in groups[gtype]:
+                rows.append(_queue_row(it, subjects, applied, bulk))
+        if bulk:
+            parts.append("<form method='post' action='/ui/reviews/bulk/confirm'>")
         parts.append("<table>" + "".join(rows) + "</table>")
+        if bulk:
+            parts.append("<p><button type='submit' name='bulk_action' value='reject'>Reject "
+                         "selected…</button> <button type='submit' name='bulk_action' "
+                         "value='defer'>Defer selected…</button> <span class='help'>Opens a "
+                         "confirmation page; nothing is recorded until you confirm there. Approval "
+                         "stays one at a time on each review's page.</span></p></form>")
         if applied is not None:
             parts.append("<p>Approved items stay listed here after Apply. <em>applied</em> shows when "
                          "a merge, split or type change was carried out; <em>already in effect</em> "
@@ -347,7 +399,42 @@ def render_queue(data: dict[str, Any], *, status: str) -> str:
                          "the saved state is incomplete (a missing page, an unfinished operation) — "
                          "Apply re-checks it; — means the type leaves no per-item record (Apply "
                          "re-checks those every run).</p>")
-    parts.append(
+    parts.append(_MERGE_FORM)
+    return _page(f"Reviews — {status}", "".join(parts))
+
+
+def _applied_cell(state: dict[str, Any]) -> str:
+    """The approved view's "applied" cell (UAT round 8; review rounds 9–10)."""
+    kind = state.get("state")
+    if kind == "applied":
+        return f"<td>applied {_h(local_time(state.get('at')))}</td>"
+    if kind == "in_effect":
+        return "<td>already in effect — nothing left to apply</td>"
+    if kind == "cannot_verify":
+        last = (f" (last applied {_h(local_time(state['at']))}, before this approval)"
+                if state.get("at") else "")
+        return f"<td>cannot verify — Apply re-checks it{last}</td>"
+    if kind == "not_yet":
+        return "<td><strong>not yet</strong> — run Apply</td>"
+    return "<td>—</td>"
+
+
+def _queue_row(it: dict[str, Any], subjects: dict[str, str], applied: dict[str, Any] | None,
+               bulk: bool) -> str:
+    """One flat-queue row: the selection box (bulk views), the readable subject linking to the
+    review, its id, status, priority, local creation time and (approved view) the applied cell."""
+    rid = _h(it.get("review_id"))
+    cell = _applied_cell(applied.get(it.get("review_id")) or {}) if applied is not None else ""
+    tick = (f"<td><input type='checkbox' name='rid' value='{rid}' aria-label='select {rid}'></td>"
+            if bulk else "")
+    what = subjects.get(str(it.get("review_id"))) or it.get("review_id")
+    return (f"<tr>{tick}<td><a href='/ui/reviews/{rid}'>{_h(what)}</a></td>"
+            f"<td><code>{rid}</code></td><td>{_h(it.get('status'))}</td>"
+            f"<td>{_h(it.get('priority'))}</td><td>{_h(local_time(it.get('created_at')))}</td>"
+            f"{cell}</tr>")
+
+
+_MERGE_FORM = (
         "<h2>Merge items</h2>"
         "<p>Merge one knowledge item into another: the absorbed item becomes a tombstone "
         "redirecting to the survivor and its edges move over — at apply, after the dry-run. Enter "
@@ -358,7 +445,6 @@ def render_queue(data: dict[str, Any], *, status: str) -> str:
         "<p><label>Survivor: <input type='text' name='survivor' size='30' required></label> "
         "<label>Absorbed: <input type='text' name='absorbed' size='30' required></label></p>"
         "<button type='submit'>Preview merge</button></form>")
-    return _page(f"Reviews — {status}", "".join(parts))
 
 
 # --- detail ----------------------------------------------------------------
@@ -465,9 +551,9 @@ def render_detail(result: dict[str, Any], *, review_id: str) -> str:
         "type": item.get("type"),
         "status": item.get("status"),
         "priority": item.get("priority"),
-        "created_at": item.get("created_at"),
+        "created": local_time(item.get("created_at")),
         "decided_by": item.get("decided_by"),
-        "decided_at": item.get("decided_at"),
+        "decided": local_time(item.get("decided_at")),
     }
     preview_rows = {
         "summary": preview.get("summary"),
@@ -488,7 +574,9 @@ def render_detail(result: dict[str, Any], *, review_id: str) -> str:
 
     body = [
         _nav(),
-        f"<h1>Review {_h(review_id)}</h1>",
+        (f"<h1>{_h(result['subject'])} <small>— {_h(type_label(item.get('type')))}</small></h1>"
+         f"<p><code>{_h(review_id)}</code></p>" if result.get("subject")
+         else f"<h1>Review {_h(review_id)}</h1>"),
         "<h2>Item</h2>", _render_value(summary_rows),
         "<h2>Preview</h2>", _render_value(preview_rows),
         "<h2>Apply state</h2>", _render_value(apply_rows),
@@ -498,6 +586,67 @@ def render_detail(result: dict[str, Any], *, review_id: str) -> str:
                           effect_status=ap.get("effect_status")),
     ]
     return _page(f"Review {review_id}", "".join(body))
+
+
+# --- bulk reject / defer (ADR-0072 decision 6) -----------------------------------
+
+
+_BULK_VERBS = {"reject": ("Reject", "rejected"), "defer": ("Defer", "deferred")}
+
+
+def render_bulk_confirm(action: str, rows: list[dict[str, Any]],
+                        missing: list[str]) -> str:
+    """Step 2: what the selected reviews are and what the decision leaves behind. Writes nothing; its
+    form carries each review's id AND decision fingerprint, rechecked when the decisions are recorded."""
+    verb = _BULK_VERBS[action][0]
+    parts = [_nav(), f"<h1>{_h(verb)} {_h(len(rows))} selected review"
+             f"{'s' if len(rows) != 1 else ''}?</h1>",
+             "<p>Nothing has been recorded yet. Each review is checked again when you confirm: one "
+             "that changed since this page was shown is skipped.</p>"]
+    if missing:
+        parts.append("<p class='banner'>Not found (left out): "
+                     + ", ".join(f"<code>{_h(m)}</code>" for m in missing) + "</p>")
+    if not rows:
+        parts.append("<p><em>Nothing selected.</em> <a href='/ui/reviews'>Back to the queue</a></p>")
+        return _page(f"{verb} selected", "".join(parts))
+    items = []
+    for r in rows:
+        items.append(f"<li><a href='/ui/reviews/{_h(r['review_id'])}'>{_h(r['subject'])}</a> — "
+                     f"{_h(type_label(r['type']))} <code>{_h(r['review_id'])}</code><br>"
+                     f"<span class='help'>{_h(lasting_effect(r['type'], action))}</span>"
+                     f"<input type='hidden' name='rid' value='{_h(r['review_id'])}'>"
+                     f"<input type='hidden' name='fp_{_h(r['review_id'])}' "
+                     f"value='{_h(r['fingerprint'])}'></li>")
+    parts.append("<form method='post' action='/ui/reviews/bulk'>"
+                 f"<input type='hidden' name='bulk_action' value='{_h(action)}'>"
+                 "<ul>" + "".join(items) + "</ul>"
+                 "<p><label>Note (applies to every decision): <input type='text' name='note' "
+                 "size='50'></label></p>"
+                 f"<p><button type='submit'>{_h(verb)} {_h(len(rows))} review"
+                 f"{'s' if len(rows) != 1 else ''}</button> <a href='/ui/reviews'>Cancel</a></p>"
+                 "</form>")
+    return _page(f"{verb} selected", "".join(parts))
+
+
+def render_bulk_result(action: str, recorded: list[dict[str, Any]],
+                       skipped: list[dict[str, Any]]) -> str:
+    """Step 3: which decisions were recorded and which were skipped (with why). Never runs Apply."""
+    verb, done = _BULK_VERBS[action]
+    parts = [_nav(), f"<h1>{_h(verb)} selected — result</h1>",
+             f"<p>{_h(len(recorded))} {_h(done)}, {_h(len(skipped))} skipped. Nothing was applied; "
+             "a mistaken rejection is undone with <strong>Reopen</strong> on its review page.</p>"]
+
+    def row(r: dict[str, Any], why: str = "") -> str:
+        return (f"<li><a href='/ui/reviews/{_h(r['review_id'])}'>{_h(r.get('subject') or r['review_id'])}"
+                f"</a> <code>{_h(r['review_id'])}</code>{f' — {_h(why)}' if why else ''}</li>")
+    parts.append(f"<h2>{_h(done.capitalize())}</h2>"
+                 + ("<ul>" + "".join(row(r) for r in recorded) + "</ul>" if recorded
+                    else "<p><em>None.</em></p>"))
+    if skipped:
+        parts.append("<h2>Skipped</h2><ul>" + "".join(row(r, r["reason"]) for r in skipped)
+                     + "</ul>")
+    parts.append("<p><a href='/ui/reviews'>Back to the queue</a></p>")
+    return _page(f"{verb} selected — result", "".join(parts))
 
 
 # --- apply -----------------------------------------------------------------

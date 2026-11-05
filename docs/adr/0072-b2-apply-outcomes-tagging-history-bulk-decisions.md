@@ -161,7 +161,8 @@ Refines ADR-0070 §5 "Bulk reject / defer only".
    nothing.** A separate, origin-guarded POST (ADR-0067) records the decisions. No server-side
    selection store and no Apply-style preview token.
 2. **Stale-selection fingerprint.** The confirmation form carries, per review, its id **and a
-   fingerprint of its decision-relevant content** (subject, proposal, evidence). At confirmation,
+   fingerprint of its decision-relevant content** (subject, proposal, evidence, and the whole
+   `context`, where producers keep the actual evidence — B2b review round 1). At confirmation,
    under the write lock, a review whose fingerprint changed is skipped as **"changed — review
    again"**: an id alone can survive withdrawal and re-proposal.
 3. **The confirmation page** lists each review by its readable subject and type, and explains the
@@ -351,3 +352,37 @@ Four blocking reporting issues (one an execution regression), reproduced by the 
 - **The decision being recorded is dated evidence:** it supplies `earliest_known_decision_at` when
   every older piece of evidence is untimed; `first_decision_at` stays null.
 - The list and screen say "none known to be untagged" when unknown histories remain.
+
+## Implementation — B2b (2026-11-05)
+
+- **Readable subject** (`review_read.readable_subject`): a tag by its page title, "X into Y" for a
+  merge, "A vs B" for a contradiction, a document by its effective title, a split as
+  "P → split off “S”", a type change as "T → type"; each part falls back to its id. It is the
+  queue's "What" column (linking to the review) and the detail page's heading, with the type and
+  the id beside it.
+- **Grouping and time:** queue rows are grouped by review type (readable type names, with counts);
+  times are shown with `review_html.local_time` — the runtime's local zone, each timestamp with the
+  zone that applied to it (CET / CEST), non-timestamps unchanged.
+- **Bulk reject / defer** (pending and deferred views only; no row ticked by default; the current
+  page's rows only): **Reject selected…** / **Defer selected…** post to
+  `/ui/reviews/bulk/confirm`, which writes nothing and lists each review's subject, type and
+  lasting effect (`review_html.lasting_effect`: a rejection blocks re-filing that proposal; a
+  rejected merge also blocks the pair both ways; contradictions and syntheses carry the rejection
+  out at the next Apply; a deferral changes nothing), with one optional note. Its form carries each
+  review's `review_read.decision_fingerprint` (sha256 of the canonical type, subject, proposal and
+  evidence). `/ui/reviews/bulk` (origin-guarded like every POST) records under the write lock,
+  through the single-item `_record_decision`: ids deduplicated; a review not found, no longer open,
+  already carrying the decision or whose fingerprint changed ("changed — review again") is skipped
+  with its reason. Not atomic; a retry skips what was recorded and never duplicates an audit entry.
+  The result page links every review and escapes subjects and notes; no bulk action runs Apply.
+- **Tests:** `tests/test_flat_queue.py`.
+
+### Review round 1 on B2b (2026-11-05)
+
+- **The fingerprint hashes the whole `context`.** Producers store the real evidence there (a
+  merge's `match_evidence`, a contradiction's `judged_evidence` and scope); hashing only a top-level
+  `evidence` field let a bulk rejection go through after the evidence changed. Conservative: any
+  change inside `context`, nested timestamps included, makes the selection stale ("changed —
+  review again"). No producer rewrites a filed review's `context` in place (filing is idempotent),
+  so routine confirmations aren't affected. The retirement marker is a top-level field: a review
+  being retired is refused by the decision path itself, and the rest of the batch proceeds.
