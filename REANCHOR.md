@@ -1,6 +1,6 @@
 # REANCHOR — session status
 
-_Last updated: 2026-11-04. **Reanchor command:** "read REANCHOR.md and reanchor". Read this
+_Last updated: 2026-11-05. **Reanchor command:** "read REANCHOR.md and reanchor". Read this
 first after an app restart, then `wiki/index.md` if working in the vault._
 
 > [!warning] This is a periodically-refreshed snapshot and can lag the live state. The authoritative
@@ -12,14 +12,46 @@ first after an app restart, then `wiki/index.md` if working in the vault._
 
 Local-first **LLM Wiki** knowledge-system. Immutable `raw/` → derived `normalized/` →
 generated `wiki/` (gitignored, regenerable) → `db/` SQLite (graph, jobs, llm_cache) →
-`reviews/`, `policies/`. ADR-driven (`docs/adr/0001–0071`). See `CLAUDE.md` for the
+`reviews/`, `policies/`. ADR-driven (`docs/adr/0001–0072`). See `CLAUDE.md` for the
 critical rules and `CONTEXT.md` for the glossary.
 
 ## Where we are
 
-- **2026-11-04 (late) — ADR-0070 B1 accepted in Obsidian; ADR-0071 B1b (item page filenames)
-  implemented; tip `661b877`, pushed, in sync with `origin/main`**, tree clean except the user's
-  `.vscode/`. Since `c722f9c`:
+- **2026-11-05 — ADR-0070 B2 (review-screen UX) complete, designed by ADR-0072; tip `94a05c8`,
+  pushed, in sync with `origin/main`**, tree clean except the user's `.vscode/`. Since `661b877`:
+  - `ae8e21b` — the previous refresh of this file. `878d375` — **ADR-0072** design lock (B2 grill
+    Q1–Q6: sub-slices B2a → B2c → B2b, per-review Apply outcomes, names captured before mutation,
+    the tagging-history record and migration, two-step bulk reject/defer) + ADR-0070/0071/CONTEXT
+    updates.
+  - `33a39e1` — **B2a, readable Apply** + external review rounds 1–4:
+    - every Apply executor reports one outcome per review (`app/workers/apply_outcomes.py`):
+      `applied` / `already_in_effect` (only a verified no-op) / `skipped` / `incomplete`, with the
+      VERIFIED end state (`verification_unavailable`, `postcondition_not_met`,
+      `hidden_takes_precedence`); reporting reads never raise and never fabricate success;
+    - the preview (sandbox outcomes) and result (real outcomes) lead with plain sentences
+      (`app/backend/apply_readable.py`): changes, one already-in-effect line, **Attention needed**
+      (Blocked / Incomplete / Outcome not reported, reason-specific recovery: Apply resumes
+      authority work, Retry publishing repairs projections), Advisories; the diff is folded;
+    - two execution changes: Apply's publication always republishes every document whose
+      manifest status a source executor wrote; an approved promotion writes an executor record
+      (`audit_log/<rid>-promoted-*.json`) bound to the approval by `approval_fingerprint`;
+    - ADR-0072 lists the follow-ups the outcomes exposed (left unchanged).
+  - `f32ce67` — **B2c, tagging progress**: a per-ledger `tagging` marker and the vault
+    `reviews/tag_links/_tracking.json` (`app/workers/tag_history.py`); evidence (timed or not)
+    means tagged; `rebuild_tag_links.py` migrates (dry run / `--apply`) and
+    `--init-fresh-tracking` certifies a fresh vault; the document list shows *not yet tagged* /
+    *tagging history unknown* + **Next untagged document**; the document screen shows undecided
+    rows by kind beside Save + **Next document with undecided rows**; the Save result warns.
+  - `94a05c8` — **B2b, flat queue**: a readable "What" subject (also the detail heading), rows
+    grouped by type, local time with the zone per timestamp, two-step **bulk reject / defer**
+    (confirmation writes nothing; a per-review fingerprint over type, subject, proposal, evidence
+    and the whole `context` skips anything changed since — "changed — review again").
+  - Gate before the last commit: **2413 passed, 2 skipped**, ruff clean, 15 validators.
+  - **No UAT clone exists** (`/tmp/ks-uat` deleted 2026-11-05; its cache had nothing beyond
+    `~/ks-saved/2026-11-02/llm_cache.ks-uat.sqlite`). A fresh one per `docs/UAT Guide.md` §1 now
+    includes `scripts/rebuild_tag_links.py --init-fresh-tracking` in §4.
+- **2026-11-04 (late; historical, superseded by the entry above) — ADR-0070 B1 accepted in
+  Obsidian; ADR-0071 B1b implemented; tip `661b877`.** Since `c722f9c`:
   - `c4bf0fb` — the previous refresh of this file.
   - **B1 Obsidian acceptance passed** on a fresh UAT clone (`/tmp/ks-uat`, built at `c4bf0fb`):
     `domain/2024`; `Café`/`Cafe` separate; `İstanbul`; `!!!` → id fallback; `Straße`/`Strasse`
@@ -50,10 +82,6 @@ critical rules and `CONTEXT.md` for the glossary.
       writer; replacements are written first; an old page is pruned only when no Source page links
       it, and an incomplete link scan never prunes; unfinished Authors work stays pending.
     - Gate before commit: **2242 passed, 2 skipped**, ruff clean, 15 validators, whitespace clean.
-  - **UAT clone `/tmp/ks-uat` is still at `c4bf0fb` (the old filename rule)** and may still have
-    its API running on `127.0.0.1:18000`. To see B1b end to end, rebuild it fresh per
-    `docs/UAT Guide.md` §1 (seed `~/ks-saved/2026-11-02/llm_cache.ks-uat.sqlite`; B1b changed no
-    prompts) — patching it in place keeps old-rule pages such as `Items/data-mesh.md`.
 - **2026-11-04 (historical; superseded by the entry above) — ADR-0070 Slice B: design locked, B1
   implemented; tip `c722f9c`, pushed, in sync with `origin/main`.**
   - `4e02520` — two doc fixes (this file's *Add tag / Undo drop* wording; the Build Spec's weekly
@@ -557,8 +585,9 @@ critical rules and `CONTEXT.md` for the glossary.
 | **ADR-0068 vault consistency contract** (write lock · publication queue · per-document producer commits · preview tokens · bounded traversal) | **Complete + pushed** (`4ed3e13` · `0d75234` · `e3558c6` · `b13f513` · `d11945b`); validators 12→15 |
 | **ADR-0069 scoped contradiction checks + LLM usage ledger** | **Complete + pushed** (`8e61c1f` design · `57b1dd1` · `a22d642` · `a9efe06` · `b17e254` · `c6a51f2` · `795fd46` evaluation); recommended judge `local:qwen3.6:27b` at 4,096 output tokens, `CONTRADICTION_MODEL` unset |
 | **Web UI tidy + part-3 UAT** (palette · interrupted runs · one-form document screen · UAT fixes) | **Done + pushed** (`bc7a51e` · `ad6391a` · `ec3a48b` · `665b6ba` · `297187d`); UAT 2026-11-02/03 passed, comment 4 answered by ADR-0070 B1 |
-| **ADR-0070 Slice B browsing visibility + review UX** | **Design locked; B1 + B1b complete + pushed** (`4e02520` design + round 1 · `c722f9c` B1 + rounds 2–3 · `318166a` · B1b below); B1 Obsidian acceptance passed 2026-11-04; B2–B5 open |
+| **ADR-0070 Slice B browsing visibility + review UX** | **Design locked; B1, B1b, B2 complete + pushed** (`4e02520` design + round 1 · `c722f9c` B1 + rounds 2–3 · `318166a` · B1b and B2 below); B1 Obsidian acceptance passed 2026-11-04; B3–B5 open |
 | **ADR-0071 item page filenames (B1b)** | **Complete + pushed** (`d59ef84` design · `661b877` B1b + review rounds 1–2) |
+| **ADR-0072 B2 (Apply outcomes, tagging history, bulk decisions)** | **Complete + pushed** (`878d375` design · `33a39e1` B2a + rounds 1–4 · `f32ce67` B2c + round 1 · `94a05c8` B2b + round 1); a hand look-through needs a fresh UAT clone |
 
 ## Next step
 
@@ -575,18 +604,17 @@ critical rules and `CONTEXT.md` for the glossary.
   — set `ENRICH_LOCAL_BASE_URL` + add `local:<model>` to a tier chain (start with
   `ENRICH_MODEL_LIGHT`). No-cost resolve-check snippet in that doc.
 - **NEXT (each step on the user's go; each new design starts with a `grill-phase`):**
-  1. **Slice B — ADR-0070** (design locked; read its B1–B5 sections and the review rounds; B1,
-     its Obsidian acceptance and B1b / ADR-0071 are done):
-     a. *(optional)* **B1b look-through** on a fresh UAT clone: Add tag `Data-Mesh` then `Data Mesh`
-        (the similar-tag choice), a title amendment onto a taken name (the plain refusal), and the
-        new filenames in Obsidian.
-     b. **B2–B5 implementation**, each on "implement now": **B2** review-screen UX — real
-        titles, readable apply preview (plain list, detail folded; also words the flat-queue
-        refusals that Apply still shows as codes, e.g. a title amendment's `name_taken`), bulk reject/defer, untouched-row
-        warning + durable `first_tag_decision_at` marker + "next document", queue count (all rows
-        awaiting a choice, by kind); **B3** button styling (three tiers, red stays primary);
-        **B4** competing `change_item_type` proposals (keep separate, show + guard); **B5**
-        author/publisher name variants (form hint + report-only lint, bounded matching).
+  1. **Slice B — ADR-0070** (design locked; read its B3–B5 sections; B1, B1b / ADR-0071 and
+     B2 / ADR-0072 are done):
+     a. **B3–B5 implementation**, each on "implement now": **B3** button styling (three tiers,
+        red stays primary); **B4** competing `change_item_type` proposals (keep separate, show +
+        guard); **B5** author/publisher name variants (form hint + report-only lint, bounded
+        matching).
+     b. *(when the user asks)* a fresh UAT clone to look through B1b + B2 by hand (Add tag
+        `Data-Mesh` then `Data Mesh`; the readable Apply preview; not yet tagged / Next; bulk
+        reject on the flat queue). Remember `--init-fresh-tracking` (UAT Guide §4).
+     c. ADR-0072's follow-up list (executor defects the B2a outcomes exposed) — each needs its own
+        decision.
   2. **Part 4** — decision 11: `scripts/eval_item_tags.py` (deterministic, manual run) against
      `evals/golden_item_tags.yaml` (pre-restart baseline, then measured on the rebuilt vault).
   3. **Decision 10 clean restart** at the new prompt versions → fresh full UAT + scoring, including
@@ -705,12 +733,15 @@ paid judges need `--allow-paid`; a per-attempt LLM usage ledger; a reviewed judg
 `scripts/eval_contradictions.py`; recommended judge `local:qwen3.6:27b` at 4,096 output tokens)**,
 **0070 (Slice B browsing visibility + review UX: B1 active-only tags in the index/graph, kept tags
 as nested `tags:` with casefold-collision id suffixes and a last-published snapshot, interim
-page-ownership guard for shared slugs; B2–B5 review-screen changes designed, not built)**,
+page-ownership guard for shared slugs; B2 built per ADR-0072; B3–B5 designed, not built)**,
 **0071 (item page filenames, B1b: plain slug for a lossless name, else `<base>--<8 hex of the item
 id>`; shared base helper with Authors; exact-name duplicates block, `merge_key` matches advise
 (Use existing / Add separately); report-only `item_filename_nonconforming`, no item migration;
 Authors filename migration publishes verified replacements before Source links change and prunes
-only unlinked pages)** — full glossary entries in `CONTEXT.md` (historical superseded entries
+only unlinked pages)**, **0072 (B2: per-review Apply outcomes stating the verified end state, the
+readable Apply preview/result, the tagging-history marker + `_tracking.json` + explicit migration /
+fresh initialization, the readable flat queue and two-step bulk reject/defer with a per-review
+decision fingerprint)** — full glossary entries in `CONTEXT.md` (historical superseded entries
 carry supersession notes).
 
 **Path safety:** `app/backend/paths.py` (`safe_under` containment, `safe_child` basename-only) is the
