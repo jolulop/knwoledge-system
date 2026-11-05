@@ -186,3 +186,126 @@ Refines ADR-0070 §5 "Bulk reject / defer only".
   (with its explicit `from_start: true`) gives full certainty.
 - The UAT Guide and the decision-10 restart procedure gain the explicit tracking-initialization
   step (B2c).
+
+## Implementation — B2a (2026-11-04)
+
+- **`app/workers/apply_outcomes.py`** (new): the shared record (`outcome`), display pairs
+  (`named`, `page_name`, `item_name` — a tag is named only by its **own** page), `reconcile`
+  (one outcome per handled review; missing or duplicate reports become gaps, every report kept) and
+  `counts`.
+- **Every Apply executor reports `outcomes`** beside its unchanged counts: `synthesis` (propose,
+  hide, unhide), `contradictions`, `deprecations` (deprecate, semantic hide/unhide, claim
+  hide/unhide), `duplicates`, `merges`, `retypes`, `splits`, `promote` (a new read-only pass gives
+  approvals the candidate loop never visits — e.g. already active — their outcome) and `retention`
+  (archive, hide, unhide documents). Each executor's docstring states where a legacy count differs
+  from its outcomes (e.g. a silent no-op whose postcondition no longer holds is now a `skipped`
+  outcome but stays out of the legacy `skipped` list; a hide's `normalized` is `applied` with
+  `normalized: true` for syntheses, `already_in_effect` with `normalized: true` elsewhere).
+  Outcome-only reason codes were added where the old code had none (e.g. `merge_unverified`,
+  `graph_item_type_mismatch`, `node_not_candidate`, `page_not_active`, `edge_missing`,
+  `edge_status_unexpected`, `page_status_mismatch`).
+- **`incomplete`** is reported where state changed but the review didn't finish: a merge/split
+  refused while its identity journal is open (`details.stage`), `partial_split_state`, a document
+  status flip whose Source page re-render failed (`source_page_refresh_failed`), a duplicate whose
+  page re-render failed after the edge was written. An executor exception still aborts the run as
+  before (no outcome is invented for it).
+- **`_run_apply`** records the handled approvals before any executor runs and returns `handled`,
+  `outcomes` and `advisories` (promotions, splits); the dry run passes the sandbox's through; the
+  API models gain the three fields.
+- **`app/backend/apply_readable.py`** (new): groups and sentences (changes by type; one
+  already-in-effect line; Attention needed with Blocked / Incomplete / Outcome not reported each
+  labelled; Advisories as information only), inline ids on name collisions, plain wording for every
+  executor code (`REASONS`, after `refusal_text`); never reads the vault. The preview and the
+  result page lead with it; the full diff, counts and raw outcomes are folded under "Technical
+  details"; validators show passed / failed / not run; a pending publication is shown as
+  "recorded; publishing unfinished" with Retry publishing.
+- **Tests:** `tests/test_apply_outcomes_{synthesis,deprecations,identity,retention}.py` (the
+  reporting contract per executor), `tests/test_apply_readable.py` (grouping, gaps, escaping,
+  collisions, advisories, publication pending, folded diff), and an end-to-end preview → Apply →
+  re-preview in `tests/test_review_html.py`.
+
+### Review round 1 on B2a (2026-11-04)
+
+Four blocking reporting issues (one an execution regression), reproduced by the reviewer:
+
+- **Reporting never raises, and never fabricates success.** Every reporting or verification read
+  goes through `apply_outcomes.guarded`; a failed read is `UNAVAILABLE`, never a value. A
+  postcondition that can't be read is `verification_unavailable` (`apply_outcomes.unverified`:
+  `incomplete` if this run changed state, else `skipped`), never `already_in_effect`. (The retype
+  instrumentation turned a `page_owner_unknown` refusal into a `PermissionError`.)
+- **A repair is `applied`** (`normalized: true` where the legacy counter says normalized);
+  `already_in_effect` is only a verified no-op. The legacy counters are unchanged.
+- **Outcomes state the verified end state.** `after` values are read back, not the requested
+  target. A read-back mismatch is `hidden_takes_precedence` only when hidden is verified,
+  otherwise `postcondition_not_met`. Promote's read-only pass compares the approved amendments with
+  the page using the executor's own amendment rules; an active tag whose amendments never applied is
+  `skipped` / `postcondition_not_met`, not in effect.
+- **Recovery wording by reason** (`apply_readable.RECOVERY`): Apply resumes authority work (a saved
+  identity operation); Retry publishing repairs projections (pages, index, search); anything else
+  says "see the details", never "the next Apply resumes it".
+- **The one executor-behaviour change:** a document whose status changed but whose Source page
+  re-render failed inside its executor is now added to Apply's own publication work (not filtered
+  through the existing-page check, so a missing page is retried too). If publication renders it, the
+  outcome is reconciled to `applied` (`page_refreshed_by_publication`); if not, it stays queued for
+  Retry publishing and the outcome stays `incomplete`.
+- Non-blocking, done: every change sentence links its review; collision detection also counts
+  promotion after-titles and advisory names.
+
+### Review round 2 on B2a (2026-11-04)
+
+- **The Source retry comes from execution, not reporting.** The source executors return
+  `status_changed_sources` (every document whose manifest status they wrote this run), and Apply's
+  publication always includes them — so a failed refresh whose reporting read also failed
+  (`verification_unavailable`, left as is) is still published or stays queued. Tests start from a
+  published tag-label snapshot (an unknown mapping forces a full Source refresh and had hidden this).
+- **Promotion amendments are verified from evidence bound to the approval.** Activating an approved
+  promotion now writes a minimal executor record (`audit_log/<review_id>-promoted-<hex>.json`: the
+  title just before execution and the effective title/aliases/description/type it produced),
+  under Apply's lock like the merge/retype/split records. With that record, in effect means the
+  page equals the recorded result. Without one (older promotions, or a tag activated by a keep):
+  a fixed point is in effect; any certain difference is `postcondition_not_met`; the one
+  unresolvable case — the approved title is the page's and the page has exactly one extra alias,
+  which an executed rename (appending the previous title) and a self-title amendment with an
+  unwanted alias both produce — is `verification_unavailable`. No alias is inferred to be the old
+  title, by position or by the creation-time name; a record older than the approval is ignored.
+
+### Review round 3 on B2a (2026-11-05)
+
+- **A promotion record verifies only the approval it executed.** Matching by review id and a
+  whole-second timestamp let a reopened approval re-approved within the same second borrow the
+  previous record. The record now carries `approval_fingerprint`: sha256 of deterministic canonical
+  JSON (sorted keys, fixed separators, list order and values preserved) of the approval's review
+  id, type, subject, the amendments exactly as executed and its `decided_at`. Verification uses only
+  a record with the approval's fingerprint (the latest, if several); a readable record with another
+  or no fingerprint is ignored (no evidence); a record that can't be read well enough to check it
+  is `verification_unavailable`. An identical re-approval verifies (the same content ran).
+
+### Review round 4 on B2a (2026-11-05)
+
+- **An incomplete matching record never verifies.** A record whose fingerprint matches must carry
+  all four recorded fields, well typed: `title` a string that isn't blank after `strip()` (the
+  recorded value itself is compared unchanged), `aliases` a list of strings, `description` a string
+  or null, `item_type` a string. Anything less is `verification_unavailable`. The page is compared
+  with the recorded state as recorded; no field is filled in from the page (an empty `effective`
+  had made the page verify against itself).
+
+### Existing behaviour the outcomes made visible (follow-ups, not changed in B2a)
+
+1. ~~Apply's Source-page refresh after a document status change is not retried~~ — **fixed in
+   review round 1** (above).
+2. **A duplicate whose page re-render fails** is still counted as applied/normalized by the legacy
+   counts; its outcome is `incomplete` or `skipped`.
+3. **A deprecation of a hidden claim** re-renders it still hidden (hidden wins), so it re-applies on
+   every run.
+4. **Opposite `propose_synthesis` decisions on one topic** (approved and rejected, different
+   fingerprints) re-render the topic twice on every run.
+5. **An approved supersede whose contradicts edge is missing or rejected** still runs and reports
+   `applied`, leaving no active contradicts edge.
+6. **An active tag whose approved promotion amendments never applied** (e.g. approved after a
+   keep activated it) is never amended; now reported `postcondition_not_met` (or
+   `verification_unavailable` when the evidence can't settle it).
+7. **An unreadable approved promotion file** is executed as "no amendments" (`_read_amendments`),
+   silently applying none.
+8. **A legacy test fixture** (`tests/test_review_html._approved_concept_deprecation`, non-canonical
+   `itm_x`) has been refused by the B1 page guard since B1; the old count-only assertions never
+   showed it. The readable page does.

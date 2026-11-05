@@ -25,6 +25,7 @@ from typing import Any
 
 from app.backend import graph, taxonomy
 from app.backend.manifests import iso_now
+from app.workers import apply_outcomes as oc
 from app.workers import item_pages, items, reviews
 from app.workers.wiki_render import NODE_DIR, render_item_page
 
@@ -124,8 +125,11 @@ def retype_check(gconn, item: dict[str, Any], *, wiki_dir: Path) -> tuple[str, A
 
 def apply_retypes(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = None) -> dict[str, Any]:
     """Apply approved `change_item_type` decisions (ADR-0059). Returns
-    `{applied, skipped:[{review_id, reason}], changed_pages, graph_changed, affected_sources}`.
-    Graph-REQUIRED; the caller owns the final commit + the Source-page re-render of
+    `{applied, skipped:[{review_id, reason}], changed_pages, graph_changed, affected_sources,
+    outcomes}` — `outcomes` has ONE ADR-0072 record per approved retype (`applied` = the applied
+    outcomes, every `skipped` entry a `skipped` outcome; a page already at the target type whose graph
+    mirror disagrees is a `skipped` outcome, `graph_item_type_mismatch`, the legacy list never
+    carried). Graph-REQUIRED; the caller owns the final commit + the Source-page re-render of
     `affected_sources` (their Items sections group by item_type)."""
     from app.workers import tag_links                    # lazy: tag_links imports items/promote
     # ADR-0066 review round 10: a retype reads the item page and writes it back, so it is serialized
@@ -141,14 +145,21 @@ def _apply_retypes(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None)
     skipped: list[dict[str, str]] = []
     changed_pages: list[str] = []
     affected_sources: set[str] = set()
+    outcomes: list[dict[str, Any]] = []
 
     for item in _approved_retypes(reviews_dir):
         rid = str(item.get("review_id", ""))
         state, ctx = retype_check(gconn, item, wiki_dir=wiki_dir)
+        details, page_type = _outcome_details(gconn, item, wiki_dir=wiki_dir,
+                                              ctx=ctx if state == "todo" else None)
         if state == "skip":
             skipped.append({"review_id": rid, "reason": ctx})
+            problem = oc.guarded(_ownership_problem, gconn, item, wiki_dir=wiki_dir, reason=ctx)
+            outcomes.append(oc.outcome(rid, "change_item_type", oc.SKIPPED, reason=ctx, **details,
+                                       **({"problem": problem} if problem else {})))
             continue
         if state == "done":
+            outcomes.append(_done_outcome(gconn, item, rid, details, page_type))
             continue
         nid, to_type, node = ctx["nid"], ctx["to_type"], ctx["node"]
         page_rel, meta, from_type = ctx["page_rel"], ctx["meta"], ctx["from_type"]
@@ -181,6 +192,72 @@ def _apply_retypes(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None)
             "affected_pages": [page_rel] + [f"Sources/{s}.md" for s in sorted(sources)],
         }, now)
         applied += 1
+        outcomes.append(oc.outcome(rid, "change_item_type", oc.APPLIED, **details))
 
     return {"applied": applied, "skipped": skipped, "changed_pages": sorted(set(changed_pages)),
-            "graph_changed": applied > 0, "affected_sources": sorted(affected_sources)}
+            "graph_changed": applied > 0, "affected_sources": sorted(affected_sources),
+            "outcomes": outcomes}
+
+
+def _outcome_details(gconn, item: dict[str, Any], *, wiki_dir: Path,
+                     ctx: dict[str, Any] | None) -> tuple[dict[str, Any], Any]:
+    """ADR-0072 decision 3: the reviewed tag's name and its before/after type, read BEFORE the
+    retype writes (read-only; a malformed id is never turned into a page path). Every read here is
+    reporting-only (:func:`apply_outcomes.guarded`): a failed one leaves the name as the id and the
+    before-type unavailable (`None`, listed in `details["unavailable"]`), never guessed.
+
+    Returns `(details, page_type)` — `page_type` is the page's own `item_type` as read here (None when
+    the page has none, :data:`apply_outcomes.UNAVAILABLE` when it couldn't be read), for verifying
+    an already-in-effect retype."""
+    subj = item.get("subject") if isinstance(item.get("subject"), dict) else {}
+    nid, to_type = subj.get("node_id"), subj.get("to_item_type")
+    node = oc.guarded(graph.get_node, gconn, nid) if _is_canonical_item_id(nid) else None
+    is_item = isinstance(node, dict) and node.get("node_type") == "item"
+    page_type: Any = oc.UNAVAILABLE
+    if ctx is not None:
+        from_type = ctx["from_type"]                     # the executor's own read
+        page_type = ctx["meta"].get("item_type")
+    elif is_item:
+        meta = oc.guarded(items._read_node_meta, Path(wiki_dir) / NODE_DIR["item"] / f"{node['slug']}.md")
+        if isinstance(meta, dict):                       # retype_check's own rule: page, then mirror
+            page_type = meta.get("item_type")
+            from_type = page_type or node.get("item_type")
+        else:                                            # missing or unreadable page: not guessed
+            from_type = None
+    else:
+        from_type = None
+    details: dict[str, Any] = {
+        "subject": oc.item_name(wiki_dir, node, nid) if is_item else oc.named(nid, None),
+        "before": {"item_type": from_type}, "after": {"item_type": to_type}}
+    if from_type is None:
+        details["unavailable"] = ["before.item_type"]
+    return details, page_type
+
+
+def _done_outcome(gconn, item: dict[str, Any], rid: str, details: dict[str, Any],
+                  page_type: Any) -> dict[str, Any]:
+    """The outcome of a retype `retype_check` called done: `already_in_effect` only when the page
+    AND the graph mirror read back at the target type (both re-read here, guarded); an unreadable
+    one is `verification_unavailable`, never in effect. Nothing is written on this path."""
+    to_type = details["after"]["item_type"]
+    node = oc.guarded(graph.get_node, gconn, (item.get("subject") or {}).get("node_id"))
+    if page_type is oc.UNAVAILABLE or node is oc.UNAVAILABLE:
+        return oc.unverified(rid, "change_item_type", changed=False, **details)
+    if page_type != to_type:                             # the type came from the mirror only
+        return oc.outcome(rid, "change_item_type", oc.SKIPPED, reason=oc.POSTCONDITION_NOT_MET,
+                          **details, problem={"fields": ["item_type"]})
+    if (node or {}).get("item_type") != to_type:
+        return oc.outcome(rid, "change_item_type", oc.SKIPPED,
+                          reason="graph_item_type_mismatch", **details)
+    return oc.outcome(rid, "change_item_type", oc.ALREADY_IN_EFFECT, **details)
+
+
+def _ownership_problem(gconn, item: dict[str, Any], *, wiki_dir: Path, reason: Any) -> dict | None:
+    """The structured ADR-0070/0071 page problem behind an ownership skip (retype_check returns
+    only its code), recomputed read-only for the outcome's details."""
+    nid = (item.get("subject") or {}).get("node_id")
+    node = graph.get_node(gconn, nid) if _is_canonical_item_id(nid) else None
+    if node is None or node.get("node_type") != "item":
+        return None
+    problem = item_pages.page_problem(gconn, wiki_dir, nid, node["slug"])
+    return problem if problem and problem.get("reason") == reason else None

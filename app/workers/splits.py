@@ -43,6 +43,7 @@ from typing import Any
 
 from app.backend import graph, taxonomy
 from app.backend.manifests import is_source_id, iso_now
+from app.workers import apply_outcomes as oc
 from app.workers import item_pages as ownership
 from app.workers import item_names, items, merges, retypes
 from app.workers.wiki_render import NODE_DIR, render_item_page
@@ -117,9 +118,16 @@ def _write_audit(reviews_dir: Path, rid: str, record: dict[str, Any], now: str) 
 def apply_splits(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = None) -> dict[str, Any]:
     """Apply approved `split_item` decisions (ADR-0052/0059). Returns
     `{applied, skipped:[{review_id, reason}], changed_pages, graph_changed, affected_sources,
-    journaled}` — `journaled` are the in-flight markers the caller closes once its refreshes succeed. Graph-
+    journaled, advisories, outcomes}` — `journaled` are the in-flight markers the caller closes once its
+    refreshes succeed. Graph-
     REQUIRED; the caller owns the final commit + the Source-page re-render of `affected_sources`. Repair-safe:
-    a half-applied split is completed idempotently, a fully-applied one is a true no-op."""
+    a half-applied split is completed idempotently, a fully-applied one is a true no-op.
+
+    `outcomes` (ADR-0072) has ONE record per approved split: `applied` (fresh, resumed or repaired —
+    `applied` = the applied outcomes), `already_in_effect` (the full-EFFECTED no-op), `skipped` for every
+    `skipped` entry — except a refusal of a split that already changed state (an open in-flight entry, or
+    `partial_split_state`: our lineage page / spin-off exists but the partition is ambiguous), which is
+    `incomplete`."""
     now = now or iso_now()
     applied = 0
     skipped: list[dict[str, Any]] = []
@@ -127,6 +135,7 @@ def apply_splits(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = 
     changed_pages: list[str] = []
     affected_sources: set[str] = set()
     journaled: list[str] = []                            # in-flight markers the caller must close
+    outcomes: list[dict[str, Any]] = []
 
     from app.workers import identity_journal, tag_links   # lazy: tag_links imports merges -> items
     # ADR-0066 review round 3: the whole identity operation is serialized with tag actions and
@@ -139,9 +148,30 @@ def apply_splits(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = 
             a = subj.get("node_id")
             b_declared = subj.get("spinoff_node_id")
             spinoff_name = proposal.get("spinoff_name")
+            # ADR-0072 decision 3: display names read BEFORE any write (ids until the nodes are read).
+            names: dict[str, Any] = {"subject": oc.named(a, None),
+                                     "spinoff": oc.named(b_declared, spinoff_name)}
 
-            def _skip(reason: str) -> None:
-                skipped.append({"review_id": rid, "reason": reason})
+            def _report(kind: str, reason: str | None = None, **extra: Any) -> None:
+                outcomes.append(oc.outcome(rid, "split_item", kind, reason=reason, **names, **extra))
+
+            def _skip(reason: str, problem: dict[str, Any] | None = None, *,
+                      started: bool = False, legacy_problem: bool = False) -> None:
+                skipped.append({"review_id": rid, "reason": reason,
+                                **({"problem": problem} if legacy_problem else {})})
+                extra = {"problem": problem} if problem else {}
+                # Some state already changed (an open in-flight entry, or our half-done lineage):
+                # the split started and did not finish — `incomplete`, never an ordinary skip.
+                # The refusal stands even when the journal can't be checked (a guarded read).
+                stage = oc.guarded(merges.journal_stage, reviews_dir, rid)
+                if stage is oc.UNAVAILABLE:
+                    stage = None
+                    if not started:
+                        extra["in_flight"] = oc.VERIFICATION_UNAVAILABLE
+                if stage is not None or started:
+                    _report(oc.INCOMPLETE, reason, **({"stage": stage} if stage else {}), **extra)
+                else:
+                    _report(oc.SKIPPED, reason, **extra)
 
             # --- malformed-proposal / derivation guards (typed skips; a bad artifact never raises) ---
             if not isinstance(spinoff_name, str) or not spinoff_name.strip():
@@ -151,6 +181,7 @@ def apply_splits(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = 
                 _skip("noncanonical_node_id")
                 continue
             n_a = graph.get_node(gconn, a)
+            names["subject"] = oc.item_name(wiki_dir, n_a, a)
             if n_a is None:
                 _skip("node_missing")
                 continue
@@ -176,6 +207,7 @@ def apply_splits(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = 
                 _skip("noncanonical_source_id")
                 continue
             srcs = _stable_dedup(raw_srcs)
+            names["documents"] = len(srcs)
             if not srcs:
                 _skip("empty_partition")
                 continue
@@ -225,18 +257,20 @@ def apply_splits(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = 
                     continue
                 # our lineage: the node must be present + splittable-status, else it is a broken partial
                 if n_b is None or n_b["status"] not in _SPLITTABLE_STATUSES:
-                    _skip("partial_split_state")
+                    _skip("partial_split_state", started=True)
                     continue
                 a_mentioners = set(graph.sources_for_node(gconn, a))
                 b_mentioners = set(graph.sources_for_node(gconn, b))
                 # every listed source must be CLEANLY on B (already moved) XOR still on A (movable); a source on
                 # neither (lost/invented) or on both (half-moved) is ambiguous -> don't repair, flag the partial
                 if any((s in a_mentioners) == (s in b_mentioners) for s in srcs_set):
-                    _skip("partial_split_state")
+                    _skip("partial_split_state", started=True)
                     continue
                 fully_effected = (srcs_set <= b_mentioners and not (srcs_set & a_mentioners)
                                   and bool(a_mentioners))
                 if fully_effected:
+                    # postcondition verified: our lineage page, the partition wholly on B, A keeps ≥1.
+                    _report(oc.ALREADY_IN_EFFECT)
                     continue                                 # true idempotent no-op (matches _effect_split EFFECTED)
                 repaired = True                              # bounded repair: fall through to the apply block
             else:
@@ -263,8 +297,7 @@ def apply_splits(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = 
                 # (a spin-off can't reuse an item, so this is a refusal naming that tag).
                 conflict = item_names.exact_conflict(gconn, wiki_dir, spinoff_name, b)
                 if conflict is not None:
-                    skipped.append({"review_id": rid, "reason": conflict["reason"],
-                                    "problem": conflict})
+                    _skip(conflict["reason"], conflict, legacy_problem=True)
                     continue
                 # Level 2 (review round 1): a similar existing tag is reported, never a refusal.
                 advisory = item_names.similar_advisory(gconn, wiki_dir, spinoff_name, b)
@@ -278,7 +311,7 @@ def apply_splits(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = 
             problem = (ownership.page_problem(gconn, wiki_dir, a, n_a["slug"])
                        or ownership.page_problem(gconn, wiki_dir, b, b_slug))
             if problem is not None:
-                _skip(problem["reason"])
+                _skip(problem["reason"], problem)
                 continue
 
             # --- LEDGER FIRST (ADR-0066 review round 3): journal, move the listed documents' keeps A→B
@@ -341,9 +374,10 @@ def apply_splits(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = 
             identity_journal.set_stage(reviews_dir, rid, "graph_done")
             journaled.append(rid)
             applied += 1
+            _report(oc.APPLIED, resumed=resuming, repaired=repaired)
             if advisory is not None:
                 advisories.append({"review_id": rid, **advisory})
 
     return {"applied": applied, "skipped": skipped, "changed_pages": sorted(set(changed_pages)),
             "graph_changed": applied > 0, "affected_sources": sorted(affected_sources),
-            "journaled": journaled, "advisories": advisories}
+            "journaled": journaled, "advisories": advisories, "outcomes": outcomes}

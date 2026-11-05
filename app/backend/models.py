@@ -579,6 +579,10 @@ class ReviewApplyResponse(BaseModel):
     # ADR-0068 decision 4: {"status": "published"|"saved_publication_pending", "pending": ...}
     publication: dict[str, Any] | None = None
     summary: dict[str, Any]
+    # ADR-0072 decision 2: the approved reviews handled, one outcome per review, advisories apart.
+    handled: list[dict[str, Any]] = []
+    outcomes: list[dict[str, Any]] = []
+    advisories: list[dict[str, Any]] = []
 
 
 class EvalRunRequest(BaseModel):
@@ -627,3 +631,7 @@ class ReviewDryRunResponse(BaseModel):
     # settings_changed / authorization_write_failed).
     preview_token: str | None = None
     token_withheld: str | None = None
+    # ADR-0072 decision 2: the sandbox run's per-review outcomes (the readable preview's source).
+    handled: list[dict[str, Any]] = []
+    outcomes: list[dict[str, Any]] = []
+    advisories: list[dict[str, Any]] = []

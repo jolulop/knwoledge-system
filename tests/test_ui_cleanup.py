@@ -30,6 +30,12 @@ def test_the_apply_result_lists_only_what_changed():
                                              "summary": {"merged": 0, "retyped": 0,
                                                          "pages_changed": False}})
     assert "Nothing was changed" in empty and "retyped" not in empty
-    some = review_html.render_apply_result({"status": "applied", "validators_ok": True,
-                                            "summary": {"merged": 1, "retyped": 0}})
-    assert "merged" in some and "retyped" not in some and "Nothing was changed" not in some
+    # ADR-0072 B2a: the readable list comes from per-review outcomes; the counts are folded below.
+    some = review_html.render_apply_result({
+        "status": "applied", "validators_ok": True, "summary": {"merged": 1, "retyped": 0},
+        "handled": [{"review_id": "rev_m", "type": "merge_items"}],
+        "outcomes": [{"review_id": "rev_m", "type": "merge_items", "outcome": "applied",
+                      "details": {"survivor": {"id": "itm_a", "name": "A"},
+                                  "absorbed": {"id": "itm_b", "name": "B"}}}]})
+    assert "Merge “B” into “A”" in some and "merged" in some and "retyped" not in some
+    assert "Nothing was changed" not in some

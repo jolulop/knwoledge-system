@@ -20,7 +20,7 @@ from typing import Any
 
 from app.backend import graph
 from app.backend.manifests import iso_now
-from app.workers import items
+from app.workers import apply_outcomes, items
 from app.workers.wiki_render import NODE_DIR
 
 # Conservative id safety (ADR-0041): reject unsafe/path-like/empty ids before any graph lookup. NOT a
@@ -58,6 +58,26 @@ def _projects(text: str, partner_slug: str, node_type: str) -> bool:
     return False
 
 
+def _node_name(wiki_dir: Path, node: dict[str, Any] | None, fallback_id: Any) -> dict[str, str]:
+    """A node's display pair from its own page (ADR-0072 decision 3), read before any mutation; the id
+    when the node/page/title can't be read. Works for any `NODE_DIR` type (a cross-type pair's skip
+    still names both ends)."""
+    if not node:
+        return apply_outcomes.named(fallback_id, None)
+    nt, slug = node.get("node_type"), node.get("slug")
+    rel = f"{NODE_DIR[nt]}/{slug}" if nt in NODE_DIR and isinstance(slug, str) and slug else None
+    return apply_outcomes.page_name(wiki_dir, rel, fallback_id)
+
+
+def _projection_holds(gconn, a: str, b: str, page_a: Path, page_b: Path, slug_a: str, slug_b: str,
+                      node_type: str) -> bool:
+    """The postcondition READ-BACK (B2a review round 1): the canonical edge is active AND both pages
+    project the partner. Reporting only — always called through :func:`apply_outcomes.guarded`."""
+    return (_edge_active(gconn, a, b)
+            and _projects(page_a.read_text(encoding="utf-8"), slug_b, node_type)
+            and _projects(page_b.read_text(encoding="utf-8"), slug_a, node_type))
+
+
 def _approved_marked_duplicates(reviews_dir: Path) -> list[dict[str, Any]]:
     d = Path(reviews_dir) / "approved"
     items: list[dict[str, Any]] = []
@@ -78,7 +98,17 @@ def apply_marked_duplicates(gconn, reviews_dir: Path, *, wiki_dir: Path,
     `{applied, normalized, skipped:[{review_id, reason}], changed_pages, graph_changed}` (mirrors the
     deprecation executor): `applied` = new edge written, `normalized` = edge already active but a page
     projection repaired, true no-ops counted in neither. The caller owns the single index rebuild/reindex
-    and `gconn.commit()` (ADR-0035)."""
+    and `gconn.commit()` (ADR-0035).
+
+    Also `outcomes` (ADR-0072 decision 2), one per approved review read, `details` = `subject` +
+    `duplicate_of` (the canonical min/max pair), stating the VERIFIED end state (B2a review round 1):
+    `already_in_effect` only for a verified no-op (edge active + both pages project, nothing written;
+    uncounted); a run that wrote the edge or a page is `applied` once the read-back confirms edge +
+    both projections (`details.normalized` for a projection repair, counted `normalized`); `skipped`
+    mirrors the typed skips. A page re-render that FAILS after the guards (e.g. `page_conflict`), or a
+    read-back that doesn't confirm the postcondition (`postcondition_not_met`) or can't be read
+    (`verification_unavailable`), is reported honestly though the legacy counts still count it:
+    `incomplete` when the edge or a page was written on this run, else `skipped` (nothing changed)."""
     from app.workers import tag_links                    # lazy: tag_links imports items
     # ADR-0066 review round 10: item-page writers are serialized with tag actions (the ledger lock,
     # re-entrant — a no-op inside run_apply, which already holds it).
@@ -93,6 +123,13 @@ def _apply_marked_duplicates(gconn, reviews_dir: Path, *, wiki_dir: Path,
     applied = normalized = 0
     skipped: list[dict[str, str]] = []
     changed_pages: list[str] = []
+    outcomes: list[dict[str, Any]] = []
+    rtype = "mark_semantic_duplicate"
+
+    def _skip(rid: str, reason: str, **details: Any) -> None:
+        skipped.append({"review_id": rid, "reason": reason})
+        outcomes.append(apply_outcomes.outcome(rid, rtype, apply_outcomes.SKIPPED, reason=reason,
+                                               **details))
 
     for item in _approved_marked_duplicates(reviews_dir):
         rid = str(item.get("review_id", ""))
@@ -101,26 +138,34 @@ def _apply_marked_duplicates(gconn, reviews_dir: Path, *, wiki_dir: Path,
         # malformed_subject: must be exactly two non-empty string ids
         if not (isinstance(ids, list) and len(ids) == 2
                 and all(isinstance(x, str) and x for x in ids)):
-            skipped.append({"review_id": rid, "reason": "malformed_subject"})
+            raw = [x for x in ids if isinstance(x, str) and x] if isinstance(ids, list) else []
+            _skip(rid, "malformed_subject", subject=apply_outcomes.named(raw[0] if raw else "", None),
+                  **({"duplicate_of": apply_outcomes.named(raw[1], None)} if len(raw) > 1 else {}))
             continue
         if not all(_is_safe_id(x) for x in ids):
-            skipped.append({"review_id": rid, "reason": "invalid_node_id"})
+            # never resolve an unsafe id against the graph or the vault: the ids stand in as names
+            _skip(rid, "invalid_node_id", subject=apply_outcomes.named(ids[0], None),
+                  duplicate_of=apply_outcomes.named(ids[1], None))
             continue
         a, b = sorted(ids)  # canonical: src_id < dst_id
         if a == b:
-            skipped.append({"review_id": rid, "reason": "self_duplicate"})
+            node = apply_outcomes.guarded(graph.get_node, gconn, a)       # reporting-only read
+            name = _node_name(wiki_dir, node if isinstance(node, dict) else None, a)
+            _skip(rid, "self_duplicate", subject=name, duplicate_of=dict(name))
             continue
         na, nb = graph.get_node(gconn, a), graph.get_node(gconn, b)
+        # ADR-0072 d3: both display names, read before any edge/page write
+        names = {"subject": _node_name(wiki_dir, na, a), "duplicate_of": _node_name(wiki_dir, nb, b)}
         if na is None or nb is None:
-            skipped.append({"review_id": rid, "reason": "node_missing"})
+            _skip(rid, "node_missing", **names)
             continue
         if na["node_type"] != nb["node_type"]:
-            skipped.append({"review_id": rid, "reason": "type_mismatch"})
+            _skip(rid, "type_mismatch", **names)
             continue
         # Same type, but a type with no `## Duplicates` page projection (source/query/synthesis/...):
         # refuse BEFORE any edge write so an unprojectable edge can never land (ADR-0041).
         if na["node_type"] != "item":
-            skipped.append({"review_id": rid, "reason": "unsupported_node_type"})
+            _skip(rid, "unsupported_node_type", **names)
             continue
         # Both pages must exist before we write the edge (atomic: never an edge with no projection).
         nt = na["node_type"]
@@ -128,7 +173,7 @@ def _apply_marked_duplicates(gconn, reviews_dir: Path, *, wiki_dir: Path,
         page_b = wiki_dir / NODE_DIR[nt] / f"{nb['slug']}.md"
         meta_a, meta_b = items._read_node_meta(page_a), items._read_node_meta(page_b)
         if meta_a is None or meta_b is None:
-            skipped.append({"review_id": rid, "reason": "page_missing"})
+            _skip(rid, "page_missing", **names)
             continue
 
         # Classify steady-state (ADR-0041): applied (new edge) / normalized (edge active, projection
@@ -137,22 +182,57 @@ def _apply_marked_duplicates(gconn, reviews_dir: Path, *, wiki_dir: Path,
         proj_a = _projects(page_a.read_text(encoding="utf-8"), nb["slug"], nt)
         proj_b = _projects(page_b.read_text(encoding="utf-8"), na["slug"], nt)
         if already_active and proj_a and proj_b:
-            continue  # true no-op
+            # true no-op (uncounted); postcondition verified: edge active + both pages project
+            outcomes.append(apply_outcomes.outcome(rid, rtype, apply_outcomes.ALREADY_IN_EFFECT,
+                                                   **names))
+            continue
         if not already_active:
             graph.upsert_assertion(gconn, src_id=a, dst_id=b, edge_type="duplicates",
                                    asserted_by="human", status="active", review_id=rid, now=now)
         # Re-render both pages, preserving each page's current status + review_status (page-owned);
         # recompose writes only when content differs and returns "written" only then, so changed_pages
         # stays honest (an already-correct page returns "unchanged" and is not counted).
+        renders: list[str] = []
         for nid, n, meta in ((a, na, meta_a), (b, nb, meta_b)):
-            if items.recompose_semantic_node_page(
-                    gconn, node_id=nid, wiki_dir=wiki_dir,
-                    status=meta["status"], review_status=meta["review_status"], now=now) == "written":
+            render = items.recompose_semantic_node_page(
+                gconn, node_id=nid, wiki_dir=wiki_dir,
+                status=meta["status"], review_status=meta["review_status"], now=now)
+            renders.append(render)
+            if render == "written":
                 changed_pages.append(f"{NODE_DIR[nt]}/{n['slug']}.md")
         if already_active:
             normalized += 1  # edge was active; only the page projection was repaired
         else:
             applied += 1
+        # Reporting only (ADR-0072 d2): a failed re-render means the projection did not land.
+        changed = not already_active or "written" in renders     # this run wrote the edge or a page
+        failed = [r for r in renders if r not in ("written", "unchanged")]
+        if failed:
+            if changed:
+                outcomes.append(apply_outcomes.outcome(
+                    rid, rtype, apply_outcomes.INCOMPLETE, reason=failed[0], **names,
+                    edge_written=not already_active))
+            else:
+                outcomes.append(apply_outcomes.outcome(
+                    rid, rtype, apply_outcomes.SKIPPED, reason=failed[0], **names))
+            continue
+        # Verified end state (B2a review round 1): read back edge + both projections (guarded).
+        holds = apply_outcomes.guarded(_projection_holds, gconn, a, b, page_a, page_b,
+                                       na["slug"], nb["slug"], nt)
+        if holds is apply_outcomes.UNAVAILABLE:
+            outcomes.append(apply_outcomes.unverified(rid, rtype, changed=changed, **names))
+        elif not holds:
+            outcomes.append(apply_outcomes.unverified(
+                rid, rtype, changed=changed, reason=apply_outcomes.POSTCONDITION_NOT_MET, **names))
+        elif not changed:
+            # nothing written on this run and the postcondition reads back: a verified no-op
+            outcomes.append(apply_outcomes.outcome(rid, rtype, apply_outcomes.ALREADY_IN_EFFECT,
+                                                   **names))
+        else:
+            outcomes.append(apply_outcomes.outcome(
+                rid, rtype, apply_outcomes.APPLIED, **names,
+                **({"normalized": True} if already_active else {})))
 
     return {"applied": applied, "normalized": normalized, "skipped": skipped,
-            "changed_pages": sorted(set(changed_pages)), "graph_changed": bool(applied)}
+            "changed_pages": sorted(set(changed_pages)), "graph_changed": bool(applied),
+            "outcomes": outcomes}

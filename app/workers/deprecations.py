@@ -29,7 +29,7 @@ from typing import Any
 
 from app.backend import graph
 from app.backend.manifests import iso_now
-from app.workers import claims, items
+from app.workers import apply_outcomes, claims, items
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter
 
 # A well-formed wiki page is exactly `<Dir>/<file>.md` — one directory segment, one filename, no path
@@ -46,6 +46,63 @@ _IN_SCOPE_TYPES = frozenset({"claim", "item"})
 # recompose_claim success outcomes (an evidenced deprecation writes "written"; a no-evidence claim
 # renders its tombstone and returns "tombstoned" — both leave the page deprecated_candidate).
 _CLAIM_SUCCESS = frozenset({"written", "tombstoned"})
+
+
+def _subject_name(wiki_dir: Path, page: Any, nid: Any) -> dict[str, str]:
+    """The reviewed page's display pair (ADR-0072 decision 3), read BEFORE any mutation. Only a
+    well-formed `<Dir>/<file>.md` path is ever read (the same guard the executors apply before any
+    read); anything else, or an unreadable page, falls back to the id."""
+    if isinstance(page, str) and _WIKI_PAGE_RE.fullmatch(page):
+        return apply_outcomes.page_name(wiki_dir, page, nid)
+    return apply_outcomes.named(nid, None)
+
+
+def _skip(skipped: list[dict[str, str]], outcomes: list[dict[str, Any]], rid: str, review_type: str,
+          reason: str, **details: Any) -> None:
+    """Record one typed skip in BOTH the legacy `skipped` list and the per-review outcomes (ADR-0072
+    decision 2) — so the two can never disagree."""
+    skipped.append({"review_id": rid, "reason": reason})
+    outcomes.append(apply_outcomes.outcome(rid, review_type, apply_outcomes.SKIPPED, reason=reason,
+                                           **details))
+
+
+def _page_frontmatter(page_path: Path) -> dict[str, Any]:
+    """A page's frontmatter for the post-write READ-BACK only (`{}` for a missing page). Always called
+    through :func:`apply_outcomes.guarded`, so a failed read-back is reported, never raised."""
+    if not page_path.exists():
+        return {}
+    return parse_frontmatter(page_path.read_text(encoding="utf-8"))
+
+
+def _verified_outcome(gconn, rid: str, review_type: str, *, page_path: Path, nid: str, holds,
+                      normalized: bool = False, hidden_wins: bool = False,
+                      **details: Any) -> dict[str, Any]:
+    """The outcome of a run that WROTE (a page and/or the graph mirror row), from the VERIFIED end state
+    (B2a review round 1): page frontmatter + graph node read back (guarded) after the write.
+
+    `holds(fm, graph_status)` is the requested postcondition. Holds -> ``applied`` (``normalized: True``
+    for a repair the legacy counter calls normalized). Otherwise ``incomplete`` (this run changed
+    state) with :data:`~apply_outcomes.HIDDEN_TAKES_PRECEDENCE` when `hidden_wins` and the read-back
+    is verified hidden in page AND graph, else :data:`~apply_outcomes.POSTCONDITION_NOT_MET`; a failed
+    read-back is :data:`~apply_outcomes.VERIFICATION_UNAVAILABLE`. `after` is always the read-back."""
+    fm = apply_outcomes.guarded(_page_frontmatter, page_path)
+    node = apply_outcomes.guarded(graph.get_node, gconn, nid)
+    if not isinstance(fm, dict) or node is apply_outcomes.UNAVAILABLE:
+        return apply_outcomes.unverified(rid, review_type, changed=True, **details)
+    page_status = fm.get("status")
+    graph_status = node.get("status") if isinstance(node, dict) else None
+    after: dict[str, Any] = {"status": page_status}
+    if graph_status != page_status:
+        after["graph_status"] = graph_status                 # the mirror disagrees: show both
+    if holds(fm, graph_status):
+        extra = {"normalized": True} if normalized else {}
+        return apply_outcomes.outcome(rid, review_type, apply_outcomes.APPLIED, **details,
+                                      after=after, **extra)
+    hidden = page_status == "hidden" and graph_status == "hidden"
+    reason = (apply_outcomes.HIDDEN_TAKES_PRECEDENCE if hidden_wins and hidden
+              else apply_outcomes.POSTCONDITION_NOT_MET)
+    return apply_outcomes.unverified(rid, review_type, changed=True, reason=reason, **details,
+                                     after=after)
 
 
 def _approved_items_of_type(reviews_dir: Path, review_type: str) -> list[dict[str, Any]]:
@@ -82,8 +139,17 @@ def apply_approved_deprecations(
 ) -> dict[str, Any]:
     """Apply every approved, in-scope `deprecate_wiki_page` decision (ADR-0035 A5).
 
-    Returns `{applied, normalized, skipped:[{review_id, reason}], changed_pages, graph_changed}`. Skips
-    are honest and typed; a fully-effected item is a silent no-op. No index rebuild (caller-owned)."""
+    Returns `{applied, normalized, skipped:[{review_id, reason}], changed_pages, graph_changed,
+    outcomes}`. Skips are honest and typed; a fully-effected item is a silent no-op in the counts. No
+    index rebuild (caller-owned).
+
+    `outcomes` (ADR-0072 decision 2): one record per approved review read, stating the VERIFIED end
+    state (B2a review round 1) — `already_in_effect` only for a verified fully-effected review
+    (uncounted, nothing written); every run that wrote is `applied` once the read-back confirms page
+    `deprecated_candidate` + `review_status: approved` + graph mirror (`details.normalized` for the
+    review_status normalization, counted `normalized`), else `incomplete` with `hidden_takes_precedence`
+    (a hidden claim stays hidden — still re-applied each run, counted `applied`),
+    `postcondition_not_met` or `verification_unavailable`; legacy `skipped` mirrors the typed skips."""
     from app.workers import tag_links                    # lazy: tag_links imports items
     # ADR-0066 review round 10: item-page writers are serialized with tag actions (the ledger lock,
     # re-entrant — a no-op inside run_apply, which already holds it).
@@ -101,41 +167,46 @@ def _apply_approved_deprecations(
     applied = normalized = 0
     skipped: list[dict[str, str]] = []
     changed_pages: list[str] = []
+    outcomes: list[dict[str, Any]] = []
+    rtype = "deprecate_wiki_page"
 
-    for item in _approved_items_of_type(reviews_dir, "deprecate_wiki_page"):
+    for item in _approved_items_of_type(reviews_dir, rtype):
         rid = str(item.get("review_id", ""))
         subj = item.get("subject") or {}
         proposal = item.get("proposal") or {}
         page, nid = subj.get("page"), subj.get("node_id")
+        subject = _subject_name(wiki_dir, page, nid)            # ADR-0072 d3: read before any mutation
         if proposal.get("to_status") != "deprecated_candidate":
-            skipped.append({"review_id": rid, "reason": "unexpected_to_status"})
+            _skip(skipped, outcomes, rid, rtype, "unexpected_to_status", subject=subject)
             continue
         if not page or not nid:
-            skipped.append({"review_id": rid, "reason": "missing_subject"})
+            _skip(skipped, outcomes, rid, rtype, "missing_subject", subject=subject)
             continue
         # Path safety BEFORE any read: reject traversal/absolute/nested paths outright (ADR-0035 A5).
         if not _WIKI_PAGE_RE.fullmatch(page):
-            skipped.append({"review_id": rid, "reason": "invalid_page_path"})
+            _skip(skipped, outcomes, rid, rtype, "invalid_page_path", subject=subject)
             continue
         top_dir = page.split("/", 1)[0]
         if top_dir == "Synthesis":
-            skipped.append({"review_id": rid, "reason": "handled_by_synthesis_executor"})
+            _skip(skipped, outcomes, rid, rtype, "handled_by_synthesis_executor", subject=subject)
             continue
         if _DIR_TO_NODE_TYPE.get(top_dir) not in _IN_SCOPE_TYPES:
-            skipped.append({"review_id": rid, "reason": "out_of_scope"})
+            _skip(skipped, outcomes, rid, rtype, "out_of_scope", subject=subject)
             continue
         node = graph.get_node(gconn, nid)
         if node is None:
-            skipped.append({"review_id": rid, "reason": "node_missing"})
+            _skip(skipped, outcomes, rid, rtype, "node_missing", subject=subject)
             continue
         # The graph node is authoritative for the page path: require subject.page to be *exactly* the
         # node's canonical page (no traversal possible, no page/node mismatch). All reads/writes use
         # the canonical page, never the raw subject.page. context.node_type is an advisory cross-check.
         node_type = node["node_type"]
         canonical_page = f"{NODE_DIR[node_type]}/{node['slug']}.md"
+        subject = _subject_name(wiki_dir, canonical_page, nid)  # the node's own page names it
+        before = {"status": node["status"]}
         ctx_type = (item.get("context") or {}).get("node_type")
         if page != canonical_page or (ctx_type and ctx_type != node_type):
-            skipped.append({"review_id": rid, "reason": "page_node_mismatch"})
+            _skip(skipped, outcomes, rid, rtype, "page_node_mismatch", subject=subject, before=before)
             continue
 
         # Pre-state: distinguish true no-op / normalization / full apply (ADR-0035 A5).
@@ -145,7 +216,12 @@ def _apply_approved_deprecations(
         page_approved = fm.get("review_status") == "approved"
         graph_deprecated = node["status"] == "deprecated_candidate"
         if page_deprecated and page_approved and graph_deprecated:
-            continue  # fully effected already (e.g. a legacy supersede deprecation) — silent no-op
+            # fully effected already (e.g. a legacy supersede deprecation) — silent no-op in the counts;
+            # the postcondition (page + review_status + graph mirror) was just verified.
+            outcomes.append(apply_outcomes.outcome(
+                rid, rtype, apply_outcomes.ALREADY_IN_EFFECT, subject=subject, before=before,
+                after={"status": "deprecated_candidate"}))
+            continue
 
         outcome = _deprecate_page(gconn, node_type, nid, wiki_dir=wiki_dir, claims_dir=claims_dir,
                                   reviews_dir=reviews_dir, markdown_dir=markdown_dir, now=now)
@@ -155,17 +231,28 @@ def _apply_approved_deprecations(
         ok = (outcome in _CLAIM_SUCCESS if node_type == "claim"
               else outcome in ("written", "unchanged"))
         if not ok:
-            skipped.append({"review_id": rid, "reason": outcome})
+            # every recompose failure code is returned before the seam writes anything
+            _skip(skipped, outcomes, rid, rtype, outcome, subject=subject, before=before)
             continue
         if outcome != "unchanged":
             changed_pages.append(canonical_page)
-        if page_deprecated and graph_deprecated:
+        is_normalization = page_deprecated and graph_deprecated
+        if is_normalization:
             normalized += 1  # page+graph were already deprecated; only review_status needed fixing
         else:
             applied += 1
+        # The seam wrote (page and/or graph mirror): report the read-back, never the request. A hidden
+        # claim re-renders still hidden (hidden has precedence; claims.recompose_claim).
+        outcomes.append(_verified_outcome(
+            gconn, rid, rtype, page_path=page_path, nid=nid, normalized=is_normalization,
+            hidden_wins=True, subject=subject, before=before,
+            holds=lambda fm, gs: (fm.get("status") == "deprecated_candidate"
+                                  and fm.get("review_status") == "approved"
+                                  and gs == "deprecated_candidate")))
 
     return {"applied": applied, "normalized": normalized, "skipped": skipped,
-            "changed_pages": changed_pages, "graph_changed": bool(applied or normalized)}
+            "changed_pages": changed_pages, "graph_changed": bool(applied or normalized),
+            "outcomes": outcomes}
 
 
 # v1 semantic-hide scope: knowledge items only (the single recompose_semantic_node_page seam).
@@ -190,44 +277,55 @@ def _apply_semantic_visibility_transition(
 
     Graph-REQUIRED (the caller gates a missing graph to 503). Key-free, deterministic, idempotent, never
     touches `raw/`, no index rebuild (caller-owned). Returns
-    `{applied, normalized, skipped, changed_pages, graph_changed}`."""
+    `{applied, normalized, skipped, changed_pages, graph_changed, outcomes}` — `outcomes` (ADR-0072
+    decision 2, verified end state): `already_in_effect` only for the verified fully-effected no-op
+    (uncounted, nothing written); a write is `applied` once the read-back shows page `to_status` +
+    `to_review_status` + graph `to_status` (`details.normalized` for the review_status repair, counted
+    `normalized`), else `incomplete` (`postcondition_not_met` / `verification_unavailable`); legacy
+    `skipped` mirrors the typed skips."""
     now = now or iso_now()
     applied = normalized = 0
     skipped: list[dict[str, str]] = []
     changed_pages: list[str] = []
+    outcomes: list[dict[str, Any]] = []
+    after = {"status": to_status}            # the verified no-op's target (read just above it)
 
     for item in _approved_items_of_type(reviews_dir, review_type):
         rid = str(item.get("review_id", ""))
         subj = item.get("subject") or {}
         proposal = item.get("proposal") or {}
         page, nid = subj.get("page"), subj.get("node_id")
+        subject = _subject_name(wiki_dir, page, nid)            # ADR-0072 d3: read before any mutation
         if proposal.get("to_status") != to_status:
-            skipped.append({"review_id": rid, "reason": "unexpected_to_status"})
+            _skip(skipped, outcomes, rid, review_type, "unexpected_to_status", subject=subject)
             continue
         if not page or not nid:
-            skipped.append({"review_id": rid, "reason": "missing_subject"})
+            _skip(skipped, outcomes, rid, review_type, "missing_subject", subject=subject)
             continue
         # Path safety BEFORE any read (ADR-0035 A5 / CLAUDE.md rule 1) — reuses the deprecation guard.
         if not _WIKI_PAGE_RE.fullmatch(page):
-            skipped.append({"review_id": rid, "reason": "invalid_page_path"})
+            _skip(skipped, outcomes, rid, review_type, "invalid_page_path", subject=subject)
             continue
         if _DIR_TO_NODE_TYPE.get(page.split("/", 1)[0]) not in _HIDE_SEMANTIC_SCOPE_TYPES:
-            skipped.append({"review_id": rid, "reason": "out_of_scope"})
+            _skip(skipped, outcomes, rid, review_type, "out_of_scope", subject=subject)
             continue
         node = graph.get_node(gconn, nid)
         if node is None:
-            skipped.append({"review_id": rid, "reason": "node_missing"})
+            _skip(skipped, outcomes, rid, review_type, "node_missing", subject=subject)
             continue
         node_type = node["node_type"]
+        before = {"status": node["status"]}
         if node_type not in _HIDE_SEMANTIC_SCOPE_TYPES:
-            skipped.append({"review_id": rid, "reason": "out_of_scope"})
+            _skip(skipped, outcomes, rid, review_type, "out_of_scope", subject=subject, before=before)
             continue
         # The graph node is authoritative for the page path: subject.page must be EXACTLY the node's
         # canonical page (no traversal, no page/node mismatch). context.node_type is an advisory cross-check.
         canonical_page = f"{NODE_DIR[node_type]}/{node['slug']}.md"
+        subject = _subject_name(wiki_dir, canonical_page, nid)  # the node's own page names it
         ctx_type = (item.get("context") or {}).get("node_type")
         if page != canonical_page or (ctx_type and ctx_type != node_type):
-            skipped.append({"review_id": rid, "reason": "page_node_mismatch"})
+            _skip(skipped, outcomes, rid, review_type, "page_node_mismatch", subject=subject,
+                  before=before)
             continue
 
         page_path = wiki_dir / canonical_page
@@ -236,21 +334,27 @@ def _apply_semantic_visibility_transition(
         page_review_match = fm.get("review_status") == to_review_status
         graph_status = node["status"]
         if page_at_target and page_review_match and graph_status == to_status:
-            continue                                          # fully effected — silent no-op
+            # fully effected — silent no-op in the counts; postcondition (page+review_status+graph) verified
+            outcomes.append(apply_outcomes.outcome(
+                rid, review_type, apply_outcomes.ALREADY_IN_EFFECT, subject=subject, before=before,
+                after=after))
+            continue
         if graph_status == from_status:
             counts_as = "applied"                             # the real <from> -> <to> transition
         elif graph_status == to_status and page_at_target:
             counts_as = "normalized"                          # both at target; only review_status differs
         else:
-            skipped.append({"review_id": rid, "reason": not_in_from_reason})
+            _skip(skipped, outcomes, rid, review_type, not_in_from_reason, subject=subject,
+                  before=before)
             continue
 
         outcome = items.recompose_semantic_node_page(
             gconn, node_id=nid, wiki_dir=wiki_dir, status=to_status, review_status=to_review_status, now=now)
         # "written" = page changed; "unchanged" = page already matched but the graph-node mirror still
-        # ran (both are SUCCESS — the mirror is the point); anything else is a typed skip reason.
+        # ran (both are SUCCESS — the mirror is the point); anything else is a typed skip reason
+        # (returned before the seam writes anything).
         if outcome not in ("written", "unchanged"):
-            skipped.append({"review_id": rid, "reason": outcome})
+            _skip(skipped, outcomes, rid, review_type, outcome, subject=subject, before=before)
             continue
         if outcome != "unchanged":
             changed_pages.append(canonical_page)
@@ -258,9 +362,17 @@ def _apply_semantic_visibility_transition(
             applied += 1
         else:
             normalized += 1
+        # the seam wrote (page and/or graph mirror): report the read-back
+        outcomes.append(_verified_outcome(
+            gconn, rid, review_type, page_path=page_path, nid=nid,
+            normalized=counts_as == "normalized", subject=subject, before=before,
+            holds=lambda fm, gs: (fm.get("status") == to_status
+                                  and fm.get("review_status") == to_review_status
+                                  and gs == to_status)))
 
     return {"applied": applied, "normalized": normalized, "skipped": skipped,
-            "changed_pages": changed_pages, "graph_changed": bool(applied or normalized)}
+            "changed_pages": changed_pages, "graph_changed": bool(applied or normalized),
+            "outcomes": outcomes}
 
 
 def apply_hidden_semantic_pages(
@@ -302,11 +414,18 @@ def _apply_claim_visibility_transition(
     "Contradicting Claims" sections drop/restore the target by its new visibility — reusing the
     `contradiction_affected` fan-out idea. Graph-REQUIRED; never deletes edges. Idempotent: an
     already-hidden hide / a non-hidden unhide is a silent no-op; hide of a non-active claim is a typed
-    `claim_not_active` skip. Returns `{applied, normalized, skipped, changed_pages, graph_changed}`."""
+    `claim_not_active` skip. Returns `{applied, normalized, skipped, changed_pages, graph_changed,
+    affected_sources, affected_syntheses, outcomes}` — `outcomes` (ADR-0072 decision 2, verified end
+    state): `already_in_effect` only for a verified already-in-target claim (uncounted, nothing
+    written); a re-render is `applied` once the read-back confirms it (hide: page + graph hidden,
+    review_status approved; unhide: page not hidden, graph mirroring it), `details.normalized` for the
+    hide review_status repair (counted `normalized`), else `incomplete` (`postcondition_not_met` /
+    `verification_unavailable`); legacy `skipped` mirrors the typed skips."""
     now = now or iso_now()
     applied = normalized = 0
     skipped: list[dict[str, str]] = []
     changed_pages: list[str] = []
+    outcomes: list[dict[str, Any]] = []
     affected_sources: set[str] = set()   # ADR-0048: Source pages whose Claims section must re-render
     affected_syntheses: set[str] = set()  # ADR-0049: syntheses citing this claim must re-render (fan-out)
     claims_dir = wiki_dir / "Claims"
@@ -317,29 +436,33 @@ def _apply_claim_visibility_transition(
         subj = item.get("subject") or {}
         proposal = item.get("proposal") or {}
         page, nid = subj.get("page"), subj.get("node_id")
+        subject = _subject_name(wiki_dir, page, nid)            # ADR-0072 d3: read before any mutation
         if proposal.get("to_status") != expected_to:
-            skipped.append({"review_id": rid, "reason": "unexpected_to_status"})
+            _skip(skipped, outcomes, rid, review_type, "unexpected_to_status", subject=subject)
             continue
         if not page or not nid:
-            skipped.append({"review_id": rid, "reason": "missing_subject"})
+            _skip(skipped, outcomes, rid, review_type, "missing_subject", subject=subject)
             continue
         if not _WIKI_PAGE_RE.fullmatch(page):
-            skipped.append({"review_id": rid, "reason": "invalid_page_path"})
+            _skip(skipped, outcomes, rid, review_type, "invalid_page_path", subject=subject)
             continue
         if page.split("/", 1)[0] != "Claims":
-            skipped.append({"review_id": rid, "reason": "out_of_scope"})
+            _skip(skipped, outcomes, rid, review_type, "out_of_scope", subject=subject)
             continue
         node = graph.get_node(gconn, nid)
         if node is None:
-            skipped.append({"review_id": rid, "reason": "node_missing"})
+            _skip(skipped, outcomes, rid, review_type, "node_missing", subject=subject)
             continue
+        before = {"status": node["status"]}
         if node["node_type"] != "claim":
-            skipped.append({"review_id": rid, "reason": "out_of_scope"})
+            _skip(skipped, outcomes, rid, review_type, "out_of_scope", subject=subject, before=before)
             continue
         canonical_page = f"Claims/{node['slug']}.md"
+        subject = _subject_name(wiki_dir, canonical_page, nid)  # the node's own page names it
         ctx_type = (item.get("context") or {}).get("node_type")
         if page != canonical_page or (ctx_type and ctx_type != "claim"):
-            skipped.append({"review_id": rid, "reason": "page_node_mismatch"})
+            _skip(skipped, outcomes, rid, review_type, "page_node_mismatch", subject=subject,
+                  before=before)
             continue
 
         # Read BOTH authorities (the page is authoritative; the graph node is the mirror) so a page/graph
@@ -350,8 +473,9 @@ def _apply_claim_visibility_transition(
         page_hidden = fm.get("status") == "hidden"
         graph_hidden = node["status"] == "hidden"
         if page_hidden != graph_hidden:
-            skipped.append({"review_id": rid,
-                            "reason": "partial_hide_state" if hide else "partial_unhide_state"})
+            _skip(skipped, outcomes, rid, review_type,
+                  "partial_hide_state" if hide else "partial_unhide_state", subject=subject,
+                  before={**before, "page_status": fm.get("status")})
             continue
         if hide:
             if page_hidden:                                 # both hidden
@@ -360,7 +484,8 @@ def _apply_claim_visibility_transition(
             elif node["status"] == "active":
                 counts_as = "applied"                       # the active -> hidden transition
             else:
-                skipped.append({"review_id": rid, "reason": "claim_not_active"})  # hide is active-only
+                _skip(skipped, outcomes, rid, review_type, "claim_not_active",   # hide is active-only
+                      subject=subject, before=before)
                 continue                                    # not hidden -> nothing for a synthesis to suppress
         elif not page_hidden:
             counts_as = None                                # unhide: both not hidden -> already un-hidden
@@ -378,7 +503,12 @@ def _apply_claim_visibility_transition(
             if e["edge_type"] == "derived_from"
             and (graph.get_node(gconn, e["src_id"]) or {}).get("node_type") == "synthesis")
         if counts_as is None:
-            continue                                        # claim already in target state -> no claim work
+            # claim already in target state -> no claim work. Postcondition verified above: page AND
+            # graph agree (hide: both hidden + review_status approved; unhide: both not hidden).
+            outcomes.append(apply_outcomes.outcome(
+                rid, review_type, apply_outcomes.ALREADY_IN_EFFECT, subject=subject, before=before,
+                after=dict(before)))
+            continue
 
         # Capture the claim's active contradiction partners + cited sources BEFORE the transition, so we
         # re-render them afterwards (partner Contradicting Claims sections + Source-page Claims sections
@@ -390,13 +520,22 @@ def _apply_claim_visibility_transition(
             gconn, cid=nid, claims_dir=claims_dir, reviews_dir=reviews_dir, markdown_dir=markdown_dir,
             now=now, hide=hide, unhide=not hide, review_status="approved" if hide else None)
         if outcome not in ("written", "tombstoned"):
-            skipped.append({"review_id": rid, "reason": outcome})
+            # recompose_claim's failure codes are all returned before it writes anything
+            _skip(skipped, outcomes, rid, review_type, outcome, subject=subject, before=before)
             continue
         changed_pages.append(canonical_page)
         if counts_as == "applied":
             applied += 1
         else:
             normalized += 1
+        # after = the read-back (unhide re-derives it: active, or a tombstone deprecated_candidate)
+        holds = ((lambda fm, gs: fm.get("status") == "hidden" and gs == "hidden"
+                  and fm.get("review_status") == "approved") if hide
+                 else (lambda fm, gs: fm.get("status") not in (None, "hidden")
+                       and gs == fm.get("status")))
+        outcomes.append(_verified_outcome(
+            gconn, rid, review_type, page_path=page_path, nid=nid,
+            normalized=counts_as == "normalized", subject=subject, before=before, holds=holds))
         for p in partners:                                  # re-render partners (their sections shift)
             if claims.recompose_claim(
                     gconn, cid=p, claims_dir=claims_dir, reviews_dir=reviews_dir,
@@ -406,7 +545,8 @@ def _apply_claim_visibility_transition(
     return {"applied": applied, "normalized": normalized, "skipped": skipped,
             "changed_pages": changed_pages, "graph_changed": applied + normalized > 0,
             "affected_sources": sorted(affected_sources),
-            "affected_syntheses": sorted(affected_syntheses)}
+            "affected_syntheses": sorted(affected_syntheses),
+            "outcomes": outcomes}
 
 
 def apply_hidden_claims(

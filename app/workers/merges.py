@@ -24,6 +24,7 @@ from typing import Any
 
 from app.backend import graph, taxonomy
 from app.backend.manifests import iso_now
+from app.workers import apply_outcomes as oc
 from app.workers import item_pages as ownership
 from app.workers import items, labels, reviews
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter, render_item_page
@@ -254,6 +255,21 @@ def _write_audit(reviews_dir: Path, rid: str, record: dict[str, Any], now: str) 
         encoding="utf-8")
 
 
+def journal_stage(reviews_dir: Path, review_id: str) -> str | None:
+    """The recorded stage of an open in-flight entry (`started` / `graph_done`), `"unknown"` when the
+    entry exists but can't be read, None when there is none. Read-only (ADR-0072 outcome details)."""
+    from app.workers import identity_journal              # lazy, like apply_merges
+    if not identity_journal.is_open(reviews_dir, review_id):
+        return None
+    try:
+        data = json.loads((Path(reviews_dir) / identity_journal.JOURNAL_DIR
+                           / f"{review_id}.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return "unknown"
+    stage = data.get("stage") if isinstance(data, dict) else None
+    return stage if isinstance(stage, str) and stage else "unknown"
+
+
 def merge_state(reviews_dir: Path, *, wiki_dir: Path, review_id: str, survivor: str,
                 absorbed_node: dict[str, Any]) -> str:
     """Where one approved merge stands, by the executor's own rules (ADR-0066 review round 10: shared
@@ -281,11 +297,16 @@ def merge_state(reviews_dir: Path, *, wiki_dir: Path, review_id: str, survivor: 
 def apply_merges(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = None) -> dict[str, Any]:
     """Apply approved `merge_items` decisions (ADR-0050/0059). Returns
     `{applied, skipped:[{review_id, reason}], changed_pages, graph_changed, affected_sources,
-    journaled}` — `journaled` are the in-flight markers the caller closes once its refreshes succeed. Graph-
+    journaled, outcomes}` — `journaled` are the in-flight markers the caller closes once its refreshes
+    succeed; `outcomes` has ONE ADR-0072 record per approved merge (`applied` = the applied outcomes;
+    every `skipped` entry is a `skipped` outcome, except one whose in-flight entry is open — some state
+    changed — which is `incomplete`; a graph-merged tag without a verifiable tombstone is a `skipped`
+    outcome, `merge_unverified`, that the legacy `skipped` list never carried). Graph-
     REQUIRED; the caller owns the final commit + the Source-page re-render of `affected_sources`."""
     now = now or iso_now()
     applied = 0
     skipped: list[dict[str, str]] = []
+    outcomes: list[dict[str, Any]] = []
     changed_pages: list[str] = []
     affected_sources: set[str] = set()
     journaled: list[str] = []                            # in-flight markers the caller must close
@@ -299,10 +320,28 @@ def apply_merges(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = 
             subj = item.get("subject") or {}
             proposal = item.get("proposal") or {}
             a, b = subj.get("survivor_node_id"), subj.get("absorbed_node_id")
+            # ADR-0072 decision 3: display names read BEFORE any write (ids until the nodes are read).
+            names: dict[str, Any] = {"subject": oc.named(b, None), "survivor": oc.named(a, None),
+                                     "absorbed": oc.named(b, None)}
+
+            def _report(kind: str, reason: str | None = None, **extra: Any) -> None:
+                outcomes.append(oc.outcome(rid, "merge_items", kind, reason=reason, **names, **extra))
 
             # --- subject guards (decision 5); each appends a typed reason and skips, never partial-applies ---
-            def _skip(reason: str) -> None:
-                skipped.append({"review_id": rid, "reason": reason})
+            def _skip(reason: str, problem: dict[str, Any] | None = None, *, legacy: bool = True) -> None:
+                if legacy:
+                    skipped.append({"review_id": rid, "reason": reason})
+                extra = {"problem": problem} if problem else {}
+                # An open in-flight entry means an earlier run already changed state: this review
+                # started and did not finish — `incomplete` (it resumes once the refusal clears).
+                # The refusal stands even when the journal can't be checked (a guarded read).
+                stage = oc.guarded(journal_stage, reviews_dir, rid)
+                if stage is oc.UNAVAILABLE:
+                    _report(oc.SKIPPED, reason, in_flight=oc.VERIFICATION_UNAVAILABLE, **extra)
+                elif stage is not None:
+                    _report(oc.INCOMPLETE, reason, stage=stage, **extra)
+                else:
+                    _report(oc.SKIPPED, reason, **extra)
 
             if proposal.get("to_status") != "merged":
                 _skip("unexpected_to_status")
@@ -314,6 +353,8 @@ def apply_merges(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = 
                 _skip("self_merge")
                 continue
             na, nb = graph.get_node(gconn, a), graph.get_node(gconn, b)
+            names["survivor"] = oc.item_name(wiki_dir, na, a)
+            names["absorbed"] = names["subject"] = oc.item_name(wiki_dir, nb, b)
             if na is None or nb is None:
                 _skip("node_missing")
                 continue
@@ -332,6 +373,13 @@ def apply_merges(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = 
                 # elsewhere means a conflicting merge won — loud typed skip, never silent (ADR-0064).
                 if state == "elsewhere":
                     _skip("absorbed_merged_elsewhere")
+                elif state == "done":
+                    # merge_state verified the postcondition: B is a `merged` tombstone into A.
+                    _report(oc.ALREADY_IN_EFFECT)
+                else:
+                    # merged in the graph, but no tombstone names a survivor: not verifiably this
+                    # merge's effect, and apply doesn't act — never reported as in effect.
+                    _skip("merge_unverified", legacy=False)
                 continue
             resuming = state == "resuming"
             if na["status"] not in _MERGEABLE_STATUSES:       # ADR-0066: an unused tag stays mergeable
@@ -377,7 +425,7 @@ def apply_merges(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = 
             dup_partners = {e["src_id"] if e["dst_id"] == b else e["dst_id"]
                             for e in edges if e["edge_type"] == "duplicates"} - {a, b}
             if (problem := ownership.first_problem(gconn, wiki_dir, [a, b, *sorted(dup_partners)])):
-                _skip(problem["reason"])
+                _skip(problem["reason"], problem)
                 continue
 
             # --- LEDGER FIRST (ADR-0066 review round 3): journal the operation, then move B's keeps and
@@ -482,10 +530,12 @@ def apply_merges(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = 
             identity_journal.set_stage(reviews_dir, rid, "graph_done")
             journaled.append(rid)
             applied += 1
+            # A finished graph stage whose marker the caller closes after publishing is `applied`.
+            _report(oc.APPLIED, resumed=resuming)
 
     return {"applied": applied, "skipped": skipped, "changed_pages": sorted(set(changed_pages)),
             "graph_changed": applied > 0, "affected_sources": sorted(affected_sources),
-            "journaled": journaled}
+            "journaled": journaled, "outcomes": outcomes}
 
 
 def _withdraw_b_subjects(reviews_dir: Path, b: str, b_page: str, now: str,

@@ -161,7 +161,7 @@ def test_apply_confirm_shows_dry_run_preview(client, tmp_path):
     body = client.post("/ui/reviews/apply/preview").text
     assert "deprecate_wiki_page" in body          # executor-backed item / blocked
     assert "split_entity" in body                 # executor-backed; empty subject/proposal -> scope-guard skip -> not appliable
-    assert "no live state was changed" in body    # framed as a dry-run preview
+    assert "Nothing has been changed yet" in body  # framed as a dry-run preview (ADR-0072 wording)
     assert "Not appliable" in body
 
 
@@ -271,3 +271,51 @@ def test_no_server_path_leak_in_ui(client, tmp_path):
     for url in ("/ui/reviews", "/ui/reviews/rev_d", "/ui/reviews/apply"):
         assert str(tmp_path) not in client.get(url).text
     assert str(tmp_path) not in fixtures.apply_ui(client).text
+
+
+def test_the_readable_preview_and_result_come_from_the_runs_outcomes(client, tmp_path):
+    """ADR-0072 B2a end to end: the sandbox preview and the real result both say what the one
+    approved deprecation does, by the page's title, with no reporting gap; a re-run reports it as
+    already in effect, and the token rules are unchanged (Apply only from a clean preview)."""
+    from app.workers import items as items_mod
+    nid = items_mod.node_id("Thing")                     # canonical: the B1 ownership guard accepts it
+    gdb = tmp_path / "db" / "graph.sqlite"
+    gdb.parent.mkdir(parents=True, exist_ok=True)
+    graph.init_db(gdb)
+    conn = graph.connect(gdb)
+    graph.upsert_node(conn, node_id=nid, node_type="item", item_type="method_technique",
+                      slug="thing", status="active")
+    conn.commit()
+    conn.close()
+    page = tmp_path / "wiki" / "Items" / "thing.md"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(f'---\ntype: item\nitem_id: "{nid}"\nitem_type: method_technique\n'
+                    'title: "Thing"\nstatus: active\nreview_status: none\naliases: []\n---\n',
+                    encoding="utf-8")
+    _write_review(tmp_path, "approved", {
+        "review_id": "rev_d", "type": "deprecate_wiki_page", "status": "approved",
+        "subject": {"node_id": nid, "page": "Items/thing.md"},
+        "proposal": {"to_status": "deprecated_candidate", "reason": "x"},
+        "context": {"node_type": "item"}})
+    preview = client.post("/ui/reviews/apply/preview").text
+    changes = preview.split("<h2>Changes this Apply would make</h2>")[1].split("<h2>")[0]
+    assert "Deprecate “Thing”" in changes and "Outcome not reported" not in preview
+    assert "Apply now" in preview and "status: active" in page.read_text(encoding="utf-8")
+    result = fixtures.apply_ui(client).text
+    made = result.split("<h2>Changes made</h2>")[1].split("<h2>")[0]
+    assert "Deprecate “Thing”" in made and "Outcome not reported" not in result
+    assert "status: deprecated_candidate" in page.read_text(encoding="utf-8")
+    again = client.post("/ui/reviews/apply/preview").text
+    assert "1 decided review already in effect" in again
+    assert "Attention needed" not in again
+
+
+def test_a_blocked_review_reads_plainly_without_its_code(client, tmp_path):
+    """The legacy non-canonical fixture is refused by the B1 page guard: the readable page says so in
+    words and keeps the code in the folded details."""
+    _approved_concept_deprecation(tmp_path)
+    preview = client.post("/ui/reviews/apply/preview").text
+    attention = preview.split("<h2>Attention needed</h2>")[1].split("<details><summary>Technical")[0]
+    assert "<strong>Blocked</strong>" in attention and "Deprecate “Thing”" in attention
+    assert "belongs to another tag" in attention
+    assert "page_conflict" not in attention.split("<details>")[0]

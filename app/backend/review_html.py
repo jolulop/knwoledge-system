@@ -549,41 +549,39 @@ _WITHHELD = {
 }
 
 
+def _validators_line(ran: bool, passed: Any, failures: Any) -> str:
+    """ADR-0070 §4: validators shown as passed, failed or not run."""
+    if not ran:
+        return "<p>Validators: <strong>not run</strong>.</p>"
+    if passed:
+        return "<p class='ok'>Validators: <strong>passed</strong>.</p>"
+    n = len(failures or [])
+    return (f"<p class='err'>Validators: <strong>failed</strong>"
+            f"{f' ({n})' if n else ''} — see the technical details.</p>")
+
+
 def render_apply_dry_run(scope: dict[str, Any], dry: dict[str, Any]) -> str:
     """Step-1 apply page (ADR-0040): the dry-run mutation preview. Apply is offered ONLY when the
-    preview is clean (`status == "ok"`); a blocked/failed/validation-failed preview withholds it."""
+    preview is clean (`status == "ok"`); a blocked/failed/validation-failed preview withholds it.
+    ADR-0072 B2a: the readable sentences (from the sandbox run's per-review outcomes) come first; the
+    technical diff stays on the page, folded."""
+    from app.backend import apply_readable
     status = dry.get("status")
+    ran = status in ("ok", "validation_failed")
     body = [
         _nav(),
         "<h1>Apply approved reviews — preview</h1>",
-        f"<p>Dry-run status: <code>{_h(status)}</code> "
-        "(no live state was changed by this preview).</p>",
+        "<p>Nothing has been changed yet: this is what Apply would do.</p>",
     ]
     if dry.get("reason"):
-        body.append(f"<p class='banner'>blocked/failed: {_h(dry.get('reason'))} "
+        body.append(f"<p class='banner'>The preview couldn't run: {_h(dry.get('reason'))} "
                     f"{_h(dry.get('error') or '')}</p>")
-    diff = dry.get("diff") or {}
-    graph_diff = diff.get("graph") or {}
-    body.append("<h2>Graph changes</h2>")
-    body.append(_render_value({
-        "edges_added": graph_diff.get("edges_added"), "edges_removed": graph_diff.get("edges_removed"),
-        "edges_status_changed": graph_diff.get("edges_status_changed"),
-        "nodes_status_changed": graph_diff.get("nodes_status_changed"),
-        "nodes_added": graph_diff.get("nodes_added"),
-    }))
-    body.append("<h2>Manifest status changes</h2>")
-    body.append(_render_value(diff.get("manifests") or []))
-    body.append("<h2>Review file moves</h2>")
-    body.append(_render_value(diff.get("reviews") or []))
-    body.append("<h2>Wiki page diffs</h2>")
-    for page in diff.get("wiki") or []:
-        body.append(f"<h3>{_h(page.get('path'))}</h3><pre>{_h(page.get('unified_diff'))}</pre>")
-    body.append("<h2>Per-item provenance <small>(best-effort; the diff above is authoritative)</small></h2>")
-    body.append(_render_value(dry.get("items") or []))
-    body.append("<h2>Not appliable</h2>")
-    body.append(_render_value(dry.get("not_appliable") or []))
-    body.append("<h2>Validators (would pass?)</h2>")
-    body.append(_render_value(dry.get("validators") or {}))
+    if ran:
+        groups = apply_readable.model(dry.get("handled") or [], dry.get("outcomes") or [],
+                                      dry.get("not_appliable"))
+        body.append(apply_readable.render(groups, advisories=dry.get("advisories"), preview=True))
+    body.append(_validators_line(ran, (dry.get("validators") or {}).get("passed"),
+                                 (dry.get("validators") or {}).get("failures")))
     if dry.get("warnings"):
         body.append(f"<p class='banner'>warnings: {_render_value(dry['warnings'])}</p>")
 
@@ -600,6 +598,29 @@ def render_apply_dry_run(scope: dict[str, Any], dry: dict[str, Any]) -> str:
     else:
         body.append("<p class='err'>Apply is withheld: the preview is not clean "
                     f"(status <code>{_h(status)}</code>). Resolve the cause before applying.</p>")
+
+    diff = dry.get("diff") or {}
+    graph_diff = diff.get("graph") or {}
+    tech = [f"<p>Dry-run status: <code>{_h(status)}</code>.</p>", "<h3>Graph changes</h3>",
+            _render_value({
+                "edges_added": graph_diff.get("edges_added"),
+                "edges_removed": graph_diff.get("edges_removed"),
+                "edges_status_changed": graph_diff.get("edges_status_changed"),
+                "nodes_status_changed": graph_diff.get("nodes_status_changed"),
+                "nodes_added": graph_diff.get("nodes_added"),
+            }),
+            "<h3>Manifest status changes</h3>", _render_value(diff.get("manifests") or []),
+            "<h3>Review file moves</h3>", _render_value(diff.get("reviews") or []),
+            "<h3>Wiki page diffs</h3>"]
+    for page in diff.get("wiki") or []:
+        tech.append(f"<h4>{_h(page.get('path'))}</h4><pre>{_h(page.get('unified_diff'))}</pre>")
+    tech += ["<h3>Per-review outcomes</h3>", _render_value(dry.get("outcomes") or []),
+             "<h3>Per-item provenance <small>(best-effort; the diff above is authoritative)</small>"
+             "</h3>", _render_value(dry.get("items") or []),
+             "<h3>Not appliable</h3>", _render_value(dry.get("not_appliable") or []),
+             "<h3>Validators</h3>", _render_value(dry.get("validators") or {})]
+    body.append("<details><summary>Technical details (the full diff)</summary>"
+                + "".join(tech) + "</details>")
     return _page("Apply preview", "".join(body))
 
 
@@ -622,21 +643,24 @@ def render_apply_refused(reason: str, action: str) -> str:
 
 
 def render_apply_result(result: dict[str, Any]) -> str:
+    """The Apply result (ADR-0072 B2a): readable sentences from the REAL run's per-review outcomes,
+    the publication state kept apart from the recorded changes, the counts folded."""
+    from app.backend import apply_readable
     s = result.get("summary") or {}
-    body = [
-        _nav(),
-        f"<h1>Apply result — {_h(result.get('status'))}</h1>",
-    ]
-    if result.get("status") == "saved_publication_pending":
-        body.append("<p class='banner'><strong>Saved; publication incomplete.</strong> The approved "
-                    "decisions were applied; some pages or search still need refreshing. Use "
-                    "<strong>Retry publishing</strong>, and don't apply or decide again.</p>")
-    body += [
-        f"<p>validators_ok: <code>{_h(result.get('validators_ok'))}</code></p>",
-    ]
+    pending = result.get("status") == "saved_publication_pending" or (
+        (result.get("publication") or {}).get("status") == "saved_publication_pending")
+    body = [_nav(), "<h1>Apply result</h1>"]
+    if pending:
+        body.append("<p class='banner'><strong>The changes below were recorded; publishing them is "
+                    "unfinished.</strong> Some pages, the index or search still show the old state. "
+                    "Use <strong>Retry publishing</strong>, and don't apply or decide again. "
+                    "<form class='decide' method='post' action='/ui/publication/retry'><button "
+                    "type='submit'>Retry publishing</button></form></p>")
+    groups = apply_readable.model(result.get("handled") or [], result.get("outcomes") or [])
+    body.append(apply_readable.render(groups, advisories=result.get("advisories"), preview=False))
+    body.append(_validators_line(True, result.get("validators_ok"), result.get("failed_validators")))
     if result.get("warnings"):
         body.append(f"<p class='banner'>warnings: {_render_value(result['warnings'])}</p>")
-    body.append("<h2>Summary</h2>")
     summary = {
         "syntheses": s.get("syntheses"), "promotions": s.get("promotions"),
         "contradictions": s.get("contradictions"), "deprecations": s.get("deprecations"),
@@ -653,11 +677,13 @@ def render_apply_result(result: dict[str, Any]) -> str:
     }
     # UAT part 3 #10: list only what happened, not ~20 rows of zero.
     shown = {k: v for k, v in summary.items() if v not in (None, 0, False, [], {}, "")}
-    body.append(_render_value(shown) if shown else
-                "<p><em>Nothing was changed: there were no approved items to apply.</em></p>")
+    tech = [f"<p>Status: <code>{_h(result.get('status'))}</code>; validators_ok: "
+            f"<code>{_h(result.get('validators_ok'))}</code>.</p>", "<h3>Counts</h3>",
+            _render_value(shown) if shown else "<p><em>No counts.</em></p>",
+            "<h3>Per-review outcomes</h3>", _render_value(result.get("outcomes") or [])]
     if result.get("failed_validators"):
-        body.append("<h2 class='err'>Failed validators</h2>")
-        body.append(_render_value(result["failed_validators"]))
+        tech += ["<h3 class='err'>Failed validators</h3>", _render_value(result["failed_validators"])]
+    body.append("<details><summary>Technical details</summary>" + "".join(tech) + "</details>")
     return _page("Apply result", "".join(body))
 
 

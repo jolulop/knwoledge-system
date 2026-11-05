@@ -42,7 +42,7 @@ from app.backend.paths import safe_child
 from app.llm import prompts
 from app.llm.client import LLMClient, ParseError
 from app.workers import enrichment_artifact as art
-from app.workers import publication, reconciliation, reviews
+from app.workers import apply_outcomes, publication, reconciliation, reviews
 from app.workers import labels
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter, render_synthesis_page
 
@@ -375,11 +375,54 @@ def _deprecate_synthesis(gconn, *, syn_id, topic_node, reviews_dir: Path, synthe
     _withdraw_stale_pending(reviews_dir, topic_node, keep_fp=None, now=now)
 
 
+def _read_back(gconn, synthesis_dir: Path, syn_id: str) -> tuple[Any, Any]:
+    """Reporting-only read-back after a write (ADR-0072, B2a review round 1): `(page frontmatter or
+    None when the page is missing, graph node or None)`, each :data:`apply_outcomes.UNAVAILABLE`
+    when it can't be read. Never raises."""
+    def _fm() -> dict[str, Any] | None:
+        p = synthesis_dir / f"{syn_id}.md"
+        return parse_frontmatter(p.read_text(encoding="utf-8")) if p.exists() else None
+    return apply_outcomes.guarded(_fm), apply_outcomes.guarded(graph.get_node, gconn, syn_id)
+
+
+def _written_outcome(rid: str, review_type: str, *, wrote: bool, target: str, review_status: str,
+                     fm: Any, node: Any, details: dict[str, Any]) -> dict[str, Any]:
+    """The outcome of a decision that executed its write, from the VERIFIED end state (`_read_back`):
+    `applied` when the page AND the graph node read back at `target` with `review_status`, `after`
+    being the page status read; otherwise `incomplete` if this run wrote (else `skipped`) with
+    `hidden_takes_precedence` (verified hidden, page and graph), `postcondition_not_met`, or
+    `verification_unavailable` when a read failed."""
+    if fm is apply_outcomes.UNAVAILABLE or node is apply_outcomes.UNAVAILABLE:
+        return apply_outcomes.unverified(rid, review_type, changed=wrote, **details)
+    page_status = fm.get("status") if isinstance(fm, dict) else None
+    node_status = node.get("status") if isinstance(node, dict) else None
+    page_review = fm.get("review_status") if isinstance(fm, dict) else None
+    details = {**details, "after": {"status": page_status}}
+    if page_status == target and node_status == target and page_review == review_status:
+        return apply_outcomes.outcome(rid, review_type, apply_outcomes.APPLIED, **details)
+    # hidden_takes_precedence only for a non-visibility review (a propose overridden by a hide); a
+    # hide/unhide that reads back wrong is simply postcondition_not_met (B2a review round 1).
+    reason = (apply_outcomes.HIDDEN_TAKES_PRECEDENCE
+              if review_type == "propose_synthesis" and page_status == node_status == "hidden"
+              else apply_outcomes.POSTCONDITION_NOT_MET)
+    details["problem"] = {"expected": target, "page_status": page_status, "node_status": node_status,
+                          "review_status": page_review}
+    return apply_outcomes.outcome(rid, review_type,
+                                  apply_outcomes.INCOMPLETE if wrote else apply_outcomes.SKIPPED,
+                                  reason=reason, **details)
+
+
 def apply_resolved_syntheses(gconn, reviews_dir: Path, *, synthesis_dir: Path,
-                             enrichment_dir: Path, now: str) -> dict[str, int]:
+                             enrichment_dir: Path, now: str) -> dict[str, Any]:
     """Apply human decisions: approve → synthesis `active`, reject → `deprecated_candidate`
-    (review-only promotion, no recurrence — ADR-0031). Renders from the synthesis artifact."""
+    (review-only promotion, no recurrence — ADR-0031). Renders from the synthesis artifact.
+
+    Returns `{promoted, rejected, outcomes}`: one ADR-0072 outcome per readable `propose_synthesis`
+    item in approved/ AND rejected/ (both are executed). `promoted + rejected` equals the `applied`
+    outcomes; `already_in_effect` only once the graph node AND the page both hold the target status."""
     promoted = rejected = 0
+    outcomes: list[dict[str, Any]] = []
+    wiki_dir = synthesis_dir.parent
     for state, status, rstatus in (("approved", "active", "approved"),
                                    ("rejected", "deprecated_candidate", "rejected")):
         d = reviews_dir / state
@@ -390,30 +433,85 @@ def apply_resolved_syntheses(gconn, reviews_dir: Path, *, synthesis_dir: Path,
                 continue
             if item.get("type") != "propose_synthesis":
                 continue
+            rid = str(item.get("review_id") or path.stem)
             subj = item.get("subject") or {}
             topic_node = subj.get("topic_node_id")
             if not topic_node:
+                outcomes.append(apply_outcomes.outcome(
+                    rid, "propose_synthesis", apply_outcomes.SKIPPED, reason="missing_subject",
+                    subject=apply_outcomes.named(rid, None), decision=state))
                 continue
             syn_id = synthesis_id(topic_node)
+            # ADR-0072 decision 3: the title as the page shows it BEFORE this decision re-renders it.
+            subject = apply_outcomes.page_name(wiki_dir, f"Synthesis/{syn_id}", syn_id)
             node = graph.get_node(gconn, syn_id)
             # ADR-0049: a `hidden`/`evidence_hidden` synthesis is a visibility-suppression state — a lingering
             # approved/rejected proposal must not flip it active/deprecated. Check the AUTHORITATIVE page
             # status too, so a page-suppressed/graph-active partial state is also preserved (skip-only; the
             # unhide executor / claim fan-out / validator owns drift repair, not the generator).
-            if (node is None or node["status"] == status
-                    or node["status"] in _PRESERVED_GENERATE_STATUSES
-                    or _page_status(synthesis_dir, syn_id) in _PRESERVED_GENERATE_STATUSES):
-                continue  # nothing indexed, already in target, or visibility-suppressed (page or graph)
+            # The page is read for the decision exactly when it always was (last in the chain); where
+            # the chain stopped earlier, it is read for reporting only (`guarded`, never raises).
+            page_status: Any = apply_outcomes.UNAVAILABLE
+            hold = (node is None or node["status"] == status
+                    or node["status"] in _PRESERVED_GENERATE_STATUSES)
+            if not hold:
+                page_status = _page_status(synthesis_dir, syn_id)
+                hold = page_status in _PRESERVED_GENERATE_STATUSES
+            elif node is not None:
+                page_status = apply_outcomes.guarded(_page_status, synthesis_dir, syn_id)
+            if hold:
+                # nothing indexed, already in target, or visibility-suppressed (page or graph)
+                shown = None if page_status is apply_outcomes.UNAVAILABLE else page_status
+                if node is None:
+                    rec = apply_outcomes.outcome(
+                        rid, "propose_synthesis", apply_outcomes.SKIPPED, reason="node_missing",
+                        subject=subject, decision=state)
+                elif node["status"] in _PRESERVED_GENERATE_STATUSES:
+                    rec = apply_outcomes.outcome(
+                        rid, "propose_synthesis", apply_outcomes.SKIPPED, reason="visibility_suppressed",
+                        subject=subject, decision=state,
+                        problem={"node_status": node["status"], "page_status": shown})
+                elif page_status is apply_outcomes.UNAVAILABLE:   # graph in target, page unreadable
+                    rec = apply_outcomes.unverified(rid, "propose_synthesis", changed=False,
+                                                    subject=subject, decision=state)
+                elif page_status in _PRESERVED_GENERATE_STATUSES:
+                    rec = apply_outcomes.outcome(
+                        rid, "propose_synthesis", apply_outcomes.SKIPPED, reason="visibility_suppressed",
+                        subject=subject, decision=state,
+                        problem={"node_status": node["status"], "page_status": page_status})
+                elif page_status == status:              # postcondition verified: graph AND page
+                    rec = apply_outcomes.outcome(
+                        rid, "propose_synthesis", apply_outcomes.ALREADY_IN_EFFECT, subject=subject,
+                        decision=state, after={"status": status})
+                else:                                    # graph in target, page not: left as is
+                    rec = apply_outcomes.outcome(
+                        rid, "propose_synthesis", apply_outcomes.SKIPPED, reason="page_status_mismatch",
+                        subject=subject, decision=state,
+                        problem={"node_status": node["status"], "page_status": page_status})
+                outcomes.append(rec)
+                continue
             apath = art.synthesis_artifact_path(enrichment_dir, topic_node)
             if not apath.exists():
+                outcomes.append(apply_outcomes.outcome(
+                    rid, "propose_synthesis", apply_outcomes.SKIPPED, reason="synthesis_artifact_missing",
+                    subject=subject, decision=state))
                 continue
             a = json.loads(apath.read_text(encoding="utf-8"))
-            _render_page(gconn, syn_id=syn_id, topic_node=topic_node, title=a["title"],
-                         summary=a["summary"], synthesis_text=a["synthesis"], confidence=a["confidence"],
-                         status=status, review_status=rstatus, synthesis_dir=synthesis_dir, now=now)
+            wrote = _render_page(gconn, syn_id=syn_id, topic_node=topic_node, title=a["title"],
+                                 summary=a["summary"], synthesis_text=a["synthesis"],
+                                 confidence=a["confidence"], status=status, review_status=rstatus,
+                                 synthesis_dir=synthesis_dir, now=now)
             promoted += state == "approved"
             rejected += state == "rejected"
-    return {"promoted": promoted, "rejected": rejected}
+            if subject["name"] == subject["id"]:         # no page before: the title it was rendered with
+                subject = apply_outcomes.named(syn_id, a.get("title"))
+            # the VERIFIED end state (read back, guarded), not the requested one
+            fm, after_node = _read_back(gconn, synthesis_dir, syn_id)
+            outcomes.append(_written_outcome(
+                rid, "propose_synthesis", wrote=wrote, target=status, review_status=rstatus, fm=fm,
+                node=after_node, details={"subject": subject, "decision": state,
+                                          "before": {"status": node["status"]}}))
+    return {"promoted": promoted, "rejected": rejected, "outcomes": outcomes}
 
 
 _SYN_PAGE_RE = re.compile(r"Synthesis/syn_[0-9a-f]{16}\.md")  # canonical synthesis page shape (untrusted subject)
@@ -431,13 +529,18 @@ def _apply_synthesis_visibility_transition(
     so a page/graph disagreement is a typed `partial_*_state` skip (never a silent no-op); never deletes
     edges. Idempotent: an already-hidden hide / a non-hidden unhide is a silent no-op; hide of a non-active
     synthesis is a typed `synthesis_not_active` skip. Returns
-    `{applied, normalized, skipped, changed_pages, graph_changed}`."""
+    `{applied, normalized, skipped, changed_pages, graph_changed, outcomes}` — `outcomes` holds one
+    ADR-0072 record per readable approved item of `review_type`: `applied` = `applied + normalized`,
+    `skipped` = `len(skipped)` plus any `page_missing` unhide (a missing page reads as not hidden, so
+    the no-op could not be verified; reported, not added to the existing `skipped` list)."""
     now = now or iso_now()
     applied = normalized = 0
     skipped: list[dict[str, str]] = []
     changed_pages: list[str] = []
+    outcomes: list[dict[str, Any]] = []
     expected_to = "hidden" if hide else "active"
     approved = reviews_dir / "approved"
+    wiki_dir = synthesis_dir.parent
 
     for path in sorted(approved.glob("*.json")) if approved.exists() else []:
         try:
@@ -447,31 +550,46 @@ def _apply_synthesis_visibility_transition(
         if item.get("type") != review_type:
             continue
         rid = str(item.get("review_id", ""))
+        orid = rid or path.stem                              # the outcome's id (the file is named by it)
         subj = item.get("subject") or {}
         proposal = item.get("proposal") or {}
         page, nid = subj.get("page"), subj.get("node_id")
+        # ADR-0072 decision 3: the id until the page path is known safe, then the page's title as read
+        # BEFORE any re-render.
+        subject = apply_outcomes.named(nid or page or orid, None)
+
+        def _skip(reason: str, problem: dict[str, Any] | None = None, *, listed: bool = True) -> None:
+            if listed:                                       # the existing `skipped` list (unchanged)
+                skipped.append({"review_id": rid, "reason": reason})
+            details: dict[str, Any] = {"subject": subject}
+            if problem:
+                details["problem"] = problem
+            outcomes.append(apply_outcomes.outcome(orid, review_type, apply_outcomes.SKIPPED,
+                                                   reason=reason, **details))
+
         if proposal.get("to_status") != expected_to:
-            skipped.append({"review_id": rid, "reason": "unexpected_to_status"})
+            _skip("unexpected_to_status", {"to_status": proposal.get("to_status")})
             continue
         if not page or not nid:
-            skipped.append({"review_id": rid, "reason": "missing_subject"})
+            _skip("missing_subject")
             continue
         if not _SYN_PAGE_RE.fullmatch(page):       # path safety BEFORE any read (untrusted subject)
-            skipped.append({"review_id": rid, "reason": "invalid_page_path"})
+            _skip("invalid_page_path")
             continue
+        subject = apply_outcomes.page_name(wiki_dir, page, nid)
         node = graph.get_node(gconn, nid)
         if node is None:
-            skipped.append({"review_id": rid, "reason": "node_missing"})
+            _skip("node_missing")
             continue
         if node["node_type"] != "synthesis":
-            skipped.append({"review_id": rid, "reason": "out_of_scope"})
+            _skip("out_of_scope", {"node_type": node["node_type"]})
             continue
         # The graph node is authoritative for the page path: subject.page must be EXACTLY the node's
         # canonical page (slug == syn_id). All reads/writes use the canonical page, never raw subject.page.
         canonical_page = f"Synthesis/{node['slug']}.md"
         ctx_type = (item.get("context") or {}).get("node_type")
         if page != canonical_page or (ctx_type and ctx_type != "synthesis"):
-            skipped.append({"review_id": rid, "reason": "page_node_mismatch"})
+            _skip("page_node_mismatch")
             continue
 
         # Read BOTH authorities (page authoritative, graph node mirrored): a page/graph disagreement is a
@@ -480,22 +598,35 @@ def _apply_synthesis_visibility_transition(
         fm = parse_frontmatter(page_path.read_text(encoding="utf-8")) if page_path.exists() else {}
         page_hidden = fm.get("status") == "hidden"
         graph_hidden = node["status"] == "hidden"
+        status_problem = {"page_status": fm.get("status"), "node_status": node["status"]}
         if page_hidden != graph_hidden:
-            skipped.append({"review_id": rid,
-                            "reason": "partial_hide_state" if hide else "partial_unhide_state"})
+            _skip("partial_hide_state" if hide else "partial_unhide_state", status_problem)
             continue
         if hide:
             if page_hidden:                                  # both hidden
                 if fm.get("review_status") == "approved":
-                    continue                                 # fully effected -> silent no-op
+                    # fully effected -> silent no-op; postcondition verified: page AND graph hidden,
+                    # review_status approved.
+                    outcomes.append(apply_outcomes.outcome(
+                        orid, review_type, apply_outcomes.ALREADY_IN_EFFECT, subject=subject,
+                        after={"status": "hidden"}))
+                    continue
                 counts_as = "normalized"                     # both hidden, review pending -> fix review_status
             elif node["status"] == "active":
                 counts_as = "applied"                        # the active -> hidden transition
             else:
-                skipped.append({"review_id": rid, "reason": "synthesis_not_active"})  # hide is active-only
+                _skip("synthesis_not_active", status_problem)  # hide is active-only
                 continue
         elif not page_hidden:
-            continue                                         # unhide: both not hidden -> already un-hidden
+            # unhide: both not hidden -> already un-hidden. The postcondition needs the page itself to
+            # exist (a missing page reads as "not hidden"); without it nothing is verified, nothing acts.
+            if page_path.exists():
+                outcomes.append(apply_outcomes.outcome(
+                    orid, review_type, apply_outcomes.ALREADY_IN_EFFECT, subject=subject,
+                    after={"status": fm.get("status")}))
+            else:
+                _skip("page_missing", status_problem, listed=False)
+            continue
         else:
             counts_as = "applied"                            # unhide: both hidden -> active
 
@@ -507,19 +638,19 @@ def _apply_synthesis_visibility_transition(
         # artifact's own node_id is a second, defence-in-depth match. Both are typed skips (never silent).
         topic_node = fm.get("topic_node")
         if not topic_node or synthesis_id(topic_node) != nid:
-            skipped.append({"review_id": rid, "reason": "synthesis_topic_mismatch"})
+            _skip("synthesis_topic_mismatch")
             continue
         apath = safe_child(enrichment_dir, f"{topic_node}.synthesis.json")
         if apath is None or not apath.exists():
-            skipped.append({"review_id": rid, "reason": "synthesis_artifact_missing"})
+            _skip("synthesis_artifact_missing")
             continue
         try:
             a = json.loads(apath.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            skipped.append({"review_id": rid, "reason": "synthesis_artifact_unreadable"})
+            _skip("synthesis_artifact_unreadable")
             continue
         if a.get("node_id") != nid:
-            skipped.append({"review_id": rid, "reason": "synthesis_artifact_mismatch"})
+            _skip("synthesis_artifact_mismatch")
             continue
         # Operator hide -> `hidden`. Operator UNHIDE clears the operator hide, but must not re-expose a
         # synthesis whose evidence is still hidden: restore to `evidence_hidden` if a supporting claim is
@@ -527,18 +658,30 @@ def _apply_synthesis_visibility_transition(
         # outlives it).
         render_status = expected_to if hide else (
             "evidence_hidden" if _evidence_hidden(gconn, nid) else "active")
-        _render_page(gconn, syn_id=nid, topic_node=topic_node, title=a.get("title", topic_node),
-                     summary=a.get("summary", ""), synthesis_text=a.get("synthesis", ""),
-                     confidence=a.get("confidence", "low"), status=render_status,
-                     review_status="approved", synthesis_dir=synthesis_dir, now=now)
+        wrote = _render_page(gconn, syn_id=nid, topic_node=topic_node, title=a.get("title", topic_node),
+                             summary=a.get("summary", ""), synthesis_text=a.get("synthesis", ""),
+                             confidence=a.get("confidence", "low"), status=render_status,
+                             review_status="approved", synthesis_dir=synthesis_dir, now=now)
         changed_pages.append(canonical_page)
         if counts_as == "applied":
             applied += 1
         else:
             normalized += 1
+        # A `normalized` review (already hidden; only its review_status was fixed) changed state and
+        # finished too: it is an `applied` outcome flagged `normalized` (applied outcomes = applied +
+        # normalized), never `already_in_effect`. Its `after` is the VERIFIED end state (read back,
+        # guarded): a mismatch or a failed read is `incomplete`, not applied.
+        after_fm, after_node = _read_back(gconn, synthesis_dir, nid)
+        rec = _written_outcome(orid, review_type, wrote=wrote, target=render_status,
+                               review_status="approved", fm=after_fm, node=after_node,
+                               details={"subject": subject, "before": {"status": fm.get("status")}})
+        if counts_as == "normalized":                       # the legacy counter's name for it
+            rec["details"]["normalized"] = True
+        outcomes.append(rec)
 
     return {"applied": applied, "normalized": normalized, "skipped": skipped,
-            "changed_pages": changed_pages, "graph_changed": applied + normalized > 0}
+            "changed_pages": changed_pages, "graph_changed": applied + normalized > 0,
+            "outcomes": outcomes}
 
 
 def rerender_synthesis_page(gconn, syn_id: str, *, synthesis_dir: Path, enrichment_dir: Path,

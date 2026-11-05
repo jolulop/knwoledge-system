@@ -27,7 +27,8 @@ from app.backend import db, graph, keyword_index, manifests, write_lock
 from app.backend.manifests import iso_now, load_manifest, valid_manifests
 from app.backend.policy import load_yaml
 from app.llm import cache as llm_cache
-from app.workers import reviews, wiki
+from app.workers import apply_outcomes, reviews, wiki
+from app.workers.wiki_render import parse_frontmatter
 
 _DAYS_PER_YEAR = 365
 
@@ -224,6 +225,35 @@ def _approved_items_of_type(reviews_dir: Path, review_type: str) -> list[dict[st
     return out
 
 
+def _source_page_drift(wiki_dir: Path, sid: str, manifest: dict[str, Any]) -> dict[str, Any] | None:
+    """Read-only postcondition check (ADR-0072 decision 2): the Source page mirrors the manifest's
+    lifecycle status — the `validate_wiki.py` page-status check (default `active` when unset). An
+    extracted document must have its page; a not-yet-extracted one has no page to mirror (its
+    extraction publishes it), so only a page that exists is compared. None when consistent, else the
+    structured problem."""
+    expected = manifest.get("status") or "active"
+    page = Path(wiki_dir) / "Sources" / f"{sid}.md"
+    try:
+        text = page.read_text(encoding="utf-8")
+    except OSError:
+        if manifest.get("ingestion_status") not in wiki._GENERATED_STATUSES:
+            return None
+        return {"page": f"Sources/{sid}.md", "page_status": None, "manifest_status": expected}
+    page_status = parse_frontmatter(text).get("status")
+    if page_status != expected:
+        return {"page": f"Sources/{sid}.md", "page_status": page_status, "manifest_status": expected}
+    return None
+
+
+def _render_error(gen: Any, sid: str) -> dict[str, str] | None:
+    """The page error `generate_wiki` reported for `sid` (its `error_details`), if any."""
+    errors = gen.get("error_details") if isinstance(gen, dict) else None
+    for err in errors or []:
+        if isinstance(err, dict) and err.get("source_id") == sid:
+            return {k: str(v) for k, v in err.items() if k in ("source_id", "reason", "error")}
+    return None
+
+
 def _apply_source_status_transition(
     root: Path,
     *,
@@ -245,13 +275,29 @@ def _apply_source_status_transition(
     mirrors the graph source node (best-effort). Reversible, idempotent (only a source currently in
     `from_status` transitions), and **never touches raw bytes**. No reindex here — the caller
     (`/reviews/apply`) owns the single reindex. Returns
-    `{applied, skipped:[{review_id, reason}], changed_pages, graph_changed}`.
+    `{applied, skipped:[{review_id, reason}], changed_pages, graph_changed, outcomes}`.
+
+    `outcomes` (ADR-0072 decision 2) holds exactly one record per approved review of `review_type`
+    read on this run, named with the document title read before any change (decision 3):
+    `applied` (manifest flipped and the page now mirrors it); `already_in_effect` (manifest already
+    at the target AND the page mirror verified); `skipped` (nothing changed: every `skipped` entry,
+    plus two cases that stay silent in `skipped` — a third state without a typed code,
+    `source_not_<from_status>`, and an already-transitioned manifest whose page drifted,
+    `page_manifest_drift`); `incomplete` (`source_page_refresh_failed`: the manifest flipped but the
+    page did not re-render to match — still counted in `applied`/`changed_pages`, as before; its
+    details carry `source_id` for Apply's publication retry). Outcomes state the VERIFIED end state:
+    `after` is the manifest status read back after the write — a read-back other than the target is
+    `incomplete` `postcondition_not_met` (`hidden_takes_precedence` when it reads `hidden`), and a
+    reporting read that fails is `verification_unavailable` (`incomplete` after a write, `skipped` on
+    a no-op — never `already_in_effect`). Reporting reads never raise and never change the result.
     """
     now = now or iso_now()
     applied = 0
     graph_writes = 0  # actual graph-mirror writes (honest `graph_changed`; 0 when graph absent/missing)
     skipped: list[dict[str, str]] = []
+    outcomes: list[dict[str, Any]] = []   # ADR-0072 decision 2: one per approved review handled
     changed_pages: list[str] = []
+    status_changed: list[str] = []
     # Schema-safe graph open: only mirror onto a present, matching-schema graph (a wrong-schema graph
     # is left untouched — the mirror is best-effort; the manifest + page are the load-bearing effect).
     gconn = None
@@ -264,39 +310,95 @@ def _apply_source_status_transition(
     try:
         for item in _approved_items_of_type(reviews_dir, review_type):
             rid = str(item.get("review_id", ""))
+            # ADR-0072 decision 3: the document's display name, read BEFORE any change (the id when the
+            # page/title can't be read; an untrusted, non-canonical id is never used in a path).
+            _subj = item.get("subject")
+            _sid = _subj.get("source_id") if isinstance(_subj, dict) else None
+            subject = (apply_outcomes.page_name(wiki_dir, f"Sources/{_sid}", _sid)
+                       if manifests.is_source_id(_sid) else apply_outcomes.named(_sid, None))
+
+            def details_of(*, before: Any = None, after: Any = None, problem: Any = None,
+                           **extra: Any) -> dict[str, Any]:
+                details: dict[str, Any] = {"subject": subject, **extra}
+                if before is not None:
+                    details["before"] = {"status": before}
+                if after is not None:
+                    details["after"] = {"status": after}
+                if problem is not None:
+                    details["problem"] = problem
+                return details
+
+            def report(kind: str, *, reason: str | None = None, **kw: Any) -> None:
+                outcomes.append(apply_outcomes.outcome(rid, review_type, kind, reason=reason,
+                                                       **details_of(**kw)))
+
+            def report_unverified(*, changed: bool, reason: str = "", **kw: Any) -> None:
+                # the honest outcome when the end state couldn't be confirmed (B2a review round 1)
+                outcomes.append(apply_outcomes.unverified(rid, review_type, changed=changed,
+                                                          reason=reason, **details_of(**kw)))
+
+            def skip(reason: str, **kw: Any) -> None:
+                skipped.append({"review_id": rid, "reason": reason})
+                report(apply_outcomes.SKIPPED, reason=reason, **kw)
+
             # Scope guard: only act on a well-formed, approved item. A corrupt/unexpected approved file
             # is skipped, never mutates lifecycle state.
             if item.get("status") != "approved":
-                skipped.append({"review_id": rid, "reason": "not_approved"})
+                skip("not_approved")
                 continue
             if (item.get("proposal") or {}).get("to_status") != to_status:
-                skipped.append({"review_id": rid, "reason": "unexpected_to_status"})
+                skip("unexpected_to_status",
+                     problem={"to_status": (item.get("proposal") or {}).get("to_status"),
+                              "expected": to_status})
                 continue
             sid = (item.get("subject") or {}).get("source_id")
             if not sid:
-                skipped.append({"review_id": rid, "reason": "missing_subject"})
+                skip("missing_subject")
                 continue
             if not manifests.is_source_id(sid):  # untrusted review subject — reject before any path use
-                skipped.append({"review_id": rid, "reason": "invalid_source_id"})
+                skip("invalid_source_id")
                 continue
             m = load_manifest(manifests_dir, sid)
             if m is None:
-                skipped.append({"review_id": rid, "reason": "source_missing"})
+                skip("source_missing")
                 continue
             current = manifests.get_status(m)
             if current == to_status:
-                continue  # idempotent no-op: already at the target lifecycle state (silent, not a skip)
+                # Idempotent no-op: already at the target lifecycle state (silent in `skipped`, not a
+                # skip). Reported `already_in_effect` only once the page mirror is verified too
+                # (ADR-0072 decision 2); a drifted/missing page is left as it is (behaviour unchanged)
+                # and reported as a skipped outcome — not added to `skipped`, whose counts stay as-is.
+                # A failed read never justifies `already_in_effect` (nothing written: `skipped`).
+                drift = apply_outcomes.guarded(_source_page_drift, wiki_dir, sid, m)
+                if drift is apply_outcomes.UNAVAILABLE:
+                    report_unverified(changed=False, before=current, after=current)
+                elif drift is None:
+                    report(apply_outcomes.ALREADY_IN_EFFECT, before=current, after=current)
+                else:
+                    report(apply_outcomes.SKIPPED, reason="page_manifest_drift", before=current,
+                           after=current, problem=drift)
+                continue
             if current != from_status:
                 # A third state (neither from nor target): the transition can't apply. Emit a typed skip
                 # when the caller names one (ADR-0047: unhide of a non-hidden source -> source_not_hidden),
                 # so the guard failure is operator-visible in the apply summary + dry-run, not silent.
                 if not_in_from_reason is not None:
-                    skipped.append({"review_id": rid, "reason": not_in_from_reason})
+                    skip(not_in_from_reason, before=current, after=current,
+                         problem={"status": current, "expected": from_status})
+                else:
+                    # Silent in `skipped` (unchanged); the outcome still names why nothing happened, with
+                    # the dry-run's code (review_read: `source_not_active`).
+                    report(apply_outcomes.SKIPPED, reason=f"source_not_{from_status}", before=current,
+                           after=current, problem={"status": current, "expected": from_status})
                 continue
             manifests.set_status(manifests_dir, sid, to_status)
+            # B2a review round 2: EXECUTION data, independent of how the outcome is classified — every
+            # document whose manifest status this run wrote. Apply's publication re-renders each one,
+            # so a failed page refresh is never lost to a reporting failure.
+            status_changed.append(sid)
             # Re-render the one Source page from the (now-updated) manifest; pure projection.
             # (generate_wiki opens its own read connection — keep our write conn idle/committed here.)
-            wiki.generate_wiki(root, source_ids=[sid], rebuild_index=False, record_job=False)
+            gen = wiki.generate_wiki(root, source_ids=[sid], rebuild_index=False, record_job=False)
             if gconn is not None and graph.get_node(gconn, sid) is not None:
                 graph.upsert_node(gconn, node_id=sid, node_type="source", slug=sid,
                                   status=to_status, now=now)
@@ -304,13 +406,47 @@ def _apply_source_status_transition(
                 graph_writes += 1
             applied += 1
             changed_pages.append(f"Sources/{sid}.md")
+            # The manifest (authority) changed; the review finished only if the VERIFIED end state is
+            # the target (B2a review round 1): the manifest read back at `to_status`, then the page
+            # mirroring it. Every read here is reporting-only (`guarded`): a failure never changes what
+            # was executed, and is `incomplete` (this run wrote) with `verification_unavailable`.
+            after_m = apply_outcomes.guarded(load_manifest, manifests_dir, sid)
+            after = (apply_outcomes.guarded(manifests.get_status, after_m)
+                     if isinstance(after_m, dict) else apply_outcomes.UNAVAILABLE)
+            if not isinstance(after, str):           # unreadable (load_manifest folds errors into None)
+                report_unverified(changed=True, before=current, source_id=sid)
+                continue
+            if after != to_status:
+                report(apply_outcomes.INCOMPLETE,
+                       # hidden wins only over a non-visibility change (archive); an unhide that
+                       # reads back hidden is simply not in effect
+                       reason=(apply_outcomes.HIDDEN_TAKES_PRECEDENCE
+                               if after == "hidden" and review_type == "archive_source"
+                               else apply_outcomes.POSTCONDITION_NOT_MET),
+                       before=current, after=after, source_id=sid,
+                       problem={"manifest_status": after, "expected": to_status})
+                continue
+            # generate_wiki keeps a page failure in its result (the page keeps its old status): that is
+            # `incomplete`, not applied; Apply's publication step retries the page named by
+            # `details.source_id`.
+            problem = apply_outcomes.guarded(_render_error, gen, sid)
+            if problem is None:
+                problem = apply_outcomes.guarded(_source_page_drift, wiki_dir, sid, after_m)
+            if problem is apply_outcomes.UNAVAILABLE:
+                report_unverified(changed=True, before=current, after=after, source_id=sid)
+            elif problem is None:
+                report(apply_outcomes.APPLIED, before=current, after=after)
+            else:
+                report(apply_outcomes.INCOMPLETE, reason="source_page_refresh_failed",
+                       before=current, after=after, source_id=sid, problem=problem)
     finally:
         if gconn is not None:
             gconn.close()
     # `graph_changed` is honest: True only when a graph mirror was actually written (not merely that an
     # apply happened). Graph absent / schema-mismatched / node missing -> applied > 0, graph_changed False.
     return {"applied": applied, "skipped": skipped, "changed_pages": changed_pages,
-            "graph_changed": graph_writes > 0}
+            "graph_changed": graph_writes > 0, "outcomes": outcomes,
+            "status_changed_sources": status_changed}
 
 
 def apply_archive_sources(

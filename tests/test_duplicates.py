@@ -122,6 +122,8 @@ def test_steady_state_reapply_is_a_true_noop(tmp_path):
     after_first = pa.read_text()
     r2 = duplicates.apply_marked_duplicates(gconn, tmp_path / "reviews", wiki_dir=wiki)
     gconn.commit()
+    # ADR-0072: the verified no-op still reports its one outcome (already_in_effect)
+    assert [o["outcome"] for o in r2.pop("outcomes")] == ["already_in_effect"]
     assert r2 == {"applied": 0, "normalized": 0, "skipped": [], "changed_pages": [],
                   "graph_changed": False}
     assert len(_edges(gconn)) == 1            # no duplicate row

@@ -73,7 +73,7 @@ from app.llm.cache import ResponseCache
 from app.llm.client import ConfigError, ParseError, build_client
 from app.llm import usage as llm_usage
 from app.workers import (
-    claims, contradictions, deprecations, duplicates, eval_answers, extract, human_add,
+    apply_outcomes, claims, contradictions, deprecations, duplicates, eval_answers, extract, human_add,
     human_merge, identity_journal, intake, lint, merges, promote, publication, query, retention,
     retypes, reviews, splits, synthesis, tag_links, wiki,
 )
@@ -1075,6 +1075,21 @@ def run_apply(st: Any) -> dict[str, Any]:
             raise
 
 
+def _reconcile_refresh(rec: dict[str, Any], pub: dict[str, Any]) -> dict[str, Any]:
+    """B2a review round 1: a `source_page_refresh_failed` outcome whose page Apply's publication then
+    rendered is finished — report it `applied` (noting the publication did it), not unfinished. One
+    that failed again stays `incomplete` (its page is queued for Retry publishing)."""
+    if rec.get("outcome") != apply_outcomes.INCOMPLETE or rec.get("reason") != "source_page_refresh_failed":
+        return rec
+    d = rec.get("details") or {}
+    sid = str(d.get("source_id") or (d.get("subject") or {}).get("id") or "")
+    if sid and sid in (pub.get("sources_rendered") or []):
+        out = {k: v for k, v in rec.items() if k != "reason"}
+        return {**out, "outcome": apply_outcomes.APPLIED,
+                "details": {**d, "page_refreshed_by_publication": True}}
+    return rec
+
+
 def _run_apply(st: Any, intent: str | None = None) -> dict[str, Any]:
     """The shared apply orchestration (ADR-0035 A4/A6, extracted per ADR-0040). Key-free, raw/-free.
 
@@ -1094,6 +1109,10 @@ def _run_apply(st: Any, intent: str | None = None) -> dict[str, Any]:
     enrichment_dir = st.normalized_dir / "enrichment"
     markdown_dir = st.markdown_dir
     now = manifests.iso_now()
+    # ADR-0072 decision 2: the approved reviews this run handles, read before any executor moves a
+    # file; each executor reports one outcome per review (gaps are surfaced, never guessed).
+    handled = [{"review_id": it["review_id"], "type": it["type"]}
+               for it in _approved_appliable_items(reviews_dir) if it["appliable"]]
 
     syntheses = {"promoted": 0, "rejected": 0}
     contra: dict[str, Any] = {"resolution": {"acknowledged": 0, "rejected": 0,
@@ -1268,6 +1287,16 @@ def _run_apply(st: Any, intent: str | None = None) -> dict[str, Any]:
     merge_work = merged["applied"]
     rekey_work = rekeyed["applied"]
     split_work = split_res["applied"]
+    # B2a review rounds 1–2: every document whose manifest status a source executor wrote this run is
+    # published by THIS publication — taken from the executors' execution list, never from how an
+    # outcome was classified (a reporting failure must not drop recovery work), and not filtered
+    # through the existing-page check (a missing page is exactly what needs publishing). An unchanged
+    # page is a no-op; a page whose executor re-render failed is retried, and stays queued for Retry
+    # publishing if it fails again.
+    status_changed = sorted({str(sid) for res in (archive, hidden, unhidden)
+                             for sid in (res.get("status_changed_sources") or [])
+                             if manifests.is_source_id(str(sid))})
+    existing_sources = sorted(set(existing_sources) | set(status_changed))
     changed = bool(pages_changed or existing_sources or contra["resolution"]["acknowledged"]
                    or contra["resolution"]["rejected"] or contra["resolution"]["superseded_executed"]
                    or semantic_hide_work or semantic_unhide_work
@@ -1407,9 +1436,19 @@ def _run_apply(st: Any, intent: str | None = None) -> dict[str, Any]:
     else:
         status = "applied"
 
+    executor_results = (syntheses, contra, deprec, dups, sem_hidden, sem_unhidden, claims_hidden,
+                        claims_unhidden, syn_hidden, syn_unhidden, merged, rekeyed, split_res, promo,
+                        archive, hidden, unhidden)
+    outcomes = [_reconcile_refresh(o, pub) for res in executor_results
+                for o in (res.get("outcomes") or [])]
+    advisories = ([{"type": "promote_candidate_node", **a} for a in promo.get("advisories") or []]
+                  + [{"type": "split_item", **a} for a in split_res.get("advisories") or []])
     return {
         "status": status,
         "applied": True,
+        "handled": handled,
+        "outcomes": outcomes,
+        "advisories": advisories,
         "validators_ok": validators_ok,
         "failed_validators": failed,
         "warnings": warnings,
@@ -1577,6 +1616,9 @@ def _evaluate_preview(sandbox: Any) -> dict[str, Any]:
         "validators": {"passed": result["validators_ok"], "failures": result["failed_validators"]},
         "warnings": result["warnings"],
         "summary": result["summary"],
+        # ADR-0072: the sandbox run's per-review outcomes drive the readable preview.
+        "handled": result.get("handled") or [], "outcomes": result.get("outcomes") or [],
+        "advisories": result.get("advisories") or [],
     }
 
 
