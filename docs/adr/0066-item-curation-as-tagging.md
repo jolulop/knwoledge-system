@@ -350,6 +350,10 @@ pipeline from `raw/`, then keep or drop on each document screen. No conversion s
   holds the human state that regenerating from `raw/` cannot reproduce: item-page edits (titles,
   aliases, descriptions, statuses), `reviews/tag_links/`, the blocked list, confirmed Details in the
   manifests, and every review decision and the audit log under `reviews/`.
+- **Tagging-history initialization (ADR-0072 decision 5, 2026-11-05):** right after the rebuild from
+  `raw/` and before the first tag decision, run `scripts/rebuild_tag_links.py --init-fresh-tracking`
+  once. It records `from_start: true`, so every document without a decision shows as *not yet
+  tagged* rather than *tagging history unknown*. It refuses if any ledger or tag audit entry exists.
 
 ### 11. Success measure
 

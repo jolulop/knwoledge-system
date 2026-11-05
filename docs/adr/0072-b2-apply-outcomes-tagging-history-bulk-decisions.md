@@ -309,3 +309,45 @@ Four blocking reporting issues (one an execution regression), reproduced by the 
 8. **A legacy test fixture** (`tests/test_review_html._approved_concept_deprecation`, non-canonical
    `itm_x`) has been refused by the B1 page guard since B1; the old count-only assertions never
    showed it. The readable page does.
+
+## Implementation — B2c (2026-11-05)
+
+- **`app/workers/tag_history.py`** (new): the tracking record (`load_tracking`,
+  `tracking_problem`, `init_fresh`, `ensure_migration_record`, `complete_for`), attributable tag
+  audit evidence (`audit_evidence`: tag events carrying a `source_id`), the strict `tagging` schema
+  (`tagging_problem`), the shared evidence backfill (`backfill`), the decision marker
+  (`mark_decision`) and the read-only display state (`classify`: tagged / never_tagged /
+  history_unknown).
+- **Ledger:** `tagging` is an optional ledger field, strictly validated (malformed → the ledger is
+  damaged, like any other field); load and save carry it, so every ledger writer preserves it.
+- **What sets it:** `tag_links.keep` (Add tag and "use X" go through it) and `drop` compute the
+  marker from the ledger as loaded and persist it with their own ledger write; `block` sets it only
+  when called from a document's screen (`source_id`, also recorded in the `tag-blocked` audit
+  entry). A refused action writes nothing; `undo_drop` never clears it.
+- **Migration and initialization:** `tag_links.migrate_tagging` (via
+  `scripts/rebuild_tag_links.py`, dry run by default, `--apply` under the write lock, run
+  independently of the graph repair) and `--init-fresh-tracking`. `validate_tag_links` reports a
+  malformed `_tracking.json` as an error and unmarked ledgers as an advisory note.
+- **Display:** `review_read` classifies each document (an unmigrated ledger shows the backfill the
+  migration would store, never written on display) and splits the existing `remaining` rule into
+  `undecided: {tags, type_changes, retirements, total}`. `next_source` navigates forward in list
+  order, wrapping once, never the current document. The document list shows a *not yet tagged* /
+  *tagging history unknown* badge, the counts and **Next untagged document**; the document screen
+  shows the undecided count beside Save and **Next document with undecided rows** (replacing "Next
+  source"); the Save result page warns (never blocks) with counts recomputed after the save.
+- **Docs:** the UAT Guide's deterministic build and ADR-0066 decision 10 gain the explicit
+  initialization step.
+- **Tests:** `tests/test_tagging_history.py` (marker, tracking, migration, undecided rows,
+  navigation, the scripts).
+
+### Review round 1 on B2c (2026-11-05)
+
+- **Evidence existence is tracked apart from timestamp availability.** A kept/drop entry or an
+  attributable tag audit event (one naming the `source_id`) is evidence of a decision whether or
+  not its timestamp is usable (`audit_evidence` returns `{times, untimed}`). Any evidence means
+  tagged: `earliest_known_decision_at` is the earliest usable time (or null); `first_decision_at`
+  only when tracking is complete **and** no evidence is untimed (an untimed decision could precede
+  the earliest dated one). Untimed evidence without a ledger is never shown as not yet tagged.
+- **The decision being recorded is dated evidence:** it supplies `earliest_known_decision_at` when
+  every older piece of evidence is untimed; `first_decision_at` stays null.
+- The list and screen say "none known to be untagged" when unknown histories remain.

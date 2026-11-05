@@ -1948,7 +1948,8 @@ def _apply_link_action(gconn: Any, source_id: str, nid: str, action: str,
     else:
         page = review_read._family_page_meta(settings.wiki_dir).get(nid) or {}
         out = tag_links.block(gconn, name=str(page.get("title") or ""),
-                              policies_dir=settings.root / "policies", **common)
+                              policies_dir=settings.root / "policies", source_id=source_id,
+                              **common)
     if out["outcome"] != "blocked":
         out["cancelled"] = tag_links.cancel_resolutions(
             gconn, source_id=source_id, node_ids=[nid], reason=action, **common)["cancelled"]
@@ -2286,7 +2287,8 @@ def _source_decide(source_id: str, form: dict[str, Any]) -> HTMLResponse:
                             "skip_reason": f"{exc.status_code}: {exc.detail}"})
     return HTMLResponse(review_html.render_source_decide_result(
         source_id, results, warnings=warnings,
-        pending=_pending_producers(source_id) if details_save is not None or clear else None))
+        pending=_pending_producers(source_id) if details_save is not None or clear else None,
+        progress=_source_view(source_id)))         # ADR-0070 §6: recomputed after the save
 
 
 def _alias_lines(values: Any) -> list[str]:

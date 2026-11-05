@@ -16,6 +16,15 @@ It re-renders the touched tag pages and Source pages and refreshes `wiki/index.m
 keyword index. Never touched: a document whose ledger is damaged (restore it from backup) and the
 tags of an in-flight merge/split (`reviews/in_flight/`; run `/reviews/apply` to finish it first).
 Never touches raw/.
+
+Tagging history (ADR-0072 decisions 4–5): the same run backfills each ledger's `tagging` marker
+from evidence (kept/drop timestamps, attributable tag audit entries) and, with --apply, writes the
+vault's `reviews/tag_links/_tracking.json` only if absent (`from_start: false`). A fresh vault —
+created from raw/ by the clean restart, before any tag decision — is certified once with:
+
+    uv run python scripts/rebuild_tag_links.py [ROOT] --init-fresh-tracking
+
+which records `from_start: true` and refuses when any ledger or tag audit entry already exists.
 """
 from __future__ import annotations
 
@@ -27,23 +36,58 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.backend import graph, publication_queue, write_lock
-from app.workers import tag_links
+from app.backend.manifests import iso_now
+from app.workers import tag_history, tag_links
+
+
+def _tagging(root: Path, *, apply: bool) -> int:
+    """The tagging-history migration (graph-independent; under the write lock when applying)."""
+    if apply:
+        with write_lock.hold(root / "reviews"):
+            out = tag_links.migrate_tagging(root / "reviews", apply=True, now=iso_now())
+    else:
+        out = tag_links.migrate_tagging(root / "reviews", apply=False)
+    print(f"Tagging history ({'applied' if apply else 'dry run'}):")
+    print(f"  ledgers {'backfilled' if apply else 'to backfill'}: {len(out['backfilled'])} "
+          f"({sum(b['tagging']['state'] == 'tagged' for b in out['backfilled'])} tagged, "
+          f"{sum(b['tagging']['state'] == 'unknown' for b in out['backfilled'])} unknown)")
+    if out["tracking_written"]:
+        print("  tracking record: " + ("written (from_start: false)" if apply
+                                       else "would be written (from_start: false)"))
+    for d in out["skipped_damaged"]:
+        print(f"  SKIPPED {d['source_id']}: damaged ledger ({d['problem']})")
+    return 1 if out["skipped_damaged"] else 0
+
+
+def _init_fresh(root: Path) -> int:
+    with write_lock.hold(root / "reviews"):
+        out = tag_history.init_fresh(root / "reviews", iso_now())
+    if out["outcome"] == "initialized":
+        print("Tagging history: this vault is recorded as fresh (from_start: true) — every document "
+              "without a decision now shows as not yet tagged.")
+        return 0
+    print(f"Refused: {out['reason']} — this vault already has tagging history, so it can't be "
+          "certified as fresh. Use the migration (run without --init-fresh-tracking).")
+    return 1
 
 
 def main(argv: list[str]) -> int:
     apply = "--apply" in argv
     positional = [a for a in argv if not a.startswith("-")]
     root = Path(positional[0]).resolve() if positional else Path.cwd()
+    if "--init-fresh-tracking" in argv:
+        return _init_fresh(root)
+    tagging_rc = _tagging(root, apply=apply)
     if not (root / "db" / "graph.sqlite").exists():
         print("No graph database — nothing to repair.")
-        return 0
+        return tagging_rc
     if not apply:
-        return _repair(root, apply=False, intent=None)
+        return _repair(root, apply=False, intent=None) or tagging_rc
     # ADR-0068: one commit phase; its publication intent is recorded first (a crash mid-repair
     # republishes from authority).
     with write_lock.hold(root / "reviews"):
         intent = publication_queue.record(root, origin="tag_repair", full=True)
-        return _repair(root, apply=True, intent=intent)
+        return _repair(root, apply=True, intent=intent) or tagging_rc
 
 
 def _repair(root: Path, *, apply: bool, intent: str | None) -> int:

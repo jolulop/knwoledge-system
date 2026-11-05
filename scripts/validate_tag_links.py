@@ -24,7 +24,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.backend import graph
-from app.workers import tag_links
+from app.workers import tag_history, tag_links
 
 
 def _check(root: Path) -> list[str]:
@@ -43,14 +43,37 @@ def _check(root: Path) -> list[str]:
         conn.close()
 
 
+def _tagging_notes(root: Path) -> tuple[list[str], list[str]]:
+    """ADR-0072 decisions 4–5: `(errors, advisories)`. A malformed tracking record is an error (like
+    a malformed ledger); ledgers without a `tagging` marker are advisory only (run the migration)."""
+    reviews_dir = root / "reviews"
+    errors = []
+    if (problem := tag_history.tracking_problem(reviews_dir)) is not None:
+        errors.append(f"reviews/tag_links/{tag_history.TRACKING_NAME} is malformed ({problem})")
+    unmarked = []
+    for sid in tag_links._ledger_ids(reviews_dir):
+        try:
+            if "tagging" not in tag_links.load_ledger(reviews_dir, sid):
+                unmarked.append(sid)
+        except tag_links.LedgerCorrupt:
+            continue                                     # reported as damaged by _check
+    notes = ([f"{len(unmarked)} ledger(s) have no tagging-history marker yet — run "
+              "`scripts/rebuild_tag_links.py --apply` to backfill them (advisory)"]
+             if unmarked else [])
+    return errors, notes
+
+
 def main(argv: list[str]) -> int:
     root = Path(argv[0]).resolve() if argv else Path.cwd()
-    errors = _check(root)
+    tag_errors, notes = _tagging_notes(root)
+    errors = _check(root) + tag_errors
     if errors:
         print("Tag-link validation failed:")
         for err in errors:
             print(f"- {err}")
         return 1
+    for note in notes:
+        print(f"Note: {note}")
     print("Tag-link validation passed.")
     return 0
 

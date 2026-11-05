@@ -51,6 +51,7 @@ from typing import Any
 from app.backend import graph, taxonomy, write_lock
 from app.backend.manifests import is_source_id, iso_now
 from app.workers import identity_journal, item_pages, items, merge_candidates, merges, promote
+from app.workers import tag_history
 from app.workers.wiki_render import NODE_DIR, REVIEW_STATUSES, parse_frontmatter
 
 LEDGER_DIR = "tag_links"
@@ -165,6 +166,8 @@ def _ledger_problem(data: Any, source_id: str) -> str | None:
             not isinstance(d, dict) or not isinstance(d.get("key"), str) or not d["key"]
             or not isinstance(d.get("keys", []), list) for d in drops):
         return "`drops` is not a list of drop records"
+    if "tagging" in data:                     # ADR-0072 decision 4: optional, strictly checked
+        return tag_history.tagging_problem(data["tagging"])
     return None
 
 
@@ -181,19 +184,86 @@ def load_ledger(reviews_dir: Path, source_id: str) -> dict[str, Any]:
     problem = _ledger_problem(data, source_id)
     if problem:
         raise LedgerCorrupt(source_id, problem)
-    return {"source_id": source_id, "kept": dict(data.get("kept") or {}),
-            "drops": [dict(d) for d in data.get("drops") or []]}
+    out = {"source_id": source_id, "kept": dict(data.get("kept") or {}),
+           "drops": [dict(d) for d in data.get("drops") or []]}
+    if "tagging" in data:
+        out["tagging"] = dict(data["tagging"])
+    return out
 
 
 def _save_ledger(reviews_dir: Path, ledger: dict[str, Any]) -> None:
     path = ledger_path(reviews_dir, ledger["source_id"])
     path.parent.mkdir(parents=True, exist_ok=True)
+    tagging = ledger.get("tagging")
     ledger = {"source_id": ledger["source_id"],
               "kept": {k: ledger["kept"][k] for k in sorted(ledger["kept"])},
               "drops": sorted(ledger["drops"], key=lambda d: (d["key"], d.get("item_id") or ""))}
+    if tagging is not None:                   # carried by every writer; never dropped
+        ledger["tagging"] = tagging
     tmp = path.with_suffix(f".tmp-{uuid.uuid4().hex[:8]}")
     tmp.write_text(json.dumps(ledger, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     os.replace(tmp, path)
+
+
+def _decision_tagging(reviews_dir: Path, source_id: str, ledger: dict[str, Any],
+                      now: str) -> dict[str, Any]:
+    """ADR-0072 decision 4: the `tagging` this document's ledger carries once the decision being
+    recorded succeeds — computed from the ledger as loaded (before the decision changes it), under
+    the lock, and persisted only with the decision's own ledger write. Evidence is read only when
+    the ledger isn't already marked tagged."""
+    current = ledger.get("tagging")
+    if (isinstance(current, dict) and current.get("state") == tag_history.TAGGED
+            and current.get("earliest_known_decision_at") is not None):
+        return current                    # settled; an all-untimed record still takes this action's time
+    tracking = tag_history.load_tracking(reviews_dir)
+    complete = tag_history.complete_for(tracking, tag_history.discovered_at(reviews_dir, source_id))
+    return tag_history.mark_decision(
+        ledger, ledger_existed=ledger_path(reviews_dir, source_id).exists(), complete=complete,
+        audit=tag_history.audit_evidence(reviews_dir).get(source_id), now=now)
+
+
+def mark_tagged(reviews_dir: Path, source_id: str, now: str) -> None:
+    """Record that a decision was made on this document (a "never suggest" chosen on its screen, whose
+    effect is vault-wide and writes no ledger entry of its own). The caller holds the lock and calls
+    it only after the decision succeeded. Raises :class:`LedgerCorrupt` for a damaged ledger."""
+    ledger = load_ledger(reviews_dir, source_id)
+    tagging = _decision_tagging(reviews_dir, source_id, ledger, now)
+    if ledger.get("tagging") != tagging:
+        ledger["tagging"] = tagging
+        _save_ledger(reviews_dir, ledger)
+
+
+def migrate_tagging(reviews_dir: Path, *, apply: bool, now: str | None = None) -> dict[str, Any]:
+    """ADR-0072 decision 4 — the explicit repair migration (`rebuild_tag_links.py`). For every ledger
+    without `tagging`: the evidence backfill (:func:`tag_history.backfill`). With `apply` (the caller
+    holds the write lock) it writes the vault's tracking record ONLY when absent (`from_start:
+    false`, never advancing or downgrading an existing one) and the backfilled ledgers; without it,
+    nothing is written. Re-running changes nothing. Damaged ledgers are skipped and reported.
+    Returns `{backfilled: [{source_id, tagging}], tracking_written, skipped_damaged}`."""
+    now = now or iso_now()
+    reviews_dir = Path(reviews_dir)
+    tracking_absent = not tag_history.tracking_path(reviews_dir).exists()
+    if apply:
+        tag_history.ensure_migration_record(reviews_dir, now)
+    tracking = tag_history.load_tracking(reviews_dir)
+    evidence = tag_history.audit_evidence(reviews_dir)
+    backfilled, damaged = [], []
+    for sid in _ledger_ids(reviews_dir):
+        try:
+            ledger = load_ledger(reviews_dir, sid)
+        except LedgerCorrupt as exc:
+            damaged.append({"source_id": sid, "problem": exc.problem})
+            continue
+        if "tagging" in ledger:
+            continue
+        complete = tag_history.complete_for(tracking, tag_history.discovered_at(reviews_dir, sid))
+        ledger["tagging"] = tag_history.backfill(ledger, complete=complete,
+                                                 audit=evidence.get(sid))
+        backfilled.append({"source_id": sid, "tagging": ledger["tagging"]})
+        if apply:
+            _save_ledger(reviews_dir, ledger)
+    return {"backfilled": backfilled, "tracking_written": tracking_absent,
+            "skipped_damaged": damaged}
 
 
 def _drop_record_keys(d: dict[str, Any]) -> set[str]:
@@ -447,6 +517,7 @@ def keep(gconn, *, source_id: str, node_id: str, wiki_dir: Path, reviews_dir: Pa
         return _blocked("missing_required_item_type", node_id=node_id)
 
     ledger = load_ledger(reviews_dir, source_id)
+    tagging = _decision_tagging(reviews_dir, source_id, ledger, now)     # ADR-0072: the marker
     was_kept = node_id in ledger["kept"] and bool(
         [e for e in _active_mention_edges(gconn, source_id, node_id) if e["asserted_by"] == "human"])
     # The keep records the activation intent (amendments) so an interrupted first keep can be
@@ -461,6 +532,7 @@ def keep(gconn, *, source_id: str, node_id: str, wiki_dir: Path, reviews_dir: Pa
     # A legacy tag's active mentions all project as curated links; its first keep ends that, so
     # every document suggesting it re-renders (its link becomes a suggestion) — review round 6.
     was_legacy = graph.is_legacy_tag(gconn, node_id, node["status"])
+    ledger["tagging"] = tagging
     _save_ledger(reviews_dir, ledger)
     graph.upsert_assertion(gconn, src_id=source_id, dst_id=node_id, edge_type="mentions",
                            asserted_by="human", status="active", now=now)
@@ -512,6 +584,7 @@ def drop(gconn, *, source_id: str, node_id: str, wiki_dir: Path, reviews_dir: Pa
     # The ledger (the authority) is written first, then its graph mirror: an interrupted drop
     # leaves a ledger the repair (`rebuild_tag_links.py`) can re-apply to the graph.
     ledger = load_ledger(reviews_dir, source_id)
+    tagging = _decision_tagging(reviews_dir, source_id, ledger, now)     # ADR-0072: the marker
     ledger["kept"].pop(node_id, None)
     key = tag_key(title) or tag_key(node["slug"])
     # The record carries every name the tag answered to when dropped (title + aliases) and its id,
@@ -519,6 +592,7 @@ def drop(gconn, *, source_id: str, node_id: str, wiki_dir: Path, reviews_dir: Pa
     keys = sorted((_node_keys(wiki_dir, node) | {key}) - {""})
     ledger["drops"] = [d for d in ledger["drops"] if d["key"] != key and d.get("item_id") != node_id]
     ledger["drops"].append({"key": key, "keys": keys, "name": title, "item_id": node_id, "at": now})
+    ledger["tagging"] = tagging
     _save_ledger(reviews_dir, ledger)
     for e in _active_mention_edges(gconn, source_id, node_id):
         graph.set_status(gconn, e["edge_id"], "rejected", now=now)
@@ -966,11 +1040,15 @@ def delete_unused(gconn, *, wiki_dir: Path, reviews_dir: Path,
 
 @ledger_action
 def block(gconn, *, name: str, policies_dir: Path, wiki_dir: Path, reviews_dir: Path,
-          now: str | None = None) -> dict[str, Any]:
+          now: str | None = None, source_id: str | None = None) -> dict[str, Any]:
     """Never suggest `name` (ADR-0066 decision 5): add it to the blocked list and withdraw its
-    pending suggestions everywhere (no drop records). Kept links are untouched."""
+    pending suggestions everywhere (no drop records). Kept links are untouched. `source_id`: the
+    document whose screen the choice was made on — it then counts as a tag decision there (ADR-0070
+    §6: the document is no longer "not yet tagged"), recorded in that ledger and the audit entry."""
     now = now or iso_now()
     wiki_dir, reviews_dir = Path(wiki_dir), Path(reviews_dir)
+    if source_id is not None:
+        load_ledger(reviews_dir, source_id)               # LedgerCorrupt here — before any write
     name = items._WS.sub(" ", str(name or "")).strip()[:items._MAX_NAME]
     key = tag_key(name)
     if not key:
@@ -1007,8 +1085,11 @@ def block(gconn, *, name: str, policies_dir: Path, wiki_dir: Path, reviews_dir: 
             deleted.append(nid)
         elif any(w["node_id"] == nid for w in withdrawn):
             _refresh_page(gconn, node_id=nid, wiki_dir=wiki_dir, reviews_dir=reviews_dir, now=now)
+    if source_id is not None:
+        mark_tagged(reviews_dir, source_id, now)
     _audit(reviews_dir, f"blocked-{uuid.uuid4().hex[:8]}", "tag-blocked",
-           {"name": name, "key": key, "added": added, "withdrawn": withdrawn, "deleted": deleted}, now)
+           {"name": name, "key": key, "added": added, "withdrawn": withdrawn, "deleted": deleted,
+            **({"source_id": source_id} if source_id is not None else {})}, now)
     return {"outcome": "blocked_tag", "name": name, "key": key, "added": added,
             "withdrawn": len(withdrawn), "deleted": deleted, "affected_sources": sorted(affected)}
 

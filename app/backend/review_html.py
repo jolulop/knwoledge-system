@@ -56,6 +56,8 @@ _STYLE = (
     "border-radius:6px;padding:.55rem .85rem;margin:.6rem 0}"
     ".muted{color:var(--gris-texto)}"
     ".help{color:var(--tierra);font-size:.9rem}"
+    ".badge{border:1px solid var(--tierra);border-radius:.6rem;padding:0 .4rem;font-size:.8rem;"
+    "color:var(--tierra);white-space:nowrap}"
     "form.decide{display:inline;margin-right:.4rem}"
     "button{font:inherit;font-weight:bold;color:#FFFFFF;background:var(--rojo);border:0;"
     "border-radius:6px;padding:.38rem .9rem;margin:.15rem .2rem .15rem 0;cursor:pointer}"
@@ -690,6 +692,29 @@ def render_apply_result(result: dict[str, Any]) -> str:
 # --- per-source review flow (ADR-0058) --------------------------------------
 
 
+def undecided_text(undecided: dict[str, Any] | None) -> str:
+    """ADR-0070 §6: "3 tags, 1 type change still undecided" (split by kind), or "" when none."""
+    u = undecided or {}
+    parts = [f"{n} {word}{'' if n == 1 else 's'}" for n, word in (
+        (int(u.get("tags") or 0), "tag"), (int(u.get("type_changes") or 0), "type change"),
+        (int(u.get("retirements") or 0), "retirement")) if n]
+    return f"{', '.join(parts)} still undecided" if parts else ""
+
+
+_TAGGING_MARKERS = {"never_tagged": "not yet tagged", "history_unknown": "tagging history unknown"}
+
+
+def _tagging_marker(tagging: dict[str, Any] | None) -> str:
+    label = _TAGGING_MARKERS.get(str((tagging or {}).get("state")))
+    return f" <span class='badge'>{_h(label)}</span>" if label else ""
+
+
+def _next_link(sid: Any, label: str, *, none_text: str = "none remaining") -> str:
+    if sid:
+        return f"<a href='/ui/reviews/sources/{_h(sid)}'>{_h(label)}</a>"
+    return f"{_h(label)}: <em>{_h(none_text)}</em>"
+
+
 def _counts_cell(counts: dict[str, Any]) -> str:
     return _h(" / ".join(f"{k}:{counts.get(k, 0)}"
                          for k in ("remaining", "kept", "dropped", "deferred", "added")))
@@ -711,6 +736,14 @@ def render_sources_index(data: dict[str, Any]) -> str:
                      "<strong>Start review</strong></a> (first source with remaining rows)</p>")
     else:
         parts.append("<p><em>Nothing remaining to decide by source.</em></p>")
+    # ADR-0070 §6 / ADR-0072: documents with no tag decision yet, and those whose history is unknown
+    unknown = int(totals.get("history_unknown") or 0)
+    parts.append(f"<p>{_h(totals.get('not_yet_tagged', 0))} not yet tagged"
+                 + (f" · {_h(unknown)} with tagging history unknown" if unknown else "")
+                 + " · " + _next_link(totals.get("first_untagged_source"), "Next untagged document",
+                                      none_text=("none known to be untagged" if unknown
+                                                 else "none remaining"))
+                 + "</p>")
     rows = ["<tr><th>#</th><th>document</th><th>file</th><th>ingested</th>"
             "<th>remaining / kept / dropped / deferred / added</th></tr>"]
     for i, s in enumerate(data.get("sources") or [], start=1):
@@ -720,7 +753,7 @@ def render_sources_index(data: dict[str, Any]) -> str:
         rows.append(
             f"<tr{style}><td>{i}</td>"
             f"<td><a href='/ui/reviews/sources/{sid}'>{_h(s.get('title') or s.get('source_id'))}"
-            "</a></td>"
+            f"</a>{_tagging_marker(s.get('tagging'))}</td>"
             f"<td><a href='/raw/{sid}'>{_h(s.get('filename'))}</a></td>"
             f"<td>{_h(s.get('discovered_at'))}</td>"
             f"<td>{_counts_cell(s.get('counts') or {})}{'' if remaining else ' — done'}</td></tr>")
@@ -933,9 +966,12 @@ def render_source_screen(data: dict[str, Any], *, draft: dict[str, Any] | None =
         f"{_h(data.get('position'))} of "
         f"{_h(totals.get('sources'))} · {_h(totals.get('remaining_overall'))} rows remaining "
         f"overall · this source: {_counts_cell(counts)}</p>",
-        "<p><a href='/ui/reviews/sources'>Source index</a>"
-        + (f" · <a href='/ui/reviews/sources/{_h(data['next_source'])}'>Next source</a>"
-           if data.get("next_source") else "") + "</p>",
+        "<p><a href='/ui/reviews/sources'>Source index</a> · "
+        + _next_link(data.get("next_source"), "Next document with undecided rows") + " · "
+        + _next_link(data.get("next_untagged"), "Next untagged document",
+                     none_text=("none known to be untagged"
+                                if (totals.get("history_unknown") or 0) else "none remaining"))
+        + _tagging_marker(data.get("tagging")) + "</p>",
         (f"<p class='banner'><strong>This document's tag ledger is damaged</strong> "
          f"(<code>reviews/tag_links/{sid}.json</code>: {_h(data['ledger_error'])}). Tag decisions "
          "are refused until it is restored from backup, so no earlier keep or drop is lost.</p>"
@@ -1072,7 +1108,10 @@ def render_source_screen(data: dict[str, Any], *, draft: dict[str, Any] | None =
                  f"<input type='text' name='note' size='40' value='{_h(draft.get('note', ''))}'>"
                  "</label></p>" + tick
                  + "<p><button type='submit' name='screen_action' value='save'>Save all changes on "
-                 "this page</button> <span class='help'>Saves every choice above at once: tag "
+                 "this page</button> "
+                 + (f"<strong>{_h(undecided_text(data.get('undecided')))}</strong> "
+                    if undecided_text(data.get("undecided")) else "")
+                 + "<span class='help'>Saves every choice above at once: tag "
                  "decisions, type changes and retirements, the Details (or a Clear). Untouched rows "
                  "record nothing.</span></p></form>")
 
@@ -1144,14 +1183,27 @@ def reconciliation_notices(pending: list[str]) -> str:
 
 def render_source_decide_result(source_id: str, results: list[dict[str, Any]], *,
                                  warnings: list[str] | None = None,
-                                 pending: list[str] | None = None) -> str:
-    """Per-row batch results (recorded vs skipped-with-reason; never a batch abort)."""
+                                 pending: list[str] | None = None,
+                                 progress: dict[str, Any] | None = None) -> str:
+    """Per-row batch results (recorded vs skipped-with-reason; never a batch abort). `progress` (the
+    document's view recomputed AFTER the save, ADR-0070 §6): the still-undecided warning — never a
+    block; untouched rows stay unchanged — and "Next document with undecided rows"."""
     sid = _h(source_id)
     recorded = sum(1 for r in results if r.get("recorded"))
+    left = ""
+    if progress is not None:
+        text = undecided_text(progress.get("undecided"))
+        total = int((progress.get("undecided") or {}).get("total") or 0)
+        left = ((f"<p class='banner'>{_h(total)} row{'s' if total != 1 else ''} on this document "
+                 f"{'are' if total != 1 else 'is'} still undecided ({_h(text)}).</p>")
+                if total else "<p class='ok'>Nothing is left undecided on this document.</p>")
+        left += ("<p>" + _next_link(progress.get("next_source"),
+                                    "Next document with undecided rows") + "</p>")
     parts = [
         _nav(),
         f"<h1>Batch decisions — source {sid}</h1>",
         f"<p>{_h(recorded)} recorded, {_h(len(results) - recorded)} skipped/no-op.</p>",
+        left,
         _refresh_warnings(warnings),
         reconciliation_notices(pending or []),
         f"<p><a href='/ui/reviews/sources/{sid}'>Back to source</a> · "

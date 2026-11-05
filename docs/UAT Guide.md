@@ -146,8 +146,13 @@ cp /path/to/your/test-file.md raw/inbox/
 ```bash
 uv run python scripts/scan_inbox.py
 uv run python scripts/extract_sources.py     # publishes each Source page, wiki/index.md and search
+uv run python scripts/rebuild_tag_links.py --init-fresh-tracking   # fresh vault only, before any tag decision
 uv run python scripts/validate_all.py
 ```
+
+The third line certifies that this vault starts with no tagging history (ADR-0072), so untouched
+documents show as **not yet tagged** on the Review by source list. Skip it on a vault that already
+has tag decisions; there, `scripts/rebuild_tag_links.py --apply` backfills the history instead.
 
 Acceptance checks:
 

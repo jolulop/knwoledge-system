@@ -1663,6 +1663,10 @@ def _source_flow(reviews_dir: Path, *, gconn: Any, wiki_dir: Path | None,
     pages = _family_page_meta(wiki_dir)
     names = _name_index(pages)
     added_counts = _human_added_counts(reviews_dir)
+    # ADR-0072 decisions 4–5: tagging history, read-only (no screen ever writes a ledger to classify)
+    from app.workers import tag_history
+    tracking = tag_history.load_tracking(reviews_dir)
+    evidence = tag_history.audit_evidence(reviews_dir)
     attributed_rids: set[str] = set()
     sources: list[dict[str, Any]] = []
     suggestions_overall = 0
@@ -1672,10 +1676,20 @@ def _source_flow(reviews_dir: Path, *, gconn: Any, wiki_dir: Path | None,
         suggestions, kept = (_tag_rows(gconn, sid, pages, _ambiguous_matches(enrichment_dir, sid),
                                        names)
                              if gconn is not None else ([], []))
+        ledger: dict[str, Any] | None = None
         try:
-            ledger_drops, ledger_error = tag_links.load_ledger(reviews_dir, sid)["drops"], None
+            ledger = tag_links.load_ledger(reviews_dir, sid)
+            ledger_drops, ledger_error = ledger["drops"], None
         except tag_links.LedgerCorrupt as exc:           # shown, never treated as "no decisions"
             ledger_drops, ledger_error = [], exc.problem
+        if ledger_error is not None:
+            tagging = {"state": tag_history.SHOWN_UNKNOWN, "first_decision_at": None,
+                       "earliest_known_decision_at": None}
+        else:
+            tagging = tag_history.classify(
+                ledger=ledger if tag_links.ledger_path(reviews_dir, sid).exists() else None,
+                complete=tag_history.complete_for(tracking, m.get("discovered_at")),
+                audit=evidence.get(sid))
         dropped = [{"kind": "dropped", "key": d["key"], "name": d.get("name"),
                     "node_id": d.get("item_id"), "at": d.get("at")} for d in ledger_drops]
         # Part-2 review: an interrupted "use X" stays visible until retried or cancelled — on its
@@ -1715,6 +1729,15 @@ def _source_flow(reviews_dir: Path, *, gconn: Any, wiki_dir: Path | None,
         review_rows = retype_rows + retired
         attributed_rids.update(str(r["review_id"]) for r in review_rows)
         counts = Counter(r["status"] for r in review_rows)
+        # ADR-0070 §6: ONE eligibility rule for undecided rows (the screen count, the Save warning and
+        # Next navigation) — the existing "remaining", split by kind; deferred reviews are excluded and
+        # each review counts once even when it reaches the document through several associations.
+        pending_types = {str(r["review_id"]): r for r in retype_rows if r["status"] == "pending"}
+        pending_retired = {str(r["review_id"]): r for r in retired if r["status"] == "pending"}
+        undecided = {"tags": len(suggestions) + len(unfinished),
+                     "type_changes": len(pending_types),
+                     "retirements": len(set(pending_retired) - set(pending_types))}
+        undecided["total"] = sum(undecided.values())
         suggestions_overall += len(suggestions)
         sources.append({
             "source_id": sid,
@@ -1728,7 +1751,8 @@ def _source_flow(reviews_dir: Path, *, gconn: Any, wiki_dir: Path | None,
             "in_flight_review_id": identity_journal.operation_for(
                 reviews_dir, [r.get("node_id") for r in suggestions + kept + dropped]),
             "retype_items": retype_rows, "retired": retired,
-            "counts": {"remaining": len(suggestions) + len(unfinished) + counts.get("pending", 0),
+            "tagging": tagging, "undecided": undecided,
+            "counts": {"remaining": undecided["total"],
                        "kept": len(kept), "dropped": len(dropped),
                        "deferred": counts.get("deferred", 0),
                        "added": added_counts.get(sid, 0)},
@@ -1746,9 +1770,33 @@ def _source_flow(reviews_dir: Path, *, gconn: Any, wiki_dir: Path | None,
         "sources": sources,
         "totals": {"sources": len(sources),
                    "remaining_overall": suggestions_overall + len(remaining_rids),
-                   "first_remaining_source": first_remaining},
+                   "first_remaining_source": first_remaining,
+                   "not_yet_tagged": sum(s["tagging"]["state"] == "never_tagged" for s in sources),
+                   "history_unknown": sum(s["tagging"]["state"] == "history_unknown"
+                                          for s in sources),
+                   "first_untagged_source": next_source(sources, None, _untagged)},
         "global_remaining_by_type": dict(sorted(global_by_type.items())),
     }
+
+
+def _untagged(s: dict[str, Any]) -> bool:
+    return s["tagging"]["state"] == "never_tagged"
+
+
+def _has_undecided(s: dict[str, Any]) -> bool:
+    return s["undecided"]["total"] > 0
+
+
+def next_source(sources: list[dict[str, Any]], current: str | None, wanted) -> str | None:
+    """ADR-0070 §6 Next navigation: the next document in the list's deterministic order (manifest
+    ingest order) after `current` for which `wanted(source)` holds, wrapping once and never the
+    current document; from the top when `current` is None. None = "None remaining"."""
+    ids = [s["source_id"] for s in sources]
+    start = ids.index(current) + 1 if current in ids else 0
+    for s in sources[start:] + sources[:start]:
+        if s["source_id"] != current and wanted(s):
+            return s["source_id"]
+    return None
 
 
 def _enrichment_dir(wiki_dir: Path | None, enrichment_dir: Path | None) -> Path | None:
@@ -1797,9 +1845,9 @@ def source_review_view(reviews_dir: Path, source_id: str, *, graph_db: Path | No
     view["graph_available"] = flow["graph_available"]
     view["totals"] = flow["totals"]
     view["global_remaining_by_type"] = flow["global_remaining_by_type"]
-    view["next_source"] = next(
-        (s["source_id"] for s in flow["sources"]
-         if s["counts"]["remaining"] and s["source_id"] != source_id), None)
+    # ADR-0070 §6: forward from this document, wrapping once (replaces "first with rows").
+    view["next_source"] = next_source(flow["sources"], source_id, _has_undecided)
+    view["next_untagged"] = next_source(flow["sources"], source_id, _untagged)
     if manifests_dir is not None:
         view.update(details_section(reviews_dir, source_id, manifests_dir=Path(manifests_dir),
                                     enrichment_dir=_enrichment_dir(wiki_dir, enrichment_dir)))
