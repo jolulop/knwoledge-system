@@ -59,9 +59,18 @@ _STYLE = (
     ".badge{border:1px solid var(--tierra);border-radius:.6rem;padding:0 .4rem;font-size:.8rem;"
     "color:var(--tierra);white-space:nowrap}"
     "form.decide{display:inline;margin-right:.4rem}"
-    "button{font:inherit;font-weight:bold;color:#FFFFFF;background:var(--rojo);border:0;"
-    "border-radius:6px;padding:.38rem .9rem;margin:.15rem .2rem .15rem 0;cursor:pointer}"
-    "button:hover{background:var(--rojo-oscuro)}"
+    # ADR-0070 B3: three button tiers. Secondary is the plain default; `primary` (solid Rojo, at
+    # most one per form) and `danger` (Rojo outline, a label naming the loss, never the Enter
+    # default) are explicit. WCAG 2.1 AA on every background (text 4.5:1, borders 3:1).
+    "button{font:inherit;font-weight:bold;color:var(--negro);background:#FFFFFF;"
+    "border:1px solid var(--gris);border-radius:6px;padding:.36rem .88rem;"
+    "margin:.15rem .2rem .15rem 0;cursor:pointer}"
+    "button:hover{border-color:var(--negro);background:#F4F4F4}"
+    "button.primary{color:#FFFFFF;background:var(--rojo);border-color:var(--rojo)}"
+    "button.primary:hover{background:var(--rojo-oscuro);border-color:var(--rojo-oscuro)}"
+    "button.danger{color:var(--rojo);background:#FFFFFF;border-color:var(--rojo)}"
+    "button.danger:hover{color:var(--rojo-oscuro);border-color:var(--rojo-oscuro);"
+    "background:#FBEBEF}"
     "button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,"
     "a:focus-visible{outline:2px solid var(--mar);outline-offset:2px}"
     "input,select,textarea{font:inherit;color:var(--negro);border:1px solid var(--gris);"
@@ -292,6 +301,26 @@ def render_publication_result(result: dict[str, Any], *, repaired: str | None = 
 _STATUSES = ("pending", "deferred", "approved", "rejected")
 
 
+# ADR-0070 B3: a destructive button is never the Enter-key default. A form whose first submit
+# button would be destructive starts with this disabled, invisible one: implicit submission (Enter
+# in a field) uses the form's FIRST submit button, and a disabled default submits nothing.
+_ENTER_GUARD = ("<button type='submit' class='ks-enter' disabled tabindex='-1' aria-hidden='true'>"
+                "Enter does nothing here</button>")
+_ACTION_TIERS = {"approve": "primary", "reject": "danger"}
+
+
+def _guard_for(first_action: str) -> str:
+    """The Enter guard, only when the form's first submit button would be destructive (elsewhere
+    Enter keeps its existing behaviour)."""
+    return _ENTER_GUARD if _ACTION_TIERS.get(first_action) == "danger" else ""
+
+
+def _tier(action: str) -> str:
+    """The class attribute for a review-decision button (approve primary, reject destructive)."""
+    tier = _ACTION_TIERS.get(action)
+    return f" class='{tier}'" if tier else ""
+
+
 def local_time(value: Any) -> str:
     """ADR-0072 B2: an ISO timestamp in the runtime's detected local zone, each with the zone that
     applied to IT (so the two sides of a daylight-saving change show CET / CEST). Anything that isn't
@@ -384,12 +413,13 @@ def render_queue(data: dict[str, Any], *, status: str) -> str:
             for it in groups[gtype]:
                 rows.append(_queue_row(it, subjects, applied, bulk))
         if bulk:
-            parts.append("<form method='post' action='/ui/reviews/bulk/confirm'>")
+            parts.append("<form method='post' action='/ui/reviews/bulk/confirm'>" + _ENTER_GUARD)
         parts.append("<table>" + "".join(rows) + "</table>")
         if bulk:
-            parts.append("<p><button type='submit' name='bulk_action' value='reject'>Reject "
-                         "selected…</button> <button type='submit' name='bulk_action' "
-                         "value='defer'>Defer selected…</button> <span class='help'>Opens a "
+            parts.append("<p><button type='submit' class='danger' name='bulk_action' "
+                         "value='reject'>Reject selected…</button> <button type='submit' "
+                         "name='bulk_action' value='defer'>Defer selected…</button> "
+                         "<span class='help'>Opens a "
                          "confirmation page; nothing is recorded until you confirm there. Approval "
                          "stays one at a time on each review's page.</span></p></form>")
         if applied is not None:
@@ -513,8 +543,8 @@ def _decision_section(review_id: str, item: dict[str, Any], *, invalid_subject: 
                    ("supersede_a", f"Supersede: A wins → deprecate B ({a} beats {b})"),
                    ("supersede_b", f"Supersede: B wins → deprecate A ({b} beats {a})"),
                    ("reject", "Reject"), ("defer", "Defer"))
-        buttons = "".join(
-            f"<button type='submit' name='action' value='{act}'>{label}</button> "
+        buttons = _guard_for(actions[0][0]) + "".join(
+            f"<button type='submit'{_tier(act)} name='action' value='{act}'>{label}</button> "
             for act, label in actions)
         return ("<h2>Decision</h2>"
                 "<p>Decisions are recorded only; effects are applied later via "
@@ -527,8 +557,8 @@ def _decision_section(review_id: str, item: dict[str, Any], *, invalid_subject: 
     # A tampered/malformed subject can never apply — disable Approve (offer only Reject/Defer) and warn.
     actions = (("reject", "Reject"), ("defer", "Defer")) if invalid_subject else \
         (("approve", "Approve"), ("reject", "Reject"), ("defer", "Defer"))
-    buttons = "".join(
-        f"<button type='submit' name='action' value='{a}'>{_h(label)}</button> "
+    buttons = _guard_for(actions[0][0]) + "".join(
+        f"<button type='submit'{_tier(a)} name='action' value='{a}'>{_h(label)}</button> "
         for a, label in actions)
     warn = ("<p><strong>⚠ Invalid subject:</strong> this item's source_id is not canonical "
             "(possible tampering). It cannot be applied; approval is disabled.</p>"
@@ -617,12 +647,13 @@ def render_bulk_confirm(action: str, rows: list[dict[str, Any]],
                      f"<input type='hidden' name='rid' value='{_h(r['review_id'])}'>"
                      f"<input type='hidden' name='fp_{_h(r['review_id'])}' "
                      f"value='{_h(r['fingerprint'])}'></li>")
-    parts.append("<form method='post' action='/ui/reviews/bulk'>"
-                 f"<input type='hidden' name='bulk_action' value='{_h(action)}'>"
+    parts.append("<form method='post' action='/ui/reviews/bulk'>" + _guard_for(action)
+                 + f"<input type='hidden' name='bulk_action' value='{_h(action)}'>"
                  "<ul>" + "".join(items) + "</ul>"
                  "<p><label>Note (applies to every decision): <input type='text' name='note' "
                  "size='50'></label></p>"
-                 f"<p><button type='submit'>{_h(verb)} {_h(len(rows))} review"
+                 f"<p><button type='submit' class='{'danger' if action == 'reject' else 'primary'}'>"
+                 f"{_h(verb)} {_h(len(rows))} review"
                  f"{'s' if len(rows) != 1 else ''}</button> <a href='/ui/reviews'>Cancel</a></p>"
                  "</form>")
     return _page(f"{verb} selected", "".join(parts))
@@ -741,7 +772,7 @@ def render_apply_dry_run(scope: dict[str, Any], dry: dict[str, Any]) -> str:
         body.append(
             "<form method='post' action='/ui/reviews/apply'>"
             f"<input type='hidden' name='preview_token' value='{_h(token)}'>"
-            "<button type='submit'>Apply now</button></form>")
+            "<button type='submit' class='primary'>Apply now</button></form>")
     elif status == "ok":
         reason = dry.get("token_withheld") or ""
         body.append(f"<p class='err'>Apply is withheld: {_WITHHELD.get(reason, 'Preview again.')}"
@@ -1256,7 +1287,8 @@ def render_source_screen(data: dict[str, Any], *, draft: dict[str, Any] | None =
     parts.append("<p><label>Note (applies to every review-item decision this submit): "
                  f"<input type='text' name='note' size='40' value='{_h(draft.get('note', ''))}'>"
                  "</label></p>" + tick
-                 + "<p><button type='submit' name='screen_action' value='save'>Save all changes on "
+                 + "<p><button type='submit' class='primary' name='screen_action' value='save'>"
+                 "Save all changes on "
                  "this page</button> "
                  + (f"<strong>{_h(undecided_text(data.get('undecided')))}</strong> "
                     if undecided_text(data.get("undecided")) else "")
@@ -1406,8 +1438,9 @@ def render_unused_tags(rows: list[dict[str, Any]], *, result: dict[str, Any] | N
     parts.append("<table>" + "".join(table) + "</table>")
     deletable = sum(1 for r in rows if not r.get("protected"))
     if deletable:
-        parts.append("<form method='post' action='/ui/reviews/tags/unused/delete'>"
-                     f"<button type='submit'>Delete unused ({_h(deletable)})</button></form>")
+        parts.append("<form method='post' action='/ui/reviews/tags/unused/delete'>" + _ENTER_GUARD
+                     + f"<button type='submit' class='danger'>Delete {_h(deletable)} unused "
+                     f"tag{'s' if deletable != 1 else ''}</button></form>")
     return _page("Unused tags", "".join(parts))
 
 
@@ -1480,7 +1513,7 @@ def render_merge_confirm(plan: dict[str, Any], ctx: dict[str, Any]) -> str:
         "<form method='post' action='/ui/reviews/merge'>"
         f"<input type='hidden' name='survivor' value='{_h(sv['node_id'])}'>"
         f"<input type='hidden' name='absorbed' value='{_h(ab['node_id'])}'>"
-        "<button type='submit'>Confirm and approve merge</button> "
+        "<button type='submit' class='primary'>Confirm and approve merge</button> "
         "<a href='/ui/reviews'>Cancel</a></form>")
     return _page("Confirm merge", "".join(parts))
 

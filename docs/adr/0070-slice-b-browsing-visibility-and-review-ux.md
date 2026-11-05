@@ -538,6 +538,24 @@ cover a foreign-owned partner on either side, with and without an earlier pendin
 Each asserts the ledger, the graph and the pending resolution are unchanged. All four fail
 against the old preflight.
 
+## Implementation — B3 (2026-11-05)
+
+- **CSS only** (`review_html._STYLE`): the plain `button` is the **secondary** tier (white, grey
+  border, dark text); `button.primary` is solid Rojo; `button.danger` is white with a Rojo border
+  and Rojo text. Hover states darken each tier.
+- **Primary** (at most one per form): *Save all changes on this page*, *Apply now*, *Confirm and
+  approve merge*, *Approve* on a review page, and *Defer N reviews* on the bulk confirmation.
+- **Destructive:** *Delete N unused tags* (the label now names the loss; was "Delete unused (N)"),
+  the queue's *Reject selected…*, the confirmation's *Reject N reviews*, and *Reject* on a review
+  page. Everything else is secondary.
+- **Never the Enter default:** a form whose first submit button would be destructive starts with a
+  disabled, invisible submit button (`_ENTER_GUARD`); implicit submission uses the first submit
+  button, and a disabled one submits nothing. Elsewhere Enter keeps its behaviour (the document
+  screen's own redraw default is unchanged).
+- Forms, routes and handlers are unchanged. **Tests:** `tests/test_button_tiers.py` (WCAG AA for
+  each tier on the page, banner, error and ok backgrounds; at most one primary per form; no
+  destructive Enter default; destructive labels).
+
 ## Implementation notes
 
 - Each sub-slice follows the usual rhythm: implement on "implement now" → tests → external review
