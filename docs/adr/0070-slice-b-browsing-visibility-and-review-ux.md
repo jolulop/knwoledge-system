@@ -556,6 +556,98 @@ against the old preflight.
   each tier on the page, banner, error and ok backgrounds; at most one primary per form; no
   destructive Enter default; destructive labels).
 
+## Implementation — B4 (2026-11-05)
+
+- **"Not yet applied" is evidence, not page state** (`retypes._applied_at`): an approval is carried
+  out when an executor record (`audit_log/<rid>-retyped-*`) exists at or after its approval. Page
+  state can't tell, because a later retype changes the page while the earlier approval stays
+  approved. (Before B4, two approvals for one tag were applied in file order, and an older one could
+  apply again on a later Apply, flipping the tag back and forth.)
+- **Approval guard** (`main._require_no_competing_retype`, inside `_record_decision`, under the
+  write lock — the UI form, a stale form and the JSON/API path alike): approving a type change is
+  refused (409) while another approved type change of the same tag is not yet carried out; the
+  HTML error links that review so it can be reopened. An approval already in effect but with no
+  executor record counts as waiting (conservative).
+- **Apply recheck** (`retypes._apply_retypes`): when several appliable approvals of one tag are
+  waiting, all are blocked (`competing_retypes_approved`, the others named in `problem`); a malformed
+  or refused approval reports its own reason and never blocks a valid one. An approval already
+  carried out is never applied again once another retype of the tag was carried out at or after it
+  (`superseded_by_retype`; a tie in the whole-second times counts as "after", so no order is
+  guessed); if the page still carries its type it is simply in effect.
+- **Withdrawal unchanged** (only an applied retype withdraws pending/deferred competitors); the
+  applied outcome carries `withdraws` — the exact proposals, read before the withdrawal — which the
+  readable preview lists.
+- **Visible everywhere a retype is shown** (`retypes.competitors` / `retype_index`,
+  `review_read.retype_competitors`, `review_html.competitors_html`): the document-screen row, the
+  review page ("Competing type changes") and the flat queue name each competitor's target type,
+  review status (approved: applied or not yet) and source document.
+- **Tests:** `tests/test_competing_retypes.py` (the guard on every path, concurrent approvals,
+  reopening, an applied approval never re-applied, a restored database with two waiting
+  approvals, exact withdrawals, reject/defer never withdrawing, the three surfaces).
+
+### Review round 1 on B4 (2026-11-05)
+
+- **Order-independent supersession.** An approval already carried out is superseded (never applied
+  again) when another retype of the tag was carried out at or after it, **or** another approval of
+  the tag is the one waiting to be carried out — the newer human choice, whatever the file order.
+  The run's own history counts too (each applied retype updates the snapshot). Before, `rev_a_new`
+  could be applied and then `rev_z_old` replayed in the same run.
+- **Each approval has its own identity.** `reviews.resolve_review_item` writes a unique
+  `approval_id` on every approval (and its audit entry); reopening clears it, re-approving makes a
+  new one. The retype executor record carries it, and an approval counts as carried out only by a
+  record with its own `approval_id` — a same-second reopen and re-approval is a new approval.
+  Approvals made before this have no id and keep the timestamp rule.
+- **Malformed reviews never break screens or Apply.** The competitor index applies the queue's
+  shape rule (`subject` / `proposal` / `context` objects when present); `retype_check` reports a
+  non-object subject as `invalid_subject` instead of raising.
+
+### Review round 2 on B4 (2026-11-06)
+
+- **"Waiting" is not "newer".** Apply computes each tag's latest type change *L* from **every**
+  executor record (`retypes.execution_history`), whichever review or approval generation wrote it,
+  reopened or restored ones included, plus this run's executions. A waiting approval proceeds only
+  when its `decided_at` is **strictly after** *L*; an older, same-second or unparsable one is
+  blocked (`approval_not_after_latest_retype`: "not provably approved after the tag's latest type
+  change — reopen and approve it again"). A carried-out approval is superseded by a waiting one
+  only when that one is provably newer and the only one waiting. A restored older approval
+  therefore never overwrites a later choice.
+- **Apply fails closed on unreadable history.** An executor record that can't be read (or has no
+  usable time) makes its tag's history unknown — mapped through the review id in its file name; if
+  even that fails, every tag's is — and the waiting approval is blocked
+  (`execution_history_unreadable`). Screens merely skip unreadable files.
+- **One malformed-file rule:** every review and executor-record reader in `retypes.py` treats an
+  unreadable file, invalid UTF-8 or invalid JSON alike (`OSError`, `ValueError`).
+
+### Review round 3 on B4 (2026-11-06)
+
+- **One complete history decides both new executions and replays.** Whether an approval already
+  carried out may replay (repair drift) is decided on every executor record of the tag — any record
+  not established as that approval's own, at or after its own execution, from any review or
+  generation, approved or not, supersedes it (`superseded_by_retype`; it changes nothing and
+  withdraws nothing). Unknown history never lets it mutate the tag (`execution_history_unreadable`).
+  The latest approval still repairs drift when its history is complete.
+- **Established ownership only** (`retypes._owns`): the same `approval_id`; for an approval without
+  one, the `approval_fingerprint` the executor now writes into its record; for a record from before
+  B4, the same review at or after the approval's `decided_at`. Times are compared as parsed
+  instants, offsets included; an unparsable time or a missing `decided_at` is never ownership, so
+  it can't authorize a replay.
+
+### Review round 4 on B4 (2026-11-06)
+
+- **A verified no-op approval settles.** When Apply finds an approval already in effect —
+  `_done_outcome` re-read the page AND the graph at its type — and the approval has no settlement of
+  its own, it writes `audit_log/<rid>-retype-verified-<hex>.json` (the approval's `approval_id`, or
+  its `approval_fingerprint`; the tag, the type, the time). It is not an execution: it never matches
+  the `*-retyped-*` records, so nothing reads it as "carried out" (screens show "approved, verified
+  in effect"). Repeated Apply reuses it (no new record, the same time). It is not written while the
+  tag's history is unknown (no re-verification on unreadable records).
+- **One settled history.** Settled = carried out OR verified (`retypes._settled`): the approval
+  guard ignores settled approvals (so an in-effect approval no longer blocks the next type change
+  forever); the cutoff for a waiting approval is the tag's **latest settled type choice**
+  (`approval_not_after_latest_retype`, `problem.latest_settled_choice_at`), so an older restored
+  approval can't override a verified choice either; replays and supersession use the same history;
+  an unreadable verification record makes the history unknown, like an execution record.
+
 ## Implementation notes
 
 - Each sub-slice follows the usual rhythm: implement on "implement now" → tests → external review

@@ -693,6 +693,20 @@ def _validate_amendments(decision: str, rtype: str,
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _require_no_competing_retype(item: dict[str, Any]) -> None:
+    """ADR-0070 B4: approving a type change is refused while another approved type change of the
+    same tag is not yet carried out (no executor record since its approval) — never resolved by
+    processing order. Runs under the write lock with every decision path (form, stale form, API)."""
+    nid = (item.get("subject") or {}).get("node_id")
+    waiting = retypes.approved_unapplied(settings.reviews_dir, nid, exclude=item.get("review_id"))
+    if waiting:
+        other = waiting[0]
+        raise _ReopenFirst(
+            f"another type change of this tag is already approved and not yet applied: "
+            f"{other['review_id']} (to {other['to_item_type']}). Reopen it first, or apply it; two "
+            "type changes of one tag are never approved together.", str(other["review_id"]))
+
+
 def _require_no_conflicting_merge(item: dict[str, Any]) -> None:
     """ADR-0064 review round: never let two approved merges conflict (shared absorbed node, or a
     chain). Graph-optional: without a graph every approved merge counts as unapplied (conservative)."""
@@ -783,6 +797,8 @@ def _record_pending_decision(review_id: str, item: dict[str, Any], decision: str
         _require_active_claims(item)  # 409 if either Claim page is missing / not active
     if decision == "approved" and rtype == "merge_items":
         _require_no_conflicting_merge(item)  # 409 on an approved-unapplied conflict (ADR-0064)
+    if decision == "approved" and rtype == "change_item_type":
+        _require_no_competing_retype(item)   # 409 while another approved retype waits (ADR-0070 B4)
     return reviews.resolve_review_item(
         settings.reviews_dir, review_id, decision=decision, decided_by="human", note=note,
         winner=winner, amendments=amendments if decision == "approved" else None), decision
@@ -1671,8 +1687,17 @@ _UI_DECISIONS = {"approve": "approved", "reject": "rejected", "defer": "deferred
 
 
 def _html_error(exc: HTTPException) -> HTMLResponse:
-    return HTMLResponse(review_html.render_error(exc.status_code, str(exc.detail)),
+    link = getattr(exc, "review_link", None)      # ADR-0070 B4: the review to reopen first
+    return HTMLResponse(review_html.render_error(exc.status_code, str(exc.detail), link=link),
                         status_code=exc.status_code)
+
+
+class _ReopenFirst(HTTPException):
+    """A 409 that names the review to reopen first; the HTML error page links it."""
+
+    def __init__(self, detail: str, review_id: str) -> None:
+        super().__init__(status_code=409, detail=detail)
+        self.review_link = review_id
 
 
 @app.get("/ui/reviews", response_class=HTMLResponse)
@@ -1703,6 +1728,10 @@ def ui_review_queue(
     pages = review_read._family_page_meta(settings.wiki_dir)        # ADR-0070 §5: the "What"
     data["subjects"] = {str(it.get("review_id")): review_read.readable_subject(
         it, wiki_dir=settings.wiki_dir, pages=pages) for it in data["items"]}
+    index = retypes.retype_index(settings.reviews_dir)              # ADR-0070 B4: competitors
+    data["competitors"] = {str(it.get("review_id")): review_read.retype_competitors(
+        settings.reviews_dir, it, settings.wiki_dir, index=index)
+        for it in data["items"] if it.get("type") == "change_item_type"}
     return HTMLResponse(review_html.render_queue(data, status=status))
 
 
@@ -2738,6 +2767,9 @@ def ui_review_detail(review_id: str) -> HTMLResponse:
             review_html.render_error(404, f"review not found: {review_id}"), status_code=404)
     result = {**result, "subject": review_read.readable_subject(        # ADR-0070 §5 heading
         result["item"], wiki_dir=settings.wiki_dir)}
+    if result["item"].get("type") == "change_item_type":               # ADR-0070 B4
+        result["competitors"] = review_read.retype_competitors(
+            settings.reviews_dir, result["item"], settings.wiki_dir)
     return HTMLResponse(review_html.render_detail(result, review_id=review_id))
 
 

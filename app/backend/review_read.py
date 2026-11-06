@@ -1663,6 +1663,8 @@ def _source_flow(reviews_dir: Path, *, gconn: Any, wiki_dir: Path | None,
     pages = _family_page_meta(wiki_dir)
     names = _name_index(pages)
     added_counts = _human_added_counts(reviews_dir)
+    from app.workers import retypes as _retypes
+    retype_idx = _retypes.retype_index(reviews_dir)
     # ADR-0072 decisions 4–5: tagging history, read-only (no screen ever writes a ledger to classify)
     from app.workers import tag_history
     tracking = tag_history.load_tracking(reviews_dir)
@@ -1709,7 +1711,10 @@ def _source_flow(reviews_dir: Path, *, gconn: Any, wiki_dir: Path | None,
                        | {"node_id": (it.get("subject") or {}).get("node_id"),
                           "to_item_type": (it.get("subject") or {}).get("to_item_type"),
                           "from_item_type": (it.get("context") or {}).get("from_item_type"),
-                          "name": (it.get("context") or {}).get("name")}
+                          "name": (it.get("context") or {}).get("name"),
+                          # ADR-0070 B4: the other type changes proposed for the same tag
+                          "competitors": retype_competitors(reviews_dir, it, wiki_dir,
+                                                            index=retype_idx)}
                        for it in retype_by_source.get(sid, [])]
         retired: list[dict[str, Any]] = []
         if gconn is not None:
@@ -1952,3 +1957,18 @@ def decision_fingerprint(item: dict[str, Any]) -> str:
     canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"),
                            default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+
+def retype_competitors(reviews_dir: Path, item: dict[str, Any], wiki_dir: Path | None, *,
+                       index: dict[str, list[dict[str, Any]]] | None = None) -> list[dict[str, Any]]:
+    """ADR-0070 B4: the type changes competing with `item` for the same tag, each with its target
+    type, review status and source document title (where available)."""
+    from app.workers import retypes
+    comps = retypes.competitors(reviews_dir, (item.get("subject") or {}).get("node_id"),
+                                exclude=item.get("review_id"), index=index)
+    for c in comps:
+        sid = c.get("source_id")
+        c["source_title"] = (_source_title(wiki_dir, sid) if isinstance(sid, str)
+                             and manifests.is_source_id(sid) else None)
+    return comps

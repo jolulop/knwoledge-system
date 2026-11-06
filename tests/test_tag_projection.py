@@ -446,11 +446,12 @@ def api(vault, monkeypatch):
     return TestClient(main_module.app)
 
 
-def _approve(root, rid, rtype, subject, proposal):
+def _approve(root, rid, rtype, subject, proposal, decided_at=None):
     d = root / "reviews" / "approved"
     d.mkdir(parents=True, exist_ok=True)
     (d / f"{rid}.json").write_text(json.dumps({"review_id": rid, "type": rtype, "status": "approved",
-                                               "subject": subject, "proposal": proposal}),
+                                               "subject": subject, "proposal": proposal,
+                                               **({"decided_at": decided_at} if decided_at else {})}),
                                    encoding="utf-8")
 
 
@@ -470,8 +471,10 @@ def test_apply_retype_creates_and_ends_a_collision(vault, api):
              {"to_item_type": "use_case"})
     _apply(api)                                     # different types: no collision any more
     assert _tags(root, a) == ["domain/Straße"] and _tags(root, b) == ["use_case/STRASSE"]
+    # ADR-0070 B4: a later type change of the same tag must be provably approved after the first
+    # one ran (real approvals carry decided_at)
     _approve(root, "rev_rt2", "change_item_type", {"node_id": s2, "to_item_type": "domain"},
-             {"to_item_type": "domain"})
+             {"to_item_type": "domain"}, decided_at="2099-01-01T00:00:00+00:00")
     _apply(api)                                     # back to one type: both suffixed
     assert _tags(root, a) == [f"domain/Straße_{s1[4:10]}"]
     assert _tags(root, b) == [f"domain/STRASSE_{s2[4:10]}"]

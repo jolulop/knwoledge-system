@@ -234,6 +234,11 @@ def resolve_review_item(
         raise ReviewRetiring(review_id)
     item.pop("draft_amendments", None)  # ADR-0058: drafts never survive a terminal decision
     item.update(status=decision, decided_by=decided_by, decided_at=now, decision_note=note)
+    item.pop("approval_id", None)
+    if decision == "approved":
+        # ADR-0070 B4 review round 1: a unique identity for THIS approval (a reopened and re-approved
+        # review gets a new one, even within the same second); executor records bind to it.
+        item["approval_id"] = uuid.uuid4().hex
     if winner is not None:
         item["winner"] = winner
     if amendments is not None:
@@ -250,6 +255,8 @@ def resolve_review_item(
         "decided_by": decided_by, "decided_at": now, "subject": item.get("subject"),
         "note": note,
     }
+    if item.get("approval_id"):
+        audit_entry["approval_id"] = item["approval_id"]
     if winner is not None:
         audit_entry["winner"] = winner
     if amendments is not None:
@@ -294,7 +301,7 @@ def reopen_review_item(
     if item.get("winner") is not None:
         prior["prior_winner"] = item["winner"]
     # Clear terminal fields + the supersede winner; back to pending (re-decidable).
-    for field in ("decided_by", "decided_at", "decision_note", "winner"):
+    for field in ("decided_by", "decided_at", "decision_note", "winner", "approval_id"):
         item.pop(field, None)
     item["status"] = "pending"
     dest = reviews_dir / "pending" / f"{review_id}.json"

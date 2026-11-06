@@ -309,6 +309,25 @@ _ENTER_GUARD = ("<button type='submit' class='ks-enter' disabled tabindex='-1' a
 _ACTION_TIERS = {"approve": "primary", "reject": "danger"}
 
 
+def competitors_html(comps: list[dict[str, Any]] | None) -> str:
+    """ADR-0070 B4: the other type changes proposed for the same tag — target type, review status
+    and source document — or "" when there are none."""
+    if not comps:
+        return ""
+    parts = []
+    for c in comps:
+        state = str(c.get("status"))
+        if state == "approved":
+            state = ("approved, applied" if c.get("applied_at") else
+                     "approved, verified in effect" if c.get("verified_at") else
+                     "approved, not yet applied")
+        src = c.get("source_title") or c.get("source_id")
+        parts.append(f"<a href='/ui/reviews/{_h(c.get('review_id'))}'>"
+                     f"<code>{_h(c.get('to_item_type'))}</code></a> ({_h(state)}"
+                     + (f", from “{_h(src)}”" if src else "") + ")")
+    return ("<div class='help'>Also proposed for this tag: " + "; ".join(parts) + "</div>")
+
+
 def _guard_for(first_action: str) -> str:
     """The Enter guard, only when the form's first submit button would be destructive (elsewhere
     Enter keeps its existing behaviour)."""
@@ -411,7 +430,7 @@ def render_queue(data: dict[str, Any], *, status: str) -> str:
                         "<th>created</th>" + ("<th>applied</th>" if applied is not None else "")
                         + "</tr>")
             for it in groups[gtype]:
-                rows.append(_queue_row(it, subjects, applied, bulk))
+                rows.append(_queue_row(it, subjects, applied, bulk, data.get("competitors")))
         if bulk:
             parts.append("<form method='post' action='/ui/reviews/bulk/confirm'>" + _ENTER_GUARD)
         parts.append("<table>" + "".join(rows) + "</table>")
@@ -450,7 +469,7 @@ def _applied_cell(state: dict[str, Any]) -> str:
 
 
 def _queue_row(it: dict[str, Any], subjects: dict[str, str], applied: dict[str, Any] | None,
-               bulk: bool) -> str:
+               bulk: bool, competing: dict[str, Any] | None = None) -> str:
     """One flat-queue row: the selection box (bulk views), the readable subject linking to the
     review, its id, status, priority, local creation time and (approved view) the applied cell."""
     rid = _h(it.get("review_id"))
@@ -458,7 +477,8 @@ def _queue_row(it: dict[str, Any], subjects: dict[str, str], applied: dict[str, 
     tick = (f"<td><input type='checkbox' name='rid' value='{rid}' aria-label='select {rid}'></td>"
             if bulk else "")
     what = subjects.get(str(it.get("review_id"))) or it.get("review_id")
-    return (f"<tr>{tick}<td><a href='/ui/reviews/{rid}'>{_h(what)}</a></td>"
+    extra = competitors_html(competing.get(str(it.get("review_id")))) if competing else ""
+    return (f"<tr>{tick}<td><a href='/ui/reviews/{rid}'>{_h(what)}</a>{extra}</td>"
             f"<td><code>{rid}</code></td><td>{_h(it.get('status'))}</td>"
             f"<td>{_h(it.get('priority'))}</td><td>{_h(local_time(it.get('created_at')))}</td>"
             f"{cell}</tr>")
@@ -608,6 +628,8 @@ def render_detail(result: dict[str, Any], *, review_id: str) -> str:
          f"<p><code>{_h(review_id)}</code></p>" if result.get("subject")
          else f"<h1>Review {_h(review_id)}</h1>"),
         "<h2>Item</h2>", _render_value(summary_rows),
+        (f"<h2>Competing type changes</h2>{competitors_html(result['competitors'])}"
+         if result.get("competitors") else ""),
         "<h2>Preview</h2>", _render_value(preview_rows),
         "<h2>Apply state</h2>", _render_value(apply_rows),
         "<h2>Details</h2>", _render_value(preview.get("details") or {}),
@@ -1236,7 +1258,8 @@ def render_source_screen(data: dict[str, Any], *, draft: dict[str, Any] | None =
             info = f"<td><a href='/ui/reviews/{rid}'>{rid}</a></td>"
             if row["kind"] == "retype":
                 info += (f"<td>{_h(row.get('name'))}</td>"
-                         f"<td>{_h(row.get('from_item_type'))} → {_h(row.get('to_item_type'))}</td>")
+                         f"<td>{_h(row.get('from_item_type'))} → {_h(row.get('to_item_type'))}"
+                         f"{competitors_html(row.get('competitors'))}</td>")
             else:  # retired
                 info += (f"<td>{_h(row.get('title'))}</td><td>{_h(row.get('page'))}</td>"
                          f"<td>{_h(row.get('node_status'))}</td>")
@@ -1518,10 +1541,12 @@ def render_merge_confirm(plan: dict[str, Any], ctx: dict[str, Any]) -> str:
     return _page("Confirm merge", "".join(parts))
 
 
-def render_error(status_code: int, message: str) -> str:
+def render_error(status_code: int, message: str, *, link: str | None = None) -> str:
     body = [
         _nav(),
         f"<h1>Error {_h(status_code)}</h1>",
         f"<p class='err'>{_h(message)}</p>",
     ]
+    if link:                                     # ADR-0070 B4: the review to reopen first
+        body.append(f"<p><a href='/ui/reviews/{_h(link)}'>Open {_h(link)} to reopen it</a></p>")
     return _page(f"Error {status_code}", "".join(body))

@@ -95,8 +95,16 @@ def sentence(rec: dict[str, Any], clash: set[str]) -> str:
         return (f"Merge {_name(_pair(d.get('absorbed')), clash)} into "
                 f"{_name(_pair(d.get('survivor')) or _pair(d.get('subject')), clash)}")
     if t == "change_item_type":
-        return (f"Change type of {subj}: <code>{_h(before.get('item_type') or '?')}</code> → "
+        text = (f"Change type of {subj}: <code>{_h(before.get('item_type') or '?')}</code> → "
                 f"<code>{_h(after.get('item_type') or '?')}</code>")
+        withdraws = d.get("withdraws") if isinstance(d.get("withdraws"), list) else []
+        if withdraws:                    # ADR-0070 B4: the EXACT proposals this withdraws
+            text += "; withdraws the other proposal" + ("s" if len(withdraws) != 1 else "") + ": "
+            text += ", ".join(f"<code>{_h(w.get('to_item_type'))}</code> "
+                              f"(<a href='/ui/reviews/{_h(w.get('review_id'))}'>"
+                              f"{_h(w.get('review_id'))}</a>, {_h(w.get('status'))})"
+                              for w in withdraws if isinstance(w, dict))
+        return text
     if t == "promote_candidate_node":
         if after.get("title") and before.get("title") and after["title"] != before["title"]:
             subj_pair = _pair(d.get("subject"))
@@ -154,7 +162,16 @@ REASONS = {
     "item_type_missing": "no type was chosen",
     "missing_required_item_type": "the tag needs a real type before it can be kept",
     "superseded_by_merge": "a merge replaced this change",
-    "superseded_by_retype": "another type change replaced this one",
+    "superseded_by_retype": "a later type change of this tag replaced this one, so it is not "
+                            "applied again",
+    "competing_retypes_approved": "another approved type change of this tag is waiting too; no "
+                                  "order decides between them — reopen all but one",
+    "approval_not_after_latest_retype": "not provably approved after the tag's latest settled "
+                                        "type choice — reopen and approve it again if it is still "
+                                        "your choice",
+    "execution_history_unreadable": "the tag's type-change history can't be read, so it isn't "
+                                    "clear this is the latest choice — repair the audit log "
+                                    "(scripts/validate_all.py), then preview again",
     "retirement_unfinished": "a retirement of this tag is unfinished",
     "node_missing": "the item no longer exists",
     "node_not_candidate": "the tag is no longer a suggestion",
