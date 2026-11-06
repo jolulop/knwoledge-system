@@ -292,6 +292,12 @@ Four blocking reporting issues (one an execution regression), reproduced by the 
 
 ### Existing behaviour the outcomes made visible (follow-ups, not changed in B2a)
 
+> [!note] Triaged by ADR-0073 (grill 2026-11-06)
+> Items 4, 5 and 8 are **to be fixed** (ADR-0073 decisions 2–12). Items 2, 3, 6 and 7 are
+> **dormant / deferred**, not resolved: no current filer reaches them. ADR-0073 decision 1 records
+> each one's affected path and reopening trigger. Item 5's trigger is the claim lifecycle, not a
+> Details edit (ADR-0073 decision 9).
+
 1. ~~Apply's Source-page refresh after a document status change is not retried~~ — **fixed in
    review round 1** (above).
 2. **A duplicate whose page re-render fails** is still counted as applied/normalized by the legacy
