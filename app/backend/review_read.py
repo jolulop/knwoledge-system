@@ -1883,9 +1883,12 @@ def details_section(reviews_dir: Path, source_id: str, *, manifests_dir: Path,
     pending = [reconciliation.PRODUCERS[p] for p in sorted(waiting)]
     if contradictions.notice_needed(root, source_id, manifests_dir=manifests_dir):  # ADR-0069 2(a)
         pending.append(contradictions.NOTICE_NAME)
+    from app.workers import name_variants                     # ADR-0070 B5: the form hints
     return {"details": shown | {"known_names": known,
                                 "baseline": details_mod.baseline_token(manifest, ledger, shown),
-                                "pending": pending}}
+                                "pending": pending,
+                                "confirmed_names": name_variants.confirmed_names(manifests_dir),
+                                "source_id": source_id}}
 
 
 # --- B2b: the flat queue's readable subject and decision fingerprint (ADR-0070 §5, ADR-0072 d6) ----

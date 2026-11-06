@@ -648,6 +648,30 @@ against the old preflight.
   approval can't override a verified choice either; replays and supersession use the same history;
   an unreadable verification record makes the history unknown, like an execution record.
 
+## Implementation — B5 (2026-11-06)
+
+- **`app/workers/name_variants.py`** (new, pure): the fold (`merge_candidates._tokens`, no plural
+  step, accents removed for the hint only), the two rules (`rule`: whole-token containment with a
+  qualifying ≥4-letter non-generic token; initials with the same last token), the fixed generic
+  list, the word index over qualifying tokens plus the last token, a deterministic `Budget`
+  (`FORM_BUDGET` 2,000 pairs per form render, `LINT_BUDGET` 20,000 per lint run) visited in sorted
+  `name_identity` order, and the display bounds (3 hints per field ordered by confirming
+  documents then name; 50 lint pairs plus `more`). `confirmed_names` reads only confirmed names on
+  valid manifests, both roles.
+- **Form hint** (`review_html._name_hints`, under each author field and the publisher field):
+  "Already confirmed elsewhere — possibly the same name (a hint only)", each spelling with its role
+  and documents (this document left out), and **Use this spelling** — a redraw
+  (`details_action=use_spelling:<field>:<name>`, the field limited to `author_name_N` /
+  `publisher_name`) that changes only that field, keeps every other unsaved choice and saves
+  nothing. Server-rendered: a newly typed name gets its hints after a redraw. A render that hits
+  the budget says "Name matching was cut short".
+- **Lint** `name_variant_possible` (`lint._check_name_variants`, graph-free, report-only, low): one
+  finding per pair with both spellings, their roles, documents and screen links, and the rule; a
+  summary finding carries `more`, `truncated` and `compared`. It never merges Authors pages, files
+  nothing and never fails lint.
+- Identity, Authors pages and independence are unchanged; only an explicit Save of corrected
+  Details changes them. **Tests:** `tests/test_name_variants.py`.
+
 ## Implementation notes
 
 - Each sub-slice follows the usual rhythm: implement on "implement now" → tests → external review

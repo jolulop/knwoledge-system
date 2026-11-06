@@ -1071,6 +1071,28 @@ _DETAILS_SOURCE = {"enrich": "Suggestions from Enrich", "pdf": "Title from the P
                    "filename": "Title from the file name"}
 
 
+def _name_hints(field: str, name: Any, info: dict[str, Any], budget: Any, idx: Any) -> str:
+    """ADR-0070 B5: "Already confirmed elsewhere: …" under a name field, with where each spelling
+    is confirmed (role + documents) and a **Use this spelling** redraw that changes only this
+    field. A suggestion for a human, never evidence; nothing is saved."""
+    from app.workers import name_variants
+    names = info.get("confirmed_names") or {}
+    found = name_variants.hints(name, names, exclude_source=info.get("source_id"), budget=budget,
+                                idx=idx) if names and str(name or "").strip() else []
+    if not found:
+        return ""
+    rows = []
+    for h in found:
+        where = ", ".join(f"{_h(u['role'])} of “{_h(u['title'])}”" for u in h["uses"][:3])
+        more = len(h["uses"]) - 3
+        rows.append(f"<li>“{_h(h['name'])}” ({where}{f', and {more} more' if more > 0 else ''}) "
+                    f"<button type='submit' name='details_action' "
+                    f"value='{_h('use_spelling:' + field + ':' + h['name'])}'>Use this spelling"
+                    "</button></li>")
+    return ("<div class='help'>Already confirmed elsewhere — possibly the same name (a hint only):"
+            "<ul>" + "".join(rows) + "</ul></div>")
+
+
 def _details_section(data: dict[str, Any], draft: dict[str, Any] | None) -> str:
     """ADR-0066 part 3 slice 3: the Details fields inside the main form. Draft actions (Add author
     rows, Use these) re-render with the submitted values and write nothing; the baseline token and
@@ -1106,13 +1128,17 @@ def _details_section(data: dict[str, Any], draft: dict[str, Any] | None) -> str:
     rows = list(values["authors"]) + [{"name": "", "show_page": False}] * (
         details_mod.EMPTY_AUTHOR_ROWS + extra)
     rows = rows[:details_mod.MAX_AUTHOR_ROWS]
+    from app.workers import name_variants
+    budget = name_variants.Budget(name_variants.FORM_BUDGET)    # one budget per form render
+    idx = name_variants._index(info.get("confirmed_names") or {})
     table = ["<tr><th>order</th><th>author</th><th>show page</th></tr>"]
     for i, a in enumerate(rows):
         table.append(
             f"<tr><td><input type='hidden' name='author_row_{i}' value='1'>"
             f"<input type='number' name='author_order_{i}' value='{i}' style='width:4em'></td>"
             f"<td><input type='text' name='author_name_{i}' size='40' list='ks-known-names' "
-            f"value='{_h(a['name'])}'></td>"
+            f"value='{_h(a['name'])}'>"
+            f"{_name_hints(f'author_name_{i}', a['name'], info, budget, idx)}</td>"
             f"<td><input type='checkbox' name='author_show_{i}' value='1'"
             f"{' checked' if a.get('show_page') else ''}></td></tr>")
     parts.append("<p>Authors, in document order (clear a name to remove it):</p><table>"
@@ -1128,7 +1154,11 @@ def _details_section(data: dict[str, Any], draft: dict[str, Any] | None) -> str:
     parts.append(f"<p><label>Publisher: <input type='text' name='publisher_name' size='40' "
                  f"list='ks-known-names' value='{_h(pub['name'])}'></label> "
                  f"<label><input type='checkbox' name='publisher_show' value='1'"
-                 f"{' checked' if pub.get('show_page') else ''}> show page</label></p>")
+                 f"{' checked' if pub.get('show_page') else ''}> show page</label></p>"
+                 + _name_hints("publisher_name", pub["name"], info, budget, idx))
+    if budget.truncated:
+        parts.append("<p class='help'>Name matching was cut short (too many similar names to "
+                     "compare on one page).</p>")
     parts.append("<datalist id='ks-known-names'>"
                  + "".join(f"<option value='{_h(n)}'>" for n in info.get("known_names") or [])
                  + "</datalist>")

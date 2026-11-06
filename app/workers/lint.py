@@ -209,6 +209,37 @@ def _check_graph(gconn, wiki_dir: Path, reviews_dir: Path, *, file_items: bool, 
     return findings
 
 
+def _check_name_variants(manifests_dir: Path | None) -> list[dict[str, Any]]:
+    """`name_variant_possible` (ADR-0070 B5): pairs of confirmed author/publisher names that may be
+    spellings of one name (`name_variants`' provisional hint rule), each with the documents
+    confirming each spelling (links to their screens) and the roles. Report-only (low): it never
+    merges Authors pages, files nothing and never fails lint — a similar name is never evidence.
+    At most 50 pairs (`more` counts the rest); a run that hit the comparison budget says
+    `truncated: true` with the number of pairs compared."""
+    if manifests_dir is None:
+        return []
+    from app.workers import name_variants
+    found = name_variants.variant_pairs(name_variants.confirmed_names(manifests_dir))
+
+    def side(x: dict[str, Any]) -> dict[str, Any]:
+        return {"name": x["name"], "uses": [
+            {**u, "screen": f"/ui/reviews/sources/{u['source_id']}"} for u in x["uses"]]}
+    findings = [{
+        "check": "name_variant_possible", "severity": "low",
+        "subject": f"{pair['a']['name']} ~ {pair['b']['name']}",
+        "detail": "possibly one author/publisher spelled two ways (a hint, never evidence); "
+                  "correct the Details on a document screen if they are the same — report only",
+        "data": {"a": side(pair["a"]), "b": side(pair["b"]), "rule": pair["rule"]}}
+        for pair in found["pairs"]]
+    if found["more"] or found["truncated"]:
+        findings.append({
+            "check": "name_variant_possible", "severity": "low", "subject": "summary",
+            "detail": "more possible name variants than shown, or the comparison was cut short",
+            "data": {"more": found["more"], "truncated": found["truncated"],
+                     "compared": found["compared"]}})
+    return findings
+
+
 def _check_item_filenames(gconn, wiki_dir: Path) -> list[dict[str, Any]]:
     """`item_filename_nonconforming` (ADR-0071 decision 4): an item page whose recorded path differs
     from the path the filename rule gives for its current title and id — e.g. a page minted by the
@@ -732,6 +763,9 @@ def run_lint(
             # ADR-0066 part 3 slice 3: documents whose independence inputs changed since a producer
             # reconciled them. Report-only (low): never fails lint, nothing is filed.
             findings += _check_awaiting_reconciliation(manifests_dir, jobs_db)
+
+            # ADR-0070 B5: possible author/publisher name variants. Report-only (low), graph-free.
+            findings += _check_name_variants(manifests_dir)
 
             # display_alias_rot reads wiki pages only — runs always (ADR-0060, report-only).
             findings += _check_display_alias_rot(wiki_dir)

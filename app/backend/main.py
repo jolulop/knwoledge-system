@@ -2215,6 +2215,17 @@ def _source_decide(source_id: str, form: dict[str, Any]) -> HTMLResponse:
                                                              draft=draft))
     # ADR-0066 part 3 slice 3: draft-only actions re-render the submission and write nothing.
     action = str(form.get("details_action") or "")
+    # ADR-0070 B5: "Use this spelling" changes only that name field, keeps every other unsaved
+    # choice and saves nothing (a redraw, like Use these).
+    if action.startswith("use_spelling") and view.get("details"):
+        parts = action.split(":", 2)
+        draft = dict(form)
+        # A malformed value (wrong shape or a field other than a name field) is ignored: the
+        # submitted page is redrawn as it was, and nothing is written.
+        if (len(parts) == 3 and parts[0] == "use_spelling"
+                and re.fullmatch(r"author_name_\d{1,3}|publisher_name", parts[1])):
+            draft[parts[1]] = parts[2]
+        return HTMLResponse(review_html.render_source_screen(view, draft=draft))
     if action in ("add_rows", "use_suggestion") and view.get("details"):
         draft = dict(form)
         if action == "add_rows":
