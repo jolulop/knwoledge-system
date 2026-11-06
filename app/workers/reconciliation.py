@@ -30,7 +30,8 @@ from app.backend import manifests
 
 PRODUCERS = {"generate_synthesis": "Synthesis"}
 SCREEN_NOTICES = {
-    "Synthesis": "Synthesis hasn't run since these details changed; run it to reconcile them.",
+    "Synthesis": ("Topic summaries haven't been updated since you changed these details. "
+                  "Run synthesis to update them."),
 }
 LINT_TEXT = {
     "generate_synthesis": ("Synthesis hasn't run since this document's provenance changed",

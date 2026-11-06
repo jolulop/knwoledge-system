@@ -557,11 +557,13 @@ critical rules and `CONTEXT.md` for the glossary.
   id-keyed**, and the file explorer/tabs/graph therefore show ids — that is by design, not a bug.
   Tag pages in `Items/` are named by slug (ADR-0071: plain for a lossless name, otherwise
   `<base>--<8 hex>`).
-- **Obsidian is installed in WSL** (apt `.deb`, WSLg; it self-updated to 1.15.0 on 2026-11-02 via
-  `~/.config/obsidian/obsidian-1.15.0.asar` — renaming that file falls back to the installed 1.14.5).
+- **Obsidian is installed in WSL** (apt `.deb`, WSLg; the package itself is 1.15.0 since 2026-11-06 —
+  an in-app "installer update" prompt means: download the new `.deb` from the obsidian-releases GitHub
+  page and `sudo apt install ./obsidian_<ver>_amd64.deb`).
   Since 2026-10-31 the launcher uses **software rendering**:
-  `obsidian --no-sandbox --disable-gpu --enable-unsafe-swiftshader --ozone-platform=wayland`
-  (the SwiftShader flag since 2026-11-04, for the graph view's WebGL fallback) — the GPU line
+  `obsidian --no-sandbox --disable-gpu --enable-unsafe-swiftshader --ozone-platform=wayland --password-store=basic`
+  (the SwiftShader flag since 2026-11-04, for the graph view's WebGL fallback; `--password-store=basic`
+  since 2026-11-06, so the 1.15.0 package doesn't ask for a gnome-keyring password on every start) — the GPU line
   (`GALLIUM_DRIVER=d3d12 … --use-gl=angle --use-angle=gl`) blanked the window on the graph view; it
   is kept commented in the launcher. Native Wayland, because under X11 clicks land off-target on a
   maximized window at 125% Windows scaling. On this machine `~/.local/bin/obsidian` and

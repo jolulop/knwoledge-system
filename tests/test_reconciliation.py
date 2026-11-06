@@ -134,8 +134,8 @@ def test_the_document_screen_names_the_pending_producer(tmp_path, monkeypatch):
     _confirm(tmp_path, a, _a("Alice", "Carol"))
     monkeypatch.setattr(main_module, "settings", get_settings(tmp_path))
     html = TestClient(main_module.app).get(f"/ui/reviews/sources/{a}").text
-    assert "Synthesis hasn&#x27;t run since these details changed" in html \
-        or "Synthesis hasn't run since these details changed" in html
+    assert "Topic summaries haven&#x27;t been updated since you changed these details" in html \
+        or "Topic summaries haven't been updated since you changed these details" in html
     # ADR-0069 slice 2(a): no contradiction reconciliation notice (no proposal is stale here).
     assert "Proposed contradictions involving this document weren" not in html
     assert "Contradiction detection" not in html

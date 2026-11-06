@@ -370,8 +370,8 @@ Details, so do this on a few documents, sharing at least one author between two 
   its names leave the Authors pages. Clear can't be combined with editing or confirming the details
   in the same save.
 - Changing a confirmed **author or publisher** changes which documents count as independent. The
-  screen then shows "**Synthesis** hasn't run since these details changed", and lint reports
-  `awaiting_reconciliation`, until you re-run `scripts/generate_synthesis.py`. Title and show-page
+  screen then shows "Topic summaries haven't been updated since you changed these details", and
+  lint reports `awaiting_reconciliation`, until you re-run `scripts/generate_synthesis.py`. Title and show-page
   edits don't need it. Proposed contradictions are re-checked in the same save (ADR-0069 slice
   2(a)): one whose documents are no longer independent is retired, and the result says
   "N proposed contradiction(s) retired". There is no contradiction notice to clear.
