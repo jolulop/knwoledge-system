@@ -2,7 +2,8 @@
 
 - **Status:** accepted — design-locked by grill-phase 2026-11-06 (Q1–Q11). **Slice 1 (decisions
   2–8, 12) implemented 2026-11-06**. Slice 2 grilled 2026-11-08 (decisions 13–17); **slice 2
-  (decisions 9–10, 13–17) implemented 2026-11-08**; slice 3 (decision 11) not implemented.
+  (decisions 9–10, 13–17) implemented 2026-11-08**. Slice 3 grilled 2026-11-08 (decisions 18–23,
+  amending decision 11); slice 3 not implemented.
 - **Date:** 2026-11-06
 - **Drivers:** ADR-0072's B2a outcomes exposed pre-existing executor behaviour ("Existing behaviour
   the outcomes made visible", items 1–8; item 1 was fixed in B2a review round 1). This ADR decides
@@ -256,6 +257,12 @@ Every other page/graph disagreement stays blocked and goes to the manual recover
 
 ## Decision 11 — `scripts/repair_supersede.py` (grill Q11)
 
+> **Amended by the slice 3 grill (2026-11-08):** `rollback-edge` initiates the shared rollback
+> recovery and never ends the journal; Apply owns completion and journal cleanup (decision 18). It
+> requires an open journal bound to the current approval; with no journal nothing is written
+> (decision 19). `resync-mirror` is dropped in favour of hardened publication (decision 20). When it
+> is offered, the fingerprint and the interface: decisions 21–23.
+
 An argparse script (so `--help` is safe), read-only by default. No "complete" command exists:
 asserting that an unmarked deprecation belongs to an operation would invent ownership.
 
@@ -472,6 +479,263 @@ conflicting rollback entries; a fresh approval generation executing normally; re
 `rolling_back` that meets matching completion evidence (marker or completion audit) makes no
 mutation; completion evidence that became unreadable before recovery makes no mutation.
 
+## Decision 18 — `rollback-edge` initiates recovery; Apply completes it (slice 3 grill Q1, 2026-11-08)
+
+**Amends decision 11.** `repair_supersede.py rollback-edge` no longer "ends the journal" or
+"removes the journal last". The script **initiates** the decision-17 rollback recovery; **Apply owns
+its completion and the journal's cleanup**. The script never publishes and never closes a journal
+on its own.
+
+**Why.** A second rollback implementation would bypass what slice 2 established. Decision 17's
+rollback audit is what consumes the approval generation; a script record of its own would let the
+next Apply see "approved, no journal, nothing owned active" and execute the supersede again,
+undoing the human's choice. Slice 2 review round 1 also made Apply the only closer of a journal,
+and only once publication is `published`.
+
+**Protocol.** One shared rollback entry point in `app/workers/supersede.py` serves Apply's row 7,
+Apply's `rolling_back` recovery and the script; `_rollback`'s logic is not duplicated. Under the
+write lock, after the run guards and the `--expected-state` fingerprint check:
+
+1. the journal binding checks (decision 10 row 1) and the completion-evidence guard;
+2. **queue the affected derived views** (both endpoint Claim pages, `wiki/index.md`, search)
+   **before the first mutation**, the `rolling_back` transition included;
+3. durably record the intent: the journal stage `rolling_back`, persisting with it the repair id,
+   `actor: "repair_supersede"`, the `--reason` and the expected-state fingerprint;
+4. the shared rollback: the guard again, only the owned edge set to `superseded`, the decision-17
+   rollback audit (consumes the approval generation);
+5. the separate repair audit (who, why, expected state, repair id), written from the values saved
+   with the intent. It is never completion evidence;
+6. stop. The script reports that publication is pending and that the next Apply finishes the
+   recovery and closes the journal.
+
+**Recovery uses the saved intent.** Any later Apply resuming a `rolling_back` journal that carries
+repair metadata finishes steps 4–5 idempotently from the persisted values, **even if the script
+never runs again**. Reuse rules as decision 13 (an existing entry is reused only when it validates,
+is flushed again, never overwritten). Every recovery keeps the journal binding checks and runs the
+completion-evidence guard again before any further mutation; restored prerequisites never restart
+the supersede (decision 17).
+
+**Reopen.** Writing the consumed-approval audit prevents re-execution, but while the journal is
+open the effect is still in flight (`UNKNOWN`, reopen blocked). **Reopen becomes available only
+after Apply closes the journal**, which it does once publication is `published`.
+
+**Tests:** interruption before and after the intent, after the edge update, after each audit and
+around publication; repeated script invocation; prerequisites restored during recovery (the
+rollback still finishes); a publication failure retaining the journal; the eventual Apply closing
+the journal, followed by a successful reopen.
+
+## Decision 19 — `rollback-edge` is strictly compensating; any-generation completion guard (slice 3 grill Q2, 2026-11-08)
+
+**No journal, no rollback write.** The state "owned active `supersedes` edge, active loser, no
+journal" is **unexpected**, not impossible. Since slice 2 Apply begins the journal before the edge
+and ends it only after the deprecation or the rollback, so the executor does not leave this state
+on its own. But a clean restart is a planned operational boundary, not a guarantee, and a consistent
+backup can still preserve an already-interrupted or historical state. Locking prevents concurrent
+writes; it does not prove every recorded operation completed. Lost metadata (`reviews/in_flight/`
+removed) reaches it too. In that state an edge carries only `review_id`, which survives reapproval,
+so nothing binds it to a generation. `rollback-edge` therefore offers **no write**, even when the
+current approval is canonical. `inspect` reports the uncertainty (an owned edge with no journal;
+the generation that wrote it is unknown; "no safe repair determined") **without inferring a cause**,
+and names the last resorts: `scripts/backup.py` restore or a governed reversal. Decision 11's rule
+"uncertain completed effects need governed reversal" stands unamended.
+
+**`rollback-edge` requires** (in addition to the decision-18 protocol):
+- an open, readable journal whose binding matches the **current** approval's `approval_id`,
+  winner and derived loser (decision 10 row 1);
+- the loser **active in both page and graph**, page readable and consistent (a hidden loser stays
+  blocked);
+- **exactly one** owned `supersedes` edge for the pair, and it is active;
+- the `--expected-state` check under the lock, the durable intent (decision 18), and Apply-owned
+  closure.
+
+**Any-generation completion guard.** The shared completion-evidence guard (decision 10) is widened,
+for Apply's rollback and the script alike:
+- a completion marker on the loser naming **this `review_id` under any `approval_id`**, or a valid
+  completion audit (`<review_id>-superseded-<any approval_id>.json`) from **any generation**,
+  **forbids** rollback;
+- an unreadable or conflicting candidate audit, or an audit directory that **cannot be fully
+  scanned**, **blocks** rollback: an incomplete scan never establishes absence;
+- the existing rules stay (a completed journal stage forbids; unreadable page or journal blocks;
+  a missing marker alone never authorizes).
+
+*Why:* an earlier generation can complete, the loser later become active again (its marker kept,
+decision 16), and the review be reapproved. A guard matching only the current `approval_id` would
+then let a rollback withdraw an edge a completed generation wrote.
+
+**Deferred — operator-governed withdrawal.** An explicit command to withdraw an uncertain
+review-owned edge and consume the current approval, whose audit records that the operator withdrew
+it without asserting which generation wrote it. **Trigger:** the no-journal state is actually
+observed in a vault.
+
+**Tests:** no journal with a canonical approval → no write offered or performed; a historical
+marker from an earlier generation forbids rollback (the reapproval example above); a completion
+audit from an earlier generation forbids; an unreadable or conflicting candidate audit blocks; an
+unscannable audit directory blocks; a hidden loser blocks; two owned edges block.
+
+## Decision 20 — `resync-mirror` is dropped; ordinary publication is hardened (slice 3 grill Q3, 2026-11-08)
+
+**Amends decision 11.** `repair_supersede.py` keeps read-only `inspect` plus **one** governed write
+command, `rollback-edge`. The `resync-mirror` command is removed: publication already mirrors a
+Claim page's saved status into the graph (`claims.mirror_page_status`, run by
+`publication._render_claims` on every claim it publishes, ADR-0022), so a second repair command for
+the same projection is unnecessary. Ordinary projection repair writes no separate repair audit.
+
+**One shared page-authority check.** Publication's mirror and render both go through a single check
+of the Claim page before using it:
+- **Identity:** the page's frontmatter `claim_id` must equal the claim being published. A
+  wrong-owner page is reported `claim_identity_mismatch` and **excluded from both mirroring and
+  rendering**, so neither the page nor the graph changes. (Returning `False` from the mirror alone
+  is insufficient: `recompose_claim` would still render over it.)
+- **Readable marker and supported status**, as today: an unreadable or damaged marker
+  (decision 16) or an unsupported status mirrors nothing, and the render reports the page.
+- **Durability barrier for marked pages:** before a page carrying a supersede completion marker is
+  mirrored into the graph, it is flushed again (`claims.sync_page_durably`), exactly as slice 2's
+  recovery does, so publication repairing a lagging mirror never bypasses that barrier. A flush
+  failure leaves the graph unchanged and the page reported, and is retried on the next run.
+
+**Journals.** Publication never touches a supersede journal. It stays open until Apply completes its
+existing recovery (with a marked page, decision 10 row 3 or 5) and the published-only close
+(slice 2 review round 1).
+
+**Two publication routes, named precisely by `inspect`:**
+- the affected claim is **already queued** in `db/publication_pending.json` → **Retry publishing**
+  (or `scripts/republish.py`), then Apply;
+- otherwise → `uv run python scripts/republish.py --all`, then Apply.
+
+**Tests:** a foreign `claim_id` (mirror and render both excluded, page and graph unchanged,
+`claim_identity_mismatch` reported); supported and unsupported statuses; damaged and unreadable
+markers; repeated page-flush failure on a marked page (graph unchanged each time, repaired once the
+flush succeeds); publication repairing a lagging mirror while the supersede journal stays open, then
+Apply completing and closing it.
+
+## Decision 21 — when `rollback-edge` is offered (slice 3 grill Q4, 2026-11-08)
+
+**Offered whenever the strict preconditions hold** (decision 19, the journal at `started` or
+`edge_written`, and the any-generation completion guard passing), **not only when Apply is
+blocked.** The human is explicitly withdrawing an unfinished operation: completion must still be
+unproven and the rollback safe. Apply's row 7 already rolls back by itself when the prerequisites
+fail; the gap this covers is an operation whose prerequisites hold but which cannot, or should not,
+finish. The concrete case is `marker_conflict`: the loser carries **another review's** completion
+marker (an earlier supersede completed, the loser later became active again, decision 16 kept the
+marker), so every Apply blocks at the recompose and never rolls back.
+
+**What `inspect` says**, from the inspected state and the shared checks, never from the last Apply
+outcome (that is a stale view):
+- **a deterministic blocker** → named with its evidence, e.g. `marker_conflict` and the conflicting
+  review id;
+- **prerequisites currently hold** → "Apply can attempt to complete this supersede. Rolling back
+  withdraws this approval; another attempt requires reopening and deciding again." It never promises
+  completion: rendering or I/O may still fail;
+- **already `rolling_back`** → no new write offered; the operator is directed to Apply;
+- **unreadable evidence** → a refusal, reported as such. It is never described as something the
+  completion-evidence guard tolerates.
+
+**Under the lock** the write command repeats **every** check (run guards, `--expected-state`,
+journal binding, preconditions, the guard) against the fingerprint it was given; any difference
+writes nothing.
+
+**Tests:** voluntary rollback of a completable operation; rollback after a foreign-marker
+conflict; stale inspection (the state changed after `inspect` → nothing written); refusal after
+completion evidence appears between inspect and write. Both allowed cases consume the approval
+(decision-17 rollback audit) and retain the journal for Apply-owned closure (decision 18).
+
+## Decision 22 — the `--expected-state` fingerprint (slice 3 grill Q5, 2026-11-08)
+
+**Content-based, not a vault revision.** The vault revision (`app/backend/revision.py`) is too broad
+(any tag action invalidates it) and misses edits made outside the write lock, such as a Claim page
+edited by hand in Obsidian. No vault-wide revision is used.
+
+**Shape.** A full SHA-256 hex digest (the `apply_gate.code_fingerprint` convention) over a canonical
+JSON payload, beginning with a version tag `"supersede-state-v1"`. The tag changes whenever the
+fingerprint's contents **or** the recovery-policy semantics change, so a fingerprint printed under an
+older policy never authorizes a write under a newer one.
+
+| Part | Content |
+|---|---|
+| target | the resolved vault root, the review id and both endpoint claim ids |
+| review | **every** ledger location (`reviews/pending/`, `approved/`, `rejected/`), each with presence, readability and byte hash. An interrupted move can leave several copies; **ambiguous copies refuse the write** |
+| journal | byte hash, or `absent` / `unreadable` |
+| supersedes edges | every `supersedes` edge between the pair, both directions, owned and foreign: sorted (edge_id, src, dst, status, review_id, asserted_by) |
+| prerequisites | both endpoints' graph statuses; the pair's `contradicts` edges (edge_id, status) |
+| pages | byte hash of both endpoint Claim pages, or `absent` / `unreadable` |
+| audits | sorted (name, byte hash) of every `reviews/audit_log/<review_id>-*` entry (completion, rollback, repair; any generation), or `unscannable` |
+
+**One captured snapshot.** The parsed preconditions, `inspect`'s warning text and the fingerprint
+are all derived from **the same captured bytes and graph rows**; files are never reread separately
+for hashing and for interpretation. The locked execution check captures a **fresh** snapshot and
+compares its fingerprint with `--expected-state`. `inspect` prints the fingerprint inside the exact
+command line it offers.
+
+**A matching fingerprint is necessary, never sufficient.** A fingerprint that records unreadable or
+unscannable evidence can match, and the safety checks still refuse the write. Strictness is
+deliberate: a re-render or any byte change means "state changed — inspect again"; a false mismatch
+costs a second `inspect`, a false match could authorize a write against evidence the operator never
+saw.
+
+**Run guards stay out of it.** They are independent lock-time checks; a run starting and ending must
+not invalidate an otherwise unchanged inspected state.
+
+**Tests:** duplicate ledger copies (the write refused); a cross-vault mismatch (same review id, other
+root); hand edits to an endpoint page; audit entries added or removed; a foreign edge changing; an
+unrelated tag action leaving the fingerprint unchanged.
+
+## Decision 23 — the script's interface and how Apply points to it (slice 3 grill Q6, 2026-11-08)
+
+**Run guards.** `rollback-edge` takes, **non-blocking and in a fixed order, before the vault write
+lock**, the guards of the runs whose multi-commit work can change what the fingerprint reads:
+`apply`, `extract_claims`, `detect_contradictions`, `republish`, `reconcile_reviews` (the existing
+entry-point names). If any acquisition fails it **releases every guard already acquired** and exits
+3. Other runs (tagging, vector reindex, synthesis, Source pages) are not guarded. They can still
+change these inputs indirectly, for example by draining pending publication and so refreshing Claim
+pages, but their commits stay serialized by the write lock and are caught by the fresh fingerprint
+check under the lock (decision 22).
+
+**`inspect` is read-only:** no write lock with changes, no run guards, it never advances the vault
+revision and never initializes a missing authority store (a missing `reviews/`, graph or audit
+directory is reported as such).
+
+**Exit codes** (aligned with `scripts/apply_reviews.py` where the meaning overlaps):
+
+| Code | Meaning |
+|---|---|
+| 0 | `inspect` produced its diagnostic report (**even when it offers no safe repair**); `rollback-edge` recorded the intent and finished its steps |
+| 1 | a refused write (a safety check, no safe repair) or an operational failure |
+| 2 | usage (argparse; `--help` is safe) |
+| 3 | a guarded run is in progress |
+| 4 | the publication queue is unreadable (`scripts/republish.py --repair`) |
+| 6 | state changed: inspect again (`--expected-state` mismatch) |
+| 9 | `revision_unavailable` (the write lock could not advance the vault revision) |
+
+`inspect --json` prints the snapshot facts, the offered command and the fingerprint.
+
+**Failure after a mutation** reports honestly whether the repair intent (decision 18) was durably
+recorded and what Apply must finish. It is **never** labelled "nothing changed", and its message is
+distinct from a pre-write refusal; no extra exit code is needed (it exits 1).
+
+**Apply names the inspect command** — `uv run python scripts/repair_supersede.py inspect
+<review_id>` — in the next-step text for the reasons that block without a recovery of their own:
+`supersede_state_unverified`, `loser_deprecated_unmarked`, `supersede_journal_invalid`,
+`supersede_journal_unreadable`, `completion_evidence_found`, `rollback_evidence_unreadable`,
+`completion_audit_conflict`, `rollback_audit_conflict`, `marker_conflict`,
+`supersedes_edge_foreign`; and `marker_unreadable` keeps its `validate_all.py` text with the
+inspect command added. The lint `supersede_state_unverified` message names it too. Not named:
+`supersede_in_flight` (Apply resumes it) and the prerequisite reasons (the Information and
+Attention groups explain them).
+
+**Rollback wording.** While its journal is still open, `partial_supersede_withdrawn` says: "Finish
+recovery with Apply, then reopen if another attempt is wanted." (Reopen is unavailable until Apply
+closes the journal, decision 18.) `supersede_withdrawn`, which applies after closure, keeps the
+direct reopen instruction.
+
+**Docs:** a "Supersede recovery" section in `docs/Operations.md`: `inspect` first; the two
+publication routes (decision 20); `rollback-edge` and the approval it consumes; Apply finishing the
+recovery and closing the journal, reopen after that; `scripts/backup.py` restore as the last resort.
+
+**Tests:** each busy guard refuses (exit 3) with nothing written; release after a partial
+acquisition (no guard left held); `inspect` is read-only (no revision change, no store created);
+the exit-code mapping; accurate output after an interrupted repair (intent recorded, Apply to
+finish).
+
 ## Tests (required)
 
 - **Synthesis:** an old rejection cannot override approval of the current version; an old approval
@@ -494,15 +758,17 @@ mutation; completion evidence that became unreadable before recovery makes no mu
 - **Repair script:** `--expected-state` mismatch writes nothing; rollback refused after an
   established completion; a crash immediately after the marked page write → `rollback-edge` is
   refused even with no completion stage and no audit; unreadable completion evidence → rollback
-  writes nothing; `resync-mirror` preserves the journal and the authoritative page; resync refuses
-  unsupported statuses; retry after interruption.
+  writes nothing; retry after interruption. Plus the tests listed under decisions 18–23
+  (`resync-mirror` is dropped, decision 20; its projection cases move to publication).
 
 ## Recommended implementation order
 
 1. **Slice 1 — synthesis version binding** (decisions 2–8), with item 8 (decision 12).
 2. **Slice 2 — guarded supersede** (decisions 9–10, 13–17): durable identity journal, binding, marker,
    precedence, shared effect check, the two report-only lints.
-3. **Slice 3 — `repair_supersede.py`** (decision 11) + Operations doc.
+3. **Slice 3 — `repair_supersede.py`** (decision 11 as amended by decisions 18–23): the shared
+   rollback entry point and any-generation guard, the hardened publication authority check, the
+   script (`inspect`, `rollback-edge`), Apply's inspect wording, and the Operations doc.
 
 ## Implementation notes — slice 1 (2026-11-06)
 
