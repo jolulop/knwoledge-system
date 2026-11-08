@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 import urllib.parse
 from typing import Any
 
@@ -539,8 +540,87 @@ def _reopen_section(review_id: str, effect_status: str | None) -> str:
             "<button type='submit'>Reopen</button></form>")
 
 
+_VERSION_PROBLEMS = {
+    "synthesis_artifact_missing": "The synthesis text is missing.",
+    "synthesis_artifact_unreadable": "The synthesis text can't be read.",
+    "synthesis_artifact_invalid": "The synthesis text is malformed",
+    "synthesis_digest_mismatch": "The synthesis text doesn't match its recorded version.",
+}
+
+
+def _version_usable(version: dict[str, Any] | None) -> bool:
+    """A version a decision can be recorded for: valid, for the review's inputs, and not in the
+    middle of an interrupted regeneration (ADR-0073 decision 4)."""
+    return bool(version and version.get("ok") and version.get("for_review_inputs")
+                and version.get("proposal_agrees") is not False)
+
+
+def _version_section(item: dict[str, Any], version: dict[str, Any] | None) -> str:
+    """ADR-0073 decision 4: the version itself — title, summary, confidence and the full synthesis
+    text, escaped — so the human sees exactly what a decision is bound to."""
+    if version is None:
+        return ""
+    if not version.get("ok"):
+        problem = str(version.get("problem") or "")
+        text = _VERSION_PROBLEMS.get(problem, "The synthesis text can't be used.")
+        if version.get("field"):
+            text += f" (field: {version['field']})"
+        return ("<h2>Synthesis version</h2>"
+                f"<p class='banner'>{_h(text)} Nothing can be decided or applied until "
+                "scripts/generate_synthesis.py writes it again.</p>")
+    rows = {"title": version.get("title"), "summary": version.get("summary"),
+            "confidence": version.get("confidence"),
+            "version": str(version.get("version_digest"))[:12]}
+    notes = []
+    if not version.get("for_review_inputs"):
+        notes.append("This synthesis was regenerated from other evidence than this review's; the "
+                     "text below is the current one, not the one this review proposed.")
+    if version.get("proposal_agrees") is False:
+        notes.append("An interrupted regeneration left this proposal and the synthesis text "
+                     "disagreeing. Run scripts/generate_synthesis.py to finish it, then review again.")
+    bound = item.get("decided_version_digest")
+    if item.get("status") in ("approved", "rejected"):
+        if bound is None:
+            notes.append("This decision was recorded before decisions named a version, so Apply "
+                         "won't carry it out until it is decided again for the version shown.")
+        elif bound != version.get("version_digest"):
+            notes.append("This decision was made for an earlier version of the text; Apply won't "
+                         "carry it out on this one.")
+    page = (item.get("proposal") or {}).get("synthesis_id")
+    link = (f"<p class='help'>Synthesis page: <code>Synthesis/{_h(page)}.md</code></p>"
+            if isinstance(page, str) and re.fullmatch(r"syn_[0-9a-f]{16}", page) else "")
+    return ("<h2>Synthesis version</h2>"
+            + "".join(f"<p class='banner'>{_h(n)}</p>" for n in notes)
+            + _render_value(rows)
+            + "<h3>Full text</h3>"
+            + f"<div class='synthesis-text'><p>{_h(version.get('synthesis')).replace(chr(10), '<br>')}"
+              "</p></div>"
+            + link)
+
+
+def _decide_again_section(review_id: str, item: dict[str, Any],
+                          version: dict[str, Any] | None) -> str:
+    """ADR-0073 decision 7: "Decide again for the version shown" — only for a legacy decision with
+    no recorded version, on the current inputs, where reopen is refused because the effect is live."""
+    if (item.get("type") != "propose_synthesis" or item.get("decided_version_digest") is not None
+            or not _version_usable(version)):
+        return ""
+    rid = _h(review_id)
+    buttons = "".join(f"<button type='submit'{_tier(a)} name='action' value='{a}'>{label}</button> "
+                      for a, label in (("approve", "Approve this version"),
+                                       ("reject", "Reject this version")))
+    return ("<h2>Decide again for the version shown</h2>"
+            "<p>The decision above names no version. Record it again for the text shown above; the "
+            "previous decision is kept in the audit log. Nothing changes until Apply.</p>"
+            f"<form method='post' action='/ui/reviews/{rid}/decide-again'>"
+            f"<input type='hidden' name='version_digest' value='{_h(version['version_digest'])}'>"
+            "<p><label>Note (optional): <input type='text' name='note' size='50'></label></p>"
+            f"{buttons}</form>")
+
+
 def _decision_section(review_id: str, item: dict[str, Any], *, invalid_subject: bool = False,
-                      effect_status: str | None = None) -> str:
+                      effect_status: str | None = None,
+                      version: dict[str, Any] | None = None) -> str:
     # Terminal items (approved/rejected) are immutable — show the recorded decision, not forms that
     # the backend would 409. Forms stay for pending/deferred (deferred is non-terminal). A terminal item
     # also gets the ADR-0045 reopen affordance (gated on effect_status).
@@ -550,10 +630,23 @@ def _decision_section(review_id: str, item: dict[str, Any], *, invalid_subject: 
                 "decided_at": item.get("decided_at"), "note": item.get("decision_note")}
         if item.get("winner"):  # ADR-0044: the recorded contradiction supersede winner
             meta["winner"] = item["winner"]
+        if item.get("type") == "propose_synthesis":   # ADR-0073: the version it is bound to
+            bound = item.get("decided_version_digest")
+            meta["version"] = str(bound)[:12] if bound else "none recorded (decided before versions)"
+        again = (_decide_again_section(review_id, item, version)
+                 if reopen_block_reason(effect_status) is not None else "")
         return ("<h2>Decision (recorded)</h2>" + _render_value(meta)
                 + "<p>Effects are applied via <a href='/ui/reviews/apply'>Apply</a>.</p>"
-                + _reopen_section(review_id, effect_status))
+                + _reopen_section(review_id, effect_status) + again)
     rid = _h(review_id)
+    if item.get("type") == "propose_synthesis":
+        if not _version_usable(version):
+            return ("<h2>Decision</h2><p>No decision can be recorded on this version: see "
+                    "<em>Synthesis version</em> above.</p>")
+        digest_field = (f"<input type='hidden' name='version_digest' "
+                        f"value='{_h(version['version_digest'])}'>")
+    else:
+        digest_field = ""
     # ADR-0044: a resolve_contradiction offers winner selection — Acknowledge (both stand) /
     # Supersede A|B / Reject / Defer. Each button is one atomic action the decide handler translates.
     if item.get("type") == "resolve_contradiction" and not invalid_subject:
@@ -587,7 +680,7 @@ def _decision_section(review_id: str, item: dict[str, Any], *, invalid_subject: 
             "<p>Decisions are recorded only; effects are applied later via "
             "<a href='/ui/reviews/apply'>Apply</a>.</p>"
             f"{warn}"
-            f"<form method='post' action='/ui/reviews/{rid}/decide'>"
+            f"<form method='post' action='/ui/reviews/{rid}/decide'>{digest_field}"
             "<p><label>Note (optional): <input type='text' name='note' size='50'></label></p>"
             f"{buttons}</form>")
 
@@ -633,9 +726,11 @@ def render_detail(result: dict[str, Any], *, review_id: str) -> str:
         "<h2>Preview</h2>", _render_value(preview_rows),
         "<h2>Apply state</h2>", _render_value(apply_rows),
         "<h2>Details</h2>", _render_value(preview.get("details") or {}),
+        _version_section(item, preview.get("synthesis_version")),
         _stored_proposal(item),
         _decision_section(review_id, item, invalid_subject=bool(preview.get("invalid_subject")),
-                          effect_status=ap.get("effect_status")),
+                          effect_status=ap.get("effect_status"),
+                          version=preview.get("synthesis_version")),
     ]
     return _page(f"Review {review_id}", "".join(body))
 
@@ -646,11 +741,39 @@ def render_detail(result: dict[str, Any], *, review_id: str) -> str:
 _BULK_VERBS = {"reject": ("Reject", "rejected"), "defer": ("Defer", "deferred")}
 
 
+def _version_blocker(version: dict[str, Any]) -> str:
+    """Why no decision can be recorded for this synthesis version (`_version_usable` is False)."""
+    if not version.get("ok"):
+        text = _VERSION_PROBLEMS.get(str(version.get("problem") or ""),
+                                     "The synthesis text can't be used.")
+        return text + (f" (field: {version['field']})" if version.get("field") else "")
+    if not version.get("for_review_inputs"):
+        return "The synthesis was regenerated from other evidence than this review's."
+    return ("An interrupted regeneration left the proposal and the synthesis text disagreeing; "
+            "run scripts/generate_synthesis.py.")
+
+
+def _version_brief(version: dict[str, Any]) -> str:
+    """The version a bulk decision binds, shown on the confirmation row (ADR-0073 slice 1 review):
+    title, summary, confidence and short version, the full text behind a disclosure. Escaped."""
+    rows = {"title": version.get("title"), "summary": version.get("summary"),
+            "confidence": version.get("confidence"),
+            "version": str(version.get("version_digest"))[:12]}
+    return ("<div class='synthesis-version'>" + _render_value(rows)
+            + "<details><summary>Full text</summary><div class='synthesis-text'><p>"
+            + _h(version.get("synthesis")).replace(chr(10), "<br>") + "</p></div></details></div>")
+
+
 def render_bulk_confirm(action: str, rows: list[dict[str, Any]],
                         missing: list[str]) -> str:
     """Step 2: what the selected reviews are and what the decision leaves behind. Writes nothing; its
-    form carries each review's id AND decision fingerprint, rechecked when the decisions are recorded."""
+    form carries each review's id AND decision fingerprint, rechecked when the decisions are recorded.
+    A synthesis row SHOWS the version it binds and carries that version's digest; a synthesis whose
+    version can't be decided (ADR-0073 decision 4) is listed with why and left out of the form."""
     verb = _BULK_VERBS[action][0]
+    blocked = [r for r in rows if r.get("type") == "propose_synthesis"
+               and not _version_usable(r.get("version"))]
+    rows = [r for r in rows if r not in blocked]
     parts = [_nav(), f"<h1>{_h(verb)} {_h(len(rows))} selected review"
              f"{'s' if len(rows) != 1 else ''}?</h1>",
              "<p>Nothing has been recorded yet. Each review is checked again when you confirm: one "
@@ -658,17 +781,28 @@ def render_bulk_confirm(action: str, rows: list[dict[str, Any]],
     if missing:
         parts.append("<p class='banner'>Not found (left out): "
                      + ", ".join(f"<code>{_h(m)}</code>" for m in missing) + "</p>")
+    if blocked:
+        parts.append("<div class='banner'><p>Can't be decided now (left out):</p><ul>"
+                     + "".join(f"<li><a href='/ui/reviews/{_h(r['review_id'])}'>{_h(r['subject'])}"
+                               f"</a> <code>{_h(r['review_id'])}</code> — "
+                               f"{_h(_version_blocker(r.get('version') or {}))}</li>"
+                               for r in blocked) + "</ul></div>")
     if not rows:
         parts.append("<p><em>Nothing selected.</em> <a href='/ui/reviews'>Back to the queue</a></p>")
         return _page(f"{verb} selected", "".join(parts))
     items = []
     for r in rows:
+        version = r.get("version") if r.get("type") == "propose_synthesis" else None
         items.append(f"<li><a href='/ui/reviews/{_h(r['review_id'])}'>{_h(r['subject'])}</a> — "
                      f"{_h(type_label(r['type']))} <code>{_h(r['review_id'])}</code><br>"
                      f"<span class='help'>{_h(lasting_effect(r['type'], action))}</span>"
-                     f"<input type='hidden' name='rid' value='{_h(r['review_id'])}'>"
+                     + (_version_brief(version) if version else "")
+                     + f"<input type='hidden' name='rid' value='{_h(r['review_id'])}'>"
                      f"<input type='hidden' name='fp_{_h(r['review_id'])}' "
-                     f"value='{_h(r['fingerprint'])}'></li>")
+                     f"value='{_h(r['fingerprint'])}'>"
+                     + (f"<input type='hidden' name='vd_{_h(r['review_id'])}' "
+                        f"value='{_h(version['version_digest'])}'>" if version else "")
+                     + "</li>")
     parts.append("<form method='post' action='/ui/reviews/bulk'>" + _guard_for(action)
                  + f"<input type='hidden' name='bulk_action' value='{_h(action)}'>"
                  "<ul>" + "".join(items) + "</ul>"

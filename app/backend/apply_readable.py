@@ -201,6 +201,11 @@ REASONS = {
     "evidence_changed": "the evidence changed since the review was filed",
     "evidence_gone": "the evidence no longer exists",
     "synthesis_artifact_missing": "the synthesis text is missing",
+    "synthesis_artifact_invalid": "the synthesis text is malformed",
+    "synthesis_digest_mismatch": "the synthesis text doesn't match its recorded version",
+    "synthesis_version_replaced": "the decision was for an earlier version of the synthesis",
+    "decision_unbound": "the decision was recorded before decisions named a version; open the "
+                        "review and use Decide again for the version shown",
     "synthesis_artifact_unreadable": "the synthesis text can't be read",
     "synthesis_artifact_mismatch": "the synthesis text doesn't match the page",
     "synthesis_not_active": "the synthesis is not active",
@@ -278,10 +283,12 @@ def _tech(obj: Any) -> str:
 
 def model(handled: list[dict[str, Any]], reported: list[dict[str, Any]],
           not_appliable: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    """Group a run's outcomes: `{changes, in_effect, blocked, incomplete, not_reported}`."""
+    """Group a run's outcomes: `{changes, in_effect, information, blocked, incomplete,
+    not_reported}`. A skip flagged `information` (ADR-0073: a decision on a replaced synthesis
+    version) needs nothing from anyone, so it is listed once here, not under Attention needed."""
     rec = ao.reconcile(handled, reported)
-    groups: dict[str, list[dict[str, Any]]] = {"changes": [], "in_effect": [], "blocked": [],
-                                               "incomplete": []}
+    groups: dict[str, list[dict[str, Any]]] = {"changes": [], "in_effect": [], "information": [],
+                                               "blocked": [], "incomplete": []}
     for r in rec["outcomes"]:
         kind = r.get("outcome")
         key = {ao.APPLIED: "changes", ao.ALREADY_IN_EFFECT: "in_effect", ao.SKIPPED: "blocked",
@@ -290,6 +297,8 @@ def model(handled: list[dict[str, Any]], reported: list[dict[str, Any]],
             rec["gaps"].append({"review_id": r.get("review_id"), "type": r.get("type"),
                                 "gap": "malformed_outcome", "reports": [r]})
             continue
+        if key == "blocked" and (r.get("details") or {}).get("information") is True:
+            key = "information"
         groups[key].append(r)
     reported_ids = {str(r.get("review_id")) for r in reported}
     for na in not_appliable or []:                        # no executor: blocked, with its reason
@@ -304,7 +313,8 @@ def model(handled: list[dict[str, Any]], reported: list[dict[str, Any]],
 def render(groups: dict[str, Any], *, advisories: list[dict[str, Any]] | None = None,
            preview: bool) -> str:
     """The readable section of the preview (`preview=True`) or result page."""
-    every = [r for k in ("changes", "in_effect", "blocked", "incomplete") for r in groups[k]]
+    every = [r for k in ("changes", "in_effect", "information", "blocked", "incomplete")
+             for r in groups.get(k, [])]
     clash = collisions(every, advisories)
     parts = []
     changes = groups["changes"]
@@ -316,7 +326,8 @@ def render(groups: dict[str, Any], *, advisories: list[dict[str, Any]] | None = 
             parts.append(f"<h3>{_h(_label(t))}</h3><ul>" + "".join(
                 f"<li>{sentence(r, clash)}{_caveat(r)} {_link(r.get('review_id'))} {_tech(r)}</li>"
                 for r in rows) + "</ul>")
-    elif not any(groups[k] for k in ("in_effect", "blocked", "incomplete", "not_reported")):
+    elif not any(groups.get(k) for k in ("in_effect", "information", "blocked", "incomplete",
+                                         "not_reported")):
         parts.append("<p><em>Nothing " + ("would change" if preview else "was changed")
                      + ": there were no approved items to apply.</em></p>")
     else:
@@ -325,6 +336,14 @@ def render(groups: dict[str, Any], *, advisories: list[dict[str, Any]] | None = 
         n = len(groups["in_effect"])
         parts.append(f"<p>{n} decided review{'s' if n != 1 else ''} already in effect — nothing "
                      f"more to do. {_tech(groups['in_effect'])}</p>")
+    if groups.get("information"):
+        rows = "".join(f"<li>{sentence(r, clash)}: "
+                       f"{_h(reason_text(r.get('reason'), r.get('details') or {}))}. "
+                       f"{_link(r.get('review_id'))} {_tech(r)}</li>"
+                       for r in groups["information"])
+        parts.append("<h2>Information</h2><p class='help'>Nothing to do — these decisions are "
+                     "for a version that has since been replaced, so Apply leaves them as they "
+                     "are.</p><ul>" + rows + "</ul>")
     attention = []
     for r in groups["blocked"]:
         d = r.get("details") or {}

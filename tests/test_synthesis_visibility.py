@@ -34,6 +34,18 @@ from tests import fixtures
 
 TOPIC = "itm_aaaaaaaaaaaaaaaa"
 SYN = synthesis.synthesis_id(TOPIC)
+FP = "0f0f0f0f0f0f0f0f"                 # the fixture artifact's input fingerprint (16 hex, ADR-0073)
+
+
+def bound_digest(tmp_path, topic=TOPIC):
+    """The version digest of the fixture artifact as it is now — what a decision recorded for the
+    version shown carries (ADR-0073 decision 4)."""
+    from app.workers import synthesis_version
+    version = synthesis_version.read(tmp_path / "normalized" / "enrichment", topic)
+    assert version["ok"], version
+    return version["digest"]
+
+
 SID = "src_0123456789abcdef"
 CX = "clm_aaaaaaaaaaaaaaaa"
 
@@ -82,7 +94,7 @@ def _active_synthesis(tmp_path, conn, *, claim_ids=(CX,), status="active"):
     (enrich / f"{TOPIC}.synthesis.json").write_text(json.dumps({
         "node_id": SYN, "topic_node_id": TOPIC, "title": "Solar trends",
         "summary": "Solar adoption is rising.", "synthesis": "Across sources solar grows.",
-        "confidence": 0.7, "input_fingerprint": "fp"}), encoding="utf-8")
+        "confidence": 0.7, "input_fingerprint": FP}), encoding="utf-8")
     synthesis._render_page(
         conn, syn_id=SYN, topic_node=TOPIC, title="Solar trends", summary="Solar adoption is rising.",
         synthesis_text="Across sources solar grows.", confidence=0.7, status=status,
@@ -255,7 +267,8 @@ def test_partial_page_hidden_survives_generate_resolved_and_retraction(tmp_path)
     (tmp_path / "reviews" / "rejected").mkdir(parents=True, exist_ok=True)
     (tmp_path / "reviews" / "rejected" / "rev_p.json").write_text(json.dumps({
         "review_id": "rev_p", "type": "propose_synthesis", "status": "rejected",
-        "subject": {"topic_node_id": TOPIC, "fingerprint": "fp"}}), encoding="utf-8")
+        "subject": {"topic_node_id": TOPIC, "fingerprint": FP},
+        "decided_version_digest": bound_digest(tmp_path)}), encoding="utf-8")
     summary = synthesis.generate_syntheses(
         tmp_path, client=_SpyClient(has_key=False), model_ref="m", rebuild_index=False, record_job=False)
     assert summary["rejected"] == 0 and summary["retracted"] == 0   # neither clobbered the hidden page
@@ -360,7 +373,8 @@ def test_preservation_apply_resolved_cannot_flip_hidden(tmp_path):
     conn.close()
     (tmp_path / "reviews" / "approved" / "rev_p.json").write_text(json.dumps({
         "review_id": "rev_p", "type": "propose_synthesis", "status": "approved",
-        "subject": {"topic_node_id": TOPIC, "fingerprint": "fp"},
+        "subject": {"topic_node_id": TOPIC, "fingerprint": FP},
+        "decided_version_digest": bound_digest(tmp_path),
         "proposal": {"to_status": "active"}}), encoding="utf-8")
     summary = synthesis.generate_syntheses(
         tmp_path, client=_SpyClient(has_key=False), model_ref="m", rebuild_index=False, record_job=False)

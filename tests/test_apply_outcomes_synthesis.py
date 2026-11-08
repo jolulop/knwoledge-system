@@ -60,9 +60,14 @@ def _set_page_status(tmp_path, status):
 
 
 def _propose(tmp_path, state, rid, topic=TOPIC):
-    _write_review(tmp_path, state, {
-        "review_id": rid, "type": "propose_synthesis", "status": state,
-        "subject": {"topic_node_id": topic, "fingerprint": "fp"} if topic else {}})
+    """A decision bound to the fixture artifact's current version (ADR-0073), when there is one."""
+    item = {"review_id": rid, "type": "propose_synthesis", "status": state,
+            "subject": {"topic_node_id": topic, "fingerprint": sv.FP} if topic else {}}
+    from app.workers import synthesis_version
+    version = synthesis_version.read(tmp_path / "normalized" / "enrichment", topic)
+    if version.get("ok"):
+        item["decided_version_digest"] = version["digest"]
+    _write_review(tmp_path, state, item)
 
 
 def _resolve(tmp_path, conn):
@@ -76,8 +81,8 @@ def _resolve(tmp_path, conn):
 def test_propose_approved_applied_then_already_in_effect_with_name_before_rerender(tmp_path):
     conn = sv._graph(tmp_path)
     sv._active_synthesis(tmp_path, conn, status="candidate")
-    _propose(tmp_path, "approved", "rev_p")
     _set_artifact_title(tmp_path, "Solar trends v2")    # the approval re-renders with a new title
+    _propose(tmp_path, "approved", "rev_p")             # ... the version it was decided for
 
     res = _resolve(tmp_path, conn)
     rec = _by_id(res)["rev_p"]
@@ -122,7 +127,7 @@ def test_propose_rejected_and_approved_one_outcome_each_and_skip_reasons(tmp_pat
     assert recs["rev_missing"]["reason"] == "missing_subject"
     assert recs["rev_missing"]["details"]["subject"] == {"id": "rev_missing", "name": "rev_missing"}
     nonode = recs["rev_nonode"]
-    assert nonode["reason"] == "node_missing"
+    assert nonode["reason"] == "synthesis_artifact_missing"   # ADR-0073: bound to a version first
     other = synthesis.synthesis_id("itm_bbbbbbbbbbbbbbbb")
     assert nonode["details"]["subject"] == {"id": other, "name": other}    # no page: the id
     assert res["rejected"] == apply_outcomes.counts(res["outcomes"])["applied"] == 1

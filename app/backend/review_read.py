@@ -1413,8 +1413,13 @@ def get_review(
     graph_db: Path | None = None,
     wiki_dir: Path | None = None,
     manifests_dir: Path | None = None,
+    enrichment_dir: Path | None = None,
 ) -> dict[str, Any] | None:
     """Return ``{item, preview}`` for one review id, or ``None`` if not found.
+
+    For a ``propose_synthesis`` with ``enrichment_dir`` given, ``preview["synthesis_version"]`` is the
+    version the human decides on (ADR-0073 decision 4): its full text, title, summary, confidence and
+    ``version_digest`` (which every decision path must send back), or the artifact problem.
 
     Read-only: opens the graph only if it already exists with a matching schema, and reads wiki
     pages without mutating them. A corrupt or schema-invalid review file is reported via a
@@ -1433,6 +1438,11 @@ def get_review(
     finally:
         if conn is not None:
             conn.close()
+    if item.get("type") == "propose_synthesis" and enrichment_dir is not None:
+        from app.workers import synthesis_version
+        topic = (item.get("subject") or {}).get("topic_node_id")
+        preview["synthesis_version"] = synthesis_version.describe(
+            synthesis_version.read(enrichment_dir, topic), item)
     return {"item": item, "preview": preview}
 
 

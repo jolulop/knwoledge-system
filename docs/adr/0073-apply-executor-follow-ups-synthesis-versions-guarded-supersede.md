@@ -1,6 +1,7 @@
 # ADR-0073 — Apply executor follow-ups: synthesis decisions bound to versions, guarded supersede
 
-- **Status:** accepted — design-locked by grill-phase 2026-11-06 (Q1–Q11). Not implemented.
+- **Status:** accepted — design-locked by grill-phase 2026-11-06 (Q1–Q11). **Slice 1 (decisions
+  2–8, 12) implemented 2026-11-06**; slices 2–3 not implemented.
 - **Date:** 2026-11-06
 - **Drivers:** ADR-0072's B2a outcomes exposed pre-existing executor behaviour ("Existing behaviour
   the outcomes made visible", items 1–8; item 1 was fixed in B2a review round 1). This ADR decides
@@ -51,8 +52,8 @@ Before computing a digest, the artifact's required fields are validated, with **
 always **recomputed** from the validated fields.
 
 - A stored `version_digest` must equal the recomputed one. A mismatch is malformed: a refusal.
-- **Legacy-format artifact:** a valid artifact without a stored `version_digest`. The recomputed
-  digest is its version digest. It is displayable and decidable as is. **No migration and no artifact
+- **Legacy-format artifact:** a valid artifact without the `version_digest` field (an explicit
+  null is malformed). The recomputed digest is its version digest. It is displayable and decidable as is. **No migration and no artifact
   write** is needed. The generator writes the field on its next write.
 - Missing, unreadable or malformed artifact → no mutation anywhere (Apply, decision paths).
 
@@ -327,6 +328,63 @@ test.
 2. **Slice 2 — guarded supersede** (decisions 9–10): durable identity journal, binding, marker,
    precedence, shared effect check, the two report-only lints.
 3. **Slice 3 — `repair_supersede.py`** (decision 11) + Operations doc.
+
+## Implementation notes — slice 1 (2026-11-06)
+
+- `app/workers/synthesis_version.py`: field validation, `compute_digest`, `read`, the decision-time
+  check (`decision_problem`) and the Apply binding (`apply_problem`). Reason codes:
+  `synthesis_artifact_missing` / `_unreadable` / `_invalid` (with the field), `synthesis_digest_mismatch`,
+  `synthesis_inputs_changed`, `synthesis_version_changed`, `synthesis_generation_interrupted`
+  (decision refusals), `synthesis_version_replaced` (Apply information) and `decision_unbound`.
+- The decision field is `decided_version_digest`, on the item and its audit entry; reopen clears it
+  (and keeps it in the reopened audit as `prior_decided_version_digest`). The artifact and the
+  pending proposal carry `version_digest`.
+- The authority check runs in `main._record_pending_decision` (under the write lock) for every path:
+  the form (`version_digest` hidden field), the JSON API (`version_digest` in the body; 400 when
+  missing or on another type) and bulk (the confirmation page carries `vd_<rid>` beside `fp_<rid>`).
+  The version is exposed as `preview.synthesis_version` on `GET /reviews/{id}`.
+- Apply: the binding check runs before the visibility and in-effect checks, so a replaced or unbound
+  decision is reported as such even when the synthesis is hidden. A replaced version is a `skipped`
+  outcome flagged `information`, rendered in its own *Information* group.
+- Decide again: `reviews.decide_again` (audit `<rid>-decided-again-<key>.json`, key over the replaced
+  decision, the new decision and the digest; audit written durably first). Endpoints
+  `POST /reviews/{id}/decide-again` and `POST /ui/reviews/{id}/decide-again`. The review page offers
+  it only where reopen is refused; otherwise reopen → decide is the path.
+- Regeneration: `reviews.refresh_pending_proposal` (audit `<rid>-proposal-refreshed-<attempt>.json`)
+  runs before the artifact write; `_commit_complete` also requires the pending proposal's digest to
+  match the artifact. The generator now refuses blank summary or text.
+- Validator: `scripts/validate_synthesis.py` (decision 8).
+- Tests: `tests/test_synthesis_versions.py`; existing synthesis fixtures now bind their decisions;
+  `tests/test_review_html._approved_concept_deprecation` uses a canonical id and its tests assert
+  the deprecation executed (decision 12).
+
+### Review round 1 (2026-11-07)
+
+- **In effect means the decided text is published.** When the graph and the page already hold the
+  target status, Apply compares the page byte-for-byte with `_page_content` for the bound artifact
+  at that status (`synthesis._rendering_matches`; byte-stable, no wall-clock fields). Equal →
+  `already_in_effect`; different → republished through `_render_page`, including its generated
+  claim links; unreadable → `verification_unavailable`. Every write is verified the same way: a
+  page at the right status but with other content is `postcondition_not_met`, never `applied`.
+  After a repair the next Apply writes nothing. The other hold branches (node missing, hidden,
+  graph and page disagreeing on status) stay skip-only.
+- **Decide-again retry durability.** A retry that finds the replacement already written repeats the
+  first attempt's barriers in order: audit flush → replacement file and directory flush →
+  predecessor deletion → flush of **both** terminal directories (`approved/`, `rejected/`). Both
+  are flushed even when no predecessor file remains, because an earlier run may have deleted it
+  and then failed to flush its directory; the retry reports completion only after both flushes
+  succeed. A terminal directory that does not exist (a same-status re-decision never creates the
+  opposite one) is skipped; a permission or I/O failure, or a `FileNotFoundError` for a directory
+  that does exist, propagates. If the audit entry for a predecessor that is still present is
+  missing or unreadable, the retry refuses (`DecideAgainRefused`) and keeps it. On the first
+  attempt a torn audit entry is written again before anything moves. (Review round 2.)
+- **Bulk confirmation shows what it binds.** Each `propose_synthesis` row shows the version (title,
+  summary, confidence, short version, full text in a disclosure) and carries that version's digest.
+  A synthesis whose version can't be decided (invalid, other inputs, interrupted regeneration) is
+  listed with the reason and left out of the form.
+- **Validation.** An integer `confidence` is compared exactly, so an oversized one is
+  `synthesis_artifact_invalid` instead of an `OverflowError`. Legacy format is the
+  `version_digest` field's absence; an explicit `null` is malformed (field `version_digest`).
 
 ## Consequences
 

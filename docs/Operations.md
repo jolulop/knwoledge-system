@@ -240,6 +240,23 @@ marks every extracted document and every possible synthesis topic, including wor
 before its first result was saved. The next runs redo the documents, mostly from the cache. They
 check the topics and clear the ones that are already complete.
 
+**Synthesis versions (ADR-0073).** A synthesis decision names the exact text the person saw: the
+review page shows the title, summary, confidence and the full synthesis text, and every decision
+(the form, `POST /reviews/{id}/approve|reject|defer` with `version_digest` from
+`GET /reviews/{id}` → `preview.synthesis_version`, bulk reject/defer) records that version's digest.
+A decision is refused ("changed — review again") when the text changed since it was shown, was
+regenerated from other evidence, or the synthesis file is missing or malformed. Apply carries out a
+decision only on its own version. A decision on a replaced version is listed under *Information*
+(nothing to do). A decision recorded before versions existed is blocked as `decision_unbound`: open
+the review and use **Decide again for the version shown** (`POST /reviews/{id}/decide-again`
+`{"decision", "version_digest"}`), which keeps the earlier decision in the audit log and changes
+nothing until Apply. `generate_synthesis.py --force` on a pending candidate updates its proposal to
+the new text (audited). If that run is interrupted between the two writes, decisions on it are
+refused and `validate_synthesis.py` says to rerun `scripts/generate_synthesis.py`. The same validator
+fails on a malformed synthesis file (an explicit `null` digest included) and reports a valid file
+without the digest field as an advisory only. Apply reports a synthesis decision as already in
+effect only when the page is exactly that version's rendering; otherwise it republishes it.
+
 ### Executor-backed review types (`POST /reviews/apply`)
 
 Every review type below has a deterministic, key-free executor (the canonical set is `_APPLY_TYPES` in
@@ -250,7 +267,7 @@ honestly under `unapplied` (record-only / raw-touching).
 |---|---|---|
 | `promote_candidate_node` | 0018/0035/0059 | Candidate knowledge item → `active` (an unclassified-sentinel candidate needs an `item_type` amendment first). |
 | `resolve_contradiction` | 0031 | Acknowledge / supersede / reject a `contradicts` edge. |
-| `propose_synthesis` | 0031 | Activate a `candidate` synthesis node. |
+| `propose_synthesis` | 0031/0073 | Activate (approve) or deprecate (reject) a `candidate` synthesis — only for the version the decision names (see *Synthesis versions* below). |
 | `deprecate_wiki_page` | 0035 | Scoped page deprecation → `deprecated_candidate`. |
 | `archive_source` | 0036 | Source `active` → `archive_candidate` (raw bytes untouched; manifest status flips). |
 | `mark_semantic_duplicate` | 0041 | `## Duplicates` annotation edge (no id rewrite). |

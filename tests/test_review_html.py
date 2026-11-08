@@ -132,23 +132,40 @@ def test_decide_unknown_action_is_html_400(client, tmp_path):
 # --- two-step apply --------------------------------------------------------
 
 
-def _approved_concept_deprecation(tmp_path):
+def _approved_concept_deprecation(tmp_path, node_id=None):
+    """One approved deprecation of the active tag "Thing". Its id is canonical by default
+    (ADR-0073 decision 12), so the deprecation really executes; `node_id` overrides it only for the
+    test of the page-ownership refusal. Returns the node id."""
+    from app.workers import items as items_mod
+    nid = node_id or items_mod.node_id("Thing")
     gdb = tmp_path / "db" / "graph.sqlite"
     gdb.parent.mkdir(parents=True, exist_ok=True)
     graph.init_db(gdb)
     conn = graph.connect(gdb)
-    graph.upsert_node(conn, node_id="itm_x", node_type="item", item_type="method_technique", slug="thing", status="active")
+    graph.upsert_node(conn, node_id=nid, node_type="item", item_type="method_technique", slug="thing", status="active")
     conn.commit()
     conn.close()
     page = tmp_path / "wiki" / "Items" / "thing.md"
     page.parent.mkdir(parents=True, exist_ok=True)
-    page.write_text('---\ntype: item\nitem_id: "itm_x"\nitem_type: method_technique\ntitle: "Thing"\nstatus: active\n'
+    page.write_text(f'---\ntype: item\nitem_id: "{nid}"\nitem_type: method_technique\ntitle: "Thing"\nstatus: active\n'
                     "review_status: none\naliases: []\n---\n", encoding="utf-8")
     _write_review(tmp_path, "approved", {
         "review_id": "rev_d", "type": "deprecate_wiki_page", "status": "approved",
-        "subject": {"node_id": "itm_x", "page": "Items/thing.md"},
+        "subject": {"node_id": nid, "page": "Items/thing.md"},
         "proposal": {"to_status": "deprecated_candidate", "reason": "x"},
         "context": {"node_type": "item"}})
+    return nid
+
+
+def _assert_thing_deprecated(tmp_path, nid):
+    """The intended state change (ADR-0073 decision 12): page AND graph at deprecated_candidate."""
+    page = tmp_path / "wiki" / "Items" / "thing.md"
+    assert "status: deprecated_candidate" in page.read_text(encoding="utf-8")
+    conn = graph.connect(tmp_path / "db" / "graph.sqlite")
+    try:
+        assert graph.get_node(conn, nid)["status"] == "deprecated_candidate"
+    finally:
+        conn.close()
 
 
 def test_apply_confirm_shows_dry_run_preview(client, tmp_path):
@@ -159,17 +176,24 @@ def test_apply_confirm_shows_dry_run_preview(client, tmp_path):
         "review_id": "rev_m", "type": "split_entity", "status": "approved",
         "subject": {}, "proposal": {}, "context": {}})
     body = client.post("/ui/reviews/apply/preview").text
-    assert "deprecate_wiki_page" in body          # executor-backed item / blocked
+    assert "deprecate_wiki_page" in body          # executor-backed item
     assert "split_entity" in body                 # executor-backed; empty subject/proposal -> scope-guard skip -> not appliable
     assert "Nothing has been changed yet" in body  # framed as a dry-run preview (ADR-0072 wording)
     assert "Not appliable" in body
+    changes = body.split("<h2>Changes this Apply would make</h2>")[1].split("<h2>")[0]
+    assert "Deprecate “Thing”" in changes         # the deprecation would really execute
+    page = tmp_path / "wiki" / "Items" / "thing.md"
+    assert "status: active" in page.read_text(encoding="utf-8")   # the preview changed nothing
 
 
 def test_apply_post_renders_summary(client, tmp_path):
-    _approved_concept_deprecation(tmp_path)
+    nid = _approved_concept_deprecation(tmp_path)
     resp = fixtures.apply_ui(client)
     assert resp.status_code == 200
     assert "Apply result" in resp.text and "deprecations" in resp.text
+    made = resp.text.split("<h2>Changes made</h2>")[1].split("<h2>")[0]
+    assert "Deprecate “Thing”" in made            # outcome `applied`
+    _assert_thing_deprecated(tmp_path, nid)
     # ADR-0059 review round: the summary shows the RETYPED counts (the old rekeyed key is gone).
     assert "retyped" in resp.text and "rekeyed" not in resp.text
 
@@ -267,10 +291,11 @@ def test_xss_in_raw_subject_proposal_context_is_escaped(client, tmp_path):
 
 
 def test_no_server_path_leak_in_ui(client, tmp_path):
-    _approved_concept_deprecation(tmp_path)
+    nid = _approved_concept_deprecation(tmp_path)
     for url in ("/ui/reviews", "/ui/reviews/rev_d", "/ui/reviews/apply"):
         assert str(tmp_path) not in client.get(url).text
     assert str(tmp_path) not in fixtures.apply_ui(client).text
+    _assert_thing_deprecated(tmp_path, nid)        # the result page was a real Apply
 
 
 def test_the_readable_preview_and_result_come_from_the_runs_outcomes(client, tmp_path):
@@ -311,9 +336,9 @@ def test_the_readable_preview_and_result_come_from_the_runs_outcomes(client, tmp
 
 
 def test_a_blocked_review_reads_plainly_without_its_code(client, tmp_path):
-    """The legacy non-canonical fixture is refused by the B1 page guard: the readable page says so in
+    """A legacy non-canonical id is refused by the B1 page guard: the readable page says so in
     words and keeps the code in the folded details."""
-    _approved_concept_deprecation(tmp_path)
+    _approved_concept_deprecation(tmp_path, node_id="itm_x")
     preview = client.post("/ui/reviews/apply/preview").text
     attention = preview.split("<h2>Attention needed</h2>")[1].split("<details><summary>Technical")[0]
     assert "<strong>Blocked</strong>" in attention and "Deprecate “Thing”" in attention

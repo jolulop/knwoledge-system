@@ -380,6 +380,8 @@ class ReviewItem(BaseModel):
     decided_by: str | None = None
     decided_at: str | None = None
     decision_note: str | None = None
+    # ADR-0073 decision 4: a propose_synthesis decision's bound version (absent on a legacy decision).
+    decided_version_digest: str | None = None
 
 
 class ReviewListResponse(BaseModel):
@@ -421,6 +423,9 @@ class ReviewPreview(BaseModel):
     warnings: list[str] = []
     apply: ReviewApply
     details: dict[str, Any] = {}
+    # ADR-0073 decision 4 (propose_synthesis only): the version the human decides on — full text,
+    # title, summary, confidence and the `version_digest` every decision must send back.
+    synthesis_version: dict[str, Any] | None = None
 
 
 class ReviewDetailResponse(BaseModel):
@@ -446,6 +451,17 @@ class ReviewDecisionRequest(BaseModel):
     # node id stays frozen). On a DEFER of the same type the payload is preserved as a mutable
     # draft on the pending item. Any other type / decision / field -> 400.
     amendments: dict[str, Any] | None = None
+    # ADR-0073 decision 4: on any decision of a propose_synthesis, the version digest of the synthesis
+    # the human was shown (64 hex). Required for that type; set on any other type -> 400.
+    version_digest: str | None = None
+
+
+class ReviewDecideAgainRequest(BaseModel):
+    # POST /reviews/{id}/decide-again (ADR-0073 decision 7): a new decision for a legacy unbound
+    # propose_synthesis decision, bound to the version shown.
+    decision: str
+    version_digest: str
+    note: str = ""
 
 
 class ReviewDecisionResponse(BaseModel):

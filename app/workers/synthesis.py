@@ -44,6 +44,7 @@ from app.llm.client import LLMClient, ParseError
 from app.workers import enrichment_artifact as art
 from app.workers import apply_outcomes, publication, reconciliation, reviews
 from app.workers import labels
+from app.workers import synthesis_version as sv
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter, render_synthesis_page
 
 _PROMOTABLE = ("item",)
@@ -322,7 +323,28 @@ def _commit_complete(gconn, *, rec: dict[str, Any], topic: dict[str, Any], syn_i
     if text != expected:
         return False
     rid = reviews.review_id("propose_synthesis", _review_subject(tid, fp))
-    return any((reviews_dir / d / f"{rid}.json").exists() for d in ("pending", "approved", "rejected"))
+    if not any((reviews_dir / d / f"{rid}.json").exists() for d in ("pending", "approved", "rejected")):
+        return False
+    # ADR-0073 decision 5: a still-open proposal must describe the artifact's version. A refreshed
+    # proposal next to an older artifact (the commit stopped between them) is not a finished commit.
+    return _proposal_agrees(reviews_dir, rid, meta)
+
+
+def _proposal_agrees(reviews_dir: Path, rid: str, meta: dict[str, Any]) -> bool:
+    """Whether the pending proposal `rid` (if any, and if it records a digest) names the version
+    digest of artifact `meta`. A decided item, or a legacy proposal without a digest, agrees."""
+    path = reviews_dir / "pending" / f"{rid}.json"
+    if not path.exists():
+        return True
+    try:
+        item = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    proposed = (item.get("proposal") or {}).get(sv.FIELD) if isinstance(item, dict) else None
+    if proposed is None:
+        return True
+    version = sv.check(meta)
+    return bool(version.get("ok")) and version["digest"] == proposed
 
 
 def _retired_or_absent(gconn, *, syn_id: str, synthesis_dir: Path) -> bool:
@@ -385,20 +407,44 @@ def _read_back(gconn, synthesis_dir: Path, syn_id: str) -> tuple[Any, Any]:
     return apply_outcomes.guarded(_fm), apply_outcomes.guarded(graph.get_node, gconn, syn_id)
 
 
+def _rendering_matches(gconn, synthesis_dir: Path, *, syn_id: str, topic_node: str,
+                       artifact: dict[str, Any], status: str, review_status: str) -> Any:
+    """Whether the page on disk is EXACTLY the rendering of `artifact` at `status`/`review_status`
+    (ADR-0073 slice 1 review): `_page_content` is byte-stable (no wall-clock), so equality means the
+    bound version's text, its status and its generated claim links are all published. True/False, or
+    :data:`apply_outcomes.UNAVAILABLE` when the page or the graph can't be read. Never raises."""
+    def _cmp() -> bool:
+        page = synthesis_dir / f"{syn_id}.md"
+        if not page.exists():
+            return False
+        expected = _page_content(gconn, syn_id=syn_id, topic_node=topic_node,
+                                 title=artifact["title"], summary=artifact["summary"],
+                                 synthesis_text=artifact["synthesis"],
+                                 confidence=artifact["confidence"], status=status,
+                                 review_status=review_status, synthesis_dir=synthesis_dir)
+        return page.read_text(encoding="utf-8") == expected
+    return apply_outcomes.guarded(_cmp)
+
+
 def _written_outcome(rid: str, review_type: str, *, wrote: bool, target: str, review_status: str,
-                     fm: Any, node: Any, details: dict[str, Any]) -> dict[str, Any]:
+                     fm: Any, node: Any, details: dict[str, Any],
+                     content: Any = True) -> dict[str, Any]:
     """The outcome of a decision that executed its write, from the VERIFIED end state (`_read_back`):
     `applied` when the page AND the graph node read back at `target` with `review_status`, `after`
     being the page status read; otherwise `incomplete` if this run wrote (else `skipped`) with
     `hidden_takes_precedence` (verified hidden, page and graph), `postcondition_not_met`, or
-    `verification_unavailable` when a read failed."""
-    if fm is apply_outcomes.UNAVAILABLE or node is apply_outcomes.UNAVAILABLE:
+    `verification_unavailable` when a read failed. `content` (propose_synthesis) is
+    :func:`_rendering_matches` after the write: a page at the right status but with other text or
+    links is `postcondition_not_met`, never `applied`."""
+    if (fm is apply_outcomes.UNAVAILABLE or node is apply_outcomes.UNAVAILABLE
+            or content is apply_outcomes.UNAVAILABLE):
         return apply_outcomes.unverified(rid, review_type, changed=wrote, **details)
     page_status = fm.get("status") if isinstance(fm, dict) else None
     node_status = node.get("status") if isinstance(node, dict) else None
     page_review = fm.get("review_status") if isinstance(fm, dict) else None
     details = {**details, "after": {"status": page_status}}
-    if page_status == target and node_status == target and page_review == review_status:
+    if (page_status == target and node_status == target and page_review == review_status
+            and content is True):
         return apply_outcomes.outcome(rid, review_type, apply_outcomes.APPLIED, **details)
     # hidden_takes_precedence only for a non-visibility review (a propose overridden by a hide); a
     # hide/unhide that reads back wrong is simply postcondition_not_met (B2a review round 1).
@@ -407,6 +453,8 @@ def _written_outcome(rid: str, review_type: str, *, wrote: bool, target: str, re
               else apply_outcomes.POSTCONDITION_NOT_MET)
     details["problem"] = {"expected": target, "page_status": page_status, "node_status": node_status,
                           "review_status": page_review}
+    if content is not True:
+        details["problem"]["content"] = "differs from the decided version"
     return apply_outcomes.outcome(rid, review_type,
                                   apply_outcomes.INCOMPLETE if wrote else apply_outcomes.SKIPPED,
                                   reason=reason, **details)
@@ -417,9 +465,20 @@ def apply_resolved_syntheses(gconn, reviews_dir: Path, *, synthesis_dir: Path,
     """Apply human decisions: approve → synthesis `active`, reject → `deprecated_candidate`
     (review-only promotion, no recurrence — ADR-0031). Renders from the synthesis artifact.
 
+    ADR-0073 decision 6: a decision executes only on ITS version — the artifact is present, readable
+    and valid, it is for the decision's inputs (`subject.fingerprint`), and the decision's recorded
+    `decided_version_digest` equals the digest recomputed from it. Otherwise nothing changes: a
+    decision on a replaced version is reported as information (`synthesis_version_replaced`, flagged
+    `information`), a legacy decision with no digest is `decision_unbound` (Decide again for the
+    version shown), and a missing/unreadable/malformed artifact is skipped with its own reason. With
+    deterministic review ids at most one decision per topic matches, so opposite decisions on one
+    topic never flip it back and forth, and an old approval never publishes new, unreviewed prose.
+
     Returns `{promoted, rejected, outcomes}`: one ADR-0072 outcome per readable `propose_synthesis`
     item in approved/ AND rejected/ (both are executed). `promoted + rejected` equals the `applied`
-    outcomes; `already_in_effect` only once the graph node AND the page both hold the target status."""
+    outcomes; `already_in_effect` only once the graph node AND the page both hold the target status AND the
+    page is exactly the decided version's rendering; a page at the right status with other text or
+    claim links is republished from the bound version (and that rendering verified)."""
     promoted = rejected = 0
     outcomes: list[dict[str, Any]] = []
     wiki_dir = synthesis_dir.parent
@@ -444,6 +503,19 @@ def apply_resolved_syntheses(gconn, reviews_dir: Path, *, synthesis_dir: Path,
             syn_id = synthesis_id(topic_node)
             # ADR-0072 decision 3: the title as the page shows it BEFORE this decision re-renders it.
             subject = apply_outcomes.page_name(wiki_dir, f"Synthesis/{syn_id}", syn_id)
+            # ADR-0073 decision 6: bind the decision to its version before anything else.
+            version = sv.read(enrichment_dir, topic_node)
+            problem = sv.apply_problem(version, item)
+            if problem is not None:
+                extra: dict[str, Any] = {}
+                if problem == sv.VERSION_REPLACED:
+                    extra["information"] = True          # not under Attention needed
+                if version.get("field"):
+                    extra["problem"] = {"field": version["field"]}
+                outcomes.append(apply_outcomes.outcome(
+                    rid, "propose_synthesis", apply_outcomes.SKIPPED, reason=problem,
+                    subject=subject, decision=state, **extra))
+                continue
             node = graph.get_node(gconn, syn_id)
             # ADR-0049: a `hidden`/`evidence_hidden` synthesis is a visibility-suppression state — a lingering
             # approved/rejected proposal must not flip it active/deprecated. Check the AUTHORITATIVE page
@@ -479,24 +551,30 @@ def apply_resolved_syntheses(gconn, reviews_dir: Path, *, synthesis_dir: Path,
                         rid, "propose_synthesis", apply_outcomes.SKIPPED, reason="visibility_suppressed",
                         subject=subject, decision=state,
                         problem={"node_status": node["status"], "page_status": page_status})
-                elif page_status == status:              # postcondition verified: graph AND page
-                    rec = apply_outcomes.outcome(
-                        rid, "propose_synthesis", apply_outcomes.ALREADY_IN_EFFECT, subject=subject,
-                        decision=state, after={"status": status})
+                elif page_status == status:
+                    # Status alone is not the decision: the page must be EXACTLY the bound version's
+                    # rendering (its text, review status and claim links). Otherwise republish it.
+                    same = _rendering_matches(
+                        gconn, synthesis_dir, syn_id=syn_id, topic_node=topic_node,
+                        artifact=version["artifact"], status=status, review_status=rstatus)
+                    if same is True:                     # postcondition verified: graph AND page
+                        rec = apply_outcomes.outcome(
+                            rid, "propose_synthesis", apply_outcomes.ALREADY_IN_EFFECT,
+                            subject=subject, decision=state, after={"status": status})
+                    elif same is apply_outcomes.UNAVAILABLE:
+                        rec = apply_outcomes.unverified(rid, "propose_synthesis", changed=False,
+                                                        subject=subject, decision=state)
+                    else:
+                        rec = None                       # republish below
                 else:                                    # graph in target, page not: left as is
                     rec = apply_outcomes.outcome(
                         rid, "propose_synthesis", apply_outcomes.SKIPPED, reason="page_status_mismatch",
                         subject=subject, decision=state,
                         problem={"node_status": node["status"], "page_status": page_status})
-                outcomes.append(rec)
-                continue
-            apath = art.synthesis_artifact_path(enrichment_dir, topic_node)
-            if not apath.exists():
-                outcomes.append(apply_outcomes.outcome(
-                    rid, "propose_synthesis", apply_outcomes.SKIPPED, reason="synthesis_artifact_missing",
-                    subject=subject, decision=state))
-                continue
-            a = json.loads(apath.read_text(encoding="utf-8"))
+                if rec is not None:
+                    outcomes.append(rec)
+                    continue
+            a = version["artifact"]                      # validated above; no defaults
             wrote = _render_page(gconn, syn_id=syn_id, topic_node=topic_node, title=a["title"],
                                  summary=a["summary"], synthesis_text=a["synthesis"],
                                  confidence=a["confidence"], status=status, review_status=rstatus,
@@ -507,10 +585,14 @@ def apply_resolved_syntheses(gconn, reviews_dir: Path, *, synthesis_dir: Path,
                 subject = apply_outcomes.named(syn_id, a.get("title"))
             # the VERIFIED end state (read back, guarded), not the requested one
             fm, after_node = _read_back(gconn, synthesis_dir, syn_id)
+            content = _rendering_matches(gconn, synthesis_dir, syn_id=syn_id,
+                                         topic_node=topic_node, artifact=a, status=status,
+                                         review_status=rstatus)
             outcomes.append(_written_outcome(
                 rid, "propose_synthesis", wrote=wrote, target=status, review_status=rstatus, fm=fm,
-                node=after_node, details={"subject": subject, "decision": state,
-                                          "before": {"status": node["status"]}}))
+                node=after_node, content=content,
+                details={"subject": subject, "decision": state,
+                         "before": {"status": node["status"]}}))
     return {"promoted": promoted, "rejected": rejected, "outcomes": outcomes}
 
 
@@ -930,6 +1012,10 @@ def generate_syntheses(
                 except ParseError as exc:
                     errors.append({"topic": tid, "error": str(exc)})
                     continue
+                if not (isinstance(result.get("summary"), str) and result["summary"].strip()
+                        and isinstance(result.get("synthesis"), str) and result["synthesis"].strip()):
+                    errors.append({"topic": tid, "error": "synthesis output has a blank summary or text"})
+                    continue
                 if _contains_verbatim_quote(result["summary"] + " " + result["synthesis"], src_texts):
                     errors.append({"topic": tid, "error": "synthesis copied a verbatim source quote (rejected)"})
                     continue
@@ -987,23 +1073,32 @@ def generate_syntheses(
                                  confidence=confidence, status="candidate", review_status="pending",
                                  synthesis_dir=synthesis_dir, now=now)
                     _withdraw_stale_pending(reviews_dir, tid, keep_fp=fp, now=now)
-                    reviews.create_review_item(
-                        reviews_dir, review_type="propose_synthesis",
-                        subject=_review_subject(tid, fp),
-                        proposal={"to_status": "active", "synthesis_id": syn_id, "title": t["title"],
-                                  "claim_ids": [c["claim_id"] for c in t["claims"]],
-                                  "summary": result["summary"]},
-                        context={"node_type": t["node_type"]}, priority="medium", now=now)
-                    apath = art.synthesis_artifact_path(enrichment_dir, tid)
-                    apath.parent.mkdir(parents=True, exist_ok=True)
-                    apath.write_text(json.dumps({
+                    artifact = {
                         "node_id": syn_id, "topic_node_id": tid, "title": t["title"],
                         "summary": result["summary"], "synthesis": result["synthesis"],
                         "confidence": confidence, "input_fingerprint": fp,
                         "schema_version": art.SYNTHESIS_SCHEMA_VERSION, "model_ref": model_ref,
                         "generation_status": "enriched", "generated_at": now,
                         "commit_attempt": attempt,       # the journal attempt this commit finished
-                    }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                    }
+                    # ADR-0073: the version this commit writes, on the artifact and the proposal.
+                    digest = artifact[sv.FIELD] = sv.compute_digest(artifact)
+                    proposal = {"to_status": "active", "synthesis_id": syn_id, "title": t["title"],
+                                "claim_ids": [c["claim_id"] for c in t["claims"]],
+                                "summary": result["summary"], sv.FIELD: digest}
+                    prid = reviews.create_review_item(
+                        reviews_dir, review_type="propose_synthesis",
+                        subject=_review_subject(tid, fp), proposal=proposal,
+                        context={"node_type": t["node_type"]}, priority="medium", now=now)
+                    # decision 5: a forced regeneration under the same inputs refreshes every
+                    # version-specific field of the still-open proposal (audited), before the
+                    # artifact; a crash between them is an interrupted generation (recovery redoes it).
+                    reviews.refresh_pending_proposal(reviews_dir, prid, proposal=proposal,
+                                                     audit_key=attempt, now=now)
+                    apath = art.synthesis_artifact_path(enrichment_dir, tid)
+                    apath.parent.mkdir(parents=True, exist_ok=True)
+                    apath.write_text(json.dumps(artifact, ensure_ascii=False, indent=2) + "\n",
+                                     encoding="utf-8")
                     run.publish(topic_intent)             # the page was rendered above
                     journal.finish(root, _PRODUCER, tid)
                     written += 1

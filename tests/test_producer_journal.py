@@ -346,7 +346,8 @@ def test_an_approval_between_the_interruption_and_the_replay_is_never_overwritte
     (tid,) = _records(tmp_path, "generate_synthesis")
     # A human approves the proposal before the next run.
     reviews.resolve_review_item(tmp_path / "reviews", proposal["review_id"], decision="approved",
-                                decided_by="human")
+                                decided_by="human",
+                                version_digest=proposal["proposal"]["version_digest"])
     run, adapter = _generate(tmp_path, jobs)
     assert run["promoted"] == 1 and adapter.calls == 0             # approved prose, not regenerated
     assert run["journal_verified"] == [tid] and _records(tmp_path, "generate_synthesis") == {}
@@ -358,7 +359,8 @@ def test_a_human_decision_that_prevents_the_replay_reports_the_topic_blocked(tmp
     _generate(tmp_path, jobs)
     (proposal,) = _proposals(tmp_path)
     reviews.resolve_review_item(tmp_path / "reviews", proposal["review_id"], decision="approved",
-                                decided_by="human")
+                                decided_by="human",
+                                version_digest=proposal["proposal"]["version_digest"])
     _generate(tmp_path, jobs)                                      # promoted: active
     tid = proposal["subject"]["topic_node_id"]
     # An unfinished commit for different evidence than the approved synthesis's.
@@ -501,7 +503,8 @@ def test_a_forced_run_with_an_unfinished_record_still_respects_a_hide(tmp_path):
     _generate(tmp_path, jobs)
     (proposal,) = _proposals(tmp_path)
     reviews.resolve_review_item(tmp_path / "reviews", proposal["review_id"], decision="approved",
-                                decided_by="human")
+                                decided_by="human",
+                                version_digest=proposal["proposal"]["version_digest"])
     _generate(tmp_path, jobs)                                      # promoted: active
     tid = proposal["subject"]["topic_node_id"]
     syn_id = synthesis.synthesis_id(tid)

@@ -241,7 +241,7 @@ def test_review_only_promotion(tmp_path):
     rid = next(json.loads(p.read_text())["review_id"]
                for p in (tmp_path / "reviews" / "pending").glob("*.json")
                if json.loads(p.read_text())["type"] == "propose_synthesis")
-    reviews.resolve_review_item(tmp_path / "reviews", rid, decision="approved", decided_by="human")
+    reviews.resolve_review_item(tmp_path / "reviews", rid, decision="approved", decided_by="human", version_digest=_shown(tmp_path))
     summary = _gen(tmp_path, SynthAdapter(), jobs)
     assert summary["promoted"] == 1
     conn = _gconn(tmp_path)
@@ -259,7 +259,7 @@ def test_rejection_deprecates(tmp_path):
     rid = next(json.loads(p.read_text())["review_id"]
                for p in (tmp_path / "reviews" / "pending").glob("*.json")
                if json.loads(p.read_text())["type"] == "propose_synthesis")
-    reviews.resolve_review_item(tmp_path / "reviews", rid, decision="rejected", decided_by="human")
+    reviews.resolve_review_item(tmp_path / "reviews", rid, decision="rejected", decided_by="human", version_digest=_shown(tmp_path))
     _gen(tmp_path, SynthAdapter(), jobs)
     page = _syn_page(tmp_path).read_text(encoding="utf-8")
     assert "status: deprecated_candidate" in page and "review_status: rejected" in page
@@ -301,6 +301,14 @@ class _EmptyClaims:
         return {"claims": []}
 
 
+def _shown(tmp_path):
+    """The version digest the pending synthesis proposal shows (ADR-0073): what a human decision
+    on it is bound to."""
+    return next(json.loads(p.read_text())["proposal"]["version_digest"]
+                for p in (tmp_path / "reviews" / "pending").glob("*.json")
+                if json.loads(p.read_text())["type"] == "propose_synthesis")
+
+
 def _propose_rid(tmp_path):
     return next(json.loads(p.read_text())["review_id"]
                 for p in (tmp_path / "reviews" / "pending").glob("*.json")
@@ -334,7 +342,7 @@ def test_approved_synthesis_not_demoted_on_evidence_change(tmp_path):
     jobs = _build(tmp_path)
     _gen(tmp_path, SynthAdapter(), jobs)
     reviews.resolve_review_item(tmp_path / "reviews", _propose_rid(tmp_path),
-                                decision="approved", decided_by="human")
+                                decision="approved", decided_by="human", version_digest=_shown(tmp_path))
     _gen(tmp_path, SynthAdapter(), jobs)  # -> active
     _bump_a_claim(tmp_path, jobs)         # contributing evidence changes -> fingerprint changes
     summary = _gen(tmp_path, SynthAdapter(), jobs)
@@ -351,7 +359,7 @@ def test_force_reopens_stale_approved_with_fresh_pending(tmp_path):
     jobs = _build(tmp_path)
     _gen(tmp_path, SynthAdapter(), jobs)
     reviews.resolve_review_item(tmp_path / "reviews", _propose_rid(tmp_path),
-                                decision="approved", decided_by="human")
+                                decision="approved", decided_by="human", version_digest=_shown(tmp_path))
     _gen(tmp_path, SynthAdapter(), jobs)
     _bump_a_claim(tmp_path, jobs)
     summary = _gen(tmp_path, SynthAdapter(), jobs, force=True)
@@ -370,7 +378,7 @@ def test_rejected_is_refileable_on_evidence_change(tmp_path):
     jobs = _build(tmp_path)
     _gen(tmp_path, SynthAdapter(), jobs)
     reviews.resolve_review_item(tmp_path / "reviews", _propose_rid(tmp_path),
-                                decision="rejected", decided_by="human")
+                                decision="rejected", decided_by="human", version_digest=_shown(tmp_path))
     s1 = _gen(tmp_path, SynthAdapter(), jobs)
     assert s1["skipped_reviewed"] == 1 and s1["syntheses_written"] == 0  # same evidence: no re-nag
     _bump_a_claim(tmp_path, jobs)                                        # evidence changes
@@ -390,7 +398,7 @@ def test_rejected_synthesis_honored_across_availability_flip(tmp_path):
         tmp_path, client=LLMClient({"anthropic": SynthAdapter()}, cache=cache),
         model_ref=HEAVY, jobs_db=jobs, rebuild_index=False)
     reviews.resolve_review_item(tmp_path / "reviews", _propose_rid(tmp_path),
-                                decision="rejected", decided_by="human")
+                                decision="rejected", decided_by="human", version_digest=_shown(tmp_path))
     # Local now up; chain is local-first but HEAVY (which produced the rejected evidence) is still a
     # member -> sticky-fresh -> the rejection is honored, and the newly-resolved local model is NOT called.
     local = SynthAdapter()
@@ -465,7 +473,7 @@ def test_retract_approved_synthesis_is_coherent_and_audited(tmp_path):
     jobs = _build(tmp_path)
     _gen(tmp_path, SynthAdapter(), jobs)
     reviews.resolve_review_item(tmp_path / "reviews", _propose_rid(tmp_path),
-                                decision="approved", decided_by="human")
+                                decision="approved", decided_by="human", version_digest=_shown(tmp_path))
     _gen(tmp_path, SynthAdapter(), jobs)  # active
     # Drop the topic below threshold by tombstoning source B's claim.
     fresh = LLMClient({"anthropic": _EmptyClaims()}, cache=ResponseCache(tmp_path / "db" / "f2.sqlite"))
@@ -509,7 +517,7 @@ def test_lint_synthesis_rot_matches_producer_stale_active(tmp_path):
     jobs = _build(tmp_path)
     _gen(tmp_path, SynthAdapter(), jobs)
     reviews.resolve_review_item(tmp_path / "reviews", _propose_rid(tmp_path),
-                                decision="approved", decided_by="human")
+                                decision="approved", decided_by="human", version_digest=_shown(tmp_path))
     _gen(tmp_path, SynthAdapter(), jobs)   # approved -> active synthesis, artifact fingerprinted
     _bump_a_claim(tmp_path, jobs)          # contributing evidence changes -> topic fingerprint drifts
     res = lint.run_lint(tmp_path, graph_db=tmp_path / "db" / "graph.sqlite",
@@ -524,7 +532,7 @@ def test_lint_synthesis_fresh_no_rot(tmp_path):
     jobs = _build(tmp_path)
     _gen(tmp_path, SynthAdapter(), jobs)
     reviews.resolve_review_item(tmp_path / "reviews", _propose_rid(tmp_path),
-                                decision="approved", decided_by="human")
+                                decision="approved", decided_by="human", version_digest=_shown(tmp_path))
     _gen(tmp_path, SynthAdapter(), jobs)   # active + fresh (no evidence change)
     res = lint.run_lint(tmp_path, graph_db=tmp_path / "db" / "graph.sqlite",
                         synthesis_model_ref=HEAVY, record_job=False)

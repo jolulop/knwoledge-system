@@ -47,6 +47,7 @@ from app.backend.models import (
     NormalizedResponse,
     QueryRequest,
     ReindexResponse,
+    ReviewDecideAgainRequest,
     StaleCheckResponse,
     QueryResponse,
     EvalRunRequest,
@@ -78,6 +79,7 @@ from app.workers import (
     retypes, reviews, splits, synthesis, tag_links, wiki,
 )
 from app.workers import labels
+from app.workers import synthesis_version
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter, render_query_page
 
 # Hosts on which serving the unauthenticated API is acceptable (loopback only).
@@ -627,7 +629,8 @@ def get_review(review_id: str) -> dict[str, Any]:
     """
     result = review_read.get_review(
         settings.reviews_dir, review_id, graph_db=settings.graph_db_path,
-        wiki_dir=settings.wiki_dir, manifests_dir=settings.manifests_dir)
+        wiki_dir=settings.wiki_dir, manifests_dir=settings.manifests_dir,
+        enrichment_dir=_enrichment_dir())
     # A missing, corrupt, or schema-invalid review file is a 404 (the read model never 500s on bad
     # queue state; the parse_error/schema_error markers are diagnostic only).
     if result is None or result.get("parse_error") or result.get("schema_error"):
@@ -743,11 +746,13 @@ def _record_decision(
     note = body.note if body else ""
     winner = (body.winner if body else None) or None
     amendments = (body.amendments if body else None) or None
+    version_digest = (body.version_digest if body else None) or None
     item, error = review_read.find_review(settings.reviews_dir, review_id)
     if item is None:
         raise HTTPException(status_code=404, detail=f"review not found: {review_id}")
     current = item.get("status")
     rtype = str(item.get("type"))
+    _validate_version_digest(rtype, version_digest)
     # ADR-0044: a `winner` is ONLY valid on an approve of a resolve_contradiction, naming one of the two
     # contradicting claims. Request-shape violations are 400 (never silently ignored). The claims-active
     # check (page-frontmatter authority, graph-free) is a 409 and runs only when actually resolving.
@@ -766,7 +771,7 @@ def _record_decision(
     else:
         try:
             recorded, final = _record_pending_decision(review_id, item, decision, note, winner,
-                                                       amendments)
+                                                       amendments, version_digest)
         except reviews.ReviewRetiring:
             # ADR-0069 slice 2(a): an interrupted retirement; its edge may already be superseded, so
             # a decision here could never take effect. Refused at the ledger primitive (under the
@@ -786,10 +791,12 @@ def _record_decision(
 
 
 def _record_pending_decision(review_id: str, item: dict[str, Any], decision: str, note: str,
-                             winner: str | None,
-                             amendments: dict[str, Any] | None) -> tuple[bool, str]:
+                             winner: str | None, amendments: dict[str, Any] | None,
+                             version_digest: str | None = None) -> tuple[bool, str]:
     """Defer, approve or reject a pending item (the ledger primitives refuse a retiring one)."""
     rtype = str(item.get("type"))
+    if rtype == "propose_synthesis":
+        _require_shown_synthesis_version(item, version_digest)   # 409 unless it is the version shown
     if decision == "deferred":
         return reviews.defer_review_item(settings.reviews_dir, review_id, note=note,
                                          draft_amendments=amendments), "deferred"
@@ -801,7 +808,96 @@ def _record_pending_decision(review_id: str, item: dict[str, Any], decision: str
         _require_no_competing_retype(item)   # 409 while another approved retype waits (ADR-0070 B4)
     return reviews.resolve_review_item(
         settings.reviews_dir, review_id, decision=decision, decided_by="human", note=note,
-        winner=winner, amendments=amendments if decision == "approved" else None), decision
+        winner=winner, amendments=amendments if decision == "approved" else None,
+        version_digest=version_digest if rtype == "propose_synthesis" else None), decision
+
+
+def _enrichment_dir() -> Path:
+    return settings.normalized_dir / "enrichment"
+
+
+def _validate_version_digest(rtype: str, version_digest: str | None) -> None:
+    """ADR-0073 decision 4: every decision of a propose_synthesis carries the digest of the version
+    shown (form, JSON API, bulk); no other type takes one. 400 on misuse, never silently ignored."""
+    if rtype != "propose_synthesis":
+        if version_digest is not None:
+            raise HTTPException(status_code=400,
+                                detail=f"`version_digest` is only valid for propose_synthesis, not {rtype}")
+        return
+    if not synthesis_version.is_digest(version_digest):
+        raise HTTPException(
+            status_code=400,
+            detail="a synthesis decision needs `version_digest`: the 64-hex digest of the version "
+                   "shown (GET /reviews/{id} gives it as preview.synthesis_version.version_digest)")
+
+
+_VERSION_REFUSALS = {
+    synthesis_version.MISSING: "the synthesis text is missing",
+    synthesis_version.UNREADABLE: "the synthesis text can't be read",
+    synthesis_version.INVALID: "the synthesis text is malformed",
+    synthesis_version.DIGEST_MISMATCH: "the synthesis text doesn't match its recorded version",
+    synthesis_version.INPUTS_CHANGED: "the synthesis was regenerated from other evidence",
+    synthesis_version.GENERATION_INTERRUPTED: (
+        "an interrupted regeneration left the proposal and the synthesis text disagreeing — run "
+        "scripts/generate_synthesis.py to finish it"),
+    synthesis_version.VERSION_CHANGED: "the synthesis text changed since this page was shown",
+}
+
+
+def _require_shown_synthesis_version(item: dict[str, Any], version_digest: str | None) -> None:
+    """Under the write lock: the shown digest must equal the digest recomputed from the current,
+    valid artifact, which must be for the review's inputs; a pending proposal's own digest must
+    agree (ADR-0073 decision 4). A refusal writes nothing."""
+    topic = (item.get("subject") or {}).get("topic_node_id")
+    version = synthesis_version.read(_enrichment_dir(), topic)
+    problem = synthesis_version.decision_problem(version, item, version_digest)
+    if problem is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"changed — review again: {_VERSION_REFUSALS.get(problem, problem)} ({problem}); "
+                   "no decision was recorded")
+
+
+@_commit_phase
+def _decide_again(review_id: str, decision: str, version_digest: str, note: str) -> dict[str, Any]:
+    """ADR-0073 decision 7: "Decide again for the version shown" — a new decision, bound to the
+    version shown, on a terminal propose_synthesis decision that carries no digest (legacy unbound).
+    Under the write lock: still terminal and unbound (or the same submission retried), the artifact
+    valid, for the review's inputs and the version shown. The previous decision stays in a uniquely
+    identified audit entry; no page changes (Apply executes it like any bound decision)."""
+    if decision not in ("approved", "rejected"):
+        raise HTTPException(status_code=400, detail="decision must be approved or rejected")
+    item, _err = review_read.find_review(settings.reviews_dir, review_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail=f"review not found: {review_id}")
+    if item.get("type") != "propose_synthesis":
+        raise HTTPException(status_code=400,
+                            detail="Decide again is only for synthesis proposals")
+    _validate_version_digest("propose_synthesis", version_digest)
+    if item.get("status") not in ("approved", "rejected"):
+        raise HTTPException(status_code=409,
+                            detail=f"review {review_id} is not decided (status: {item.get('status')}); "
+                                   "decide it normally")
+    bound = item.get(synthesis_version.DECIDED)
+    if bound is not None and not (bound == version_digest and item.get("status") == decision):
+        raise HTTPException(status_code=409,
+                            detail=f"review {review_id} is already decided for a version; reopen it "
+                                   "to change the decision")
+    _require_shown_synthesis_version(item, version_digest)
+    try:
+        recorded = reviews.decide_again(settings.reviews_dir, review_id, decision=decision,
+                                        version_digest=version_digest, note=note)
+    except reviews.DecideAgainRefused as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    return {"review_id": review_id, "decision_recorded": recorded, "status": decision,
+            "apply_required": review_read.decision_apply_required("propose_synthesis", decision)}
+
+
+@app.post("/reviews/{review_id}/decide-again", response_model=ReviewDecisionResponse)
+def decide_again_review(review_id: str, body: ReviewDecideAgainRequest) -> dict[str, Any]:
+    """Decide a legacy unbound synthesis decision again for the version shown (ADR-0073)."""
+    decision = _UI_DECISIONS.get(body.decision, body.decision)
+    return _decide_again(review_id, decision, body.version_digest, body.note)
 
 
 @app.post("/reviews/{review_id}/approve", response_model=ReviewDecisionResponse)
@@ -842,7 +938,8 @@ def _reopen_decision(review_id: str, reason: str) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="reopen requires a non-empty reason")
     result = review_read.get_review(
         settings.reviews_dir, review_id, graph_db=settings.graph_db_path,
-        wiki_dir=settings.wiki_dir, manifests_dir=settings.manifests_dir)
+        wiki_dir=settings.wiki_dir, manifests_dir=settings.manifests_dir,
+        enrichment_dir=_enrichment_dir())
     if result is None or result.get("parse_error") or result.get("schema_error"):
         raise HTTPException(status_code=404, detail=f"review not found: {review_id}")
     status = result["item"].get("status")
@@ -1764,10 +1861,16 @@ async def ui_bulk_confirm(request: Request) -> HTMLResponse:
         if item is None:
             missing.append(rid)
             continue
-        rows.append({"review_id": rid, "type": item.get("type"),
-                     "subject": review_read.readable_subject(item, wiki_dir=settings.wiki_dir,
-                                                             pages=pages),
-                     "fingerprint": review_read.decision_fingerprint(item)})
+        row = {"review_id": rid, "type": item.get("type"),
+               "subject": review_read.readable_subject(item, wiki_dir=settings.wiki_dir,
+                                                       pages=pages),
+               "fingerprint": review_read.decision_fingerprint(item)}
+        if item.get("type") == "propose_synthesis":
+            # ADR-0073: the page SHOWS the version it binds (its text), and binds only what it shows.
+            version = synthesis_version.read(
+                _enrichment_dir(), (item.get("subject") or {}).get("topic_node_id"))
+            row["version"] = synthesis_version.describe(version, item)
+        rows.append(row)
     return HTMLResponse(review_html.render_bulk_confirm(action, rows, missing))
 
 
@@ -1783,17 +1886,21 @@ async def ui_bulk_record(request: Request) -> HTMLResponse:
                             status_code=400)
     ids = _bulk_ids(form)
     fingerprints = {rid: str(form.get(f"fp_{rid}") or "") for rid in ids}
+    versions = {rid: str(form.get(f"vd_{rid}") or "") or None for rid in ids}
     note = str(form.get("note") or "")
     recorded, skipped = await anyio.to_thread.run_sync(
-        _bulk_record, action, ids, fingerprints, note)
+        _bulk_record, action, ids, fingerprints, note, versions)
     return HTMLResponse(review_html.render_bulk_result(action, recorded, skipped))
 
 
 @_commit_phase
-def _bulk_record(action: str, ids: list[str], fingerprints: dict[str, str],
-                 note: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def _bulk_record(action: str, ids: list[str], fingerprints: dict[str, str], note: str,
+                 versions: dict[str, str | None] | None = None,
+                 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Under the write lock: recheck each selected review (still open, same content, not already
-    carrying the decision) and record it, one decision per review."""
+    carrying the decision) and record it, one decision per review. A synthesis decision records the
+    version digest the confirmation page showed (ADR-0073 decision 4), protected by the fingerprint."""
+    versions = versions or {}
     decision = _UI_DECISIONS[action]
     pages = review_read._family_page_meta(settings.wiki_dir)
     recorded: list[dict[str, Any]] = []
@@ -1816,7 +1923,9 @@ def _bulk_record(action: str, ids: list[str], fingerprints: dict[str, str],
             skipped.append(row | {"reason": "changed — review again"})
             continue
         try:
-            out = _record_decision(rid, decision, ReviewDecisionRequest(note=note))
+            vd = versions.get(rid) if item.get("type") == "propose_synthesis" else None
+            out = _record_decision(rid, decision, ReviewDecisionRequest(note=note,
+                                                                         version_digest=vd))
         except HTTPException as exc:
             skipped.append(row | {"reason": str(exc.detail)})
             continue
@@ -2772,7 +2881,8 @@ def ui_file_merge(
 def ui_review_detail(review_id: str) -> HTMLResponse:
     result = review_read.get_review(
         settings.reviews_dir, review_id, graph_db=settings.graph_db_path,
-        wiki_dir=settings.wiki_dir, manifests_dir=settings.manifests_dir)
+        wiki_dir=settings.wiki_dir, manifests_dir=settings.manifests_dir,
+        enrichment_dir=_enrichment_dir())
     if result is None or result.get("parse_error") or result.get("schema_error"):
         return HTMLResponse(
             review_html.render_error(404, f"review not found: {review_id}"), status_code=404)
@@ -2787,6 +2897,7 @@ def ui_review_detail(review_id: str) -> HTMLResponse:
 @app.post("/ui/reviews/{review_id}/decide", response_model=None)
 def ui_review_decide(
     review_id: str, action: str = Form(...), note: str = Form(""),
+    version_digest: str = Form(""),
 ) -> HTMLResponse | RedirectResponse:
     """Record a decision from the detail form, then PRG-redirect to the item detail (ADR-0035 A8).
 
@@ -2811,7 +2922,25 @@ def ui_review_decide(
             return HTMLResponse(
                 review_html.render_error(400, f"unknown action: {action}"), status_code=400)
     try:
-        _record_decision(review_id, decision, ReviewDecisionRequest(note=note, winner=winner))
+        _record_decision(review_id, decision, ReviewDecisionRequest(
+            note=note, winner=winner, version_digest=version_digest or None))
+    except HTTPException as exc:
+        return _html_error(exc)
+    return RedirectResponse(f"/ui/reviews/{review_id}", status_code=303)
+
+
+@app.post("/ui/reviews/{review_id}/decide-again", response_model=None)
+def ui_review_decide_again(
+    review_id: str, action: str = Form(...), note: str = Form(""),
+    version_digest: str = Form(""),
+) -> HTMLResponse | RedirectResponse:
+    """ADR-0073 decision 7: Decide again for the version shown, then PRG back to the review."""
+    decision = {"approve": "approved", "reject": "rejected"}.get(action)
+    if decision is None:
+        return HTMLResponse(review_html.render_error(400, f"unknown action: {action}"),
+                            status_code=400)
+    try:
+        _decide_again(review_id, decision, version_digest, note)
     except HTTPException as exc:
         return _html_error(exc)
     return RedirectResponse(f"/ui/reviews/{review_id}", status_code=303)

@@ -46,6 +46,9 @@ PRIORITIES = frozenset({"low", "medium", "high"})
 
 _STATE_DIRS = ("pending", "approved", "rejected")
 
+# ADR-0073: the digest of the synthesis version a decision was recorded for (synthesis_version.DECIDED).
+DECIDED_VERSION = "decided_version_digest"
+
 
 def _committed(fn):
     """Each review-item state change is one commit phase under the vault write lock (ADR-0068
@@ -195,6 +198,7 @@ def resolve_review_item(
     note: str = "",
     winner: str | None = None,
     amendments: dict[str, Any] | None = None,
+    version_digest: str | None = None,
     now: str | None = None,
 ) -> bool:
     """Resolve a pending review item to approved/rejected and append an audit-log entry.
@@ -213,6 +217,10 @@ def resolve_review_item(
     into the audit entry — same conditional shape as `winner`. The caller validates it (approve of a
     promote_candidate_node only, allowed fields only). Any mutable `draft_amendments` on the pending
     file is dropped here: frozen into `amendments` on approve, discarded on reject.
+
+    `version_digest` (ADR-0073 decision 4): for a `propose_synthesis`, the digest of the version the
+    human was shown, recorded as `decided_version_digest` on the item and its audit entry (Apply
+    executes the decision only on that version). The caller checks it against the artifact.
     """
     if decision not in ("approved", "rejected"):
         raise ValueError(f"decision must be approved|rejected, got {decision!r}")
@@ -243,6 +251,9 @@ def resolve_review_item(
         item["winner"] = winner
     if amendments is not None:
         item["amendments"] = amendments
+    item.pop(DECIDED_VERSION, None)
+    if version_digest is not None:
+        item[DECIDED_VERSION] = version_digest
     dest_dir = reviews_dir / decision
     dest_dir.mkdir(parents=True, exist_ok=True)
     (dest_dir / f"{review_id}.json").write_text(
@@ -261,6 +272,8 @@ def resolve_review_item(
         audit_entry["winner"] = winner
     if amendments is not None:
         audit_entry["amendments"] = amendments
+    if version_digest is not None:
+        audit_entry[DECIDED_VERSION] = version_digest
     (audit / f"{review_id}-{decision}.json").write_text(
         json.dumps(audit_entry, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return True
@@ -300,8 +313,11 @@ def reopen_review_item(
     }
     if item.get("winner") is not None:
         prior["prior_winner"] = item["winner"]
+    if item.get(DECIDED_VERSION) is not None:
+        prior["prior_" + DECIDED_VERSION] = item[DECIDED_VERSION]
     # Clear terminal fields + the supersede winner; back to pending (re-decidable).
-    for field in ("decided_by", "decided_at", "decision_note", "winner", "approval_id"):
+    for field in ("decided_by", "decided_at", "decision_note", "winner", "approval_id",
+                  DECIDED_VERSION):
         item.pop(field, None)
     item["status"] = "pending"
     dest = reviews_dir / "pending" / f"{review_id}.json"
@@ -376,4 +392,183 @@ def defer_review_item(
         "decided_by": decided_by, "decided_at": now, "subject": item.get("subject"),
         "note": note,
     }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return True
+
+
+class DecideAgainRefused(RuntimeError):
+    """`decide_again` was refused: the review is not a terminal, unbound decision any more."""
+
+    def __init__(self, review_id: str, reason: str) -> None:
+        super().__init__(f"review {review_id}: {reason}")
+        self.review_id = review_id
+        self.reason = reason
+
+
+def _decide_again_key(review_id: str, prior: dict[str, Any], decision: str, digest: str) -> str:
+    """One audit identity per (decision being replaced, new decision, version): a retry of the same
+    submission finds its own entry; a later, different re-decision gets another."""
+    raw = json.dumps({"review_id": review_id, "prior_status": prior.get("status"),
+                      "prior_decided_at": prior.get("decided_at"),
+                      "prior_approval_id": prior.get("approval_id"),
+                      "decision": decision, "digest": digest}, sort_keys=True)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _sync_terminal_dir(path: Path) -> None:
+    """Flush a terminal decision directory. A directory that legitimately does not exist (a
+    same-status re-decision never created the opposite one) holds nothing to flush; any other
+    failure — permission, I/O — propagates."""
+    try:
+        _sync_dir(path)
+    except FileNotFoundError:
+        if os.path.lexists(path):                # it exists after all: not an absence
+            raise
+
+
+def _audit_records_decide_again(entry: Path, review_id: str, prior_status: str, decision: str,
+                                version_digest: str) -> bool:
+    """Whether `entry` is a readable decide-again audit entry for exactly this replacement."""
+    try:
+        rec = json.loads(entry.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return False
+    return (isinstance(rec, dict) and rec.get("event") == "decided_again"
+            and rec.get("review_id") == review_id and rec.get("prior_status") == prior_status
+            and rec.get("decision") == decision and rec.get(DECIDED_VERSION) == version_digest)
+
+
+@_committed
+def decide_again(
+    reviews_dir: Path,
+    review_id: str,
+    *,
+    decision: str,
+    version_digest: str,
+    note: str = "",
+    decided_by: str = "human",
+    now: str | None = None,
+) -> bool:
+    """"Decide again for the version shown" (ADR-0073 decision 7): record a new terminal decision,
+    bound to `version_digest`, on a terminal decision that carries no digest (a legacy unbound one).
+    The previous decision is kept in a uniquely identified audit entry, written durably FIRST.
+
+    Idempotent: retrying the same submission (same decision, same digest) writes neither a second
+    decision nor a second audit entry and returns False; an interrupted earlier attempt is finished.
+    Raises :class:`DecideAgainRefused` when the review is not terminal or is already bound to another
+    decision or version. The CALLER checks the artifact (valid, current inputs, the digest shown).
+    Changes no page: Apply executes the new decision like any bound one."""
+    if decision not in ("approved", "rejected"):
+        raise ValueError(f"decision must be approved|rejected, got {decision!r}")
+    reviews_dir = Path(reviews_dir)
+    found = {d: reviews_dir / d / f"{review_id}.json" for d in ("approved", "rejected")
+             if (reviews_dir / d / f"{review_id}.json").exists()}
+    if not found:
+        raise DecideAgainRefused(review_id, "not a terminal decision")
+    items = {d: json.loads(p.read_text(encoding="utf-8")) for d, p in found.items()}
+    # Already recorded (a retry, or an attempt interrupted after its write): finish and stop, in the
+    # first attempt's barrier order — audit flush, replacement file + directory flush, then delete
+    # the predecessor and flush its directory. An earlier run's flush may have failed after its
+    # rename, so each barrier is repeated before the deletion it guards; without a readable audit
+    # entry for the predecessor it is never deleted.
+    done = items.get(decision)
+    if done is not None and done.get(DECIDED_VERSION) == version_digest:
+        left = {d: p for d, p in found.items() if d != decision}
+        audits = []
+        for d in left:
+            entry = (reviews_dir / "audit_log"
+                     / f"{review_id}-decided-again-"
+                       f"{_decide_again_key(review_id, items[d], decision, version_digest)}.json")
+            if not _audit_records_decide_again(entry, review_id, d, decision, version_digest):
+                raise DecideAgainRefused(
+                    review_id, "the audit entry for the replaced decision is missing or unreadable; "
+                    "the replaced decision is kept")
+            audits.append(entry)
+        for entry in audits:
+            sync_durably(entry)
+        sync_durably(found[decision])
+        for p in left.values():                   # the replaced file an interruption left behind
+            p.unlink()
+        # Flush BOTH terminal directories, even when no predecessor file remains: an earlier run may
+        # have deleted it and then failed to flush its directory, so its absence proves nothing
+        # durable. Only after both flushes succeed is the re-decision complete.
+        for d in ("approved", "rejected"):
+            _sync_terminal_dir(reviews_dir / d)
+        return False
+    if len(found) != 1:
+        raise DecideAgainRefused(review_id, "inconsistent ledger (decided in two places)")
+    (prior_status, src), = found.items()
+    prior = items[prior_status]
+    if prior.get(DECIDED_VERSION) is not None:
+        raise DecideAgainRefused(review_id, "already bound to a version; reopen it instead")
+    now = now or iso_now()
+    key = _decide_again_key(review_id, prior, decision, version_digest)
+    audit = reviews_dir / "audit_log"
+    audit.mkdir(parents=True, exist_ok=True)
+    entry = audit / f"{review_id}-decided-again-{key}.json"
+    if _audit_records_decide_again(entry, review_id, prior_status, decision, version_digest):
+        sync_durably(entry)
+    else:                                        # absent, or a torn/unreadable one: write it again
+        write_json_durably(entry, {
+            "review_id": review_id, "type": prior.get("type"), "event": "decided_again",
+            "decided_by": decided_by, "decided_at": now, "subject": prior.get("subject"),
+            "note": note, "prior_status": prior_status,
+            "prior_decided_by": prior.get("decided_by"), "prior_decided_at": prior.get("decided_at"),
+            "prior_approval_id": prior.get("approval_id"),
+            "prior_decision_note": prior.get("decision_note"),
+            "decision": decision, DECIDED_VERSION: version_digest,
+        })
+    item = dict(prior)
+    item.update(status=decision, decided_by=decided_by, decided_at=now, decision_note=note)
+    item[DECIDED_VERSION] = version_digest
+    item.pop("approval_id", None)
+    if decision == "approved":
+        item["approval_id"] = uuid.uuid4().hex
+    dest = reviews_dir / decision / f"{review_id}.json"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    write_json_durably(dest, item)
+    if dest != src:
+        src.unlink()
+        _sync_dir(src.parent)
+    return True
+
+
+@_committed
+def refresh_pending_proposal(
+    reviews_dir: Path,
+    review_id: str,
+    *,
+    proposal: dict[str, Any],
+    audit_key: str,
+    now: str | None = None,
+) -> bool:
+    """Replace the version-specific proposal fields of a still-open item in place (ADR-0073
+    decision 5): a forced regeneration under unchanged inputs writes new prose under the same review
+    id, so the pending proposal must describe the new version (its `version_digest`, title, summary,
+    claim ids). Only an open (`pending`/`deferred`, not retiring) item is touched — a decided one is
+    a human record. An audit entry keyed by `audit_key` (the producer's commit attempt) is written
+    durably first, so a retry neither loses nor duplicates it. Returns True iff it changed the item."""
+    reviews_dir = Path(reviews_dir)
+    src = reviews_dir / "pending" / f"{review_id}.json"
+    if not src.exists():
+        return False
+    item = json.loads(src.read_text(encoding="utf-8"))
+    if item.get("status") not in ("pending", "deferred") or is_retiring(item):
+        return False
+    old = item.get("proposal") if isinstance(item.get("proposal"), dict) else {}
+    new = {**old, **proposal}
+    if new == old:
+        return False
+    audit = reviews_dir / "audit_log"
+    audit.mkdir(parents=True, exist_ok=True)
+    entry = audit / f"{review_id}-proposal-refreshed-{audit_key}.json"
+    if entry.exists():
+        sync_durably(entry)
+    else:
+        write_json_durably(entry, {
+            "review_id": review_id, "type": item.get("type"), "event": "proposal_refreshed",
+            "decided_by": "system", "decided_at": now or iso_now(), "subject": item.get("subject"),
+            "prior_proposal": old, "proposal": new,
+        })
+    item["proposal"] = new
+    write_json_durably(src, item)
     return True
