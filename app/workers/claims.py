@@ -47,7 +47,7 @@ from app.backend import producer_journal as journal
 from app.backend.manifests import get_status, iso_now, load_manifest, valid_manifests
 from app.llm import prompts
 from app.llm.client import LLMClient, ParseError
-from app.workers import citations, publication, reviews, titles
+from app.workers import citations, claim_marker, publication, reviews, titles
 from app.workers import enrichment_artifact as art
 from app.workers import labels
 from app.workers.wiki_render import REVIEW_STATUSES, parse_frontmatter, render_claim_page
@@ -188,12 +188,42 @@ def _write_source_artifact(apath, sid, fingerprint, source_claims, model_ref, no
 _MIRRORED_PAGE_STATUSES = frozenset({"active", "hidden", "deprecated_candidate"})
 
 
+def _write_page_durably(path: Path, content: str) -> None:
+    """Replace a page durably: temp file fsynced, renamed, directory fsynced (ADR-0073 decision 10:
+    the marked deprecation must be on disk before the journal records it)."""
+    from app.backend import publication_queue as pq
+    tmp = path.with_name(path.name + f".tmp-{uuid.uuid4().hex[:8]}")
+    pq._write_durably(tmp, content.encode("utf-8"))
+    tmp.replace(path)
+    pq._sync_dir(path.parent)
+
+
+def sync_page_durably(path: Path) -> None:
+    """Repeat a page's durability barrier (fsync the file, then its directory). Recovery calls it
+    before certifying a marked page an earlier run wrote — that run's flush may have failed after
+    its rename (ADR-0073 slice 2 review)."""
+    import os
+    from app.backend import publication_queue as pq
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    pq._sync_dir(Path(path).parent)
+
+
 def mirror_page_status(gconn, *, cid: str, claims_dir: Path, now: str) -> bool:
     """Copy a Claim page's saved status (the authority, ADR-0022) into the graph's node mirror.
     Returns False when there is no page or no recognised status (nothing copied). Publication runs it
     on every claim before rendering, so partner sections, syntheses and Source pages read the saved
     visibility even after a crash rolled the graph back."""
-    status = _read_status(Path(claims_dir) / f"{cid}.md")
+    page_path = Path(claims_dir) / f"{cid}.md"
+    # ADR-0073 decision 16: a page whose frontmatter or supersede marker can't be read is unknown
+    # authority — nothing is mirrored from it (the render that follows reports it).
+    if page_path.exists() and claim_marker.is_unreadable(claim_marker.parse(
+            page_path.read_text(encoding="utf-8", errors="replace"))[0]):
+        return False
+    status = _read_status(page_path)
     if status not in _MIRRORED_PAGE_STATUSES or graph.get_node(gconn, cid) is None:
         return False
     graph.upsert_node(gconn, node_id=cid, node_type="claim", slug=cid, status=status, now=now)
@@ -202,7 +232,8 @@ def mirror_page_status(gconn, *, cid: str, claims_dir: Path, now: str) -> bool:
 
 def recompose_claim(gconn, *, cid, claims_dir, reviews_dir, now, markdown_dir, text_hint=None,
                     contradiction_affected=None, deprecate=False, review_status=None,
-                    hide=False, unhide=False, project_only=False) -> str:
+                    hide=False, unhide=False, project_only=False, supersede_marker=None,
+                    durable=False) -> str:
     """Render a Claim page from its `active` derived_from edges (tombstone if none).
 
     The single, shared claim renderer (used by the claim worker and the contradiction worker):
@@ -225,12 +256,27 @@ def recompose_claim(gconn, *, cid, claims_dir, reviews_dir, now, markdown_dir, t
     ADR-0068 `project_only` (publication): render the page from saved authority and nothing else — the
     saved status and review_status are kept, and a claim whose evidence is gone while its page is not
     a tombstone returns `"evidence_gone"` unwritten (tombstoning retracts relationships and files a
-    review: producer work, never publication's)."""
+    review: producer work, never publication's).
+
+    ADR-0073 decision 16: a supersede completion marker on the page is read and written back
+    unchanged by every render. `supersede_marker` (the supersede executor only) adds one; it never
+    replaces a different marker (`"marker_conflict"`). A damaged marker — partial or malformed —
+    returns `"marker_unreadable"` before anything is written (page and graph untouched); the caller
+    reports that work incomplete. `durable` fsyncs the page write (the marked deprecation)."""
     edges = [e for e in graph.outgoing_active(gconn, cid) if e["edge_type"] == "derived_from"]
     page_path = claims_dir / f"{cid}.md"
     claim_text = text_hint or _read_claim_text(page_path)
     if claim_text is None:
         return "skipped"  # no durable wording to render from (shouldn't happen)
+    marker_state, marker = (claim_marker.parse(page_path.read_text(encoding="utf-8",
+                                                                    errors="replace"))
+                            if page_path.exists() else (claim_marker.NONE, None))
+    if claim_marker.is_unreadable(marker_state):
+        return "marker_unreadable"                # unreadable evidence: never render it away
+    if supersede_marker is not None:
+        if marker is not None and marker != supersede_marker:
+            return "marker_conflict"              # another operation's record is never replaced
+        marker = supersede_marker
     cites = []
     for e in edges:
         src, start, end = e["dst_id"], e["evidence_char_start"], e["evidence_char_end"]
@@ -268,13 +314,14 @@ def recompose_claim(gconn, *, cid, claims_dir, reviews_dir, now, markdown_dir, t
     link_labels = labels.display_labels(
         claims_dir.parent,
         [f"Sources/{c['source_id']}" for c in cites] + [f"Claims/{p}" for p in contradicts])
-    page_path.write_text(
-        render_claim_page({"claim_id": cid, "claim_text": claim_text, "confidence": "low",
-                           "citations": cites, "contradicts": contradicts, "deprecated": deprecated,
-                           "hidden": hidden},
-                          review_status=review_status, labels=link_labels),
-        encoding="utf-8",
-    )
+    content = render_claim_page({"claim_id": cid, "claim_text": claim_text, "confidence": "low",
+                                 "citations": cites, "contradicts": contradicts,
+                                 "deprecated": deprecated, "hidden": hidden},
+                                review_status=review_status, labels=link_labels, marker=marker)
+    if durable:
+        _write_page_durably(page_path, content)
+    else:
+        page_path.write_text(content, encoding="utf-8")
     # Mirror the page's status into the derived node index (hidden > deprecated/tombstone > active).
     node_status = "hidden" if hidden else ("deprecated_candidate" if (deprecated or not cites) else "active")
     graph.upsert_node(gconn, node_id=cid, node_type="claim", slug=cid, status=node_status, now=now)
@@ -599,6 +646,10 @@ def extract_claims(
 
         pages_written = sum(o == "written" for o in page_outcomes.values())
         pages_tombstoned = sum(o == "tombstoned" for o in page_outcomes.values())
+        # ADR-0073 decision 16: a Claim page whose supersede marker is damaged was left untouched;
+        # that page's work is unfinished, so the run is never a clean success.
+        marker_unreadable = sorted(c for c, o in page_outcomes.items()
+                                   if o in ("marker_unreadable", "marker_conflict"))
         pub = run.finish()                    # index.md + the keyword index, once (decision 5)
         left = journal.pending(root, _PRODUCER)
         # A document this run attempted whose commit is still unfinished is never a clean success.
@@ -606,7 +657,7 @@ def extract_claims(
 
         # ADR-0069 slice 2(a): a failed contradiction maintenance keeps the claims but leaves the
         # run incomplete (lint reports the proposals until `detect_contradictions.py maintain`).
-        if errors or left_attempted or maintenance["errors"]:
+        if errors or left_attempted or maintenance["errors"] or marker_unreadable:
             status = "partial"
         elif not has_key and considered > 0:
             status = "skipped"
@@ -619,6 +670,7 @@ def extract_claims(
             "sources_considered": considered, "sources_with_claims": sources_with_claims,
             "claims_written": claims_written, "claim_pages_written": pages_written,
             "claim_pages_tombstoned": pages_tombstoned,
+            "claim_pages_marker_unreadable": marker_unreadable,
             "claims_dropped_ungrounded": claims_dropped_ungrounded,
             # ADR-0056 coverage/staging observability: window calls made, over-budget
             # singleton windows, and the staging outcomes ("nothing changed because staging

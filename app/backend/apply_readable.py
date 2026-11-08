@@ -197,6 +197,34 @@ REASONS = {
     "unexpected_to_status": "the review asks for an unexpected status",
     "visibility_suppressed": "it is hidden, so it is left as it is",
     "edge_missing": "the contradiction link no longer exists",
+    # ADR-0073 decisions 9–17: the guarded supersede. Reason-specific; none assumes a cause.
+    "contradiction_retired": "this contradiction no longer stands (it was retired), so the "
+                             "decision has nothing to act on",
+    "winner_not_active": "the claim chosen to win is no longer active",
+    "loser_not_active": "the claim to be superseded is no longer active",
+    "claim_page_unreadable": "a claim's page can't be read",
+    "approval_unbound": "this approval was recorded before approvals carried an id; reopen it and "
+                        "approve it again",
+    "supersedes_edge_foreign": "a supersede link between these claims belongs to another decision",
+    "supersede_withdrawn": "this approval was withdrawn after an incomplete supersede; reopen it "
+                           "to decide again",
+    "partial_supersede_withdrawn": "the supersede couldn't be finished, so the part already made "
+                                   "was withdrawn; reopen the review to decide again",
+    "supersede_in_flight": "an earlier run of this supersede is unfinished",
+    "supersede_journal_unreadable": "the saved progress of this supersede can't be read",
+    "supersede_journal_invalid": "the saved progress of this supersede doesn't match the approval",
+    "supersede_state_unverified": "the claims and the supersede link don't match a known state, so "
+                                  "nothing was changed",
+    "loser_deprecated_unmarked": "the claim to be superseded is already deprecated, but nothing "
+                                 "records that this decision did it",
+    "completion_evidence_found": "the supersede is recorded as finished, so it isn't withdrawn",
+    "rollback_evidence_unreadable": "a record needed to check the supersede can't be read, so "
+                                    "nothing was withdrawn",
+    "completion_audit_conflict": "the supersede's completion record doesn't match this decision",
+    "rollback_audit_conflict": "the supersede's withdrawal record doesn't match this decision",
+    "marker_unreadable": "a claim page's supersede record is damaged",
+    "marker_conflict": "the claim page already records another supersede",
+    "identity_operation_in_flight": "another unfinished change involves this item",
     "edge_status_unexpected": "the contradiction link is in an unexpected state",
     "evidence_changed": "the evidence changed since the review was filed",
     "evidence_gone": "the evidence no longer exists",
@@ -240,6 +268,10 @@ RECOVERY = {
                                  "names it), then preview again.",
     "partial_split_state": "An earlier split stopped part-way and can't be resumed automatically; "
                            "open the review.",
+    "partial_supersede_withdrawn": "Nothing more happens on its own: reopen the review to decide "
+                                   "again.",
+    "marker_unreadable": "Repair the damaged claim page (scripts/validate_all.py names it), then "
+                         "apply again.",
 }
 
 
@@ -257,6 +289,11 @@ def reason_text(reason: Any, info: dict[str, Any]) -> str:
     """Plain words for a skip/incomplete code; never the bare code."""
     from app.backend.review_html import refusal_text
     code = str(reason or "")
+    if code == "identity_operation_in_flight" and info.get("blocking_review_id"):
+        # ADR-0073 decision 14: claim governance waits on an unfinished supersede (or any
+        # unreadable journal); the decision stays recorded and runs after it.
+        return (f"another change involving this claim (review {info['blocking_review_id']}) is "
+                "unfinished, so this one waits; it runs on a later Apply once that one finished")
     worded = refusal_text(code, info)
     if worded and worded != code:
         return worded
@@ -341,9 +378,11 @@ def render(groups: dict[str, Any], *, advisories: list[dict[str, Any]] | None = 
                        f"{_h(reason_text(r.get('reason'), r.get('details') or {}))}. "
                        f"{_link(r.get('review_id'))} {_tech(r)}</li>"
                        for r in groups["information"])
-        parts.append("<h2>Information</h2><p class='help'>Nothing to do — these decisions are "
-                     "for a version that has since been replaced, so Apply leaves them as they "
-                     "are.</p><ul>" + rows + "</ul>")
+        parts.append("<h2>Information</h2><p class='help'>Nothing to do — these decisions no "
+                     "longer have anything to act on (they are for a version that has since been "
+                     "replaced, or the contradiction they resolved no longer stands), so Apply "
+                     "leaves them as they are. They are kept as a record.</p><ul>" + rows
+                     + "</ul>")
     attention = []
     for r in groups["blocked"]:
         d = r.get("details") or {}

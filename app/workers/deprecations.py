@@ -29,7 +29,7 @@ from typing import Any
 
 from app.backend import graph
 from app.backend.manifests import iso_now
-from app.workers import apply_outcomes, claims, items
+from app.workers import apply_outcomes, claims, identity_journal, items
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter
 
 # A well-formed wiki page is exactly `<Dir>/<file>.md` — one directory segment, one filename, no path
@@ -207,6 +207,12 @@ def _apply_approved_deprecations(
         ctx_type = (item.get("context") or {}).get("node_type")
         if page != canonical_page or (ctx_type and ctx_type != node_type):
             _skip(skipped, outcomes, rid, rtype, "page_node_mismatch", subject=subject, before=before)
+            continue
+        # ADR-0073 decision 14: a claim named by an open supersede (or any unreadable) journal waits;
+        # the decision stays recorded and runs once that operation ended.
+        if node_type == "claim" and (busy := identity_journal.operation_for(reviews_dir, [nid])):
+            _skip(skipped, outcomes, rid, rtype, "identity_operation_in_flight", subject=subject,
+                  before=before, problem={"blocking_review_id": busy})
             continue
 
         # Pre-state: distinguish true no-op / normalization / full apply (ADR-0035 A5).
@@ -463,6 +469,12 @@ def _apply_claim_visibility_transition(
         if page != canonical_page or (ctx_type and ctx_type != "claim"):
             _skip(skipped, outcomes, rid, review_type, "page_node_mismatch", subject=subject,
                   before=before)
+            continue
+        # ADR-0073 decision 14: hide/unhide of a claim named by an open supersede (or any unreadable)
+        # journal waits; the decision stays recorded and runs once that operation ended.
+        if (busy := identity_journal.operation_for(reviews_dir, [nid])) is not None:
+            _skip(skipped, outcomes, rid, review_type, "identity_operation_in_flight",
+                  subject=subject, before=before, problem={"blocking_review_id": busy})
             continue
 
         # Read BOTH authorities (the page is authoritative; the graph node is the mirror) so a page/graph

@@ -325,10 +325,18 @@ def test_supersede_executes_winner_loser_effects(tmp_path):
     assert "status: deprecated_candidate" in loser_page
     assert "## Evidence" in loser_page and "[[Sources/" in loser_page
     assert _claim_page_contradictions(tmp_path, loser) == {winner}
-    # Audit trail: a deprecate_wiki_page item was approved naming the contradiction resolution.
+    # ADR-0073 decisions 13 and 16: the loser page carries the completion marker, one dedicated
+    # completion audit records the execution, and no synthetic deprecate_wiki_page item is filed.
+    item = json.loads(next((tmp_path / "reviews" / "approved").glob("*.json")).read_text())
+    assert f'superseded_by_review: "{item["review_id"]}"' in loser_page
+    assert f'superseded_by_approval: "{item["approval_id"]}"' in loser_page
+    assert f'superseded_by_claim: "{winner}"' in loser_page
     audit = [json.loads(p.read_text()) for p in (tmp_path / "reviews" / "audit_log").glob("*.json")]
-    assert any(e["type"] == "deprecate_wiki_page" and e["decision"] == "approved"
-               and e["decided_by"] == "contradiction_resolution" for e in audit)
+    done = [e for e in audit if e.get("event") == "supersede_completed"]
+    assert len(done) == 1 and done[0]["winner"] == winner and done[0]["loser"] == loser
+    assert done[0]["approval_id"] == item["approval_id"] and done[0]["edge_id"] == sup[0]["edge_id"]
+    assert not any(e.get("type") == "deprecate_wiki_page" for e in audit)
+    assert not list((tmp_path / "reviews").rglob("*deprecate*"))
     assert validate_projection.main([str(tmp_path)]) == 0
     assert validate_graph.main([str(tmp_path)]) == 0
 

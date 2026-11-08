@@ -60,11 +60,21 @@ def _claim_nodes(conn, *, loser_deprecated: bool = False) -> None:
                       status="deprecated_candidate" if loser_deprecated else "active")
 
 
-def _approved_supersede(tmp_path: Path, rid: str = "rev_c") -> None:
+RC = "rev_" + "c" * 16          # a canonical review id (the supersede effect check needs one)
+
+
+def _approved_supersede(tmp_path: Path, rid: str = RC) -> None:
     _write(tmp_path, "approved", rid, {
         "type": "resolve_contradiction", "status": "approved", "decided_by": "human",
         "decided_at": "t0", "winner": CA, "subject": {"claim_a": CA, "claim_b": CB},
-        "proposal": {}, "context": {}})
+        "approval_id": "a" * 32, "proposal": {}, "context": {}})
+
+
+def _claim_page(tmp_path: Path, cid: str, status: str) -> None:
+    d = tmp_path / "wiki" / "Claims"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{cid}.md").write_text(f'---\ntype: claim\nclaim_id: "{cid}"\nstatus: {status}\n---\n',
+                                 encoding="utf-8")
 
 
 def _reopened_audits(tmp_path: Path, rid: str) -> list[Path]:
@@ -106,20 +116,20 @@ def test_pending_apply_supersede_reopens_and_clears_winner(client, tmp_path):
     conn = _graph(tmp_path)
     _claim_nodes(conn)
     graph.upsert_assertion(conn, src_id=CA, dst_id=CB, edge_type="contradicts",  # proposed = not applied
-                           asserted_by="llm", status="proposed", review_id="rev_c")
+                           asserted_by="llm", status="proposed", review_id=RC)
     conn.commit()
     conn.close()
     _approved_supersede(tmp_path)
-    r = client.post("/reviews/rev_c/reopen", json={"reason": "picked the wrong winner"})
-    assert r.status_code == 200 and r.json() == {"review_id": "rev_c", "reopened": True,
+    r = client.post(f"/reviews/{RC}/reopen", json={"reason": "picked the wrong winner"})
+    assert r.status_code == 200 and r.json() == {"review_id": RC, "reopened": True,
                                                  "status": "pending"}
-    item = json.loads((tmp_path / "reviews" / "pending" / "rev_c.json").read_text())
+    item = json.loads((tmp_path / "reviews" / "pending" / f"{RC}.json").read_text())
     assert item["status"] == "pending"
     for cleared in ("winner", "decided_by", "decided_at", "decision_note"):
         assert cleared not in item                       # terminal fields + winner cleared
-    assert not (tmp_path / "reviews" / "approved" / "rev_c.json").exists()
-    audits = _reopened_audits(tmp_path, "rev_c")
-    assert len(audits) == 1 and audits[0].name == "rev_c-reopened-1.json"
+    assert not (tmp_path / "reviews" / "approved" / f"{RC}.json").exists()
+    audits = _reopened_audits(tmp_path, RC)
+    assert len(audits) == 1 and audits[0].name == f"{RC}-reopened-1.json"
     entry = json.loads(audits[0].read_text())
     assert entry["reason"] == "picked the wrong winner" and entry["prior_status"] == "approved"
     assert entry["prior_winner"] == CA                   # the undone winner is recorded
@@ -155,15 +165,17 @@ def test_effected_supersede_blocks_already_applied(client, tmp_path):
     conn = _graph(tmp_path)
     _claim_nodes(conn, loser_deprecated=True)
     graph.upsert_assertion(conn, src_id=CA, dst_id=CB, edge_type="contradicts",
-                           asserted_by="llm", status="active", review_id="rev_c")
+                           asserted_by="llm", status="active", review_id=RC)
     graph.upsert_assertion(conn, src_id=CA, dst_id=CB, edge_type="supersedes",
-                           asserted_by="human", status="active", review_id="rev_c")
+                           asserted_by="human", status="active", review_id=RC)
     conn.commit()
     conn.close()
+    _claim_page(tmp_path, CA, "active")
+    _claim_page(tmp_path, CB, "deprecated_candidate")    # the page is the status authority
     _approved_supersede(tmp_path)
-    r = client.post("/reviews/rev_c/reopen", json={"reason": "x"})
+    r = client.post(f"/reviews/{RC}/reopen", json={"reason": "x"})
     assert r.status_code == 409 and "already_applied" in r.json()["detail"]
-    assert (tmp_path / "reviews" / "approved" / "rev_c.json").exists()  # no mutation
+    assert (tmp_path / "reviews" / "approved" / f"{RC}.json").exists()  # no mutation
 
 
 def test_blank_reason_is_400(client, tmp_path):

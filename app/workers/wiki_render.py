@@ -402,7 +402,8 @@ def _fm_quote(text: str) -> str:
 
 
 def render_claim_page(claim: dict[str, Any], *, review_status: str | None = None,
-                      labels: dict[str, str] | None = None) -> str:
+                      labels: dict[str, str] | None = None,
+                      marker: dict[str, str] | None = None) -> str:
     """Render a deterministic Claim page from a grounded claim record (ADR-0019/0020/0022).
 
     The frontmatter `citations:` list is the machine-readable record (validated by
@@ -461,6 +462,11 @@ def render_claim_page(claim: dict[str, Any], *, review_status: str | None = None
         # metadata lives in frontmatter); escaped so it round-trips and carries no [[.
         f'claim_text: "{_fm_quote(claim_text)}"',
     ]
+    if marker is not None:
+        # ADR-0073 decision 16: the supersede completion marker, a historical record kept through
+        # every render whatever the current status.
+        from app.workers import claim_marker
+        fm_lines.extend(claim_marker.lines(marker))
     evidence_rows = []
     if active:
         fm_lines.append("citations:")

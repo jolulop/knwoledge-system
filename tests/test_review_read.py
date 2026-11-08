@@ -340,35 +340,75 @@ def _seed_contradiction(tmp_path, *, edge_status="active"):
     return gdb, conn
 
 
-def test_contradiction_supersede_edge_active_but_effects_missing_is_pending(tmp_path):
-    # Approved supersede (winner present) with the contradicts edge active but NO supersedes edge /
-    # loser deprecation yet -> must be pending_apply, not effected (ADR-0035 A2 blocking-fix).
-    rv = tmp_path / "reviews"
-    gdb, conn = _seed_contradiction(tmp_path)
+_SA, _SB = "clm_" + "1" * 16, "clm_" + "2" * 16       # canonical ids (ADR-0073 supersede)
+_SRID = "rev_" + "5" * 16
+
+
+def _supersede_seed(tmp_path, *, loser_status="active", owned=True, marker=None):
+    gdb, conn = _graph_with(tmp_path)
+    graph.upsert_node(conn, node_id=_SA, node_type="claim", slug=_SA, status="active")
+    graph.upsert_node(conn, node_id=_SB, node_type="claim", slug=_SB, status=loser_status)
+    graph.upsert_assertion(conn, src_id=_SA, dst_id=_SB, edge_type="contradicts",
+                           asserted_by="llm", status="active")
+    if owned:
+        graph.upsert_assertion(conn, src_id=_SA, dst_id=_SB, edge_type="supersedes",
+                               asserted_by="human", status="active", review_id=_SRID)
+    conn.commit()
     conn.close()
-    item = _item("rev_c", "resolve_contradiction", status="approved",
-                 subject={"claim_a": "clm_1", "claim_b": "clm_2"})
-    item["winner"] = "clm_1"
-    _write_item(rv, "approved", item)
-    prev = review_read.get_review(rv, "rev_c", graph_db=gdb, wiki_dir=tmp_path / "wiki")["preview"]
-    assert prev["apply"]["effect_status"] == review_read.PENDING_APPLY
+    d = tmp_path / "wiki" / "Claims"
+    d.mkdir(parents=True, exist_ok=True)
+    for cid, status in ((_SA, "active"), (_SB, loser_status)):
+        extra = "".join(f'{k}: "{v}"\n' for k, v in (marker or {}).items()) if cid == _SB else ""
+        (d / f"{cid}.md").write_text(f'---\ntype: claim\nclaim_id: "{cid}"\nstatus: {status}\n'
+                                     f"{extra}---\n", encoding="utf-8")
+    item = _item(_SRID, "resolve_contradiction", status="approved",
+                 subject={"claim_a": _SA, "claim_b": _SB})
+    item["winner"], item["approval_id"] = _SA, "a" * 32
+    _write_item(tmp_path / "reviews", "approved", item)
+    return gdb
+
+
+def _supersede_effect(tmp_path, gdb):
+    return review_read.get_review(tmp_path / "reviews", _SRID, graph_db=gdb,
+                                  wiki_dir=tmp_path / "wiki")["preview"]["apply"]
+
+
+def test_contradiction_supersede_edge_active_but_effects_missing_is_pending(tmp_path):
+    # Approved supersede with the contradicts edge active but NO supersedes edge / loser deprecation
+    # yet: verified absent -> pending_apply (reopenable), not effected (ADR-0035 A2, ADR-0073 d9).
+    gdb = _supersede_seed(tmp_path, owned=False)
+    assert _supersede_effect(tmp_path, gdb)["effect_status"] == review_read.PENDING_APPLY
 
 
 def test_contradiction_supersede_fully_applied_is_effected(tmp_path):
-    rv = tmp_path / "reviews"
-    gdb, conn = _seed_contradiction(tmp_path)
-    # full supersede effects: active supersedes edge winner->loser + loser deprecated_candidate
-    graph.upsert_assertion(conn, src_id="clm_1", dst_id="clm_2", edge_type="supersedes",
-                           asserted_by="human", status="active")
-    graph.upsert_node(conn, node_id="clm_2", node_type="claim", slug="clm_2",
-                      status="deprecated_candidate")
+    gdb = _supersede_seed(tmp_path, loser_status="deprecated_candidate",
+                          marker={"superseded_by_review": _SRID,
+                                  "superseded_by_approval": "a" * 32,
+                                  "superseded_by_claim": _SA})
+    assert _supersede_effect(tmp_path, gdb)["effect_status"] == review_read.EFFECTED
+
+
+def test_contradiction_supersede_legacy_unmarked_completion_is_effected(tmp_path):
+    gdb = _supersede_seed(tmp_path, loser_status="deprecated_candidate")
+    assert _supersede_effect(tmp_path, gdb)["effect_status"] == review_read.EFFECTED
+
+
+def test_contradiction_supersede_partial_effects_are_never_no_live_effect(tmp_path):
+    # an owned edge with an ACTIVE loser: partial -> unknown, so reopen is blocked
+    gdb = _supersede_seed(tmp_path)
+    apply = _supersede_effect(tmp_path, gdb)
+    assert apply["effect_status"] == review_read.UNKNOWN
+    assert review_read.reopen_block_reason(apply["effect_status"]) is not None
+
+
+def test_contradiction_supersede_with_missing_edge_is_not_unknown(tmp_path):
+    # ADR-0073 decision 9: a missing contradiction edge no longer reads as UNKNOWN for a supersede
+    gdb = _supersede_seed(tmp_path, owned=False)
+    conn = graph.connect(gdb)
+    conn.execute("DELETE FROM edges WHERE edge_type = 'contradicts'")
+    conn.commit()
     conn.close()
-    item = _item("rev_c", "resolve_contradiction", status="approved",
-                 subject={"claim_a": "clm_1", "claim_b": "clm_2"})
-    item["winner"] = "clm_1"
-    _write_item(rv, "approved", item)
-    prev = review_read.get_review(rv, "rev_c", graph_db=gdb, wiki_dir=tmp_path / "wiki")["preview"]
-    assert prev["apply"]["effect_status"] == review_read.EFFECTED
+    assert _supersede_effect(tmp_path, gdb)["effect_status"] == review_read.PENDING_APPLY
 
 
 def test_contradiction_rejected_checks_edge_rejected(tmp_path):

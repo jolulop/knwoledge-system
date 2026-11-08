@@ -1291,7 +1291,9 @@ def _plan_repair(gconn, reviews_dir: Path, wiki_dir: Path | None = None,
     damaged = {c["source_id"] for c in corrupt_ledgers(reviews_dir)}
     plan["skipped_damaged"] = sorted(damaged)
     ops = identity_journal.open_operations(reviews_dir)
-    plan["deferred"] = [o["review_id"] for o in ops]
+    # ADR-0073 decision 10: a readable supersede journal names claims only, so it defers no tag
+    # repair; an unreadable entry (any op) still defers everything (fail-closed).
+    plan["deferred"] = [o["review_id"] for o in ops if o["nodes"] is None or o["op"] != "supersede"]
     plan["pending_resolutions"] = pending_resolutions(reviews_dir)
     all_deferred = any(o["nodes"] is None for o in ops)
     in_flight = {n for o in ops for n in (o["nodes"] or [])}

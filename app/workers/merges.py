@@ -527,6 +527,9 @@ def apply_merges(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = 
                 "affected_pages": item_pages + [f"Sources/{s}.md" for s in sorted(item_sources)],
             }, now)
             # The marker stays: the apply caller removes it after the Source pages + indexes refreshed.
+            # ADR-0073 decision 10: the stage is recorded only after the graph work it certifies is
+            # committed (durable), never ahead of it.
+            gconn.commit()
             identity_journal.set_stage(reviews_dir, rid, "graph_done")
             journaled.append(rid)
             applied += 1

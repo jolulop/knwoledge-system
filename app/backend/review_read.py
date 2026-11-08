@@ -560,6 +560,20 @@ def _effect_contradiction(
         return UNKNOWN, ["graph_unavailable"]
     if not (a and b):
         return UNKNOWN, ["missing_claim_ids"]
+    if status == "approved" and item.get("winner") in (a, b):
+        # ADR-0073 decision 9: ONE effect check for Apply, the preview and reopen. Evaluated before
+        # the contradiction edge, so a missing or retired edge neither reads as UNKNOWN nor hides an
+        # applied supersede; partial or unverifiable effects are never "no live effect".
+        if wiki_dir is None:
+            return UNKNOWN, ["wiki_unavailable"]
+        from app.workers import supersede
+        eff = supersede.effect_state(gconn, Path(wiki_dir).parent / "reviews",
+                                     Path(wiki_dir) / "Claims", item)
+        if eff["state"] == supersede.COMPLETE:
+            return EFFECTED, []
+        if eff["state"] in (supersede.ABSENT, supersede.WITHDRAWN):
+            return PENDING_APPLY, []
+        return UNKNOWN, [str(eff.get("reason") or eff["state"])]
     rows = graph.contradiction_between(gconn, a, b)
     if not rows:
         return UNKNOWN, ["contradiction_edge_missing"]
@@ -571,16 +585,7 @@ def _effect_contradiction(
     # loser deprecated_candidate. Checking only the edge would hide a not-yet-applied supersede.
     if "active" not in statuses:
         return PENDING_APPLY, []
-    winner = item.get("winner")
-    if winner not in (a, b):
-        return EFFECTED, []  # acknowledge: an active contradicts edge is the whole effect
-    loser = b if winner == a else a
-    has_supersedes = any(
-        e["dst_id"] == loser and e["edge_type"] == "supersedes"
-        for e in graph.outgoing_active(gconn, winner))
-    loser_node = graph.get_node(gconn, loser)
-    loser_deprecated = bool(loser_node) and loser_node["status"] == "deprecated_candidate"
-    return (EFFECTED if (has_supersedes and loser_deprecated) else PENDING_APPLY), []
+    return EFFECTED, []  # acknowledge: an active contradicts edge is the whole effect
 
 
 def preview_resolve_contradiction(

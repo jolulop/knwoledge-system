@@ -234,21 +234,28 @@ def test_recorded_winner_drives_supersede_execution(tmp_path):
     # an APPROVED resolve_contradiction with winner=CA (loser CB) — what the UI records
     d = tmp_path / "reviews" / "approved"
     d.mkdir(parents=True, exist_ok=True)
-    (d / "rev_c.json").write_text(json.dumps({
-        "review_id": "rev_c", "type": "resolve_contradiction", "status": "approved",
-        "subject": {"claim_a": CA, "claim_b": CB}, "winner": CA,
+    rid = "rev_cccccccccccccccc"
+    (d / f"{rid}.json").write_text(json.dumps({
+        "review_id": rid, "type": "resolve_contradiction", "status": "approved",
+        "subject": {"claim_a": CA, "claim_b": CB}, "winner": CA, "approval_id": "e" * 32,
         "proposal": {}, "context": {}}), encoding="utf-8")
 
     res = contradictions.apply_resolved_contradictions(
         conn, tmp_path / "reviews", claims_dir=tmp_path / "wiki" / "Claims",
         markdown_dir=tmp_path / "normalized" / "markdown")
     conn.commit()
-    # The recorded winner drove the (unchanged) supersede executor: a supersedes(winner CA -> loser CB)
-    # active edge is written and the contradicts edge stays active for the historical record. (The
-    # loser-deprecation effect itself is covered with full claim evidence in test_contradictions.)
+    # The recorded winner drove the guarded supersede executor (ADR-0073): the journal is bound to
+    # winner CA / loser CB and this approval, a supersedes(CA -> CB) edge owned by the review is
+    # written, and the contradicts edge is active. (These minimal pages carry no claim wording, so
+    # the loser can't be re-rendered and the run stops there, journaled; the full effect is covered
+    # with real claim evidence in test_contradictions.)
     assert res["superseded_executed"] == 1
-    sup = conn.execute("SELECT src_id, dst_id, status FROM edges WHERE edge_type='supersedes'").fetchone()
-    assert (sup["src_id"], sup["dst_id"], sup["status"]) == (CA, CB, "active")
+    sup = conn.execute("SELECT src_id, dst_id, status, review_id FROM edges "
+                       "WHERE edge_type='supersedes'").fetchone()
+    assert (sup["src_id"], sup["dst_id"], sup["status"], sup["review_id"]) == (CA, CB, "active", rid)
     contra = conn.execute("SELECT status FROM edges WHERE edge_type='contradicts'").fetchone()["status"]
     assert contra == "active"
+    journal = json.loads((tmp_path / "reviews" / "in_flight" / f"{rid}.json").read_text())
+    assert (journal["winner"], journal["loser"], journal["approval_id"]) == (CA, CB, "e" * 32)
+    assert journal["stage"] == "edge_written"
     conn.close()

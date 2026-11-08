@@ -17,7 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.backend import graph
-from app.workers import apply_outcomes, contradictions, reviews, synthesis
+from app.workers import apply_outcomes, contradictions, identity_journal, reviews, synthesis
 from tests import test_contradictions as tc
 from tests import test_synthesis_visibility as sv
 
@@ -249,7 +249,8 @@ def test_unhide_applied_already_in_effect_and_page_missing(tmp_path):
 
 # --- resolve_contradiction ---------------------------------------------------
 
-CA, CB = sorted(("clm_1", "clm_2"))
+CA, CB = sorted(("clm_" + "1" * 16, "clm_" + "2" * 16))   # canonical ids (ADR-0073 supersede)
+RC = "rev_" + "c" * 16
 
 
 def _pair(tmp_path, *, edge_status="proposed", pages=True):
@@ -277,6 +278,8 @@ def _decide(tmp_path, state, rid, *, winner=None, subject=None, with_id=True):
             "proposal": {}, "context": {}}
     if winner:
         item["winner"] = winner
+    if state == "approved":
+        item["approval_id"] = "a" * 32
     d = tmp_path / "reviews" / state
     d.mkdir(parents=True, exist_ok=True)
     if not with_id:
@@ -323,10 +326,12 @@ def test_reject_applied_then_already_in_effect(tmp_path):
 
 def test_supersede_applied_with_winner_then_already_in_effect(tmp_path):
     conn = _pair(tmp_path)
-    _decide(tmp_path, "approved", "rev_c", winner=CB)
+    _decide(tmp_path, "approved", RC, winner=CB)
     loser_name = apply_outcomes.page_name(tmp_path / "wiki", f"Claims/{CA}", CA)
     res = _contra(tmp_path, conn)
-    recs = [r for r in res["outcomes"] if r["review_id"] == "rev_c"]   # the audit item is not read here
+    recs = [r for r in res["outcomes"] if r["review_id"] == RC]
+    assert res["journaled"] == [RC]                     # the caller ends it after publication
+    identity_journal.end(tmp_path / "reviews", RC)
     assert len(recs) == 1 and len(res["outcomes"]) == 1
     rec = recs[0]
     assert rec["outcome"] == "applied" and rec["details"]["resolution"] == "supersede"
@@ -366,9 +371,22 @@ def test_contradiction_edge_in_other_status_is_skipped(tmp_path):
     _decide(tmp_path, "approved", "rev_c")
     res = _contra(tmp_path, conn)
     (rec,) = res["outcomes"]
-    assert (rec["outcome"], rec["reason"]) == ("skipped", "edge_status_unexpected")
+    # ADR-0073 decision 15: a decision on a retired contradiction is information, not a warning.
+    assert (rec["outcome"], rec["reason"]) == ("skipped", "contradiction_retired")
+    assert rec["details"]["information"] is True
     assert rec["details"]["problem"]["edge_statuses"] == ["superseded"]
     assert res["graph_changed"] is False
+
+
+def test_contradiction_edge_rejected_is_still_unexpected(tmp_path):
+    conn = _pair(tmp_path, edge_status="proposed")
+    (row,) = graph.contradiction_between(conn, CA, CB)
+    graph.set_status(conn, row["edge_id"], "rejected", now="t")
+    conn.commit()
+    _decide(tmp_path, "approved", "rev_c")
+    (rec,) = _contra(tmp_path, conn)["outcomes"]
+    assert (rec["outcome"], rec["reason"]) == ("skipped", "edge_status_unexpected")
+    assert "information" not in rec["details"]
 
 
 # --- verified end state (B2a review round 1) ---------------------------------
@@ -531,25 +549,3 @@ def test_contradiction_read_back_mismatch_is_postcondition_not_met(tmp_path, mon
     assert (rec["outcome"], rec["reason"]) == ("incomplete", apply_outcomes.POSTCONDITION_NOT_MET)
     assert rec["details"]["problem"]["edge_statuses"] == ["superseded"]
     assert res["resolution"]["acknowledged"] == 1                # legacy counter unchanged
-
-
-def test_supersede_effects_read_failure_is_incomplete(tmp_path, monkeypatch):
-    conn = _pair(tmp_path)
-    _decide(tmp_path, "approved", "rev_c", winner=CB)
-    real, real_out = contradictions._execute_supersede, graph.outgoing_active
-
-    def once(*a, **kw):                  # the next read (the reporting check) fails, later ones work
-        monkeypatch.setattr(contradictions.graph, "outgoing_active", real_out)
-        raise OSError("unreadable")
-
-    def then_fail(*a, **kw):
-        done = real(*a, **kw)
-        monkeypatch.setattr(contradictions.graph, "outgoing_active", once)
-        return done
-
-    monkeypatch.setattr(contradictions, "_execute_supersede", then_fail)
-    res = _contra(tmp_path, conn)
-    (rec,) = res["outcomes"]
-    assert (rec["outcome"], rec["reason"]) == ("incomplete", apply_outcomes.VERIFICATION_UNAVAILABLE)
-    assert res["resolution"]["superseded_executed"] == 1
-    assert graph.get_node(conn, CA)["status"] == "deprecated_candidate"

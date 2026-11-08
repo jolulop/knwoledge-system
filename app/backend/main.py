@@ -1448,12 +1448,27 @@ def _run_apply(st: Any, intent: str | None = None) -> dict[str, Any]:
     # refused meanwhile.
     journaled = sorted(set(merged.get("journaled", [])) | set(split_res.get("journaled", [])))
     identity_sources = set(merged.get("affected_sources", [])) | set(split_res.get("affected_sources", []))
+    # ADR-0073 slice 2 review: a journal also stays while ANY publication work is outstanding
+    # (an upstream page failure holds index and search without setting their flags). Apply owns the
+    # cleanup: Retry publishing finishes publication, and the next Apply verifies and closes it.
+    publication_complete = pub["status"] == publication.PUBLISHED
     identity_refresh_pending = bool(journaled) and (
-        index_failed or reindex_failed or bool(source_refresh_failed & identity_sources))
+        index_failed or reindex_failed or bool(source_refresh_failed & identity_sources)
+        or not publication_complete)
     if identity_refresh_pending:
         warnings.append("identity_refresh_pending")
     else:
         for rid in journaled:
+            identity_journal.end(reviews_dir, rid)
+    # ADR-0073 decision 10: a supersede journal ends only after its publication completed (Claim
+    # pages, wiki/index.md and search); until then claim governance on its two claims waits
+    # (decision 14) and the next Apply verifies completion and closes it.
+    supersede_journaled = sorted(set(contra.get("journaled", [])))
+    if supersede_journaled and (index_failed or reindex_failed or not publication_complete):
+        if "identity_refresh_pending" not in warnings:
+            warnings.append("identity_refresh_pending")
+    else:
+        for rid in supersede_journaled:
             identity_journal.end(reviews_dir, rid)
 
     # ADR-0043 (stricter than archive): a `hide_content` whose retrieval/nav index did NOT refresh is

@@ -1,8 +1,8 @@
 # ADR-0073 — Apply executor follow-ups: synthesis decisions bound to versions, guarded supersede
 
 - **Status:** accepted — design-locked by grill-phase 2026-11-06 (Q1–Q11). **Slice 1 (decisions
-  2–8, 12) implemented 2026-11-06**. Slice 2 grilled 2026-11-08 (decisions 13–17); slices 2–3 not
-  implemented.
+  2–8, 12) implemented 2026-11-06**. Slice 2 grilled 2026-11-08 (decisions 13–17); **slice 2
+  (decisions 9–10, 13–17) implemented 2026-11-08**; slice 3 (decision 11) not implemented.
 - **Date:** 2026-11-06
 - **Drivers:** ADR-0072's B2a outcomes exposed pre-existing executor behaviour ("Existing behaviour
   the outcomes made visible", items 1–8; item 1 was fixed in B2a review round 1). This ADR decides
@@ -560,6 +560,87 @@ mutation; completion evidence that became unreadable before recovery makes no mu
 - **Validation.** An integer `confidence` is compared exactly, so an oversized one is
   `synthesis_artifact_invalid` instead of an `OverflowError`. Legacy format is the
   `version_digest` field's absence; an explicit `null` is malformed (field `version_digest`).
+
+## Implementation notes — slice 2 (2026-11-08)
+
+- `app/workers/supersede.py` owns the guarded supersede: `binding`, `claim_page` (the authoritative
+  page read: unreadable when the file can't be read, names another claim or has an unsupported
+  status), `effect_state` (the one effect check: `complete` · `absent` · `withdrawn` · `partial` ·
+  `unverifiable` · `in_flight`), `completion_evidence` (the guard `repair_supersede.py` will share),
+  `prerequisite_problem` (decision 9 rows 2–4) and `execute` (the decision-10 precedence and write
+  order, decision 17's rollback protocol). It commits the graph at each stage boundary.
+- Strictness: a supersede needs canonical ids (`rev_<16 hex>`, `clm_<16 hex>`) — anything else is
+  `invalid_subject` — and a 32-hex `approval_id` (else `approval_unbound`).
+- `app/workers/claim_marker.py` parses and writes the three marker fields (decision 16).
+  `claims.recompose_claim` preserves a marker through every render, adds one only via
+  `supersede_marker=` (never replacing another: `marker_conflict`), returns `marker_unreadable`
+  before any write for a damaged one, and fsyncs the marked page (`durable=True`). The claim worker
+  reports damaged-marker pages (`claim_pages_marker_unreadable`) and the run as `partial`;
+  publication lists them as failed.
+- `app/workers/identity_journal.py`: durable writes (file and directory fsync), `read` and
+  `JournalUnreadable`, `set_stage` raises instead of returning, `begin(binding=…)`. Merges and splits
+  now commit the graph before recording `graph_done`.
+- `contradictions.apply_resolved_contradictions` delegates every approved supersede to
+  `supersede.execute`; the synthetic `deprecate_wiki_page` filing and `_execute_supersede` are gone.
+  It returns `journaled`, and `main._run_apply` ends those journals only when the index and search
+  refreshed. Decision 15's information classification also covers an **acknowledge** on a retired
+  contradiction (same reasoning: nothing to act on).
+- Decision 14: `deprecations` (claim deprecation, claim hide/unhide) skip a claim named by an open
+  journal with `identity_operation_in_flight` and `problem.blocking_review_id`; `supersede._fresh`
+  does the same for another supersede. `tag_links` repair no longer defers on a readable supersede
+  journal (it names claims only); an unreadable journal still defers everything.
+- `review_read._effect_contradiction` uses `effect_state` for an approved supersede before looking
+  at the contradiction edge.
+- Lints (report-only, `lint._check_supersedes`): `supersede_winner_retracted` (low),
+  `supersede_state_unverified` (medium; never fails lint).
+- `validate_frontmatter.py` accepts the complete marker on Claim pages in every supported status and
+  reports a damaged one.
+- The Apply reason text does not name `repair_supersede.py inspect` yet; that comes with slice 3.
+- Tests: `tests/test_guarded_supersede.py`; existing contradiction, reopen and review-read
+  fixtures moved to canonical ids and an `approval_id`.
+
+### Slice 2 review round 1 (2026-11-08)
+
+- **Recovery repeats durability barriers before acting.** `_resume` validates the recovered
+  journal's binding and stage, then repeats its flush (`identity_journal.sync`: file, then
+  directory) before any recovery mutation. A marked loser page is likewise validated (readable,
+  marker matching review, approval and winner), then flushed again
+  (`claims.sync_page_durably`) before rows 3 and 5 repair the mirror or advance the stage. A failed
+  flush propagates and nothing advances; the next Apply tries again.
+- **Unreadable authority is never "no marker".** `claim_marker.parse` returns `UNREADABLE` for an
+  existing page whose frontmatter block can't be parsed, or that has a `superseded_by_*` line
+  outside it; `claim_marker.is_unreadable` covers `DAMAGED` and `UNREADABLE`. Every consumer treats
+  both as unreadable evidence: `recompose_claim` (returns `marker_unreadable` before any write — a
+  Claim page with broken frontmatter is no longer silently re-rendered), `mirror_page_status`
+  (mirrors nothing, so publication leaves the graph unchanged and reports the page failed),
+  `supersede.claim_page` / `effect_state` / `completion_evidence` / `prerequisite_problem`, and
+  `validate_frontmatter.py`.
+- **Journals close only after publication completed.** Apply ends a supersede, merge or split
+  journal only when the publication status is `published`; any pending work (for example an upstream
+  Claim-page failure that holds index and search without setting their flags) keeps it, and the
+  waiting claim governance keeps waiting. Cleanup stays with Apply: Retry publishing finishes
+  publication, and the next Apply verifies completion and closes the journal, so deferred
+  governance runs on a later Apply.
+
+### Slice 2 review round 2 (2026-11-08)
+
+- **Reserved marker keys are detected under any spelling.** `claim_marker.parse` separates key
+  detection from canonical-line validation. Detection reads keys the way the project's frontmatter
+  parsers (and YAML) do: strip the line, skip blank lines and `#` comments, split on the first
+  colon, trim whitespace and surrounding quotes from the key. So leading indentation, whitespace
+  before the colon and quoted keys are all found. Validation then accepts a field only on a line in
+  the renderer's exact key spelling (`field:` at column 0, quoted canonical value; the existing
+  spaces or tabs after the colon and at the end of the line stay permitted). A non-canonically
+  keyed field is `DAMAGED`, never absent, so recompose refuses with `marker_unreadable` instead of
+  erasing it, and publication leaves the page and its mirror unchanged.
+- **Duplicates count across all spellings.** A field named twice, in any mix of spellings, is
+  `DAMAGED`, so a conflicting second winner can't hide behind one parser's first-value or another's
+  last-value behaviour.
+- **Outside the frontmatter** the same broad detection applies, and any reserved field there makes
+  the page `UNREADABLE`.
+- **CRLF is a line-ending difference, not damage.** A trailing `\r` is removed before validation,
+  so a canonical marker in a CRLF page parses `OK` (the page reads normally through Python's
+  universal newlines, and a recompose writes it back with LF and the marker kept).
 
 ## Consequences
 

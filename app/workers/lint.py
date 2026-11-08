@@ -209,6 +209,48 @@ def _check_graph(gconn, wiki_dir: Path, reviews_dir: Path, *, file_items: bool, 
     return findings
 
 
+def _check_supersedes(gconn, wiki_dir: Path, reviews_dir: Path) -> list[dict[str, Any]]:
+    """ADR-0073 decision 9–10, report-only (nothing filed, never fails lint):
+    - `supersede_winner_retracted`: an applied supersede (active `supersedes` edge, loser deprecated)
+      whose winner is no longer active. It stays applied — reversing it is a governed decision.
+    - `supersede_state_unverified`: a decision's own `supersedes` edge with an ACTIVE loser and no
+      open journal for that decision. Stated without a cause: an incomplete restore, lost metadata
+      and a pre-fix partial all look the same."""
+    from app.workers import identity_journal, supersede
+    claims_dir = Path(wiki_dir) / "Claims"
+    findings: list[dict[str, Any]] = []
+    rows = gconn.execute("SELECT * FROM edges WHERE edge_type = 'supersedes' AND status = 'active' "
+                         "ORDER BY edge_id").fetchall()
+    for row in rows:
+        winner, loser, rid = row["src_id"], row["dst_id"], row["review_id"]
+        wpage, lpage = supersede.claim_page(claims_dir, winner), supersede.claim_page(claims_dir, loser)
+        wnode = (graph.get_node(gconn, winner) or {}).get("status")
+        lnode = (graph.get_node(gconn, loser) or {}).get("status")
+        if lpage["status"] == "deprecated_candidate" and lnode == "deprecated_candidate" \
+                and not (wpage["status"] == "active" and wnode == "active"):
+            findings.append({"check": "supersede_winner_retracted", "severity": "low",
+                             "subject": loser,
+                             "detail": f"{loser} was superseded by {winner}, which is no longer "
+                                       f"active (page {wpage['status']}, graph {wnode}); the "
+                                       "supersede stays applied — reversing it is a review "
+                                       "decision"})
+            continue
+        if not rid or lpage["status"] != "active" or lnode != "active":
+            continue
+        try:
+            open_ = identity_journal.read(reviews_dir, rid) is not None
+        except (identity_journal.JournalUnreadable, ValueError):
+            open_ = True                          # an unreadable journal is reported elsewhere
+        if not open_:
+            findings.append({"check": "supersede_state_unverified", "severity": "medium",
+                             "subject": rid,
+                             "detail": f"review {rid} owns an active supersede link {winner} → "
+                                       f"{loser}, but {loser} is still active and no unfinished "
+                                       "operation is recorded; the state can't be verified, "
+                                       "so Apply leaves it as it is"})
+    return findings
+
+
 def _check_name_variants(manifests_dir: Path | None) -> list[dict[str, Any]]:
     """`name_variant_possible` (ADR-0070 B5): pairs of confirmed author/publisher names that may be
     spellings of one name (`name_variants`' provisional hint rule), each with the documents
@@ -778,6 +820,7 @@ def run_lint(
                         gconn, wiki_dir, reviews_dir, file_items=file_review_items, now=now,
                         filed=filed, existing=existing)
                     findings += _check_item_filenames(gconn, wiki_dir)  # report-only (ADR-0071)
+                    findings += _check_supersedes(gconn, wiki_dir, reviews_dir)  # ADR-0073, report-only
                     findings += _check_merge_candidates(  # graph-gated (ADR-0064)
                         gconn, wiki_dir, reviews_dir, policy_path=root / "policies" / "review.yaml",
                         file_items=file_review_items, now=now,

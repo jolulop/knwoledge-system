@@ -257,6 +257,20 @@ fails on a malformed synthesis file (an explicit `null` digest included) and rep
 without the digest field as an advisory only. Apply reports a synthesis decision as already in
 effect only when the page is exactly that version's rendering; otherwise it republishes it.
 
+**Guarded supersede (ADR-0073 decisions 9–10, 13–17).** An approved supersede runs only while its
+contradiction stands and both claims are active (page and graph). Its progress is saved in
+`reviews/in_flight/<review_id>.json`; the loser's Claim page gets three `superseded_by_*` fields in
+the same write as its deprecation, and `reviews/audit_log/<review_id>-superseded-<approval_id>.json`
+records the completion (no `deprecate_wiki_page` item is filed any more). The journal ends after
+publication; until then hide, unhide, deprecation and other supersedes on its two claims wait
+(`identity_operation_in_flight`), and the next Apply finishes it. If its prerequisites fail
+part-way and nothing shows it completed, Apply withdraws only its own `supersedes` edge
+(`partial_supersede_withdrawn`, audit `…-rolled-back-<approval_id>.json`); that approval never runs
+again — reopen and approve again to retry. A decision on a contradiction that was retired (a claim
+dropped by re-extraction) is listed under *Information*. A damaged `superseded_by_*` marker leaves
+that Claim page untouched and the run incomplete; `validate_frontmatter.py` names it. Lint reports
+`supersede_winner_retracted` and `supersede_state_unverified` (report-only).
+
 ### Executor-backed review types (`POST /reviews/apply`)
 
 Every review type below has a deterministic, key-free executor (the canonical set is `_APPLY_TYPES` in
@@ -266,7 +280,7 @@ honestly under `unapplied` (record-only / raw-touching).
 | Review type | ADR | Effect on apply |
 |---|---|---|
 | `promote_candidate_node` | 0018/0035/0059 | Candidate knowledge item → `active` (an unclassified-sentinel candidate needs an `item_type` amendment first). |
-| `resolve_contradiction` | 0031 | Acknowledge / supersede / reject a `contradicts` edge. |
+| `resolve_contradiction` | 0031/0073 | Acknowledge / supersede / reject a `contradicts` edge; a supersede is guarded and journaled. |
 | `propose_synthesis` | 0031/0073 | Activate (approve) or deprecate (reject) a `candidate` synthesis — only for the version the decision names (see *Synthesis versions* below). |
 | `deprecate_wiki_page` | 0035 | Scoped page deprecation → `deprecated_candidate`. |
 | `archive_source` | 0036 | Source `active` → `archive_candidate` (raw bytes untouched; manifest status flips). |

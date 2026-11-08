@@ -12,6 +12,11 @@ if str(ROOT) not in sys.path:
 # Single source of truth for the PAGE review_status set (ADR-0022): gate exactly what the renderer emits,
 # so producer and validator can't drift. `deferred` is deliberately absent — it is a review-ledger state.
 from app.workers.wiki_render import REVIEW_STATUSES as PAGE_REVIEW_STATUSES  # noqa: E402
+from app.workers import claim_marker  # noqa: E402
+
+# ADR-0073 decision 16: the supersede completion marker is a historical record, valid in every
+# supported claim lifecycle state.
+_CLAIM_MARKER_STATUSES = {"active", "deprecated_candidate", "hidden"}
 
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 WIKI_SUBDIRS = ["Sources", "Items", "Claims", "Tags", "Synthesis", "Queries", "Authors"]
@@ -115,6 +120,22 @@ def main(argv: list[str] | None = None) -> int:
                 errors.append(f"{rel}: missing > [!summary] callout")
             if page_type == "author":
                 errors.extend(_author_errors(rel, fm))
+            mstate, _marker = claim_marker.parse(text)
+            if mstate != claim_marker.NONE:
+                if page_type != "claim":
+                    errors.append(f"{rel}: a supersede completion marker is only valid on Claim "
+                                  "pages (ADR-0073)")
+                elif mstate == claim_marker.UNREADABLE:
+                    errors.append(f"{rel}: supersede completion marker fields outside readable "
+                                  "frontmatter (ADR-0073 decision 16)")
+                elif mstate == claim_marker.DAMAGED:
+                    errors.append(f"{rel}: damaged supersede completion marker — all three of "
+                                  f"{', '.join(claim_marker.FIELDS)} are required once each, written "
+                                  "exactly as `field: \"value\"` with canonical values (ADR-0073 "
+                                  "decision 16)")
+                elif fm.get("status") not in _CLAIM_MARKER_STATUSES:
+                    errors.append(f"{rel}: a supersede completion marker on a claim with an "
+                                  f"unsupported status {fm.get('status')!r}")
 
     if errors:
         print("Frontmatter validation failed:")

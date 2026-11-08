@@ -37,7 +37,7 @@ from typing import Any
 
 from app.backend import db, graph, write_lock
 from app.backend.manifests import get_provenance, independent_sources, iso_now, valid_manifests
-from app.workers import apply_outcomes, claims, reviews
+from app.workers import apply_outcomes, claims, identity_journal, reviews, supersede
 
 _CLAIM_TEXT_RE = re.compile(r'(?m)^claim_text:\s*"(.*)"\s*$')
 _SAFE_ID_RE = re.compile(r"[A-Za-z0-9_-]+")   # a review subject id safe to name a page path
@@ -107,7 +107,7 @@ def _resolved_items(reviews_dir: Path, state: str) -> list[tuple[str, dict[str, 
 def apply_resolved_contradictions(
     gconn, reviews_dir: Path, *, claims_dir: Path, markdown_dir: Path,
     affected: set[str] | None = None, now: str | None = None,
-    outcomes: list[dict[str, Any]] | None = None,
+    outcomes: list[dict[str, Any]] | None = None, journal_out: list[str] | None = None,
 ) -> dict[str, int]:
     """Apply human decisions to the graph (deterministic, key-free; Apply's executor).
 
@@ -128,6 +128,7 @@ def apply_resolved_contradictions(
     affected = affected if affected is not None else set()
     outcomes = outcomes if outcomes is not None else []
     acknowledged = rejected = superseded_executed = 0
+    journaled: list[str] = []          # supersede journals the caller ends after publication
     wiki_dir = claims_dir.parent
     rtype = "resolve_contradiction"
 
@@ -143,16 +144,22 @@ def apply_resolved_contradictions(
 
         return rid, {"subject": _claim(a), "partner": _claim(b)}
 
-    def _supersede_effects(winner: str, loser: str) -> bool:
-        """Read-only: the supersede effects hold (an active `supersedes` winner→loser edge and the
-        loser at `deprecated_candidate`) — the same check `_execute_supersede` makes."""
-        edge = any(e["dst_id"] == loser and e["edge_type"] == "supersedes"
-                   for e in graph.outgoing_active(gconn, winner))
-        node = graph.get_node(gconn, loser)
-        return edge and bool(node) and node["status"] == "deprecated_candidate"
+    def _retired_is_information(rid: str, a: str, b: str) -> bool:
+        """ADR-0073 decision 15: no journal is open for this review and it owns no active
+        `supersedes` edge on the pair (either direction) — verified, never assumed."""
+        try:
+            if identity_journal.read(reviews_dir, rid) is not None:
+                return False
+        except (identity_journal.JournalUnreadable, ValueError):
+            return False
+        rows = gconn.execute(
+            "SELECT 1 FROM edges WHERE edge_type = 'supersedes' AND status = 'active' "
+            "AND review_id = ? AND ((src_id = ? AND dst_id = ?) OR (src_id = ? AND dst_id = ?))",
+            (rid, a, b, b, a)).fetchall()
+        return not rows
 
     def _settle(rid: str, details: dict[str, Any], a: str, b: str, *, changed: bool,
-                target: str, expected: tuple[str, ...], supersede: tuple[str, str] | None = None) -> None:
+                target: str, expected: tuple[str, ...]) -> None:
         """The one terminal outcome of a decision whose subject was readable, from the VERIFIED end
         state (B2a review round 1). The pair's `contradicts` rows are re-queried (reporting-only,
         `guarded`; a failed read is `verification_unavailable`, never `already_in_effect`). After a
@@ -167,17 +174,12 @@ def apply_resolved_contradictions(
             outcomes.append(apply_outcomes.unverified(rid, rtype, changed=changed, **details))
             return
         if changed:
-            effects = (apply_outcomes.guarded(_supersede_effects, *supersede)
-                       if supersede and target in statuses else True)
-            if effects is apply_outcomes.UNAVAILABLE:
-                outcomes.append(apply_outcomes.unverified(rid, rtype, changed=True, **details))
-            elif target in statuses and effects:
+            if target in statuses:
                 outcomes.append(apply_outcomes.outcome(rid, rtype, apply_outcomes.APPLIED, **details))
             else:
                 outcomes.append(apply_outcomes.outcome(
                     rid, rtype, apply_outcomes.INCOMPLETE, reason=apply_outcomes.POSTCONDITION_NOT_MET,
-                    **details, problem={"edge_statuses": statuses, "expected": target,
-                                        "supersede_effects": bool(effects)}))
+                    **details, problem={"edge_statuses": statuses, "expected": target}))
             return
         if target in statuses:
             outcomes.append(apply_outcomes.outcome(rid, rtype, apply_outcomes.ALREADY_IN_EFFECT,
@@ -185,6 +187,12 @@ def apply_resolved_contradictions(
         elif not statuses:
             outcomes.append(apply_outcomes.outcome(rid, rtype, apply_outcomes.SKIPPED,
                                                    reason="edge_missing", **details))
+        elif ("superseded" in statuses and not set(statuses) & {"proposed", "active", "rejected"}
+              and apply_outcomes.guarded(_retired_is_information, rid, a, b) is True):
+            # ADR-0073 decision 15: a decision on a retired contradiction has nothing to act on.
+            outcomes.append(apply_outcomes.outcome(
+                rid, rtype, apply_outcomes.SKIPPED, reason="contradiction_retired", **details,
+                information=True, problem={"edge_statuses": statuses}))
         else:
             outcomes.append(apply_outcomes.outcome(
                 rid, rtype, apply_outcomes.SKIPPED, reason="edge_status_unexpected", **details,
@@ -212,20 +220,32 @@ def apply_resolved_contradictions(
             outcomes.append(apply_outcomes.outcome(rid, rtype, apply_outcomes.SKIPPED,
                                                    reason="missing_subject", **details))
             continue
+        if winner in (a, b):
+            # ADR-0073 decisions 9–10, 13–17: the guarded supersede decides everything, including
+            # the activation of the contradiction (only after its guard passed).
+            r = supersede.execute(gconn, reviews_dir, item, claims_dir=claims_dir,
+                                  markdown_dir=markdown_dir, now=now)
+            acknowledged += r["activated"]
+            superseded_executed += bool(r["wrote"])
+            affected.update(r["affected"])
+            if r["journaled"]:
+                journaled.append(rid)
+            extra: dict[str, Any] = {}
+            if r["information"]:
+                extra["information"] = True
+            if r["problem"]:
+                extra["problem"] = r["problem"]
+            if r.get("stage"):
+                extra["stage"] = r["stage"]
+            if r.get("resumed"):
+                extra["resumed"] = True
+            outcomes.append(apply_outcomes.outcome(rid, rtype, r["outcome"], reason=r["reason"],
+                                                   **details, **extra))
+            continue
         flipped = _set(a, b, graph.contradiction_between(gconn, a, b), "active", ("proposed",))
         acknowledged += flipped
-        executed = False
-        if winner in (a, b):  # supersede decision: execute winner→loser effects (slice 1b)
-            loser = b if winner == a else a
-            if _execute_supersede(gconn, reviews_dir, winner=winner, loser=loser,
-                                  source_review_id=item.get("review_id", ""), now=now,
-                                  claims_dir=claims_dir, markdown_dir=markdown_dir):
-                superseded_executed += 1
-                executed = True
-            affected.update((a, b))
-        _settle(rid, details, a, b, changed=bool(flipped or executed), target="active",
-                expected=("proposed", "active"),
-                supersede=(winner, b if winner == a else a) if winner in (a, b) else None)
+        _settle(rid, details, a, b, changed=bool(flipped), target="active",
+                expected=("proposed", "active"))
     for stem, item in _resolved_items(reviews_dir, "rejected"):
         subj = item.get("subject") or {}
         a, b = subj.get("claim_a"), subj.get("claim_b")
@@ -240,6 +260,8 @@ def apply_resolved_contradictions(
         _settle(rid, details, a, b, changed=bool(flipped), target="rejected",
                 expected=("proposed", "active", "rejected"))
 
+    if journal_out is not None:
+        journal_out.extend(journaled)
     return {"acknowledged": acknowledged, "rejected": rejected,
             "superseded_executed": superseded_executed}
 
@@ -274,9 +296,10 @@ def apply_contradiction_decisions(gconn, reviews_dir: Path, *, claims_dir: Path,
     now = now or iso_now()
     affected: set[str] = set()
     outcomes: list[dict[str, Any]] = []
+    journaled: list[str] = []
     resolution = apply_resolved_contradictions(
         gconn, reviews_dir, claims_dir=claims_dir, markdown_dir=markdown_dir, affected=affected, now=now,
-        outcomes=outcomes)
+        outcomes=outcomes, journal_out=journaled)
     active_claims = set(graph.active_node_ids_of_type(gconn, "claim"))
     changed_pages = _reproject_claim_pages(
         gconn, affected & active_claims, claims_dir=claims_dir, reviews_dir=reviews_dir,
@@ -284,47 +307,7 @@ def apply_contradiction_decisions(gconn, reviews_dir: Path, *, claims_dir: Path,
     graph_changed = bool(resolution["acknowledged"] or resolution["rejected"]
                          or resolution["superseded_executed"])
     return {"resolution": resolution, "changed_pages": changed_pages, "graph_changed": graph_changed,
-            "outcomes": outcomes}
-
-
-def _execute_supersede(
-    gconn, reviews_dir: Path, *, winner: str, loser: str, source_review_id: str, now: str,
-    claims_dir: Path, markdown_dir: Path,
-) -> bool:
-    """Execute an approved `supersede` resolution (slice 1b, ADR-0031): an `active` `supersedes`
-    edge winner→loser, and the loser deprecated to `deprecated_candidate` via the
-    `deprecate_wiki_page` audit path — authorized by the contradiction approval (no second human
-    gate), with the cause recorded. The `contradicts` edge is left active by the caller. Returns
-    True if it applied effects this call; idempotent (a no-op once already executed)."""
-    already_edge = any(e["dst_id"] == loser and e["edge_type"] == "supersedes"
-                       for e in graph.outgoing_active(gconn, winner))
-    loser_node = graph.get_node(gconn, loser)
-    already_dep = bool(loser_node) and loser_node["status"] == "deprecated_candidate"
-    if already_edge and already_dep:
-        return False
-    # supersedes is a same-node-type edge (claim -> claim); both endpoints are indexed.
-    graph.upsert_assertion(gconn, src_id=winner, dst_id=loser, edge_type="supersedes",
-                           asserted_by="human", status="active", review_id=source_review_id, now=now)
-    # Deprecate the loser (page is the status authority); its evidence + contradiction backlink
-    # stay rendered, status flips to deprecated_candidate.
-    claims.recompose_claim(gconn, cid=loser, claims_dir=claims_dir, reviews_dir=reviews_dir,
-                           markdown_dir=markdown_dir, now=now, deprecate=True)
-    # Audit trail: the deprecation is authorized by the approved contradiction resolution, so we
-    # file a deprecate_wiki_page item and immediately resolve it approved (records the cause).
-    dep_rid = reviews.create_review_item(
-        reviews_dir, review_type="deprecate_wiki_page",
-        subject={"node_id": loser, "page": f"Claims/{loser}.md"},
-        proposal={"to_status": "deprecated_candidate",
-                  "reason": "superseded via approved contradiction resolution"},
-        # node_type lets the Phase-6 deprecation executor recognise this as a claim deprecation
-        # (already effected here) without inferring it from the page dir (ADR-0035 A5).
-        context={"resolved_by_review": source_review_id, "winner": winner, "node_type": "claim"},
-        now=now)
-    reviews.resolve_review_item(
-        reviews_dir, dep_rid, decision="approved", decided_by="contradiction_resolution",
-        note=f"deprecated as loser of approved contradiction {source_review_id}; winner {winner}",
-        now=now)
-    return True
+            "outcomes": outcomes, "journaled": journaled}
 
 
 # --- maintenance (ADR-0069 slice 2(a), model-free) -------------------------
