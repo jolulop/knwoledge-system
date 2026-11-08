@@ -14,7 +14,14 @@ Records it owns:
 - the completion audit `reviews/audit_log/<rid>-superseded-<approval_id>.json`
   (`event: supersede_completed`) — the only audit that is completion evidence (decision 13);
 - the rollback audit `reviews/audit_log/<rid>-rolled-back-<approval_id>.json`
-  (`event: supersede_rolled_back`) — it consumes that approval generation (decision 17).
+  (`event: supersede_rolled_back`) — it consumes that approval generation (decision 17);
+- the repair audit `reviews/audit_log/<rid>-repair-rollback-<repair_id>.json`
+  (`event: supersede_repair_rollback`), written from the repair intent `repair_supersede.py
+  rollback-edge` saves with the `rolling_back` stage (decision 18). Never completion evidence.
+
+The completion-evidence guard (decisions 10 and 19) looks at EVERY approval generation of the
+review: a marker naming the review, or a valid completion audit of any generation, forbids a
+rollback; an unreadable candidate or an audit directory that can't be fully scanned blocks it.
 
 Write order (decision 10): `begin` → `supersedes` edge, graph committed → stage `edge_written` →
 loser page with the marker (fsynced) → graph mirror committed → stage `loser_deprecated` → completion
@@ -23,6 +30,7 @@ audit. The Apply caller ends the journal after publication.
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -40,6 +48,10 @@ STAGES = frozenset({STARTED, EDGE_WRITTEN, LOSER_DEPRECATED, ROLLING_BACK})
 
 COMPLETED_EVENT = "supersede_completed"
 ROLLED_BACK_EVENT = "supersede_rolled_back"
+REPAIR_EVENT = "supersede_repair_rollback"
+REPAIR_ACTOR = "repair_supersede"
+_REPAIR_ID = re.compile(r"rpr_[0-9a-f]{16}")
+_DIGEST = re.compile(r"[0-9a-f]{64}")
 
 _RID = re.compile(r"rev_[0-9a-f]{16}")
 _APPROVAL = re.compile(r"[0-9a-f]{32}")
@@ -96,6 +108,22 @@ def rollback_audit_path(reviews_dir: Path, review_id: str, approval_id: str) -> 
     return Path(reviews_dir) / "audit_log" / f"{review_id}-rolled-back-{approval_id}.json"
 
 
+def repair_audit_path(reviews_dir: Path, review_id: str, repair_id: str) -> Path:
+    return Path(reviews_dir) / "audit_log" / f"{review_id}-repair-rollback-{repair_id}.json"
+
+
+def repair_intent_ok(repair: Any) -> bool:
+    """A repair intent saved with the `rolling_back` stage (decision 18)."""
+    return (isinstance(repair, dict)
+            and set(repair) == {"repair_id", "actor", "reason", "expected_state", "initiated_at"}
+            and isinstance(repair["repair_id"], str) and bool(_REPAIR_ID.fullmatch(repair["repair_id"]))
+            and repair["actor"] == REPAIR_ACTOR
+            and isinstance(repair["reason"], str) and bool(repair["reason"].strip())
+            and isinstance(repair["expected_state"], str)
+            and bool(_DIGEST.fullmatch(repair["expected_state"]))
+            and isinstance(repair["initiated_at"], str) and bool(repair["initiated_at"]))
+
+
 # --- audits ----------------------------------------------------------------------------------
 
 
@@ -145,12 +173,19 @@ def claim_page(claims_dir: Path, cid: str) -> dict[str, Any]:
     supported claim status."""
     path = Path(claims_dir) / f"{cid}.md"
     if not path.exists():
-        return {"state": "missing", "status": None, "marker_state": claim_marker.NONE,
-                "marker": None}
+        return page_from_text(None, cid)
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return {"state": "unreadable", "status": None, "marker_state": None, "marker": None}
+    return page_from_text(text, cid)
+
+
+def page_from_text(text: str | None, cid: str) -> dict[str, Any]:
+    """:func:`claim_page` from text a caller already read (`None`: no page)."""
+    if text is None:
+        return {"state": "missing", "status": None, "marker_state": claim_marker.NONE,
+                "marker": None}
     mstate, marker = claim_marker.parse(text)
     fm = parse_frontmatter(text)
     status = fm.get("status")
@@ -250,27 +285,84 @@ def effect_state(gconn, reviews_dir: Path, claims_dir: Path, item: dict[str, Any
 # --- the completion-evidence guard (decision 10, shared with repair_supersede.py) -----------
 
 
-def completion_evidence(reviews_dir: Path, claims_dir: Path, bind: dict[str, Any],
-                        journal: dict[str, Any] | None) -> tuple[str, str] | None:
-    """Why a rollback is forbidden, or None when it may run: `("completion_evidence_found", kind)`
-    for a matching marker (whatever the page status), a completed stage or this operation's completion
-    audit; `("rollback_evidence_unreadable", what)` when any of that evidence can't be read. A
-    rollback or repair audit never counts."""
-    page = claim_page(claims_dir, bind["loser"])
+def scan_review_audits(reviews_dir: Path, review_id: str) -> list[tuple[str, bytes | None]] | None:
+    """Every `reviews/audit_log/<review_id>-*` entry as `(name, bytes)` (`bytes` None: unreadable),
+    sorted; `[]` when the directory verifiably doesn't exist; **None when the directory can't be
+    fully scanned** — an incomplete scan never establishes absence (decision 19)."""
+    d = Path(reviews_dir) / "audit_log"
+    try:
+        names = os.listdir(d)
+    except FileNotFoundError:
+        return None if os.path.lexists(d) else []
+    except OSError:
+        return None
+    out: list[tuple[str, bytes | None]] = []
+    for name in sorted(names):
+        if not name.startswith(f"{review_id}-"):
+            continue
+        try:
+            out.append((name, (d / name).read_bytes()))
+        except OSError:
+            out.append((name, None))
+    return out
+
+
+def _completion_candidate(bind: dict[str, Any], name: str, raw: bytes | None) -> str | None:
+    """`valid` / `invalid` for a completion-audit candidate of ANY generation, None when `name`
+    isn't one. Valid: this review, the generation its name says, the same claim pair."""
+    prefix = f"{bind['review_id']}-superseded-"
+    if not name.startswith(prefix):
+        return None
+    approval = name[len(prefix):-len(".json")] if name.endswith(".json") else ""
+    if not _APPROVAL.fullmatch(approval) or raw is None:
+        return "invalid"
+    try:
+        rec = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return "invalid"
+    pair = {bind["a"], bind["b"]}
+    ok = (isinstance(rec, dict) and rec.get("event") == COMPLETED_EVENT
+          and rec.get("review_id") == bind["review_id"] and rec.get("approval_id") == approval
+          and rec.get("winner") in pair and rec.get("loser") in pair
+          and rec.get("winner") != rec.get("loser")
+          and isinstance(rec.get("edge_id"), str) and bool(rec.get("edge_id")))
+    return "valid" if ok else "invalid"
+
+
+def completion_evidence_from(bind: dict[str, Any], page: dict[str, Any],
+                             journal: dict[str, Any] | None,
+                             audits: list[tuple[str, bytes | None]] | None) -> tuple[str, str] | None:
+    """The guard over evidence a caller already captured (one snapshot serves every decision).
+    `("completion_evidence_found", kind)` for a marker naming this review (any generation, whatever
+    the page status), a completed stage or a valid completion audit of any generation;
+    `("rollback_evidence_unreadable", what)` when any of that evidence can't be read or the audit
+    directory can't be fully scanned. A rollback or repair audit never counts."""
     if page["state"] == "unreadable" or claim_marker.is_unreadable(page["marker_state"]):
         return "rollback_evidence_unreadable", "loser_page"
-    if _matching_marker(page, bind):
+    if _marker_for_review(page, bind):
         return "completion_evidence_found", "marker"
     if journal is not None and journal.get("stage") == LOSER_DEPRECATED:
         return "completion_evidence_found", "stage"
-    state, _rec = read_audit(completion_audit_path(reviews_dir, bind["review_id"],
-                                                   bind["approval_id"]),
-                             event=COMPLETED_EVENT, bind=bind)
-    if state == "valid":
-        return "completion_evidence_found", "audit"
-    if state == "invalid":
+    if audits is None:
+        return "rollback_evidence_unreadable", "audit_log"
+    found_invalid = False
+    for name, raw in audits:
+        state = _completion_candidate(bind, name, raw)
+        if state == "valid":
+            return "completion_evidence_found", "audit"
+        found_invalid = found_invalid or state == "invalid"
+    if found_invalid:
         return "rollback_evidence_unreadable", "completion_audit"
     return None
+
+
+def completion_evidence(reviews_dir: Path, claims_dir: Path, bind: dict[str, Any],
+                        journal: dict[str, Any] | None) -> tuple[str, str] | None:
+    """Why a rollback is forbidden, or None when it may run (Apply's row 7, its `rolling_back`
+    recovery and `repair_supersede.py rollback-edge` alike): :func:`completion_evidence_from` over
+    the evidence read now."""
+    return completion_evidence_from(bind, claim_page(claims_dir, bind["loser"]), journal,
+                                    scan_review_audits(reviews_dir, bind["review_id"]))
 
 
 # --- prerequisites (decision 9 guard rows 2–4) -----------------------------------------------
@@ -279,7 +371,16 @@ def completion_evidence(reviews_dir: Path, claims_dir: Path, bind: dict[str, Any
 def prerequisite_problem(gconn, claims_dir: Path, bind: dict[str, Any]) -> tuple[str, dict] | None:
     """Why the supersede can't execute now (`(reason, problem)`), or None: the pair's `contradicts`
     edge stands (`proposed`/`active`), and winner and loser are active in page AND graph."""
-    rows = graph.contradiction_between(gconn, bind["a"], bind["b"])
+    return prerequisite_problem_from(
+        bind, graph.contradiction_between(gconn, bind["a"], bind["b"]),
+        {cid: claim_page(claims_dir, cid) for cid in (bind["winner"], bind["loser"])},
+        {cid: _node_status(gconn, cid) for cid in (bind["winner"], bind["loser"])})
+
+
+def prerequisite_problem_from(bind: dict[str, Any], rows: list[dict[str, Any]],
+                              pages: dict[str, dict[str, Any]],
+                              nodes: dict[str, str | None]) -> tuple[str, dict] | None:
+    """:func:`prerequisite_problem` over captured `contradicts` rows, pages and node statuses."""
     statuses = sorted({r["status"] for r in rows})
     if not rows:
         return "edge_missing", {}
@@ -290,8 +391,8 @@ def prerequisite_problem(gconn, claims_dir: Path, bind: dict[str, Any]) -> tuple
                                           "expected": ["proposed", "active"]}
     for role in ("winner", "loser"):
         cid = bind[role]
-        page = claim_page(claims_dir, cid)
-        node = _node_status(gconn, cid)
+        page = pages[cid]
+        node = nodes.get(cid)
         if page["state"] != "ok" or claim_marker.is_unreadable(page["marker_state"]):
             return "claim_page_unreadable", {"claim": cid}
         if page["status"] == "active" and node == "active":
@@ -313,7 +414,9 @@ def _journal_binding_ok(journal: dict[str, Any], bind: dict[str, Any]) -> bool:
             and journal.get("review_id") == bind["review_id"]
             and journal.get("approval_id") == bind["approval_id"]
             and journal.get("winner") == bind["winner"] and journal.get("loser") == bind["loser"]
-            and journal.get("nodes") == sorted([bind["winner"], bind["loser"]]))
+            and journal.get("nodes") == sorted([bind["winner"], bind["loser"]])
+            and ("repair" not in journal
+                 or (journal.get("stage") == ROLLING_BACK and repair_intent_ok(journal["repair"]))))
 
 
 def execute(gconn, reviews_dir: Path, item: dict[str, Any], *, claims_dir: Path,
@@ -514,9 +617,80 @@ def _rollback(gconn, reviews_dir, claims_dir, bind, journal, res, now) -> dict[s
     _ensure_audit(rollback_audit_path(reviews_dir, bind["review_id"], bind["approval_id"]),
                   event=ROLLED_BACK_EVENT, time_key="rolled_back_at", bind=bind, edge_id=edge_id,
                   now=now)
+    if "repair" in journal:                    # decision 18 step 5, from the SAVED intent only
+        _ensure_repair_audit(reviews_dir, bind, journal["repair"], edge_id)
     res.update(outcome=ao.INCOMPLETE, reason="partial_supersede_withdrawn", journaled=True,
                stage=ROLLING_BACK, wrote=True)
     return res
+
+
+def _repair_record(bind: dict[str, Any], repair: dict[str, Any], edge_id: str) -> dict[str, Any]:
+    return {"event": REPAIR_EVENT, "review_id": bind["review_id"],
+            "approval_id": bind["approval_id"], "winner": bind["winner"], "loser": bind["loser"],
+            "edge_id": edge_id, "repair_id": repair["repair_id"], "actor": repair["actor"],
+            "reason": repair["reason"], "expected_state": repair["expected_state"],
+            "initiated_at": repair["initiated_at"]}
+
+
+def _ensure_repair_audit(reviews_dir: Path, bind: dict[str, Any], repair: dict[str, Any],
+                         edge_id: str) -> None:
+    """The repair audit, built only from the intent saved in the journal, so any later Apply
+    finishes it idempotently even if the script never runs again. An existing entry is reused (and
+    flushed again) only when it equals that record; otherwise it blocks and is never overwritten."""
+    if not repair_intent_ok(repair):
+        raise Blocked("supersede_journal_invalid", {"repair": "invalid"})
+    path = repair_audit_path(reviews_dir, bind["review_id"], repair["repair_id"])
+    want = _repair_record(bind, repair, edge_id)
+    if path.exists():
+        try:
+            have = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            have = None
+        if have != want:
+            raise Blocked("repair_audit_conflict", {"audit": path.name})
+        reviews.sync_durably(path)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    reviews.write_json_durably(path, want)
+
+
+def initiate_rollback(gconn, reviews_dir: Path, item: dict[str, Any], *, claims_dir: Path,
+                      repair: dict[str, Any], now: str | None = None) -> dict[str, Any]:
+    """The shared rollback entry point for `repair_supersede.py rollback-edge` (decision 18).
+
+    The caller holds the run guards and the write lock, has verified `--expected-state` and the
+    strict preconditions on a fresh snapshot (decisions 19–22), and has queued publication. This
+    repeats the journal binding check and the completion-evidence guard, durably records the
+    intent (stage `rolling_back` with `repair`), then runs the same rollback Apply runs. It never
+    ends the journal: Apply finishes the recovery and closes it after publication.
+
+    Raises :class:`Blocked` for a refusal (nothing written when it is raised before the intent),
+    :class:`identity_journal.JournalUnreadable` for an unreadable entry."""
+    now = now or iso_now()
+    reviews_dir, claims_dir = Path(reviews_dir), Path(claims_dir)
+    bind = binding(item)
+    res: dict[str, Any] = {"outcome": ao.SKIPPED, "reason": None, "problem": {}, "journaled": False,
+                           "wrote": False, "executed": False, "information": False,
+                           "affected": set(), "stage": None, "activated": 0, "resumed": False}
+    if bind is None or not _canonical(bind) or not _approval_ok(bind):
+        raise Blocked("invalid_subject")
+    if not repair_intent_ok(repair):
+        raise Blocked("supersede_journal_invalid", {"repair": "invalid"})
+    journal = identity_journal.read(reviews_dir, bind["review_id"])
+    if journal is None:
+        raise Blocked("supersede_state_unverified", {"journal": "absent"})
+    if not _journal_binding_ok(journal, bind) or journal["stage"] not in (STARTED, EDGE_WRITTEN):
+        raise Blocked("supersede_journal_invalid", {"stage": journal.get("stage")})
+    identity_journal.sync(reviews_dir, bind["review_id"])
+    refusal = completion_evidence(reviews_dir, claims_dir, bind, journal)
+    if refusal is not None:
+        raise Blocked(refusal[0], {"evidence": refusal[1]})
+    identity_journal.set_stage(reviews_dir, bind["review_id"], ROLLING_BACK,
+                               extra={"repair": repair})
+    res["wrote"] = True
+    journal = identity_journal.read(reviews_dir, bind["review_id"])
+    res["affected"] = {bind["winner"], bind["loser"]}
+    return _rollback(gconn, reviews_dir, claims_dir, bind, journal, res, now)
 
 
 # --- read-only helpers for other executors (decision 14) -------------------------------------

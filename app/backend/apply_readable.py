@@ -209,7 +209,7 @@ REASONS = {
     "supersede_withdrawn": "this approval was withdrawn after an incomplete supersede; reopen it "
                            "to decide again",
     "partial_supersede_withdrawn": "the supersede couldn't be finished, so the part already made "
-                                   "was withdrawn; reopen the review to decide again",
+                                   "was withdrawn",
     "supersede_in_flight": "an earlier run of this supersede is unfinished",
     "supersede_journal_unreadable": "the saved progress of this supersede can't be read",
     "supersede_journal_invalid": "the saved progress of this supersede doesn't match the approval",
@@ -224,6 +224,8 @@ REASONS = {
     "rollback_audit_conflict": "the supersede's withdrawal record doesn't match this decision",
     "marker_unreadable": "a claim page's supersede record is damaged",
     "marker_conflict": "the claim page already records another supersede",
+    "repair_audit_conflict": "the record of a manual withdrawal doesn't match its saved intent",
+    "claim_identity_mismatch": "a claim page names a different claim",
     "identity_operation_in_flight": "another unfinished change involves this item",
     "edge_status_unexpected": "the contradiction link is in an unexpected state",
     "evidence_changed": "the evidence changed since the review was filed",
@@ -268,18 +270,40 @@ RECOVERY = {
                                  "names it), then preview again.",
     "partial_split_state": "An earlier split stopped part-way and can't be resumed automatically; "
                            "open the review.",
-    "partial_supersede_withdrawn": "Nothing more happens on its own: reopen the review to decide "
-                                   "again.",
+    # ADR-0073 decision 23: the journal is still open, so reopen isn't available yet.
+    "partial_supersede_withdrawn": "Finish recovery with Apply, then reopen if another attempt is "
+                                   "wanted.",
     "marker_unreadable": "Repair the damaged claim page (scripts/validate_all.py names it), then "
                          "apply again.",
 }
 
 
+# ADR-0073 decision 23: a supersede blocked without a recovery of its own names the read-only
+# inspection, which says what is uncertain and offers a repair only when one is safe.
+INSPECT_REASONS = frozenset({
+    "supersede_state_unverified", "loser_deprecated_unmarked", "supersede_journal_invalid",
+    "supersede_journal_unreadable", "completion_evidence_found", "rollback_evidence_unreadable",
+    "completion_audit_conflict", "rollback_audit_conflict", "marker_conflict",
+    "supersedes_edge_foreign", "marker_unreadable", "repair_audit_conflict"})
+INSPECT_COMMAND = "uv run python scripts/repair_supersede.py inspect {rid}"
+
+
+def inspect_hint(rec: dict[str, Any]) -> str:
+    """"Inspect it: …" for a supersede blocked on one of :data:`INSPECT_REASONS`, else ""."""
+    if (rec.get("type") != "resolve_contradiction"
+            or str(rec.get("reason") or "") not in INSPECT_REASONS):
+        return ""
+    return "Inspect it: " + INSPECT_COMMAND.format(rid=rec.get("review_id"))
+
+
 def recovery_text(rec: dict[str, Any]) -> str:
     """The next step for one `incomplete` outcome, by its reason (and journal stage)."""
     reason = str(rec.get("reason") or "")
+    hint = inspect_hint(rec)
     if reason in RECOVERY:
-        return RECOVERY[reason]
+        return RECOVERY[reason] + (f" {hint}." if hint else "")
+    if hint:
+        return hint + "."
     if (rec.get("details") or {}).get("stage"):          # an identity operation's saved journal
         return _RESUMED_BY_APPLY
     return "See the details; it does not resume on its own."
@@ -387,8 +411,10 @@ def render(groups: dict[str, Any], *, advisories: list[dict[str, Any]] | None = 
     for r in groups["blocked"]:
         d = r.get("details") or {}
         info = {**d, **(d.get("problem") if isinstance(d.get("problem"), dict) else {})}
+        hint = inspect_hint(r)
         attention.append(f"<li><strong>Blocked</strong> (nothing changed) — {sentence(r, clash)}: "
-                         f"{_h(reason_text(r.get('reason'), info))}{_caveat(r)} "
+                         f"{_h(reason_text(r.get('reason'), info))}{_caveat(r)}"
+                         f"{'. ' + _h(hint) + '.' if hint else ''} "
                          f"{_link(r.get('review_id'))}"
                          f" {_tech(r)}</li>")
     for r in groups["incomplete"]:

@@ -316,10 +316,23 @@ def _render_claims(gconn, cids: list[str], *, wiki_dir: Path, root: Path, now: s
                    failed: dict[str, str]) -> None:
     from app.workers import claims
     claims_dir = Path(wiki_dir) / "Claims"
-    for cid in cids:                          # the saved visibility first: every renderer reads it
-        claims.mirror_page_status(gconn, cid=cid, claims_dir=claims_dir, now=now)
+    # The saved visibility first: every renderer reads it. One shared authority check (ADR-0073
+    # decision 20) decides both steps: a wrong-owner page or an unreadable marker is excluded from
+    # mirroring AND rendering (page and graph unchanged), and a marked page whose repeated flush
+    # fails is excluded too, so its status never reaches the graph before the page is durable.
+    excluded: dict[str, str] = {}
+    for cid in cids:
+        try:
+            state = claims.mirror_page_status(gconn, cid=cid, claims_dir=claims_dir, now=now)
+        except OSError as exc:
+            state = f"page_flush_failed:{type(exc).__name__}"
+        if state not in (claims.PAGE_OK, claims.PAGE_ABSENT):
+            excluded[cid] = state
     gconn.commit()
     for cid in cids:
+        if cid in excluded:
+            failed[cid] = excluded[cid]
+            continue
         try:
             if not (claims_dir / f"{cid}.md").exists():
                 outcome = "page_missing"

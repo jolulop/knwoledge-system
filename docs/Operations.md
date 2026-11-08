@@ -271,6 +271,41 @@ dropped by re-extraction) is listed under *Information*. A damaged `superseded_b
 that Claim page untouched and the run incomplete; `validate_frontmatter.py` names it. Lint reports
 `supersede_winner_retracted` and `supersede_state_unverified` (report-only).
 
+**Supersede recovery (ADR-0073 decisions 11, 18–23).** When Apply blocks a supersede without a
+recovery of its own, its next-step text names the inspection:
+
+1. **Inspect first:** `uv run python scripts/repair_supersede.py inspect <review_id>` (add `--json`
+   for the snapshot facts). It is read-only — no lock, no revision change, nothing created — and
+   exits 0 whenever it produced its report. It says what it found without inferring a cause, prints
+   a state fingerprint, and offers a command only when that command's preconditions hold;
+   otherwise "No safe repair determined".
+2. **A lagging graph status** (the claim's page and graph disagree) is repaired by ordinary
+   publication, which copies the page's status after checking the page names that claim, has a
+   readable marker and (for a marked page) is flushed again: use **Retry publishing** when the claim
+   is already queued, otherwise `uv run python scripts/republish.py --all`; then Apply. A page
+   naming another claim is reported `claim_identity_mismatch` and left as it is.
+3. **Withdrawing an unfinished supersede:** `uv run python scripts/repair_supersede.py rollback-edge
+   <review_id> --expected-state <fingerprint> --reason "<why>"`. Offered only with an open journal
+   bound to the current approval, an active loser (page and graph), exactly one owned active link,
+   and no completion evidence from any approval generation (no completion marker or completion
+   audit of this review; anything unreadable refuses). It is offered even when Apply could still
+   finish: rolling back withdraws the approval, and another attempt needs reopening and deciding
+   again. It refuses (exit 3) while Apply, claim extraction, contradiction detection, republish or
+   review reconciliation runs, and writes nothing if the state changed since inspection (exit 6).
+   It records its intent durably, withdraws only this review's own link, consumes the approval and
+   writes a repair audit (`…-repair-rollback-<repair_id>.json`). It never publishes or closes the
+   operation.
+4. **Run Apply:** it publishes, finishes the recorded rollback from the saved intent (even if the
+   script never runs again) and closes the operation once publication completes. **Reopen** is
+   available after that.
+5. **No journal** (an owned link with no recorded operation — unexpected, e.g. lost metadata or a
+   restored historical state): nothing is written; the generation that wrote the link is unknown.
+   The last resorts are `scripts/backup.py` restore or a governed reversal.
+
+Exit codes: 0 report produced / rollback recorded, 1 refused or failed (a failure after the intent
+says what Apply must finish), 2 usage, 3 a guarded run is busy, 4 publication queue unreadable,
+6 state changed, 9 vault revision unavailable.
+
 ### Executor-backed review types (`POST /reviews/apply`)
 
 Every review type below has a deterministic, key-free executor (the canonical set is `_APPLY_TYPES` in

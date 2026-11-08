@@ -247,7 +247,8 @@ def _check_supersedes(gconn, wiki_dir: Path, reviews_dir: Path) -> list[dict[str
                              "detail": f"review {rid} owns an active supersede link {winner} → "
                                        f"{loser}, but {loser} is still active and no unfinished "
                                        "operation is recorded; the state can't be verified, "
-                                       "so Apply leaves it as it is"})
+                                       "so Apply leaves it as it is. Inspect it: uv run python "
+                                       f"scripts/repair_supersede.py inspect {rid}"})
     return findings
 
 

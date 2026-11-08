@@ -212,22 +212,61 @@ def sync_page_durably(path: Path) -> None:
     pq._sync_dir(Path(path).parent)
 
 
-def mirror_page_status(gconn, *, cid: str, claims_dir: Path, now: str) -> bool:
+# The shared Claim-page authority check (ADR-0073 decision 20): publication's mirror and every
+# render go through it before using an existing page.
+PAGE_ABSENT, PAGE_OK = "absent", "ok"
+IDENTITY_MISMATCH = "claim_identity_mismatch"
+MARKER_UNREADABLE = "marker_unreadable"
+
+
+def page_authority(page_path: Path, cid: str, *, text: str | None = None) -> dict[str, Any]:
+    """`{state, status, marker_state, marker}` for the Claim page of `cid`. `state`:
+    - `absent`: no page;
+    - `marker_unreadable`: the frontmatter or the supersede marker can't be read (decision 16);
+    - `claim_identity_mismatch`: a readable page whose frontmatter `claim_id` isn't `cid` (a
+      wrong-owner page is never mirrored or rendered over);
+    - `ok`: a readable page that belongs to `cid` (its `status` may still be unsupported).
+    `text` lets a caller pass the bytes it already read, so one read serves every decision."""
+    page_path = Path(page_path)
+    if text is None:
+        if not page_path.exists():
+            return {"state": PAGE_ABSENT, "status": None, "marker_state": claim_marker.NONE,
+                    "marker": None}
+        text = page_path.read_text(encoding="utf-8", errors="replace")
+    marker_state, marker = claim_marker.parse(text)
+    if claim_marker.is_unreadable(marker_state):
+        return {"state": MARKER_UNREADABLE, "status": None, "marker_state": marker_state,
+                "marker": None}
+    fm = parse_frontmatter(text)
+    status = fm.get("status") if isinstance(fm.get("status"), str) else None
+    if str(fm.get("claim_id") or "") != cid:
+        return {"state": IDENTITY_MISMATCH, "status": status, "marker_state": marker_state,
+                "marker": marker}
+    return {"state": PAGE_OK, "status": status, "marker_state": marker_state, "marker": marker}
+
+
+def mirror_page_status(gconn, *, cid: str, claims_dir: Path, now: str) -> str:
     """Copy a Claim page's saved status (the authority, ADR-0022) into the graph's node mirror.
-    Returns False when there is no page or no recognised status (nothing copied). Publication runs it
-    on every claim before rendering, so partner sections, syntheses and Source pages read the saved
-    visibility even after a crash rolled the graph back."""
+    Publication runs it on every claim before rendering, so partner sections, syntheses and Source
+    pages read the saved visibility even after a crash rolled the graph back. Returns the page's
+    authority state (`ok` when checked; the status is copied only when it is a supported claim status
+    and the node exists), so the caller can exclude a page that failed the check from rendering too.
+
+    A page carrying a supersede completion marker is flushed again before its status is copied: the
+    run that wrote it may have failed during its flush, and publication repairing a lagging mirror
+    must not bypass the barrier slice 2's recovery requires (decision 20). A flush failure raises
+    before the graph changes."""
     page_path = Path(claims_dir) / f"{cid}.md"
-    # ADR-0073 decision 16: a page whose frontmatter or supersede marker can't be read is unknown
-    # authority — nothing is mirrored from it (the render that follows reports it).
-    if page_path.exists() and claim_marker.is_unreadable(claim_marker.parse(
-            page_path.read_text(encoding="utf-8", errors="replace"))[0]):
-        return False
-    status = _read_status(page_path)
-    if status not in _MIRRORED_PAGE_STATUSES or graph.get_node(gconn, cid) is None:
-        return False
-    graph.upsert_node(gconn, node_id=cid, node_type="claim", slug=cid, status=status, now=now)
-    return True
+    auth = page_authority(page_path, cid)
+    if auth["state"] != PAGE_OK:
+        return auth["state"]
+    if auth["status"] not in _MIRRORED_PAGE_STATUSES or graph.get_node(gconn, cid) is None:
+        return PAGE_OK
+    if auth["marker_state"] == claim_marker.OK:
+        sync_page_durably(page_path)
+    graph.upsert_node(gconn, node_id=cid, node_type="claim", slug=cid, status=auth["status"],
+                      now=now)
+    return PAGE_OK
 
 
 def recompose_claim(gconn, *, cid, claims_dir, reviews_dir, now, markdown_dir, text_hint=None,
@@ -268,11 +307,10 @@ def recompose_claim(gconn, *, cid, claims_dir, reviews_dir, now, markdown_dir, t
     claim_text = text_hint or _read_claim_text(page_path)
     if claim_text is None:
         return "skipped"  # no durable wording to render from (shouldn't happen)
-    marker_state, marker = (claim_marker.parse(page_path.read_text(encoding="utf-8",
-                                                                    errors="replace"))
-                            if page_path.exists() else (claim_marker.NONE, None))
-    if claim_marker.is_unreadable(marker_state):
-        return "marker_unreadable"                # unreadable evidence: never render it away
+    auth = page_authority(page_path, cid)
+    if auth["state"] in (MARKER_UNREADABLE, IDENTITY_MISMATCH):
+        return auth["state"]       # unreadable or wrong-owner authority: never render it away
+    marker = auth["marker"]
     if supersede_marker is not None:
         if marker is not None and marker != supersede_marker:
             return "marker_conflict"              # another operation's record is never replaced
@@ -650,6 +688,7 @@ def extract_claims(
         # that page's work is unfinished, so the run is never a clean success.
         marker_unreadable = sorted(c for c, o in page_outcomes.items()
                                    if o in ("marker_unreadable", "marker_conflict"))
+        identity_mismatch = sorted(c for c, o in page_outcomes.items() if o == IDENTITY_MISMATCH)
         pub = run.finish()                    # index.md + the keyword index, once (decision 5)
         left = journal.pending(root, _PRODUCER)
         # A document this run attempted whose commit is still unfinished is never a clean success.
@@ -657,7 +696,8 @@ def extract_claims(
 
         # ADR-0069 slice 2(a): a failed contradiction maintenance keeps the claims but leaves the
         # run incomplete (lint reports the proposals until `detect_contradictions.py maintain`).
-        if errors or left_attempted or maintenance["errors"] or marker_unreadable:
+        if (errors or left_attempted or maintenance["errors"] or marker_unreadable
+                or identity_mismatch):
             status = "partial"
         elif not has_key and considered > 0:
             status = "skipped"
@@ -671,6 +711,7 @@ def extract_claims(
             "claims_written": claims_written, "claim_pages_written": pages_written,
             "claim_pages_tombstoned": pages_tombstoned,
             "claim_pages_marker_unreadable": marker_unreadable,
+            "claim_pages_identity_mismatch": identity_mismatch,
             "claims_dropped_ungrounded": claims_dropped_ungrounded,
             # ADR-0056 coverage/staging observability: window calls made, over-budget
             # singleton windows, and the staging outcomes ("nothing changed because staging

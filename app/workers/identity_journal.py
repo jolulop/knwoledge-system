@@ -78,8 +78,18 @@ def read(reviews_dir: Path, review_id: str) -> dict[str, Any] | None:
     if not path.exists():
         return None
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise JournalUnreadable(review_id) from exc
+    return parse(raw, review_id)
+
+
+def parse(raw: bytes, review_id: str) -> dict[str, Any]:
+    """An entry from bytes a caller already read (one captured snapshot serves every decision);
+    raises :class:`JournalUnreadable` when they aren't a JSON object."""
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise JournalUnreadable(review_id) from exc
     if not isinstance(data, dict):
         raise JournalUnreadable(review_id)
@@ -99,13 +109,21 @@ def sync(reviews_dir: Path, review_id: str) -> None:
     _sync_dir(path.parent)
 
 
-def set_stage(reviews_dir: Path, review_id: str, stage: str) -> None:
+def set_stage(reviews_dir: Path, review_id: str, stage: str, *,
+              extra: dict[str, Any] | None = None) -> None:
     """Record how far the operation got, durably (`graph_done`: the executor finished; the caller's
     refreshes are still pending). The entry stays open. Raises :class:`JournalUnreadable` when the
-    entry is missing or damaged — a stage is never recorded over an unknown state."""
+    entry is missing or damaged — a stage is never recorded over an unknown state. `extra` adds
+    operation-specific fields in the same write (a supersede rollback's saved repair intent,
+    ADR-0073 decision 18); it can't override the shared fields."""
     data = read(reviews_dir, review_id)
     if data is None:
         raise JournalUnreadable(review_id)
+    shared = {"review_id", "op", "nodes", "stage", "started_at"}
+    for key, value in (extra or {}).items():
+        if key in shared:
+            raise ValueError(f"journal field {key!r} can't be overridden")
+        data[key] = value
     data["stage"] = stage
     _write(_path(reviews_dir, review_id), data)
 

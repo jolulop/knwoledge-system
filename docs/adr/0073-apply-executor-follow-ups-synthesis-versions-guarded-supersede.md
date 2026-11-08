@@ -3,7 +3,7 @@
 - **Status:** accepted — design-locked by grill-phase 2026-11-06 (Q1–Q11). **Slice 1 (decisions
   2–8, 12) implemented 2026-11-06**. Slice 2 grilled 2026-11-08 (decisions 13–17); **slice 2
   (decisions 9–10, 13–17) implemented 2026-11-08**. Slice 3 grilled 2026-11-08 (decisions 18–23,
-  amending decision 11); slice 3 not implemented.
+  amending decision 11); **slice 3 implemented 2026-11-08**.
 - **Date:** 2026-11-06
 - **Drivers:** ADR-0072's B2a outcomes exposed pre-existing executor behaviour ("Existing behaviour
   the outcomes made visible", items 1–8; item 1 was fixed in B2a review round 1). This ADR decides
@@ -907,6 +907,43 @@ finish).
 - **CRLF is a line-ending difference, not damage.** A trailing `\r` is removed before validation,
   so a canonical marker in a CRLF page parses `OK` (the page reads normally through Python's
   universal newlines, and a recompose writes it back with LF and the marker kept).
+
+## Implementation notes — slice 3 (2026-11-08)
+
+- **Shared rollback** (`app/workers/supersede.py`): `initiate_rollback` is the script's entry point.
+  It repeats the journal binding check (stage `started` or `edge_written`), the journal flush and
+  the completion-evidence guard, durably records the intent (`rolling_back` plus `repair`:
+  `repair_id`, `actor: repair_supersede`, `reason`, `expected_state`, `initiated_at`), then runs the
+  same `_rollback` as Apply. `_rollback` now also writes the repair audit
+  `<rid>-repair-rollback-<repair_id>.json` (`event: supersede_repair_rollback`), built only from the
+  saved intent, reused only when its content equals that record, never overwritten (`repair_audit_conflict`).
+  A journal carrying a `repair` field is valid only at `rolling_back` with a well-formed intent.
+  `identity_journal.set_stage` gained `extra=` (cannot override shared fields) and `parse(raw)`.
+- **Any-generation guard:** `completion_evidence_from` (pure, over captured evidence) and
+  `scan_review_audits` (`None` when `audit_log/` exists but can't be listed). A marker naming the
+  review under any approval, or a valid `<rid>-superseded-<any>.json` for the same pair, forbids; an
+  unreadable or conflicting candidate, or an unscannable directory, blocks. `page_from_text` and
+  `prerequisite_problem_from` are the pure counterparts the snapshot uses.
+- **Publication authority check** (`app/workers/claims.py`): `page_authority` (`absent` / `ok` /
+  `marker_unreadable` / `claim_identity_mismatch`) is used by `recompose_claim` (refuses a
+  wrong-owner page) and `mirror_page_status`, which now returns the state and flushes a marked page
+  again before copying its status. `publication._render_claims` excludes a failed page from
+  rendering too (`claim_identity_mismatch`, `marker_unreadable`, `page_flush_failed:<error>`). The
+  claims worker reports `claim_pages_identity_mismatch` and stays partial.
+- **`app/workers/supersede_repair.py`** + **`scripts/repair_supersede.py`** (argparse): `capture`
+  (one snapshot), `fingerprint` (`supersede-state-v1`), `evaluate`, `inspect` (read-only graph
+  connection `mode=ro`, never created), `rollback_edge` (guards `apply`, `extract_claims`,
+  `detect_contradictions`, `republish`, `reconcile_reviews` in an `ExitStack`, then the write lock,
+  fresh snapshot, fingerprint, every check, publication intent for both claims, `initiate_rollback`).
+  A failure after the intent reports that it was recorded and that Apply finishes it.
+- **Apply wording** (`app/backend/apply_readable.py`): `INSPECT_REASONS` / `inspect_hint` add
+  "Inspect it: uv run python scripts/repair_supersede.py inspect <rid>" to blocked and incomplete
+  supersede rows (only for `resolve_contradiction`); `partial_supersede_withdrawn` now says "Finish
+  recovery with Apply, then reopen if another attempt is wanted."; new reason texts
+  `repair_audit_conflict`, `claim_identity_mismatch`. The `supersede_state_unverified` lint names
+  the inspect command.
+- **Tests:** `tests/test_repair_supersede.py` (45) — every decision-18 to 23 case listed above.
+- **Docs:** `docs/Operations.md` "Supersede recovery".
 
 ## Consequences
 
