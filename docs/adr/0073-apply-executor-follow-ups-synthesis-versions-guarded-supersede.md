@@ -1,7 +1,8 @@
 # ADR-0073 — Apply executor follow-ups: synthesis decisions bound to versions, guarded supersede
 
 - **Status:** accepted — design-locked by grill-phase 2026-11-06 (Q1–Q11). **Slice 1 (decisions
-  2–8, 12) implemented 2026-11-06**; slices 2–3 not implemented.
+  2–8, 12) implemented 2026-11-06**. Slice 2 grilled 2026-11-08 (decisions 13–17); slices 2–3 not
+  implemented.
 - **Date:** 2026-11-06
 - **Drivers:** ADR-0072's B2a outcomes exposed pre-existing executor behaviour ("Existing behaviour
   the outcomes made visible", items 1–8; item 1 was fixed in B2a review round 1). This ADR decides
@@ -183,7 +184,7 @@ executor stops at its last stage, and the Apply caller calls `end` only after th
 
 **Binding.** The journal holds `{review_id, op: "supersede", nodes: [winner, loser], winner, loser,
 approval_id, stage}`. Before resuming, Apply validates `op`, the stage against the allowed set
-(`started`, `edge_written`, `loser_deprecated`; an unknown stage blocks), that `nodes` equals
+(`started`, `edge_written`, `loser_deprecated`, and `rolling_back` from decision 17; an unknown stage blocks), that `nodes` equals
 `[winner, loser]`, and that the approved item's `approval_id`, winner and derived loser equal the
 journal's.
 
@@ -205,7 +206,7 @@ proves nothing, since claim retraction can deprecate it independently.
 
 **Write order:** `begin` → `supersedes` edge written and graph committed → `set_stage(edge_written)` →
 loser page written with the marker (fsync) → graph mirror committed → `set_stage(loser_deprecated)` →
-audit record (deterministic id) → executor done (caller `end`s after publication).
+completion audit (decision 13) → executor done (caller `end`s after publication).
 
 **Precedence, first match wins:**
 
@@ -236,7 +237,7 @@ is **forbidden** when any completion evidence exists:
 - a marker on the loser's Claim page matching the journal's `review_id` **and** `approval_id`
   (whatever the page status; a crash right after the marked page write leaves only this);
 - a completed journal stage (`loser_deprecated`);
-- this operation's audit record (its deterministic id).
+- this operation's completion audit (decision 13); a rollback or repair audit never counts.
 
 Evidence that **cannot be read** (loser page, journal, audit log) **blocks** rollback too: absence
 counts only when it is verified. A missing marker alone never authorizes rollback. One test suite
@@ -297,6 +298,180 @@ unreadable page or journal.
 `deprecated_candidate`, outcome `applied`), so a canonical id alone can't leave another ineffective
 test.
 
+## Decision 13 — the supersede completion audit (slice 2 grill Q1, 2026-11-08)
+
+**Why.** The supersede's only audit today is a synthetic `deprecate_wiki_page` item, filed and
+approved at once. Its id is `review_id("deprecate_wiki_page", {node_id: loser, page})`: the same id as a
+human's deprecation proposal for that claim, a claim tombstone's deprecation proposal
+(`claims.recompose_claim`), or an earlier supersede of the same loser. `create_review_item` returns an
+existing id without writing, so a second supersede would "audit" itself with another record. As
+completion evidence it is ambiguous, and as an approved review it is a second persistent instruction
+for the general deprecation executor to replay.
+
+**Decision.** One dedicated completion audit per approved operation, and **no more synthetic
+`deprecate_wiki_page` filing for new supersedes**. The contradiction approval authorizes the
+deprecation; the completion audit records its execution. Historical synthetic items stay untouched.
+
+- **Location and identity:** `reviews/audit_log/<contradiction_review_id>-superseded-<approval_id>.json`.
+- **Body:** `event: "supersede_completed"`, `review_id`, `approval_id`, `winner`, `loser`, the
+  `supersedes` edge id and `completed_at`.
+- **When:** written durably (`write_json_durably`) only after the marked deprecation and the graph
+  mirror are established, in the decision-10 write order and precedence.
+- **Reuse:** an existing entry is reusable only when its identity (`review_id`, `approval_id`) and its
+  completion payload (`event`, `winner`, `loser`, edge id) validate; recovery flushes it again
+  (`sync_durably`). An unreadable or conflicting entry **blocks**; it is never overwritten.
+- **Idempotent:** repeated recovery keeps the original `completed_at` and leaves exactly one entry.
+- **Evidence:** only a valid `supersede_completed` entry for this review and approval counts as "this
+  operation's completion audit" in the precedence rows and the completion-evidence guard. Rollback
+  and repair audits never satisfy that check.
+
+**Tests:** an unrelated human deprecation of the loser; an earlier supersede of the same loser; a
+different approval generation (reopened and re-approved); malformed and conflicting completion
+audits; an interruption immediately before and immediately after the audit write.
+
+## Decision 14 — claim governance waits on an open supersede (slice 2 grill Q2, 2026-11-08)
+
+**Why.** No claim action reads the identity journal today, and Apply runs contradictions before the
+claim hide/unhide and deprecation executors. A supersede journal stays open across Applies when
+publication fails, when a blocked precedence row leaves it, or after a crash. Meanwhile a hide of the
+loser turns a resumable state into row 4 (manual repair), and a hide of the winner turns resume into
+rollback: executor order would decide recovery semantics.
+
+**Decision.** Competing governance **execution** waits; evidence freshness does not.
+
+- While a supersede journal names a claim, these executions skip it with `skipped` /
+  `identity_operation_in_flight`, naming the blocking review: `hide_claim`, `unhide_claim`, claim
+  `deprecate_wiki_page`, and **any other supersede** involving either endpoint (it could overwrite the
+  completion marker or create competing partial effects).
+- The operation that owns the journal still resumes itself.
+- Recording those decisions stays available; only their execution waits.
+- An unreadable journal (`nodes: None`) blocks these claim-governance executions globally, as it
+  already blocks tag and identity actions (fail-closed).
+- The guard holds until the journal **ends**, including the publication-pending stages; deferred
+  executions then run on the next Apply.
+- **Not blocked:** extraction and contradiction maintenance follow the evidence, and extraction never
+  skips documents for a supersede. Extraction preserves any completion marker. Maintenance never alters
+  this operation's owned `supersedes` edge (`graph.supersede_contradictions_for_claim` and
+  `check_assertions` touch `contradicts` assertions only; keep it that way and test it).
+  Winner or loser retraction is then resolved by the decision-10 precedence.
+
+**Tests:** hide, unhide, deprecation and a second supersede each wait on either endpoint; recording
+their decisions still works; the owning operation resumes; unrelated claims stay actionable;
+unreadable journals fail closed; winner and loser retraction follow the precedence with markers
+preserved; deferred executions proceed once publication succeeds and the journal closes.
+
+## Decision 15 — a decision on a retired contradiction is information (slice 2 grill Q3, 2026-11-08)
+
+**Why.** A claim retraction supersedes the pair's `contradicts` edge, and decision 9 then refuses an
+approved supersede with `contradiction_retired`. The approved item is never closed, so every Apply
+reports it under *Attention needed*. Reopening and rejecting doesn't help: the rejection executor only
+flips `proposed`/`active` rows, so a `superseded` edge reads as `edge_status_unexpected`, forever.
+
+**Decision.** When the pair's contradiction is retired (`superseded`), **no journal is open, and the
+absence of owned effects is verified**, an approved supersede **and** a rejection are both reported as
+**information**: `skipped` / `contradiction_retired`, flagged `information`, in the preview's
+*Information* group. No mutation; the decision file stays as history (no new withdrawn state).
+Wording, without assigning a cause: "Nothing to do — this contradiction no longer stands (it was
+retired), so the decision has nothing to act on. It is kept as a record."
+
+- **Exceptions follow decision 10:** completed effects are checked first (`already_in_effect`); an open
+  journal, partial owned effects or unverifiable state follow the precedence (resume, rollback or
+  block) and are never shown as information. Unreadable recovery evidence blocks.
+- The other refusals stay under *Attention needed* with reason-specific wording: `edge_missing`,
+  `edge_status_unexpected`, `winner_not_active`, `loser_not_active`, `hidden_takes_precedence`.
+
+**Re-proposal is not automatic (documented behavior).** `contradiction_check._file` keys a
+`resolve_contradiction` review solely on the claim pair and skips a pair with a terminal decision
+(`state == "decided"`) or an `active`/`rejected` assertion. So after a retired contradiction, a later
+check of the same pair files nothing: the retained terminal decision stands and nothing is
+reactivated. Any future re-proposal mechanism must ensure that the retained approval can never
+authorize a new assertion.
+
+**Tests:** repeated Apply with no writes; the approved and the rejected retired case; the journal and
+owned-effect exceptions; unreadable evidence blocks; a later scoped check of the pair keeps the
+terminal decision and reactivates nothing.
+
+## Decision 16 — the completion marker's shape and rendering (slice 2 grill Q4, 2026-11-08)
+
+**Why.** `render_claim_page` builds Claim frontmatter from scratch (no passthrough), at least one
+frontmatter parser (`keyword_index.parse_frontmatter`) reads flat `key: value` lines only, and
+`validate_frontmatter` has a fixed claim key list.
+
+**Shape: three flat scalar fields**, written in the same page write as the loser's deprecation:
+`superseded_by_review: "rev_<16 hex>"`, `superseded_by_approval: "<32 hex>"`,
+`superseded_by_claim: "clm_<16 hex>"` (the winner). No nested map, no parser upgrade.
+
+- **All or nothing.** Any marker field present requires all three, in canonical form. A partial or
+  malformed marker is **unreadable evidence**.
+- **A historical record, separate from current status.** A valid marker records that the operation
+  completed. `recompose_claim` reads it from the existing page and the renderer writes it back
+  unchanged through **every** render (re-extraction, a tombstone of the loser, contradiction
+  re-projection, deprecation re-render, hide and unhide). Rendering never removes it; only a future
+  governed reversal could.
+- **Ownership** is checked against the journal: `superseded_by_review` and `superseded_by_approval`
+  match the journal's `review_id` and `approval_id`, and `superseded_by_claim` matches the journal's
+  winner. A wrong winner is not a match.
+- **Rollback:** a matching marker forbids compensating rollback **whatever the page's current
+  status** (decision 10's completion-evidence guard).
+- **Completion and mirror repair** still require the exact status conditions of the decision-10
+  precedence rows; a valid historical marker alone never authorizes changing a page.
+- **Validator:** `validate_frontmatter` accepts the complete marker on Claim pages in every
+  supported lifecycle state (`active`, `deprecated_candidate`, `hidden`), canonical and complete;
+  anything else is an error.
+- **A damaged marker:** `recompose_claim` leaves that page untouched, reports `marker_unreadable`, and
+  continues with unrelated claims. The affected extraction or publication work is reported
+  **incomplete**: never a silent success, and the graph is not updated as though that page rendered.
+
+**Tests:** marker preservation through hide and unhide; partial markers; malformed values; a
+wrong-winner binding; continued processing of unrelated claims next to a damaged marker.
+
+## Decision 17 — a rollback consumes its approval generation (slice 2 grill Q5, 2026-11-08)
+
+**Why.** After row 7's compensating rollback the journal ends and the approved file keeps the same
+`approval_id`. With no journal, "nothing owned → normal guarded execution" would let the same approval
+run again by itself once its prerequisites held again. That is reachable through the `edge_missing`
+and `edge_status_unexpected` rollbacks, or through endpoint changes while no journal is open, and the
+result would depend on timing.
+
+**Decision.** A rollback **consumes** its approval generation. Restored prerequisites never silently
+authorize another attempt; a new attempt requires reopen and re-approval (a new `approval_id`).
+
+**Rollback protocol** (Apply's row 7 and `repair_supersede.py rollback-edge` alike), after the
+completion-evidence guard passed:
+
+1. durably record the journal stage `rolling_back`, bound to the `review_id` and `approval_id`;
+2. supersede **only** the owned `supersedes` edge and commit the graph;
+3. write (or verify and flush) the deterministic audit
+   `reviews/audit_log/<review_id>-rolled-back-<approval_id>.json`
+   (`event: "supersede_rolled_back"`, `review_id`, `approval_id`, `winner`, `loser`, edge id,
+   `rolled_back_at`), with decision 13's reuse rules: an existing entry is reused only when its
+   identity and payload validate, flushed again on recovery, never overwritten; one entry, the
+   original time kept;
+4. finish publication recovery, then close the journal (the caller `end`s it, as for every stage).
+
+- **Precedence:** a journal at `rolling_back` sits directly after row 1 (an unreadable or invalid
+  journal still blocks first). Every rollback recovery **runs the completion-evidence guard again
+  before any further mutation**: a matching completion marker, a valid completion audit or a
+  completed stage forbids it, and unreadable evidence blocks it. Only when the guard passes are steps
+  2–4 resumed. Restored execution prerequisites never restart the supersede at this stage: a
+  `rolling_back` journal ends in rollback or in a block, never in the supersede's execution. They
+  never bypass the guard either.
+- **Consumed approval:** before any execution, a valid `supersede_rolled_back` entry for this
+  `review_id` and `approval_id` with no open journal gives `skipped` / `supersede_withdrawn` under
+  *Attention needed*, with no writes: "This approval was withdrawn after an incomplete supersede;
+  reopen it to decide again." An unfinished rollback or its publication recovery still runs first; the
+  no-write outcome applies once that recovery is complete.
+- **Unreadable or conflicting** rollback entries block.
+- **Separate from completion evidence:** a rollback entry is never completion evidence (decision 13),
+  and completion evidence never comes from it. Its only effect is to stop the same approval running
+  again.
+
+**Tests:** an interruption at every boundary of the protocol; prerequisites returning during recovery
+(the rollback still finishes); repeated Apply after the rollback (no writes); unreadable and
+conflicting rollback entries; a fresh approval generation executing normally; recovery at
+`rolling_back` that meets matching completion evidence (marker or completion audit) makes no
+mutation; completion evidence that became unreadable before recovery makes no mutation.
+
 ## Tests (required)
 
 - **Synthesis:** an old rejection cannot override approval of the current version; an old approval
@@ -325,7 +500,7 @@ test.
 ## Recommended implementation order
 
 1. **Slice 1 — synthesis version binding** (decisions 2–8), with item 8 (decision 12).
-2. **Slice 2 — guarded supersede** (decisions 9–10): durable identity journal, binding, marker,
+2. **Slice 2 — guarded supersede** (decisions 9–10, 13–17): durable identity journal, binding, marker,
    precedence, shared effect check, the two report-only lints.
 3. **Slice 3 — `repair_supersede.py`** (decision 11) + Operations doc.
 
