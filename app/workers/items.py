@@ -46,7 +46,7 @@ from app.llm.client import CacheMiss, LLMClient, ParseError
 from app.workers import citations, page_names, publication, reconcile, reviews, titles
 from app.workers import enrichment_artifact as art
 from app.workers import item_pages, labels
-from app.workers.wiki_render import NODE_DIR, parse_frontmatter, render_item_page
+from app.workers.wiki_render import NODE_DIR, frontmatter_string, parse_frontmatter, render_item_page
 
 _ENRICHABLE_STATUSES = {"extracted", "partial"}
 _PRODUCER = "extract_items"                  # its run guard and journal name
@@ -488,6 +488,13 @@ def _union(existing: list[str], new: list[str]) -> list[str]:
     return out[:_MAX_ALIASES]
 
 
+def _description(text: str, fm: dict[str, Any]) -> Any:
+    """The page-owned description, decoded (`frontmatter_string`); a hand-written unquoted value
+    falls back to the plain frontmatter read."""
+    decoded = frontmatter_string(text, "description")
+    return decoded if decoded is not None else fm.get("description")
+
+
 def _read_node_meta(page_path: Path) -> dict[str, Any] | None:
     """Read the durable title + aliases + item_type from an existing node page (page is the authority)."""
     if not page_path.exists():
@@ -508,8 +515,9 @@ def _read_node_meta(page_path: Path) -> dict[str, Any] | None:
             # ADR-0052: preserve a spin-off's split lineage across re-renders (page-authoritative).
             "split_from": fm.get("split_from"),
             "split_review_id": fm.get("split_review_id"),
-            # ADR-0058: preserve the page-owned human description across re-renders.
-            "description": fm.get("description")}
+            # ADR-0058: preserve the page-owned human description across re-renders (decoded like
+            # the title — the inverse of the renderer's escaping, so it never compounds).
+            "description": _description(text, fm)}
 
 
 def _link_labels(wiki_dir: Path, source_ids, duplicates) -> dict[str, str]:

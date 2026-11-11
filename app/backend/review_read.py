@@ -35,7 +35,7 @@ from typing import Any
 
 from app.backend import graph, manifests, taxonomy
 from app.workers.reviews import PRIORITIES, REVIEW_STATUSES
-from app.workers.wiki_render import NODE_DIR, parse_frontmatter
+from app.workers.wiki_render import NODE_DIR, frontmatter_string, parse_frontmatter
 
 # --- effect-status vocabulary (ADR-0035 A2) --------------------------------
 PENDING_APPLY = "pending_apply"   # supported, but the effect is not (yet) in the world
@@ -1475,16 +1475,21 @@ def _family_page_meta(wiki_dir: Path | None) -> dict[str, dict[str, Any]]:
             continue
         for path in sorted(page_dir.glob("*.md")):
             try:
-                fm = parse_frontmatter(path.read_text(encoding="utf-8", errors="replace"))
+                text = path.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
+            fm = parse_frontmatter(text)
             nid = fm.get(id_field)
             if isinstance(nid, str) and nid:
                 aliases = fm.get("aliases")
-                meta[nid] = {"title": fm.get("title"), "status": fm.get("status"),
+                # Item pages escape title/description (`_fm_quote`); decode them for display.
+                title, description = (frontmatter_string(text, k) for k in ("title", "description"))
+                meta[nid] = {"title": title if title is not None else fm.get("title"),
+                             "status": fm.get("status"),
                              "aliases": aliases if isinstance(aliases, list) else [],
                              "item_type": fm.get("item_type"),
-                             "description": fm.get("description")}
+                             "description": description if description is not None
+                             else fm.get("description")}
     return meta
 
 

@@ -97,8 +97,8 @@ def _read_meta(page_path: Path) -> dict[str, Any] | None:
             "item_type": fm.get("item_type"),
             # ADR-0052: preserve a spin-off's split lineage when the promote pass re-renders it active.
             "split_from": fm.get("split_from"), "split_review_id": fm.get("split_review_id"),
-            # ADR-0058: preserve the page-owned human description.
-            "description": fm.get("description")}
+            # ADR-0058: preserve the page-owned human description (decoded, like the title).
+            "description": items._description(text, fm)}
 
 
 def _read_amendments(reviews_dir: Path, rid: str) -> dict[str, Any] | None:

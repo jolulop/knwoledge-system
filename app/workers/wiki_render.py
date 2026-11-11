@@ -401,6 +401,21 @@ def _fm_quote(text: str) -> str:
             .replace("[", "\\[").replace("]", "\\]"))
 
 
+_FM_ESCAPE = re.compile(r"\\(.)")
+
+
+def frontmatter_string(text: str, key: str) -> str | None:
+    """The decoded value of a top-level double-quoted frontmatter scalar `key: "..."` — the inverse
+    of `_fm_quote`, so a page-owned field (title, description) read back and re-rendered keeps its
+    value and its bytes. `parse_frontmatter` only strips the outer quotes and leaves the escapes in
+    place, which compounded on every re-render. None when the frontmatter has no such quoted line."""
+    match = _FRONTMATTER.match(text)
+    if not match:
+        return None
+    m = re.search(rf'(?m)^{re.escape(key)}:[ \t]*"(.*)"[ \t\r]*$', match.group(1))
+    return _FM_ESCAPE.sub(r"\1", m.group(1)) if m else None
+
+
 def render_claim_page(claim: dict[str, Any], *, review_status: str | None = None,
                       labels: dict[str, str] | None = None,
                       marker: dict[str, str] | None = None) -> str:
