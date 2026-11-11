@@ -1,6 +1,6 @@
 # REANCHOR — session status
 
-_Last updated: 2026-11-06. **Reanchor command:** "read REANCHOR.md and reanchor". Read this
+_Last updated: 2026-11-08. **Reanchor command:** "read REANCHOR.md and reanchor". Read this
 first after an app restart, then `wiki/index.md` if working in the vault._
 
 > [!warning] This is a periodically-refreshed snapshot and can lag the live state. The authoritative
@@ -12,13 +12,43 @@ first after an app restart, then `wiki/index.md` if working in the vault._
 
 Local-first **LLM Wiki** knowledge-system. Immutable `raw/` → derived `normalized/` →
 generated `wiki/` (gitignored, regenerable) → `db/` SQLite (graph, jobs, llm_cache) →
-`reviews/`, `policies/`. ADR-driven (`docs/adr/0001–0072`). See `CLAUDE.md` for the
+`reviews/`, `policies/`. ADR-driven (`docs/adr/0001–0073`). See `CLAUDE.md` for the
 critical rules and `CONTEXT.md` for the glossary.
 
 ## Where we are
 
-- **2026-11-06 — ADR-0070 Slice B complete (B1–B5); tip `42534df`, pushed, in sync with
-  `origin/main`**, tree clean except the user's `.vscode/`. Since `94a05c8`:
+- **2026-11-08 — ADR-0073 complete (slices 1–3); tip `06f3d56`, pushed, in sync with
+  `origin/main`**, tree clean except the user's `.vscode/`. ADR-0073 settles ADR-0072's executor
+  follow-ups: items 4, 5 and 8 fixed; 2, 3, 6 and 7 dormant with written reopening triggers.
+  Since `42534df`:
+  - `2fa5cd1` — the previous refresh of this file. `375e804` — plain wording for the synthesis
+    reconciliation notice + an Obsidian 1.15.0 launcher note.
+  - `c5db004` — **ADR-0073** design lock (grill Q1–Q11) + CONTEXT terms (*Synthesis version
+    digest*, *bound decision*, *Supersede completion marker*, *compensating rollback*).
+  - `dea4c38` — **slice 1, synthesis decisions bound to a version**: every synthesis decision
+    records the 64-hex `version_digest` of the text shown (form, API, bulk); a changed or
+    regenerated text is refused ("changed — review again"); Apply executes a decision only on its
+    own version and lists decisions on replaced versions under *Information*. Decisions recorded
+    before versions existed show **`decision_unbound`** until **Decide again for the version
+    shown**. New 16th validator `validate_synthesis.py`; item 8's fixture fixed.
+  - `6ef0d06` + `dbc6a71` — **slice 2, guarded supersede** (+ review rounds 1–2): an approved
+    supersede runs only while its contradiction stands and both claims are active; progress is
+    kept in `reviews/in_flight/<review_id>.json`; the loser's Claim page carries a completion
+    marker (`app/workers/claim_marker.py`: reserved keys detected under any spelling, duplicates
+    or non-canonical keys → damaged, CRLF tolerated); a failure before completion rolls back only
+    this review's own `supersedes` link; the journal closes only once publication is published.
+  - `5b46280` + `06f3d56` — **slice 3, supersede repair** (decisions 18–23):
+    `scripts/repair_supersede.py inspect <rid>` (read-only, exits 0 with a report and a
+    `supersede-state-v1` state fingerprint) and `rollback-edge <rid> --expected-state <digest>
+    --reason "<why>"` (run guards, then the write lock, a fresh fingerprint check, publication
+    queued first, then the same rollback Apply runs; Apply finishes and closes it, reopen after
+    that). No journal → nothing written; the completion guard covers every approval generation.
+    Publication now checks each Claim page's identity and marker before mirroring or rendering
+    (`claim_identity_mismatch` is reported and skipped). Apply and lint name the inspect command.
+    `docs/Operations.md` "Supersede recovery".
+  - Gate before the last commit: **2691 passed, 2 skipped**, ruff clean, 16 validators.
+- **2026-11-06 (historical; superseded by the entry above) — ADR-0070 Slice B complete (B1–B5);
+  tip `42534df`, pushed, in sync with `origin/main`**, tree clean except the user's `.vscode/`. Since `94a05c8`:
   - `6552df2` — the previous refresh of this file. The UAT clone `/tmp/ks-uat` was deleted and its
     API stopped (its cache matched `~/ks-saved/2026-11-02/llm_cache.ks-uat.sqlite`); none exists.
   - `6fe300f` — **B3, button tiers** (CSS only): plain buttons are secondary (white, grey border);
@@ -616,7 +646,8 @@ critical rules and `CONTEXT.md` for the glossary.
 | **Web UI tidy + part-3 UAT** (palette · interrupted runs · one-form document screen · UAT fixes) | **Done + pushed** (`bc7a51e` · `ad6391a` · `ec3a48b` · `665b6ba` · `297187d`); UAT 2026-11-02/03 passed, comment 4 answered by ADR-0070 B1 |
 | **ADR-0070 Slice B browsing visibility + review UX** | **Complete + pushed** (`4e02520` design + round 1 · `c722f9c` B1 + rounds 2–3 · `318166a` · B1b and B2 below · `6fe300f` B3 · `22869b5` B4 + rounds 1–4 · `42534df` B5); B1 Obsidian acceptance passed 2026-11-04; a hand look-through of B1b–B5 needs a fresh UAT clone |
 | **ADR-0071 item page filenames (B1b)** | **Complete + pushed** (`d59ef84` design · `661b877` B1b + review rounds 1–2) |
-| **ADR-0072 B2 (Apply outcomes, tagging history, bulk decisions)** | **Complete + pushed** (`878d375` design · `33a39e1` B2a + rounds 1–4 · `f32ce67` B2c + round 1 · `94a05c8` B2b + round 1); a hand look-through needs a fresh UAT clone |
+| **ADR-0072 B2 (Apply outcomes, tagging history, bulk decisions)** | **Complete + pushed** (`878d375` design · `33a39e1` B2a + rounds 1–4 · `f32ce67` B2c + round 1 · `94a05c8` B2b + round 1); look-through of B1b–B5 passed 2026-11-06 |
+| **ADR-0073 executor follow-ups** (synthesis version binding · guarded supersede · supersede repair) | **Complete + pushed** (`c5db004` design · `dea4c38` slice 1 · `6ef0d06` + `dbc6a71` slice 2 + rounds 1–2 · `5b46280` + `06f3d56` slice 3); validators 15→16; a hand look-through needs a fresh UAT clone |
 
 ## Next step
 
@@ -633,14 +664,14 @@ critical rules and `CONTEXT.md` for the glossary.
   — set `ENRICH_LOCAL_BASE_URL` + add `local:<model>` to a tier chain (start with
   `ENRICH_MODEL_LIGHT`). No-cost resolve-check snippet in that doc.
 - **NEXT (each step on the user's go; each new design starts with a `grill-phase`):**
-  1. **After Slice B** (complete — ADR-0070 B1–B5, ADR-0071, ADR-0072):
-     a. *(when the user asks)* a fresh UAT clone to look through B1b–B5 by hand: Add tag
-        `Data-Mesh` then `Data Mesh`; the readable Apply preview; not yet tagged / Next; bulk
-        reject on the flat queue; the button tiers; two competing type changes of one tag (the
-        guard, then Apply); a name hint and *Use this spelling* on Details. Remember
-        `--init-fresh-tracking` (UAT Guide §4).
-     b. ADR-0072's follow-up list (executor defects the B2a outcomes exposed) — each needs its own
-        decision.
+  1. **After ADR-0073** (complete; Slice B look-through passed 2026-11-06):
+     a. a fresh UAT clone to look through ADR-0073 by hand: approve / reject a synthesis (the
+        version is recorded; a regenerated text is refused); a pre-existing approved synthesis
+        shows `decision_unbound` until **Decide again**; the Apply preview's *Information* group;
+        `scripts/repair_supersede.py inspect <rid>` on a supersede review (read-only report and
+        fingerprint). Remember `--init-fresh-tracking` (UAT Guide §4).
+     b. ADR-0073's dormant items 2, 3, 6, 7 and the deferred operator-governed supersede
+        withdrawal stay parked until their written triggers occur.
   2. **Part 4** — decision 11: `scripts/eval_item_tags.py` (deterministic, manual run) against
      `evals/golden_item_tags.yaml` (pre-restart baseline, then measured on the rebuilt vault).
   3. **Decision 10 clean restart** at the new prompt versions → fresh full UAT + scoring, including
@@ -677,7 +708,9 @@ detect-and-propose); review at `/ui/reviews` (flat) or `/ui/reviews/sources` (pe
 `POST /reviews/apply` (dry-run first — it returns the `preview_token` Apply requires); reconcile
 stale items via `scripts/reconcile_reviews.py`. A `saved_publication_pending` result → **Retry
 publishing** banner or `scripts/republish.py`; a damaged producer journal →
-`scripts/repair_producer_journal.py`. Confirm each document's Details on its screen (feeds the
+`scripts/repair_producer_journal.py`; an unfinished supersede → `scripts/repair_supersede.py
+inspect <review_id>` (Operations "Supersede recovery"); a synthesis decision shown as
+`decision_unbound` → **Decide again for the version shown** on its review page. Confirm each document's Details on its screen (feeds the
 effective title and `wiki/Authors/`).
 **LLM producers** (need a provider for the tier chain — `ANTHROPIC_API_KEY`, or a local model via
 `ENRICH_LOCAL_BASE_URL`, see `docs/Local Models.md`): `scripts/enrich.py` → `extract_claims.py` →
@@ -705,7 +738,7 @@ Re-suggest without billing via `extract_items.py --cache-only`; check/repair the
 
 - Tests: `uv run pytest -q`
 - Lint: `.venv/bin/ruff check app/ scripts/ tests/`
-- Validators: `uv run python scripts/validate_all.py` (15)
+- Validators: `uv run python scripts/validate_all.py` (16)
 - Commits exclude the user's `.vscode/`: `git add -A -- . ':!.vscode'`
 
 ## Key ADRs
@@ -769,7 +802,11 @@ Authors filename migration publishes verified replacements before Source links c
 only unlinked pages)**, **0072 (B2: per-review Apply outcomes stating the verified end state, the
 readable Apply preview/result, the tagging-history marker + `_tracking.json` + explicit migration /
 fresh initialization, the readable flat queue and two-step bulk reject/defer with a per-review
-decision fingerprint)** — full glossary entries in `CONTEXT.md` (historical superseded entries
+decision fingerprint)**, **0073 (executor follow-ups: synthesis decisions bound to a 64-hex
+`version_digest`, `decision_unbound` + Decide again, `validate_synthesis`; guarded supersede with an
+identity journal, a Claim-page completion marker and a compensating rollback of only the review's
+own link; `scripts/repair_supersede.py` inspect / rollback-edge with a `supersede-state-v1`
+fingerprint; items 2, 3, 6, 7 dormant)** — full glossary entries in `CONTEXT.md` (historical superseded entries
 carry supersession notes).
 
 **Path safety:** `app/backend/paths.py` (`safe_under` containment, `safe_child` basename-only) is the
