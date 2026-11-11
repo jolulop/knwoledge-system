@@ -1,0 +1,468 @@
+# ADR-0074 — Durable authority writes and bounded extraction
+
+- **Status:** accepted — design-locked by grill-phase 2026-11-11 (Q1–Q9). **Not implemented**;
+  slices 1–6 and changes 7a–7c per decision 9.
+- **Date:** 2026-11-11
+- **Drivers:** external review of `06f3d56` (2026-11-11), blocking findings 1 and 3. Finding 2
+  (item descriptions corrupted across re-renders) was fixed separately in `dfda610`.
+  - **Finding 1 — authority can be lost in an interrupted write.** `save_manifest`
+    (`app/backend/manifests.py`) truncates the manifest in place. `load_manifest` returns `None`
+    for an absent *and* for an unparseable file, so intake (`app/workers/intake.py`) re-creates a
+    corrupt manifest as a new, default-`active` source: a hidden or archived document comes back and
+    its confirmed Details are lost. Item, non-durable Claim and Synthesis page writes, and in-place
+    review-record rewrites, truncate the same way.
+  - **Finding 3 — the extraction timeout does not apply through the API.** `_time_limit`
+    (`app/workers/extract.py`) uses `SIGALRM`, which works only on the main thread; `/jobs/extract`
+    is a synchronous FastAPI route, run on a worker thread, so a malformed document can occupy
+    extraction (and the producer lock) indefinitely, against ADR-0010's untrusted-input boundary.
+- **Related:** ADR-0008 (manifests are authoritative), ADR-0010 (extraction safety limits),
+  ADR-0068 (vault consistency contract: durable authority vs projections, write lock, producer
+  journal, publication recovery), ADR-0073 decision 10 (durable journal and page writes).
+
+The two findings share one grill but are decided separately: decisions 1–4 cover authority writes
+(finding 1), decisions 5–8 cover extraction (finding 3), decision 9 orders the work.
+
+## Part A — durable authority writes (finding 1)
+
+### Decision 1 — scope of the durable-write rule (grill Q1)
+
+**Every write of file-backed authority goes through one shared durable-write helper** — replacing
+an existing file *and* creating a new one, so no reader ever sees a truncated or half-written
+authority file. The helper writes a temporary file in the destination's directory, flushes and
+fsyncs it, `os.replace`s it over the destination, then fsyncs the directory.
+
+**Covered** (ADR-0068 §1 "where authority lives", file-backed part):
+
+- `raw/manifests/*.json`;
+- Item, Claim and Synthesis pages — **wholly**, because they are mixed pages: re-rendering a
+  projection section rewrites the file, and with it the durable fields it carries;
+- everything written under `reviews/` — pending, decided and in-place-rewritten review records
+  (defer, reopen, amendments), tag ledgers, **audit records** and **recovery journals**
+  (`reviews/in_flight/`, identity journal);
+- `policies/`;
+- the `db/*.json` authority records (publication queue, revision record, producer journal, Apply
+  authorizations, contradiction estimates, tag labels).
+
+**Not covered:**
+
+- **SQLite** (`db/graph.sqlite`, `db/jobs.sqlite`, `db/llm_cache.sqlite`) keeps its own transaction
+  and durability mechanisms.
+- **Lock files** (`db/.run-*.lock`, `db/.vault.lock`) and **temporary staging files** (extraction's
+  stage directory, the helper's own temp files).
+- **Projections** (Source pages, `index.md`, `log.md`, `wiki/Authors/`, `normalized/`, vector-index
+  metadata, eval reports): rebuildable by definition (ADR-0068 §1); their repair is ADR-0068's.
+
+**Consolidation.** The existing hand-rolled durable writers — `identity_journal._replace`,
+`reviews._write_json_durably` and its re-sync barrier, `claims._write_page_durably` and its barrier,
+`authors._write_atomically`, the publication queue, the producer journal, `tag_links` and
+`tag_history` — are folded into the one helper (neutral module, e.g. `app/backend/durable_write.py`).
+
+**Boundaries — what atomic replacement does not do:**
+
+- It does **not** replace the write lock, multi-file journals (producer journal, identity journal,
+  supersede journal, publication queue) or operation-specific creation and ownership checks (the
+  page-identity guards, `create`-only semantics where a caller needs them). Those stay where they
+  are; the helper only makes each single-file write all-or-nothing and durable.
+- **A directory-fsync failure is an error**, propagated to the caller **even though the replacement
+  has already happened**. The new content may or may not survive a power loss, so the caller must
+  treat the write as *uncertain completion* and handle it safely (its journal / retry / re-sync
+  barrier), never as success and never as "nothing happened".
+
+**Structural guard.** A deterministic check fails when an authority destination is written outside
+the helper. It recognises the known writer entry points **and** the authority destinations,
+including aliases and wrappers (a path variable bound to an authority directory, a local helper that
+calls `write_text` / `json.dump` / `open(..., "w")`), not merely literal `write_text` / `json.dump`
+calls. Allowed exceptions (the helper itself, lock files, staging) are listed explicitly.
+
+**Tests.** One implementation, many tests: a **focused fault-injection suite** for the helper
+(failure at each step — temp write, file fsync, replace, directory fsync — leaves the old content
+intact or reports uncertain completion; no temp file left behind on a clean failure), plus
+**integration coverage per authority family** (manifests, Item/Claim/Synthesis pages, review records
+and audit records, journals, `policies/`, `db/*.json`).
+
+### Decision 2 — manifest read states and what each caller does (grill Q2)
+
+Today `load_manifest` returns `None` for an absent, an unreadable and an unparseable manifest alike;
+`list_manifests` and `valid_manifests` (every runtime worker) **silently drop** an unparseable file —
+it is not even a `skipped` reason — and `validate_raw_integrity` skips it too, so no surface reports a
+corrupt manifest. Decided:
+
+**One typed reader** returns a state with the record:
+
+| State | Meaning |
+|---|---|
+| `absent` | **Verified** absence: no entry at `raw/manifests/<source_id>.json`. A dangling symlink, an unreadable directory, or a failed inventory scan (the directory cannot be listed) **never** establishes absence. |
+| `unreadable` | The entry exists (or its existence cannot be confirmed) but cannot be read: permission or I/O error, a directory or other non-regular file, a dangling symlink. Possibly transient. |
+| `corrupt` | The bytes were read but are not a manifest object: invalid UTF-8, invalid JSON, JSON that is not an object. |
+| `ok` | A **parsed object** — not yet a validated manifest. |
+
+- **Identity validation stays separate.** `ok` is followed by the existing checks (canonical id,
+  filename equals id, no duplicate id) with their existing quarantine reasons (`non_canonical_id`,
+  `filename_mismatch`, `duplicate_source_id`). **No caller uses an `ok` record before those checks
+  pass.**
+- **`unreadable` and `corrupt` stay distinct**: retrying an I/O failure and recovering damaged bytes
+  are different operator actions.
+
+**Callers:**
+
+- **Intake.** **Only `absent` permits creation.** For `unreadable` or `corrupt` it **preserves the
+  file** (no write, no occurrence update, no new canonical path), reports a per-document error and
+  continues with the other documents.
+- **Runtime workers.** `unreadable` and `corrupt` become two more categorical `skipped` reasons
+  (never the file's contents), counted in every job result, and the job reports **incomplete
+  coverage**. **An incomplete manifest inventory blocks any pruning, deletion or reconciliation whose
+  correctness depends on proving a document is absent** (for example retiring a source's derived
+  artifacts, graph nodes or review items because no manifest lists it).
+- **Retrieval.** An affected document is **excluded before its evidence reaches the model** (fail
+  closed). Part C's search decision builds on this.
+- **Validators.** `validate_raw_integrity` **fails** on any unreadable or corrupt manifest and on a
+  failure to enumerate `raw/manifests/`, naming the file by a safely rendered repository-relative
+  path, never echoing its contents.
+- **Recovery.** **No automatic recreation, overwrite or repair** — decision 3 decides the operator's
+  path.
+
+**Caller audit.** Every caller of `load_manifest`, `list_manifests` and `valid_manifests` (about 25
+modules, `app/` and `scripts/`) is moved to the typed states; **no compatibility wrapper** may keep
+collapsing a failure into `None` or an empty inventory. A caller that only needs "the record if it is
+usable" must still receive and propagate the failure state (count it, report it, block absence-based
+actions), not drop it.
+
+### Decision 3 — operator recovery of a damaged manifest (grill Q3)
+
+Today `scripts/backup.py --restore` restores **whole archives** only (it skips pre-existing files, or
+overwrites everything with `--force`); there is no single-file restore and no manifest repair tool.
+Decided: a dedicated, inspect-first script in the `repair_supersede.py` pattern (ADR-0073 decisions
+18–23).
+
+**`scripts/repair_manifest.py inspect <source_id>`** — read-only. It reports:
+
+- the state (`unreadable` / `corrupt`) and its error category;
+- the damaged file's size and sha256, or **explicitly "unavailable"** when they cannot be read; never
+  its contents;
+- the raw file's location and integrity **only from trustworthy evidence** — a corrupt manifest may
+  provide no trustworthy raw path, which is then reported as unavailable, not guessed;
+- the backup archives holding a usable manifest for this id, with each copy's `status` and
+  **confirmed Details only** (never source excerpts or arbitrary manifest fields);
+- the governance and Details decisions in the audit log that bear on this document, and whether each
+  backup copy is **compatible** with them;
+- a state fingerprint (input to `--expected-state`).
+
+Exit codes: **0** for a completed diagnostic report, including one that finds damage; **nonzero** for
+an invalid invocation or a failure of the inspection itself.
+
+**`scripts/repair_manifest.py restore <source_id> --archive <zip> --expected-state <digest>
+--reason "<why>"`** — the only write path.
+
+- **Lock order** is the established one: **vault lock → write lock**. The fingerprint and **every
+  precondition are re-checked inside that boundary**.
+- **The backup copy is validated**: the archive member is read **alone** (no extraction of arbitrary
+  paths; **duplicate or oversized members reject the archive**), it parses, passes the identity checks
+  (canonical id, filename equals id), its **full stored SHA-256** is well-formed and agrees with the
+  canonical id — and, where the raw file is present and trustworthy, with the raw bytes. Matching the
+  16-hex source-id prefix alone proves nothing about raw-byte integrity.
+- **Compatibility with later human decisions.** If the audit log holds a governance change (hide,
+  archive, unhide, deprecation, …) or a Details change **newer than the backup copy**, restore
+  **refuses** and requires a newer compatible backup. There is **no override** that temporarily
+  resurrects visibility; explicit reconciliation of an old backup with later decisions is a separate,
+  future recovery decision.
+- **Unknown is not compatible.** An unreadable audit record or an incomplete audit scan, where
+  compatibility cannot be established, **blocks** restore.
+- **Order of writes** — no absence window, intent before effect:
+  1. **copy** (never move) the damaged bytes durably to `raw/manifests/quarantine/<source_id>-<timestamp>.json`
+     — kept, never deleted, ignored by every manifest inventory;
+  2. **record recovery intent**: queue publication and persist a small recovery journal (recording
+     what is about to be installed, the quarantine copy, the reason);
+  3. **atomically replace** the live manifest with the validated backup copy (durable helper);
+  4. finish publication and write the audit record, then close the journal.
+
+  Moving the damaged file away first is rejected: the gap would read as `absent` and authorize intake
+  to re-create the manifest. A crash after step 3 leaves the journal with enough to finish publication
+  and the audit **idempotently**.
+- **`unreadable` has no write path**: the operator fixes the I/O or permission problem and re-runs;
+  `inspect` says so.
+
+**Deferred — rebuild without a backup.** Reconstructing a manifest from the raw file plus the audit
+log is lossy (occurrences, modification times, unconfirmed fields) and is not built now. **Reopening
+trigger:** a damaged manifest with **no compatible backup** — including the case where every backup
+is too old to preserve later human decisions.
+
+### Decision 4 — the read discipline covers all file-backed authority (grill Q4)
+
+The same damage-read-as-absence mechanism exists beyond manifests: `items._read_node_meta` returns
+`None` for a page without a readable title and the item writer then renders from defaults
+(`items.py`, `(existing or {})`), losing title, aliases, description and decided status;
+`reviews.py` replaces an unreadable review record with `{"review_id": …}` and continues retiring it.
+`review_read._load_dir` already counts parse and schema errors, and the ADR-0068/0073 journals
+already fail closed. Decided — **for every file-backed authority family of decision 1**:
+
+1. **Absence permits creation only when the domain allows it.** Verified absence is necessary, not
+   sufficient: a missing page for an established item (a graph node, ledger entries or review records
+   refer to it) may be **lost authority**, and producers must not re-create its human-owned fields
+   from defaults. Each family states when absence legitimately means "new".
+2. **`unreadable` and `corrupt` are never absence**: never overwritten with defaults, never rebuilt by
+   a producer, reported by category and counted.
+3. **A writer that cannot read the durable fields it must carry forward refuses** (for pages: a
+   missing or unparseable frontmatter block, or missing required durable fields), since re-rendering
+   would silently reset them.
+4. **Failure scope follows dependencies.** Skip one subject only when the remaining work is
+   independent and safe. An unreadable **shared** input — a policy, a journal, an inventory — may
+   require refusing the whole operation. Absence-based actions (pruning, retiring, "no page, so
+   create one") are blocked while that family's inventory is incomplete.
+5. **Explicit recovery contracts are preserved.** ADR-0068's revision-record recovery is an existing,
+   deliberate exception: damaged revision state is replaced with a new epoch and every outstanding
+   preview is invalidated. It keeps that behaviour; this decision does not impose blanket refusal on
+   it. Any other family with a written recovery contract is listed as conforming, not rewritten.
+6. **Shared mechanics, family-specific validation.** Byte reading, the error categories (`absent` /
+   `unreadable` / `corrupt` / `ok`) and durable writing are shared. Parsing and required-field
+   validation stay **per family** (manifests, Item/Claim/Synthesis pages, policies, review and audit
+   records, journals). **Optional or legitimately absent legacy fields remain distinguishable from
+   damage** — a pre-ADR page without `description` or `split_from` is not corrupt.
+7. **Proof is behavioural.** The structural guard (decision 1) also flags known unsafe fallbacks
+   (defaults substituted after a failed read), but pattern matching is not the proof: **behavioural
+   tests per family** show that a read failure cannot reset authority.
+
+**Recovery for the other families** is restore from backup by the operator — sufficient for this
+slice **provided it follows the rules already agreed**: preserve the damaged bytes by copy before
+replacement, the vault lock → write lock order with preconditions re-checked inside it, publication
+recorded before replacement, and refusal when later human decisions cannot be preserved. Dedicated
+per-family tooling is deferred; **reopening triggers:** the first damage observed in a family, or a
+backup recovery that cannot safely preserve later human decisions.
+
+## Part B — bounded extraction (finding 3)
+
+Today `_extract_one` (`app/workers/extract.py`) runs the untrusted parse (`_dispatch`: the
+pypdf / docx / bs4 / pandas extractors and the ZIP checks) under `_time_limit`, which uses `SIGALRM`
+and silently does nothing off the main thread. Assembly, staging (`normalized/.staging/<id>/`,
+outside the lock) and installation (`os.replace` under the write lock) follow in the same process;
+`prior_success` already keeps a prior successful extraction when a re-extraction fails.
+
+### Decision 5 — the process boundary and the deadline (grill Q5)
+
+- **Parse-only child.** Each document's parse runs in **one child process**. The child receives the
+  path of that one raw file (already confined, size-checked and sha-verified by the parent) — it
+  necessarily reads a vault file — but **no configured vault root, no output paths and no write
+  responsibilities**. It returns the parse result; nothing else. A process boundary alone does **not**
+  enforce read-only filesystem access; that is not claimed.
+- **Inside the bounded child work:** ZIP inspection (`_check_zip_bomb`) and every parser-related
+  preflight, so none of them can bypass the deadline.
+- **In the parent:** assembly, staging, installation, the manifest update, the extraction log and
+  last-good preservation — unchanged in place. A killed child cannot leave partial vault state.
+- **`spawn`, never `fork`** (the API process holds threads and CUDA). **Minimal child bootstrap:** the
+  child entry point is a small dedicated module that imports only the extractor modules; `spawn`
+  re-importing the launching module must not initialise the API, CUDA / embedding models, databases,
+  locks or jobs.
+- **The deadline is `EXTRACT_TIMEOUT_S` of wall-clock time measured by the parent from launch
+  through complete result receipt** — start-up, imports, parsing and serialization all count. The
+  termination grace is a **separate, bounded cleanup allowance**, not part of the parse budget.
+- **Process group before parsing.** The child establishes its own process group and confirms it in a
+  **start-up handshake** before any parsing begins, so a cancellation cannot race group creation and
+  the parent can never signal its own group. Termination signals the child's group: SIGTERM, the
+  grace, then SIGKILL, then reap.
+- **IPC.** The parent **drains the result channel while the child runs** (waiting for exit before
+  reading can deadlock on a full pipe) and **enforces the byte limit during receipt**. The format is
+  **schema-validated** (e.g. JSON with a versioned schema), **never pickle**.
+- **Cleanup on every exit path** — success, timeout, invalid output, parent exception, cancellation:
+  remaining helpers in the group are terminated, IPC is closed, the child is reaped. **A successful
+  result does not leave descendants running.**
+- **One path for CLI and API.** `SIGALRM` / `_time_limit` is removed; behaviour no longer depends on
+  which thread runs the job.
+- **Error categories.** Existing reasons are **preserved** as the child reports them — missing
+  optional dependency (`MissingExtractionDependency`), malformed document, `decompression_bomb`,
+  `invalid_archive`, `unsupported`, … New categories are **reserved for process and protocol
+  failures**: `timeout` (deadline passed), `extractor_crashed` (child exited or was killed without a
+  result), `extractor_output_invalid` (over the byte limit, or failing the schema), and
+  `extractor_unavailable` (the child could not be started or failed its handshake).
+
+### Decision 6 — failed attempts, retry classification and last-good (grill Q6)
+
+Today a failed re-extraction keeps the prior outputs, manifest and log (`preserved_prior`); a
+first-time failure sets `ingestion_status: "error"`, its reason lives only in the extraction log, and
+`_already_extracted` is False for `error`, so the document is re-extracted on **every** run. Decided:
+
+- **Last-good preservation is unchanged.** Any failure on a re-extraction — process and protocol
+  failures included — keeps the prior manifest, outputs and extraction log; staging is discarded.
+- **Failed attempts are stored separately from last-good state**: a per-document **attempt record**
+  (the latest failed attempt: reason, category, time, fingerprint) beside — never inside — the
+  successful extraction log, so a failure after a success neither disappears nor overwrites the good
+  log. (Location is an implementation detail; it is derived state — losing it causes a retry, the safe
+  direction.)
+- **Retry classification:**
+  - **Always retried** — environmental or ambiguous failures, whose outcome can change without the
+    fingerprint changing (CPU contention, memory pressure, machine load): `timeout`,
+    `extractor_crashed` (crash or signal, e.g. an OOM kill), `extractor_unavailable` (start-up or
+    handshake failure), missing optional dependency, I/O errors, and **incomplete IPC** (truncated
+    transport, unexplained invalid output).
+  - **Cached** (skipped as `skipped_known_failure` while the fingerprint is unchanged) — only
+    **explicit deterministic rejections**: `oversize`, decompression-limit rejection
+    (`decompression_bomb`), `invalid_archive`, clearly classified malformed-document errors, and an
+    output that **exceeds a fixed output cap** (a complete, well-formed result that is too large).
+- **The fingerprint covers every relevant bound**: raw sha256, the file-size limit, the ZIP limits
+  (entries, ratio), the output and protocol limits, the extraction configuration (chunking targets,
+  timeout), and the implementation and dependency versions (`EXTRACT_CODE_VERSION`, extractor tool
+  and library versions). Timeout plus tool version alone is insufficient. **Missing or unreadable
+  fingerprint information means retry.**
+- **`force` is an unconditional retry**, still subject to the safety checks (confinement, size,
+  checksum).
+- **Visible, and the two failure situations are distinguished.** The document screen and lint show
+  either **"usable prior extraction retained; latest attempt failed: <reason>"** or **"no usable
+  extraction: <reason>"**. Only a cached deterministic failure says it **awaits changed inputs or
+  force**; every other failure says it **retries on the next run**.
+- **No new lifecycle status.** If repeated timeouts become operationally costly, a **bounded
+  backoff** is decided separately — they are never treated as permanent known failures.
+
+### Decision 7 — locks, orphaned children, stale jobs and cancellation (grill Q7; points 4–5 completed with decision 8)
+
+Today the extract producer guard (`db/.run-extract.lock`) and the vault lock (`db/.vault.lock`,
+shared, held by every `running` job) are `flock`s the OS releases when the holder dies; `ad6391a`
+records a Ctrl-C / `SystemExit` as `failed`, but a **hard kill** (SIGKILL, OOM, a reboot) leaves the
+job row `running` forever.
+
+1. **Descriptor isolation.** The child inherits **no** vault-lock, producer-guard or database
+   descriptors (standard streams and the multiprocessing runtime's own descriptors may be needed).
+   Otherwise an orphaned child keeps `db/.vault.lock` shared — backup and restore refuse until it
+   dies — or keeps the extract guard. **Proved by a subprocess test** that the locks are released and
+   re-acquirable while a child is alive, not assumed from `spawn` defaults.
+2. **Orphan termination independent of parsing.** A parser stuck in C code or holding the GIL can
+   stop any Python-level monitor thread or signal handler in the child, so EOF monitoring of a control
+   pipe and the child's own deadline must be enforced by **an independently enforceable watchdog** —
+   a mechanism that does not depend on the parsing interpreter making progress (for example a separate
+   minimal watchdog process per child that holds the control pipe's read end and kills the child's
+   group on EOF or on deadline). **The control pipe's writer end is never inherited** by the child or
+   its helpers (it would keep the pipe open and prevent EOF). **Test:** kill the parent during a
+   stalled parse; the child group is gone within the deadline + grace.
+3. **Stale `running` jobs — extraction only in this slice.** After acquiring the **outermost** extract
+   guard and **before creating the new job**, every extract job row still `running` is marked
+   `failed` with reason **`interrupted`** — recording lost execution, **not** a successful rollback —
+   and the new run's result reports them. The reconciliation helper is **reusable**, but other
+   producers are not switched to it here: they need a separate audit of guard ownership and job-type
+   mappings first.
+4. **Staging cleanup** — decided in decision 8: at run start, after roll-forward recovery, a staging
+   directory is removed **only** when a complete, readable inventory of install journals proves that
+   none refers to it.
+5. **Shutdown and cancellation.** Cooperative cleanup on shutdown or cancel; lifespan cleanup alone is
+   insufficient for an active synchronous worker, so **children stay registered until their cleanup
+   completes** and **the run guard is not released while that worker can still install outputs**.
+   Cancellation is honoured **before an install starts or between documents**; once an install has
+   begun it finishes or leaves journal-recoverable state, still holding the guard. `interrupted` is
+   recorded when persistence remains possible; a hard death is reconciled on the next run (point 3)
+   and recovered through the install journal (decision 8).
+
+### Decision 8 — roll-forward install journal for extraction (grill Q8)
+
+The ADR-0068 producer journal covers only `extract_claims`, `extract_items` and `generate_synthesis`
+(`app/backend/producer_journal.py`); it does **not** cover extraction. `_install_outputs`
+(`app/workers/extract.py`) performs several separate renames (Markdown, chunks, old tables into
+staging, new tables), then the extraction log is truncate-written, then `save_manifest`, then
+publication. A parent death between any two leaves mixed generations, or the only copy of the old
+tables inside staging. Decided: **roll forward** (the old Markdown and chunks are overwritten by
+`os.replace`, so there is nothing to roll back to). Rollback with a full copy of the old generation,
+and per-document generation directories behind one pointer switch, were considered and not chosen.
+
+**The journal.** Before the first rename, under the write lock, a per-document **install journal**
+(durable helper; e.g. `normalized/.install/<source_id>.json`) records: the attempt id; the
+**source checksum and the relevant extraction configuration** it is bound to; the **exact output
+inventory** — each Markdown, chunk and table file with size and sha256, including an empty table set
+and the obsolete table files to remove; the extraction log to write; and the **extraction-owned**
+manifest fields to apply. The staged generation is complete and durable (files and directories
+fsynced) before the journal is written; publication intent is queued first, as today (ADR-0068).
+
+**Stages: install completion is separate from publication.**
+
+1. `installing` — renames in progress. The document's normalized outputs are **not readable** by
+   consumers.
+2. `installed` — persisted **only after** every output, the extraction log and the manifest
+   extraction fields are **verified and durable**. Readers **may** use this complete generation.
+   Publication failures are covered by the publication queue as for any other change.
+3. closed — the journal is removed **after publication succeeds**.
+
+(An "every open journal blocks readers" rule was rejected: publication itself must read the document
+while its journal is open, which would be a cycle.)
+
+**Each step verifies bytes, not presence.** Before a rename, the staged file's size and sha256 must
+match the journal; for an already-installed file, the installed bytes must match. Tables follow the
+exact inventory — an empty set is a valid generation, and obsolete files are removed. Old tables move
+to a **journal-named holding directory** (not loose in staging), deleted only once the generation is
+`installed`. **Every affected directory is fsynced after its renames**, including moves into holding
+storage.
+
+**Recovery rolls forward.** At extract run start, after the outermost guard (decision 7.3) and under
+vault lock → write lock, every open journal is completed. Recovery **re-reads and validates the
+current manifest** (decision 2), **keeps its current governance and provenance**, and applies **only
+extraction-owned fields**. A journal whose bound checksum or extraction configuration no longer
+matches is **incompatible** and is refused (not applied), and the document follows the unrecoverable
+transition below.
+
+**Unrecoverable install — an explicit transition.** When the generation cannot be completed (a staged
+file missing and the installed bytes not matching, or an incompatible journal), the journal is marked
+**`unrecoverable`**: the journal and every remaining artifact (holding directory, staging) are
+**preserved**, consumers **stay blocked** — the mixed files are **never** silently marked usable — and
+the document is reported as "no usable extraction (interrupted install)". **A fresh extraction attempt
+may supersede it**: a new successful attempt stages, journals and installs a complete new generation
+over it, after which the superseded journal and its artifacts are retired. This is what "always
+retried" (decision 6) means for this state.
+
+**A damaged journal is unknown recovery state.** An unreadable or corrupt journal (decision 4) is
+reported; consumption of the affected document and **all staging cleanup are blocked** — an
+incomplete journal inventory never proves that a staging directory is unreferenced. **Every path in a
+journal is validated** (confined to the document's own normalized, staging and holding locations)
+before any rename or deletion.
+
+**Consistent reads.** A consumer's journal check and its read must not race an install. A consumer
+captures the journal state, the manifest and the normalized bytes it needs **under the write lock**,
+or through an equivalent consistent snapshot, and only then releases the lock; **model calls stay
+outside the lock** (ADR-0068). A document whose journal is `installing`, `unrecoverable` or damaged is
+skipped with `extraction_install_incomplete` by every consumer — enrich, claims, items, synthesis
+inputs, keyword and vector reindex — and is excluded from search and `/query` evidence (fail closed,
+decision 2). `validate_normalized` fails while such a journal exists; lint names the fix ("run
+extraction").
+
+**Tests cover every durable transition**, not an assumed fixed step count: a crash or injected
+failure after each one, **recovery interrupted again**, **directory-sync failures**, empty and
+table-changing generations (tables added, removed, set emptied), incompatible and damaged journals,
+the unrecoverable transition superseded by a fresh attempt, and **consumer reads racing an install**.
+
+## Part C — order of work and deferrals
+
+### Decision 9 — slices and order (grill Q9)
+
+One implementation commit per slice where practical, **review fixes folded in before committing**.
+A large slice is **not** forced into one review-sized unit to keep that count: slices 3, 5 and 6 may
+be split into smaller sub-slices. **Every slice finishes with its targeted failure tests and the
+project gate** (tests, ruff, validators). Each slice starts on the user's "implement now".
+
+| Slice | Content | Decisions |
+|---|---|---|
+| **1** | Durable-write helper; consolidation of the existing durable writers; fault-injection suite; structural guard; integration coverage per authority family. **Consolidation preserves existing creation, ownership and locking semantics** — atomic replacement never turns a create-only operation into an overwrite | 1 |
+| **2** | Typed manifest read states: reader, intake "only absent creates", the `load_manifest` / `list_manifests` / `valid_manifests` caller audit, incomplete-coverage blocking, retrieval exclusion of documents with an **unreadable or corrupt** manifest, `validate_raw_integrity`. This **damaged-manifest exclusion is distinct** from general visibility suppression (change 7a), which checks **valid** manifests' current hide/archive status | 2 |
+| **3** | Read discipline for the other families (Item / Claim / Synthesis pages, review and audit records, policies, journals) with behavioural tests per family; sub-slices allowed | 4 |
+| **4** | `scripts/repair_manifest.py` inspect / restore | 3 |
+| **5** | Extraction install journal: stages, roll-forward recovery, consistent consumer reads, staging cleanup, crash-transition tests; sub-slices allowed | 8, 7.4 |
+| **6** | Extraction child: spawn bootstrap, handshake and process group, watchdog, IPC limits, error categories, attempt records and retry classification, descriptor isolation, extraction-only stale-job reconciliation, cancellation; sub-slices allowed | 5, 6, 7.1–7.3, 7.5 |
+
+Install recovery (slice 5) deliberately precedes the subprocess (slice 6): the child then only adds a
+new way to *fail* in front of an install that is already crash-safe. Prioritising extraction first
+was considered and not chosen.
+
+**The accepted review follow-ups are three independently reviewed changes, after slice 6**, each with
+its own short grill:
+
+- **7a — manifest visibility enforcement:** default search and `/query` check each candidate's
+  **valid** manifest's current hide/archive status (the authority) and **fail closed before evidence
+  reaches the model**, so a hide/archive whose reindex failed still suppresses retrieval.
+- **7b — documentation reconciliation:** `AGENTS.md` and Build Specification §3.2 adopt ADR-0068's
+  durable wiki fields; the stale Build Specification statement that semantic producers do not
+  refresh keyword search is corrected.
+- **7c — Apply preview benchmark** at the 600-document target: latency, peak temporary storage,
+  concurrent tagging — **measured with copies first**; **results precede any storage optimization**,
+  and reflinks are preferred over hardlinks if one is needed.
+
+### Deferred items and reopening triggers
+
+| Item | Deferred because | Reopening trigger |
+|---|---|---|
+| Rebuilding a manifest without a backup, from the raw file and the audit log (decision 3) | Lossy (occurrences, modification times, unconfirmed fields) | A damaged manifest with **no compatible backup**, including when every backup is too old to preserve later human decisions |
+| Explicit reconciliation of an older backup with later governance / Details decisions (decision 3) | Restore refuses instead; no override that temporarily resurrects visibility | The same no-compatible-backup case, or a restore refused for newer decisions that the operator cannot satisfy with a newer backup |
+| Dedicated repair tooling for pages, review / audit records, policies and journals (decision 4) | Backup recovery under the agreed preservation, locking and publication rules suffices | The **first damage observed** in that family, or a backup recovery that cannot safely preserve later human decisions |
+| Stale-`running` job reconciliation for producers other than extraction (decision 7.3) | Needs an audit of guard ownership and job-type mappings first | A hard-killed run of another producer observed left `running`, or the audit being scheduled |
+| Bounded backoff for repeatedly timing-out documents (decision 6) | Timeouts are ambiguous and always retried; no evidence of cost yet | Repeated timeouts becoming operationally costly (run time dominated by retried timeouts) |
+| Preview storage optimization (change 7c) | Benchmark results come first | The 7c benchmark exceeding the agreed latency / storage limits |
