@@ -15,6 +15,9 @@ from app.backend import graph_read  # noqa: E402
 from app.backend import taxonomy  # noqa: E402
 from app.backend.policy import RetrievalPolicy  # noqa: E402
 
+# ADR-0074: search requires a manifests dir; none here, so every document reads as absent.
+NO_MANIFESTS = Path("/nonexistent/raw/manifests")
+
 SRC_M = "src_" + "a" * 16   # bridges to a method_technique item
 SRC_D = "src_" + "b" * 16   # bridges to a deprecated method_technique item (must NOT bridge)
 ITM_ACT = "itm_" + "1" * 16
@@ -216,7 +219,7 @@ def _run(tmp_path, *, item_types, boost, graph_conn):
     kconn = keyword_index.connect(tmp_path / keyword_index.DB_RELPATH)
     pol = RetrievalPolicy(weights={"item_type_boost": boost})
     try:
-        return search.run_search(q="synergy", mode="keyword", keyword_conn=kconn,
+        return search.run_search(manifests_dir=NO_MANIFESTS, q="synergy", mode="keyword", keyword_conn=kconn,
                                  graph_conn=graph_conn, policy=pol, item_types=item_types)
     finally:
         kconn.close()

@@ -28,7 +28,7 @@ def _extract(tmp_path: Path) -> Path:
 
 def _records(tmp_path: Path) -> dict:
     return {m["original_filename"]: m for m in
-            manifests.list_manifests(tmp_path / "raw" / "manifests")}
+            manifests.scan_manifests(tmp_path / "raw" / "manifests").valid}
 
 
 def _read(tmp_path: Path, manifest: dict):

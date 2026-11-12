@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from app.backend import db, durable_write, graph, write_lock
-from app.backend.manifests import get_provenance, independent_sources, iso_now, valid_manifests
+from app.backend.manifests import get_provenance, independent_sources, iso_now, scan_manifests
 from app.workers import apply_outcomes, claims, identity_journal, reviews, supersede
 
 _CLAIM_TEXT_RE = re.compile(r'(?m)^claim_text:\s*"(.*)"\s*$')
@@ -403,7 +403,8 @@ def check_assertions(gconn, *, reviews_dir: Path, claims_dir: Path, markdown_dir
     def in_scope(a: str, b: str, srcs: list[str]) -> bool:
         return not scoped or bool({a, b} & claims_scope or set(srcs) & sources)
 
-    prov = {m["source_id"]: get_provenance(m) for m in valid_manifests(manifests_dir)[0]}
+    inventory = scan_manifests(manifests_dir)
+    prov = {m["source_id"]: get_provenance(m) for m in inventory.valid}
     standing = graph.claims_with_active_evidence(gconn)
     out: dict[str, Any] = {"checked": 0, "stale": [], "unverifiable": [], "awaiting_apply": 0}
     seen: set[str] = set()
@@ -440,6 +441,11 @@ def check_assertions(gconn, *, reviews_dir: Path, claims_dir: Path, markdown_dir
         scope = judged_scope(item or {}, a, b)
         if scope:
             srcs_a, srcs_b = [scope[a]], [scope[b]]
+        if not inventory.complete and any(sid not in prov for sid in (*srcs_a, *srcs_b)):
+            # ADR-0074 decision 2: a document whose manifest can't be read (or is quarantined) can't prove the pair
+            # dependent — never retired on that basis.
+            out["unverifiable"].append(entry | {"reason": "manifest_inventory_incomplete"})
+            continue
         if not any(sa != sb and independent_sources(prov.get(sa, {}), prov.get(sb, {}))
                    for sa in srcs_a for sb in srcs_b):
             out["stale"].append(entry | {"reason": "not_independent"})

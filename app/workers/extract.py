@@ -33,11 +33,12 @@ from app.backend import db, write_lock
 from app.backend.manifests import (
     EXTRACTION_FIELDS,
     apply_extraction_state,
+    OK,
     iso_now,
-    load_manifest,
+    read_manifest,
     save_manifest,
+    scan_manifests,
     sha256_file,
-    valid_manifests,
 )
 from app.backend.paths import safe_under
 from app.workers import publication
@@ -430,7 +431,8 @@ def extract_sources(
 
     run = publication.Run(root, "extract")
     try:
-        manifests, skipped_invalid = valid_manifests(manifests_dir)
+        inventory = scan_manifests(manifests_dir)
+        manifests = inventory.valid
         if source_ids is not None:
             wanted = set(source_ids)
             manifests = [m for m in manifests if m.get("source_id") in wanted]
@@ -463,11 +465,23 @@ def extract_sources(
                 # write lock, onto the manifest as it is now (a status changed meanwhile is kept),
                 # then publish the document's Source page before releasing it (decision 5).
                 with write_lock.hold(root / "reviews"):
+                    now_read = read_manifest(manifests_dir, source_id)
+                    if now_read.state != OK:
+                        # ADR-0074 decision 2: gone or damaged since the scan — never recreated
+                        # or overwritten from the scan's copy; nothing is installed.
+                        if staged:
+                            shutil.rmtree(dirs["staging"] / source_id, ignore_errors=True)
+                        counts["errors"] += 1
+                        errors.append({"source_id": source_id,
+                                       "error": f"manifest_{now_read.state}",
+                                       "skip_reason": f"manifest_{now_read.state}",
+                                       "preserved_prior": True})
+                        continue
                     intent = run.intent(sources=[source_id])
                     if staged:
                         _install_outputs(dirs, source_id)
                     _write_log(dirs, source_id, log)
-                    current = load_manifest(manifests_dir, source_id) or manifest
+                    current = now_read.record
                     for key in EXTRACTION_FIELDS:
                         current[key] = manifest.get(key)
                     save_manifest(manifests_dir, current)
@@ -497,7 +511,7 @@ def extract_sources(
             "errors": counts["errors"],
             "skipped_unchanged": counts["skipped_unchanged"],
             "skipped_unsupported": counts["skipped_unsupported"],
-            "manifests_skipped_invalid": len(skipped_invalid),
+            **inventory.report(),
             "error_details": errors,
             "warnings": warnings,
             "forced": force,

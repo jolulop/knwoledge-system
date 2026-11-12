@@ -98,19 +98,19 @@ def test_a_reporting_failure_never_drops_the_retry(client, tmp_path, monkeypatch
     retry comes from the executor's execution list, not from the outcome's reason."""
     _established(tmp_path)
     real = _fail_renders(monkeypatch, only_from_executor=False)
-    real_load = retention.load_manifest
+    real_load = retention.get_manifest
 
     def load(md, sid):
         if inspect.stack()[1].function == "guarded":           # the reporting read only
             raise OSError("read failed")
         return real_load(md, sid)
-    monkeypatch.setattr(retention, "load_manifest", load)
+    monkeypatch.setattr(retention, "get_manifest", load)
     body = fixtures.apply(client).json()
     rec = _outcome(body)
     assert (rec["outcome"], rec["reason"]) == ("incomplete", "verification_unavailable")
     assert _page_status(tmp_path) == "active" and SID in _queued_sources(tmp_path)  # kept as work
     monkeypatch.setattr(wiki, "generate_wiki", real)
-    monkeypatch.setattr(retention, "load_manifest", real_load)
+    monkeypatch.setattr(retention, "get_manifest", real_load)
     assert publication.publish(tmp_path)["status"] == publication.PUBLISHED   # Retry publishing
     assert _page_status(tmp_path) == "hidden" and _queued_sources(tmp_path) == []
 
@@ -119,13 +119,13 @@ def test_the_same_retry_publishes_when_only_the_executor_render_failed(client, t
                                                                      monkeypatch):
     _established(tmp_path)
     _fail_renders(monkeypatch, only_from_executor=True)
-    _real_load = retention.load_manifest
+    _real_load = retention.get_manifest
 
     def load(md, sid):
         if inspect.stack()[1].function == "guarded":
             raise OSError("read failed")
         return _real_load(md, sid)
-    monkeypatch.setattr(retention, "load_manifest", load)
+    monkeypatch.setattr(retention, "get_manifest", load)
     body = fixtures.apply(client).json()
     assert body["publication"]["status"] == publication.PUBLISHED
     assert _page_status(tmp_path) == "hidden" and _queued_sources(tmp_path) == []

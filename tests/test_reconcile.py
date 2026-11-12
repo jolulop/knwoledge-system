@@ -67,7 +67,7 @@ def _file_legacy_promotes(tmp_path, item_names):
 
 
 def _sid(tmp_path):
-    return next(m["source_id"] for m in manifests.list_manifests(tmp_path / "raw" / "manifests")
+    return next(m["source_id"] for m in manifests.scan_manifests(tmp_path / "raw" / "manifests").valid
                 if m["original_filename"] == "doc.md")
 
 

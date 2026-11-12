@@ -107,7 +107,7 @@ def test_apply_hide_flips_manifest_page_graph_raw_untouched(tmp_path):
     res = _apply(tmp_path)
     assert res["applied"] == 1 and res["skipped"] == [] and res["changed_pages"] == [f"Sources/{SID}.md"]
     md = tmp_path / "raw" / "manifests"
-    assert manifests.get_status(manifests.load_manifest(md, SID)) == "hidden"   # manifest authority
+    assert manifests.get_status(manifests.get_manifest(md, SID)) == "hidden"   # manifest authority
     assert parse_frontmatter(page.read_text())["status"] == "hidden"           # page mirror
     conn = graph.connect(tmp_path / "db" / "graph.sqlite")
     assert graph.get_node(conn, SID)["status"] == "hidden"                     # graph mirror
@@ -130,7 +130,7 @@ def test_apply_hide_graph_absent_still_hides(tmp_path):
     # manifest+page are the authority; graph absent -> applied but NO mirror -> graph_changed False (honest)
     assert res["applied"] == 1 and res["graph_changed"] is False
     md = tmp_path / "raw" / "manifests"
-    assert manifests.get_status(manifests.load_manifest(md, SID)) == "hidden"
+    assert manifests.get_status(manifests.get_manifest(md, SID)) == "hidden"
 
 
 def test_graph_changed_true_only_when_mirror_written(tmp_path):
@@ -174,7 +174,7 @@ def test_already_non_active_source_is_noop_skip(tmp_path):
     res = _apply(tmp_path)
     assert res["applied"] == 0 and res["skipped"] == []     # not-active -> no-op continue
     md = tmp_path / "raw" / "manifests"
-    assert manifests.get_status(manifests.load_manifest(md, SID)) == "archive_candidate"  # unchanged
+    assert manifests.get_status(manifests.get_manifest(md, SID)) == "archive_candidate"  # unchanged
 
 
 def test_rejected_hide_is_noop(tmp_path):
@@ -188,7 +188,7 @@ def test_rejected_hide_is_noop(tmp_path):
     res = _apply(tmp_path)
     assert res["applied"] == 0   # executor only scans approved/
     md = tmp_path / "raw" / "manifests"
-    assert manifests.get_status(manifests.load_manifest(md, SID)) == "active"  # stays active
+    assert manifests.get_status(manifests.get_manifest(md, SID)) == "active"  # stays active
 
 
 # --- status vocabulary -----------------------------------------------------
@@ -198,9 +198,9 @@ def test_set_status_hidden_roundtrip(tmp_path):
     _write_manifest(tmp_path, SID)
     md = tmp_path / "raw" / "manifests"
     manifests.set_status(md, SID, "hidden")
-    assert manifests.get_status(manifests.load_manifest(md, SID)) == "hidden"
+    assert manifests.get_status(manifests.get_manifest(md, SID)) == "hidden"
     manifests.set_status(md, SID, "active")  # reversible
-    assert manifests.get_status(manifests.load_manifest(md, SID)) == "active"
+    assert manifests.get_status(manifests.get_manifest(md, SID)) == "active"
 
 
 def test_validate_wiki_accepts_hidden(tmp_path):
@@ -270,7 +270,7 @@ def test_api_apply_hides_source_and_summary(client, tmp_path):
     body = fixtures.apply(client).json()
     assert body["summary"]["hidden"]["applied"] == 1
     md = tmp_path / "raw" / "manifests"
-    assert manifests.get_status(manifests.load_manifest(md, SID)) == "hidden"
+    assert manifests.get_status(manifests.get_manifest(md, SID)) == "hidden"
 
 
 def test_dry_run_previews_hide_and_leaves_live_unchanged(client, tmp_path):
@@ -281,7 +281,7 @@ def test_dry_run_previews_hide_and_leaves_live_unchanged(client, tmp_path):
     assert dry["status"] == "ok"
     assert {"source_id": SID, "field": "status", "from": "active", "to": "hidden"} in dry["diff"]["manifests"]
     md = tmp_path / "raw" / "manifests"
-    assert manifests.get_status(manifests.load_manifest(md, SID)) == "active"  # live unchanged
+    assert manifests.get_status(manifests.get_manifest(md, SID)) == "active"  # live unchanged
 
 
 def test_html_apply_result_shows_hidden_summary(client, tmp_path):
@@ -303,7 +303,7 @@ def test_hide_with_reindex_failure_is_not_clean(client, tmp_path, monkeypatch):
     assert body["summary"]["hidden"]["applied"] == 1                 # the mutation still happened
     assert body["status"] == "saved_publication_pending"
     assert "hide_retrieval_suppression_not_guaranteed" in body["warnings"]
-    assert manifests.get_status(manifests.load_manifest(
+    assert manifests.get_status(manifests.get_manifest(
         tmp_path / "raw" / "manifests", SID)) == "hidden"            # manifest authority is correct
 
 
@@ -421,5 +421,5 @@ def test_dry_run_hide_reindex_failure_is_not_clean(client, tmp_path, monkeypatch
     dry = client.post("/reviews/apply/dry-run").json()
     assert dry["status"] == "validation_failed"
     assert {"source_id": SID, "field": "status", "from": "active", "to": "hidden"} in dry["diff"]["manifests"]
-    assert manifests.get_status(manifests.load_manifest(
+    assert manifests.get_status(manifests.get_manifest(
         tmp_path / "raw" / "manifests", SID)) == "active"   # live still unchanged

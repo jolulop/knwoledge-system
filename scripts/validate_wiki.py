@@ -9,7 +9,6 @@ there are no manifests and no pages, there is nothing to validate (a pass).
 """
 from __future__ import annotations
 
-import json
 import re
 import sys
 from pathlib import Path
@@ -18,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from app.backend.manifests import OK, manifest_files, read_manifest_file
 from app.workers.wiki_render import parse_frontmatter
 
 _EXTRACTED = {"extracted", "partial"}
@@ -41,17 +41,24 @@ _WIKILINK = re.compile(r"\[\[([^\]]+)\]\]")
 _ABSOLUTE = re.compile(r':\s*"?/(?!/)')
 
 
+# ADR-0074 decision 2: a damaged manifest is never skipped silently — its stem maps to its state
+# here, so its Source page is reported as uncheckable rather than an orphan.
+_DAMAGED: dict[str, str] = {}
+
+
 def _manifest_index(manifests_dir: Path) -> dict[str, dict]:
     out: dict[str, dict] = {}
-    if not manifests_dir.exists():
-        return out
-    for path in sorted(manifests_dir.glob("*.json")):
-        try:
-            m = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if m.get("source_id"):
-            out[m["source_id"]] = m
+    _DAMAGED.clear()
+    paths, error = manifest_files(manifests_dir)
+    if error is not None:
+        _DAMAGED["*"] = f"unlistable ({error})"
+    for path in paths:
+        read = read_manifest_file(path)
+        if read.state == OK:
+            if read.record.get("source_id"):
+                out[read.record["source_id"]] = read.record
+        elif read.damaged:
+            _DAMAGED[path.stem] = read.state
     return out
 
 
@@ -69,7 +76,10 @@ def _check_page(root: Path, path: Path, manifests: dict[str, dict]) -> list[str]
         errors.append(f"{sid}: frontmatter source_id {fm['source_id']} != filename")
 
     manifest = manifests.get(sid)
-    if manifest is None:
+    if manifest is None and (sid in _DAMAGED or "*" in _DAMAGED):
+        errors.append(f"{sid}: its manifest is {_DAMAGED.get(sid) or _DAMAGED['*']} — the page "
+                      "can't be checked")
+    elif manifest is None:
         errors.append(f"{sid}: orphan Source page (no manifest)")
     elif manifest.get("ingestion_status") not in _EXTRACTED:
         errors.append(

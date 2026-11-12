@@ -110,7 +110,7 @@ def test_clear_and_clear_to_empty_are_changes(tmp_path):
     assert "generate_synthesis" not in _awaiting(tmp_path, a)
     manifests.set_provenance(tmp_path / MD, a, report_family=None)   # the last field removed
     assert manifests.independence_digest(manifests.get_provenance(
-        manifests.load_manifest(tmp_path / MD, a))) == manifests.independence_digest({})
+        manifests.get_manifest(tmp_path / MD, a))) == manifests.independence_digest({})
     assert _awaiting(tmp_path, a)["generate_synthesis"] == [a]       # Clear-to-empty still waits
 
 
@@ -161,7 +161,7 @@ def test_old_contradiction_acknowledgements_are_ignored(tmp_path):
     from app.backend import db
     a, b = _vault(tmp_path)
     digests = reconciliation.capture({m["source_id"]: manifests.get_provenance(m)
-                                      for m in manifests.valid_manifests(tmp_path / MD)[0]})
+                                      for m in manifests.scan_manifests(tmp_path / MD).valid})
     jobs = tmp_path / "db" / "jobs.sqlite"
     conn = db.connect(jobs)
     db.insert_job(conn, job_id="job_legacy", job_type="detect_contradictions", status="running",

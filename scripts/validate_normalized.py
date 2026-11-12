@@ -19,7 +19,13 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.backend.manifests import is_source_id
+from app.backend.manifests import (
+    OK,
+    is_source_id,
+    manifest_files,
+    read_manifest_file,
+    safe_display,
+)
 from app.backend.paths import safe_under as _safe_under
 
 _EXTRACTED = {"extracted", "partial"}
@@ -182,11 +188,20 @@ def main(argv: list[str]) -> int:
     errors: list[str] = []
     checked = 0
     status_by_id: dict[str, str] = {}
-    for path in sorted(manifests_dir.glob("*.json")):
-        try:
-            manifest = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+    paths, listing_error = manifest_files(manifests_dir)
+    if listing_error is not None:
+        errors.append(f"raw/manifests: could not be listed ({listing_error})")
+    damaged: set[str] = set()
+    for path in paths:
+        read = read_manifest_file(path)
+        if read.damaged:
+            # ADR-0074 decision 2: never skipped silently; its outputs are not called orphans.
+            errors.append(f"{safe_display(path.name)}: manifest is {read.state}")
+            damaged.add(path.stem)
             continue
+        if read.state != OK:
+            continue
+        manifest = read.record
         sid = manifest.get("source_id")
         if sid:
             status_by_id[sid] = manifest.get("ingestion_status")
@@ -195,7 +210,8 @@ def main(argv: list[str]) -> int:
         checked += 1
         errors.extend(_check_source(root, manifest))
 
-    errors.extend(_check_orphans(root, status_by_id))
+    errors.extend(e for e in _check_orphans(root, status_by_id)
+                  if e.split(":", 1)[0] not in damaged)
 
     if errors:
         print("Normalized validation failed:")

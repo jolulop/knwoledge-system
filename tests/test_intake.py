@@ -31,7 +31,7 @@ def test_scan_detects_exact_duplicate(tmp_path):
     assert summary["duplicates"] == 1
     assert summary["errors"] == 0
 
-    records = manifests.list_manifests(tmp_path / "raw" / "manifests")
+    records = manifests.scan_manifests(tmp_path / "raw" / "manifests").valid
     assert len(records) == 2
 
     dup = [m for m in records if len(m["occurrences"]) == 2]
@@ -48,7 +48,7 @@ def test_scan_is_idempotent(tmp_path):
 
     first = intake.scan_inbox(tmp_path, jobs_db=jobs_db)
     discovered = {
-        sid: manifests.load_manifest(manifests_dir, sid)["discovered_at"]
+        sid: manifests.get_manifest(manifests_dir, sid)["discovered_at"]
         for sid in first["source_ids"]
     }
 
@@ -58,11 +58,11 @@ def test_scan_is_idempotent(tmp_path):
     assert second["new_manifests"] == 0
     assert second["updated_manifests"] == 2
     assert second["unique_contents"] == 2
-    assert len(manifests.list_manifests(manifests_dir)) == 2
+    assert len(manifests.scan_manifests(manifests_dir).valid) == 2
 
     # discovered_at is set once at first intake and must survive every rescan.
     for sid in second["source_ids"]:
-        assert manifests.load_manifest(manifests_dir, sid)["discovered_at"] == discovered[sid]
+        assert manifests.get_manifest(manifests_dir, sid)["discovered_at"] == discovered[sid]
 
 
 def test_symlink_escape_is_skipped(tmp_path):
@@ -79,7 +79,7 @@ def test_symlink_escape_is_skipped(tmp_path):
     assert summary["skipped"] == 1
     assert any(w["warning"] == "skipped_symlink" for w in summary["warnings"])
     # The escaped file's path must never leak into a manifest.
-    blob = json.dumps(manifests.list_manifests(tmp_path / "raw" / "manifests"))
+    blob = json.dumps(manifests.scan_manifests(tmp_path / "raw" / "manifests").valid)
     assert "outside-secret" not in blob
 
 
@@ -124,7 +124,7 @@ def test_saved_page_assets_are_skipped(tmp_path):
     summary = intake.scan_inbox(tmp_path, jobs_db=tmp_path / "db" / "jobs.sqlite")
 
     # Only the page itself is manifested; the _files/ assets are skipped as noise.
-    records = manifests.list_manifests(tmp_path / "raw" / "manifests")
+    records = manifests.scan_manifests(tmp_path / "raw" / "manifests").valid
     assert len(records) == 1
     assert records[0]["original_filename"] == "Article.html"
     assert summary["skipped_assets"] == 3

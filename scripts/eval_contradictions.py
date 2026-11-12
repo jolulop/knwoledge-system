@@ -71,7 +71,7 @@ if str(ROOT) not in sys.path:
 
 from app.backend import graph, write_lock  # noqa: E402
 from app.backend.config import get_settings  # noqa: E402
-from app.backend.manifests import list_manifests, set_provenance  # noqa: E402
+from app.backend.manifests import scan_manifests, set_provenance  # noqa: E402
 from app.llm.client import LLMClient  # noqa: E402
 from app.workers import claims, extract, intake, wiki  # noqa: E402
 from app.workers import contradiction_check as cc  # noqa: E402
@@ -280,7 +280,7 @@ def materialize(fx: dict[str, Any], work: Path) -> tuple[dict[str, str], dict[st
     extract.extract_sources(work, jobs_db=jobs)
     wiki.generate_wiki(work, jobs_db=jobs, templates_dir=work / "templates", rebuild_index=False)
     by_name = {m.get("original_filename"): m["source_id"]
-               for m in list_manifests(work / "raw" / "manifests")}
+               for m in scan_manifests(work / "raw" / "manifests").valid}
     sids: dict[str, str] = {}
     for d in fx["documents"]:
         if d["filename"] not in by_name:

@@ -74,7 +74,7 @@ def test_pdf_extraction_dehyphenates_end_to_end(tmp_path):
     assert summary["extracted"] == 2
 
     records = {m["original_filename"]: m for m in
-               manifests.list_manifests(tmp_path / "raw" / "manifests")}
+               manifests.scan_manifests(tmp_path / "raw" / "manifests").valid}
     pdf_id = records["paper.pdf"]["source_id"]
 
     markdown = (tmp_path / "normalized" / "markdown" / f"{pdf_id}.md").read_text(encoding="utf-8")
@@ -110,7 +110,7 @@ def test_error_extraction_log_carries_extract_code_version(tmp_path):
         tmp_path, jobs_db=tmp_path / "db" / "jobs.sqlite", max_file_mb=0)
     assert summary["errors"] == 1
 
-    source_id = manifests.list_manifests(tmp_path / "raw" / "manifests")[0]["source_id"]
+    source_id = manifests.scan_manifests(tmp_path / "raw" / "manifests").valid[0]["source_id"]
     log = json.loads((tmp_path / "normalized" / "extraction_logs" /
                       f"{source_id}.json").read_text(encoding="utf-8"))
     assert log["status"] == "error"

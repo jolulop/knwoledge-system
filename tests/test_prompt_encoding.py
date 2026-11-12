@@ -178,7 +178,7 @@ def test_escaped_model_quote_is_unescaped_and_grounds_source_faithful(tmp_path):
     (tmp_path / "raw" / "inbox" / "doc.md").write_text(f"# Doc\n\n{fact}\n", encoding="utf-8")
     intake.scan_inbox(tmp_path, jobs_db=tmp_path / "db" / "jobs.sqlite")
     extract.extract_sources(tmp_path, jobs_db=tmp_path / "db" / "jobs.sqlite")
-    sid = next(iter(m["source_id"] for m in manifests.list_manifests(tmp_path / "raw" / "manifests")))
+    sid = next(iter(m["source_id"] for m in manifests.scan_manifests(tmp_path / "raw" / "manifests").valid))
     md = (tmp_path / "normalized" / "markdown" / f"{sid}.md").read_text(encoding="utf-8")
     wiki.generate_wiki(tmp_path, jobs_db=tmp_path / "db" / "jobs.sqlite",
                        templates_dir=TEMPLATES, rebuild_index=False)

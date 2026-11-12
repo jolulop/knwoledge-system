@@ -239,7 +239,7 @@ def test_a_failed_targeted_run_is_reported_and_stays_visible(tmp_path, monkeypat
     monkeypatch.setattr(contradictions, "maintain_assertions", broken)
     resp = _clear(tmp_path, api, sa)
     assert resp.status_code == 200                                  # the Details are saved
-    assert manifests.get_provenance(manifests.load_manifest(tmp_path / MD, sa)).get("author") is None
+    assert manifests.get_provenance(manifests.get_manifest(tmp_path / MD, sa)).get("author") is None
     assert "OSError: disk full" in resp.text and "detect_contradictions.py maintain" in resp.text
     assert _edge_status(tmp_path, a, b) == ["proposed"]
     # Durable: the screen and lint report it from the evidence until maintenance runs.

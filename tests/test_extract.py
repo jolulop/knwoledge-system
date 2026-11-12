@@ -50,7 +50,7 @@ def test_extracts_all_supported_formats(tmp_path):
     assert len(list(md_dir.glob("*.md"))) == 5
 
     # Every extracted source has its manifest updated and its log written.
-    for manifest in manifests.list_manifests(tmp_path / "raw" / "manifests"):
+    for manifest in manifests.scan_manifests(tmp_path / "raw" / "manifests").valid:
         if manifest["file_extension"] == ".txt":
             assert manifest["ingestion_status"] == "new"
             continue
@@ -66,7 +66,7 @@ def test_pdf_pages_and_tables_dir(tmp_path):
     _build_project(tmp_path)
     _run(tmp_path)
     records = {m["original_filename"]: m for m in
-              manifests.list_manifests(tmp_path / "raw" / "manifests")}
+              manifests.scan_manifests(tmp_path / "raw" / "manifests").valid}
 
     pdf = records["paper.pdf"]
     assert pdf["page_count"] == 2
@@ -102,7 +102,7 @@ def test_oversize_file_is_an_error(tmp_path):
     assert summary["errors"] >= 1
     assert any(e["skip_reason"] == "oversize" for e in summary["error_details"])
     # The run still completes and records the failures, never crashing.
-    bad = [m for m in manifests.list_manifests(tmp_path / "raw" / "manifests")
+    bad = [m for m in manifests.scan_manifests(tmp_path / "raw" / "manifests").valid
            if m["ingestion_status"] == "error"]
     assert bad and all(m["extracted_at"] is None for m in bad)
 
@@ -116,7 +116,7 @@ def test_zero_text_pdf_is_partial_needs_ocr(tmp_path):
     summary = _run(tmp_path)
     assert summary["partial"] == 1
     assert any(w["warning"] == "needs_ocr" for w in summary["warnings"])
-    manifest = manifests.list_manifests(tmp_path / "raw" / "manifests")[0]
+    manifest = manifests.scan_manifests(tmp_path / "raw" / "manifests").valid[0]
     assert manifest["ingestion_status"] == "partial"
 
 
@@ -129,7 +129,7 @@ def test_empty_non_paginated_source_is_partial_needs_ocr(tmp_path):
     summary = _run(tmp_path)
     assert summary["partial"] == 1
     assert any(w["warning"] == "needs_ocr" for w in summary["warnings"])
-    manifest = manifests.list_manifests(tmp_path / "raw" / "manifests")[0]
+    manifest = manifests.scan_manifests(tmp_path / "raw" / "manifests").valid[0]
     assert manifest["ingestion_status"] == "partial"
 
 
@@ -194,7 +194,7 @@ def test_failed_force_reextract_preserves_last_good(tmp_path, monkeypatch):
 
     first = _run(tmp_path)
     assert first["extracted"] == 1
-    sid = manifests.list_manifests(tmp_path / "raw" / "manifests")[0]["source_id"]
+    sid = manifests.scan_manifests(tmp_path / "raw" / "manifests").valid[0]["source_id"]
     md_path = tmp_path / "normalized" / "markdown" / f"{sid}.md"
     good_markdown = md_path.read_text(encoding="utf-8")
 
@@ -208,7 +208,7 @@ def test_failed_force_reextract_preserves_last_good(tmp_path, monkeypatch):
     assert second["errors"] == 1
     assert second["error_details"][0]["preserved_prior"] is True
     # Last-good artifacts and manifest survive untouched.
-    manifest = manifests.load_manifest(tmp_path / "raw" / "manifests", sid)
+    manifest = manifests.get_manifest(tmp_path / "raw" / "manifests", sid)
     assert manifest["ingestion_status"] == "extracted"
     assert md_path.read_text(encoding="utf-8") == good_markdown
 
@@ -294,7 +294,7 @@ def test_tampered_manifest_after_extraction_is_not_skipped(tmp_path):
     assert _run(tmp_path)["extracted"] == 5
 
     manifests_dir = tmp_path / "raw" / "manifests"
-    target = next(m for m in manifests.list_manifests(manifests_dir) if m["original_filename"] == "doc.md")
+    target = next(m for m in manifests.scan_manifests(manifests_dir).valid if m["original_filename"] == "doc.md")
     sid = target["source_id"]
     outside = tmp_path / "outside.md"
     outside.write_text("secret outside the repo\n", encoding="utf-8")
@@ -311,7 +311,7 @@ def test_tampered_manifest_after_extraction_is_not_skipped(tmp_path):
     assert escapes[0]["preserved_prior"] is True
     # prior state preserved (persisted=False): ingestion_status NOT flipped to error, markdown intact.
     # The manifest is not rewritten — it still carries the tampered path; extraction doesn't "fix" it.
-    reloaded = next(m for m in manifests.list_manifests(manifests_dir) if m["source_id"] == sid)
+    reloaded = next(m for m in manifests.scan_manifests(manifests_dir).valid if m["source_id"] == sid)
     assert reloaded["ingestion_status"] == "extracted"
     assert reloaded["relative_raw_path"] == str(outside)  # untouched (not restored, not rewritten)
     assert (tmp_path / "normalized" / "markdown" / f"{sid}.md").exists()
@@ -322,7 +322,7 @@ def test_absolute_relative_raw_path_inside_raw_is_rejected(tmp_path):
     # even when it points at a real file inside root/raw (previously accepted by is_relative_to).
     _build_project(tmp_path, with_pdf=False)
     manifests_dir = tmp_path / "raw" / "manifests"
-    target = next(m for m in manifests.list_manifests(manifests_dir) if m["original_filename"] == "doc.md")
+    target = next(m for m in manifests.scan_manifests(manifests_dir).valid if m["original_filename"] == "doc.md")
     sid = target["source_id"]
     abs_inside = (tmp_path / target["relative_raw_path"]).resolve()   # the real raw file, absolute path
     assert abs_inside.is_file() and abs_inside.is_relative_to((tmp_path / "raw").resolve())

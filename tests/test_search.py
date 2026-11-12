@@ -12,6 +12,10 @@ if str(ROOT) not in sys.path:
 
 from app.backend import graph, keyword_index, search
 from app.backend.policy import RetrievalPolicy
+from tests import fixtures
+
+# ADR-0074 decision 2: retrieval admits evidence only from identity-validated manifests, so every
+# document these fixtures write chunks for gets a minimal manifest (`fixtures.manifest_stub`).
 
 
 # --------------------------------------------------------------------------- safe FTS builder
@@ -87,6 +91,7 @@ def _chunk(sid, ordinal, text, start):
 
 
 def _write_chunks(root, sid, chunks):
+    fixtures.manifest_stub(root, sid)
     p = root / "normalized" / "chunks" / f"{sid}.jsonl"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text("\n".join(json.dumps(c) for c in chunks) + "\n", encoding="utf-8")
@@ -102,6 +107,20 @@ def _write_page(root, rel, fm, summary):
 SRC_OK = "src_aaaaaaaaaaaaaaaa"
 SRC_ARCH = "src_bbbbbbbbbbbbbbbb"
 ITM = "itm_synergyxxxxxxxx"
+
+
+class _Vault(tuple):
+    """`(keyword_conn, graph_conn)`, plus the vault directory `dir` (for its manifests)."""
+
+    def __new__(cls, conns, root):
+        obj = super().__new__(cls, conns)
+        obj.dir = root
+        return obj
+
+
+def _md(where) -> Path:
+    """The manifests directory of a `vault` fixture or of a `tmp_path` vault."""
+    return (where.dir if isinstance(where, _Vault) else Path(where)) / "raw" / "manifests"
 
 
 @pytest.fixture
@@ -135,12 +154,12 @@ def vault(tmp_path):
                         now="t0")
     graph.upsert_assertion(gconn, src_id=SRC_OK, dst_id=ITM, edge_type="mentions",
                            asserted_by="llm", status="active")
-    return kconn, gconn
+    return _Vault((kconn, gconn), tmp_path)
 
 
 def _run(vault, q, mode="auto", **kw):
     kconn, gconn = vault
-    return search.run_search(q=q, mode=mode, keyword_conn=kconn, graph_conn=gconn,
+    return search.run_search(manifests_dir=_md(vault), q=q, mode=mode, keyword_conn=kconn, graph_conn=gconn,
                              policy=RetrievalPolicy(), **kw)
 
 
@@ -198,7 +217,7 @@ def test_auto_routes_exact_shape_to_keyword(vault):
 
 def test_no_graph_conn_yields_empty_graph_group(vault):
     kconn, _ = vault
-    res = search.run_search(q="synergy", mode="graph", keyword_conn=kconn, graph_conn=None,
+    res = search.run_search(manifests_dir=_md(vault), q="synergy", mode="graph", keyword_conn=kconn, graph_conn=None,
                             policy=RetrievalPolicy())
     assert res["graph"]["nodes"] == [] and res["no_results"] is True
 
@@ -219,7 +238,7 @@ def _vector_rows():
 def _vrun(vault, *, source_statuses=search.RETENTION_DEFAULT_STATUSES, rows=None, searcher=None):
     kconn, _ = vault
     fn = searcher if searcher is not None else (lambda *, limit: rows if rows is not None else _vector_rows())
-    return search.run_search(q="synergy", mode="vector", keyword_conn=kconn, graph_conn=None,
+    return search.run_search(manifests_dir=_md(vault), q="synergy", mode="vector", keyword_conn=kconn, graph_conn=None,
                              policy=RetrievalPolicy(), source_statuses=source_statuses, vector_search=fn)
 
 
@@ -252,13 +271,13 @@ def test_vector_mode_closest_first_order(vault):
 
 
 def test_vector_mode_no_searcher_is_empty(vault):
-    res = search.run_search(q="synergy", mode="vector", keyword_conn=vault[0], graph_conn=None,
+    res = search.run_search(manifests_dir=_md(vault), q="synergy", mode="vector", keyword_conn=vault[0], graph_conn=None,
                             policy=RetrievalPolicy(), vector_search=None)
     assert res["no_results"] is True and res["evidence"] == []
 
 
 def test_vector_mode_honors_source_id_filter(vault):
-    res = search.run_search(
+    res = search.run_search(manifests_dir=_md(vault),
         q="synergy", mode="vector", keyword_conn=vault[0], graph_conn=None, policy=RetrievalPolicy(),
         source_id=SRC_OK, source_statuses=("active", "archived"),
         vector_search=lambda *, limit: _vector_rows(),
@@ -273,7 +292,7 @@ def test_vector_mode_equal_distance_deterministic_by_anchor(vault):
                 "ordinal": ordinal, "kind": "prose", "section": None, "heading_path": json.dumps([]),
                 "char_start": start, "char_end": start + 5, "page": 1, "page_end": 1,
                 "table_reference": None, "sheet_reference": None, "text": "t"}
-    res = search.run_search(q="x", mode="vector", keyword_conn=vault[0], graph_conn=None,
+    res = search.run_search(manifests_dir=_md(vault), q="x", mode="vector", keyword_conn=vault[0], graph_conn=None,
                             policy=RetrievalPolicy(), vector_search=lambda *, limit: [row(2, 40), row(0, 0)])
     assert [h["ordinal"] for h in res["evidence"]] == [0, 2]
 
@@ -352,7 +371,7 @@ def test_rrf_k_clamped_never_divides_by_zero():
 
 
 def _auto(vault, q, *, vector_search=None, reason=None, policy=None):
-    return search.run_search(q=q, mode="auto", keyword_conn=vault[0], graph_conn=None,
+    return search.run_search(manifests_dir=_md(vault), q=q, mode="auto", keyword_conn=vault[0], graph_conn=None,
                              policy=policy or RetrievalPolicy(),
                              vector_search=vector_search, vector_unavailable_reason=reason)
 
@@ -414,14 +433,14 @@ def test_explicit_vector_failure_raises_channel_error(vault):
     def boom(*, limit):
         raise search.VectorUnavailable("embed server down")  # what the real searcher raises
     with pytest.raises(search.VectorChannelError):
-        search.run_search(q="x", mode="vector", keyword_conn=vault[0], graph_conn=None,
+        search.run_search(manifests_dir=_md(vault), q="x", mode="vector", keyword_conn=vault[0], graph_conn=None,
                           policy=RetrievalPolicy(), vector_search=boom)
 
 
 def test_auto_vector_backend_failure_degrades_with_note(vault):
     def boom(*, limit):
         raise search.VectorUnavailable("embed server down")
-    res = search.run_search(q="integration playbook strategy", mode="auto", keyword_conn=vault[0],
+    res = search.run_search(manifests_dir=_md(vault), q="integration playbook strategy", mode="auto", keyword_conn=vault[0],
                             graph_conn=None, policy=RetrievalPolicy(), vector_search=boom)
     assert "vector" not in res["retrieval_path"]
     assert any("degraded to keyword-only" in n for n in res["notes"])
@@ -432,13 +451,13 @@ def test_auto_non_vector_exception_propagates(vault):
     def buggy(*, limit):
         raise KeyError("malformed row")
     with pytest.raises(KeyError):
-        search.run_search(q="integration playbook strategy", mode="auto", keyword_conn=vault[0],
+        search.run_search(manifests_dir=_md(vault), q="integration playbook strategy", mode="auto", keyword_conn=vault[0],
                           graph_conn=None, policy=RetrievalPolicy(), vector_search=buggy)
 
 
 def test_auto_exact_no_escalation_with_sufficient_keyword_evidence(tmp_path):
     from app.backend import keyword_index
-    sid = "src_alphaaaaaaaaaa"
+    sid = "src_a1a1a1a1a1a1a1a1"            # canonical: the manifest gate refuses any other
     _write_chunks(tmp_path, sid, [_chunk(sid, i, f"alpha topic chunk {i}", i * 30) for i in range(3)])
     _write_page(tmp_path, f"wiki/Sources/{sid}.md",
                 {"type": "source", "source_id": sid, "title": "A", "status": "active",
@@ -450,7 +469,7 @@ def test_auto_exact_no_escalation_with_sufficient_keyword_evidence(tmp_path):
     def vs(*, limit):
         calls["n"] += 1
         return _vector_rows()
-    res = search.run_search(q='"alpha"', mode="auto", keyword_conn=kconn, graph_conn=None,
+    res = search.run_search(manifests_dir=_md(tmp_path), q='"alpha"', mode="auto", keyword_conn=kconn, graph_conn=None,
                             policy=RetrievalPolicy(), vector_search=vs)  # exact, 3 hits, threshold 3
     assert res["shape"] == "exact" and res["counts"]["evidence"] == 3
     assert calls["n"] == 0 and "vector" not in res["retrieval_path"]  # >= threshold -> no escalation
@@ -512,7 +531,7 @@ def test_disagreement_is_graph_native_without_topic(tmp_path):
         {"node_id": c1, "node_type": "claim", "slug": None, "status": "active"},
         {"node_id": c2, "node_type": "claim", "slug": None, "status": "active"},
     ], [(c1, c2, "contradicts")])
-    res = search.run_search(q="which sources disagree", mode="auto", keyword_conn=None,
+    res = search.run_search(manifests_dir=_md(tmp_path), q="which sources disagree", mode="auto", keyword_conn=None,
                             graph_conn=gconn, policy=RetrievalPolicy())
     assert res["shape"] == "disagreement"
     assert res["retrieval_path"] == ["graph"]
@@ -532,13 +551,13 @@ def test_graph_retention_excludes_archived_and_deleted_adjacents(tmp_path):
         {"node_id": dele, "node_type": "item", "slug": "c", "status": "deleted", **T},
         {"node_id": depr, "node_type": "item", "slug": "d", "status": "deprecated_candidate", **T},
     ], [(seed, arch, "related_to"), (seed, dele, "related_to"), (seed, depr, "related_to")])
-    res = search.run_search(q="anchor", mode="graph", keyword_conn=kconn, graph_conn=gconn,
+    res = search.run_search(manifests_dir=_md(tmp_path), q="anchor", mode="graph", keyword_conn=kconn, graph_conn=gconn,
                             policy=RetrievalPolicy())
     ids = {n["node_id"] for n in res["graph"]["nodes"]}
     assert seed in ids and depr in ids       # active + deprecated_candidate kept
     assert arch not in ids and dele not in ids  # archived + deleted excluded by default
     # Explicitly requesting archived surfaces it.
-    res2 = search.run_search(q="anchor", mode="graph", keyword_conn=kconn, graph_conn=gconn,
+    res2 = search.run_search(manifests_dir=_md(tmp_path), q="anchor", mode="graph", keyword_conn=kconn, graph_conn=gconn,
                              policy=RetrievalPolicy(), node_statuses=("active", "archived"))
     assert arch in {n["node_id"] for n in res2["graph"]["nodes"]}
 
@@ -555,7 +574,7 @@ def test_search_depth_budget_controls_traversal(tmp_path):
 
     def run(depth):
         pol = RetrievalPolicy(caps={"max_graph_depth_default": depth})
-        return search.run_search(q="alpha", mode="graph", keyword_conn=kconn, graph_conn=gconn,
+        return search.run_search(manifests_dir=_md(tmp_path), q="alpha", mode="graph", keyword_conn=kconn, graph_conn=gconn,
                                  policy=pol)
 
     ids1 = {n["node_id"] for n in run(1)["graph"]["nodes"]}

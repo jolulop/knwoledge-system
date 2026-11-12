@@ -215,7 +215,7 @@ def test_archive_of_third_state_source_is_skipped_source_not_active(tmp_path):
     assert rec["outcome"] == ao.SKIPPED and rec["reason"] == "source_not_active"
     assert rec["details"]["before"] == rec["details"]["after"] == {"status": "hidden"}
     assert res["skipped"] == []                                   # silent in `skipped`, as before
-    assert manifests.get_status(manifests.load_manifest(tmp_path / "raw" / "manifests", SID)) \
+    assert manifests.get_status(manifests.get_manifest(tmp_path / "raw" / "manifests", SID)) \
         == "hidden"
     _assert_consistent(res)
 
@@ -296,7 +296,7 @@ def test_page_render_failure_after_manifest_write_is_incomplete(tmp_path, monkey
     assert rec["details"]["after"] == {"status": "hidden"}
     # Behaviour unchanged: the manifest flipped and is still counted as applied.
     assert res["applied"] == 1 and res["changed_pages"] == [f"Sources/{SID}.md"]
-    assert manifests.get_status(manifests.load_manifest(tmp_path / "raw" / "manifests", SID)) \
+    assert manifests.get_status(manifests.get_manifest(tmp_path / "raw" / "manifests", SID)) \
         == "hidden"
     assert parse_frontmatter(page.read_text(encoding="utf-8"))["status"] == "active"
     _assert_consistent(res)
@@ -330,7 +330,7 @@ def _boom(*a, **kw):
 
 
 def _status(root: Path) -> str:
-    return manifests.get_status(manifests.load_manifest(root / _MD, SID))
+    return manifests.get_status(manifests.get_manifest(root / _MD, SID))
 
 
 def test_noop_page_check_failure_is_unavailable_not_already_in_effect(tmp_path, monkeypatch):
@@ -364,15 +364,11 @@ def test_post_write_page_check_failure_is_incomplete_and_result_stands(tmp_path,
 def test_post_write_manifest_read_back_failure_is_incomplete(tmp_path, monkeypatch):
     _source(tmp_path)
     _approve(tmp_path, "hide_content")
-    real, calls = retention.load_manifest, []
-
+    # ADR-0074: the executor reads through `read_manifest`; only the read-back uses `get_manifest`.
     def flaky(*a, **kw):                     # the executor's read works; the read-back fails
-        calls.append(1)
-        if len(calls) > 1:
-            raise OSError("unreadable")
-        return real(*a, **kw)
+        raise OSError("unreadable")
 
-    monkeypatch.setattr(retention, "load_manifest", flaky)
+    monkeypatch.setattr(retention, "get_manifest", flaky)
     res = _apply(tmp_path, "hide_content")
     rec = _one(res)
     assert (rec["outcome"], rec["reason"]) == (ao.INCOMPLETE, ao.VERIFICATION_UNAVAILABLE)

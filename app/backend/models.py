@@ -73,6 +73,11 @@ class SourcesResponse(BaseModel):
     # Count of quarantined manifests (non-canonical id / filename mismatch / duplicate). Count only —
     # never the skipped filenames or ids (no echo of untrusted input).
     manifests_skipped_invalid: int = 0
+    # ADR-0074 decision 2: unreadable / corrupt manifests (counts only) and whether the inventory
+    # is complete ("complete" | "incomplete" | "unavailable" when raw/manifests can't be listed).
+    manifests_unreadable: int = 0
+    manifests_corrupt: int = 0
+    manifest_coverage: str = "complete"
     sources: list[Source]
 
 

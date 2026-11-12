@@ -44,7 +44,8 @@ from typing import Any
 
 from app.backend import db, durable_write, graph, write_lock
 from app.backend import producer_journal as journal
-from app.backend.manifests import get_status, iso_now, load_manifest, valid_manifests
+from app.backend.manifests import (
+    ABSENT, OK, get_status, iso_now, read_reason, recheck, scan_manifests)
 from app.llm import prompts
 from app.llm.client import LLMClient, ParseError
 from app.workers import citations, claim_marker, publication, reviews, titles
@@ -448,7 +449,8 @@ def extract_claims(
         # (plain split, pre-resolution) drives sticky-to-chain freshness; resolve_run_model validates.
         chain_refs = [c.strip() for c in model_ref.split(",") if c.strip()]
         model_ref, has_key = client.resolve_run_model(model_ref)
-        manifests, skipped_invalid = valid_manifests(manifests_dir)
+        inventory = scan_manifests(manifests_dir)
+        manifests = inventory.valid
         if source_ids is not None:
             wanted = set(source_ids)
             manifests = [m for m in manifests if m.get("source_id") in wanted]
@@ -461,6 +463,18 @@ def extract_claims(
                 # Deleted or no longer extractable: nothing will re-extract it, so finish the
                 # commit from authority — re-render its saved claims (one without evidence retires).
                 with write_lock.hold(reviews_dir):
+                    # ADR-0074 decision 2: "not in the valid inventory" is not "deleted". Only a
+                    # verified absence or a usable manifest whose status no longer extracts
+                    # completes the commit; a damaged or quarantined one keeps the record queued
+                    # and the evidence standing until the manifest is usable again.
+                    now_read = recheck(manifests_dir, sid, inventory)
+                    if now_read.state not in (ABSENT, OK) or (
+                            now_read.state == OK and now_read.record.get("ingestion_status")
+                            in _ENRICHABLE_STATUSES):
+                        errors.append({"source_id": sid, "error": read_reason(now_read)
+                                       if now_read.state != OK else "manifest_changed",
+                                       "journal_preserved": True})
+                        continue
                     rec = journal.pending(root, _PRODUCER).get(sid)
                     if rec is not None:
                         intent = run.intent(claims=rec["claims"])
@@ -521,6 +535,12 @@ def extract_claims(
             if not md.strip():
                 # Empty Markdown IS a deterministic complete replacement (ADR-0056).
                 with write_lock.hold(reviews_dir):
+                    # ADR-0074 decision 2: re-read under the lock — a manifest damaged or gone
+                    # since the scan stops this document before any evidence is retired.
+                    now_read = recheck(manifests_dir, sid, inventory)
+                    if now_read.state != OK:
+                        errors.append({"source_id": sid, "error": read_reason(now_read)})
+                        continue
                     rec = journal.begin(root, _PRODUCER, sid,
                                         claims=graph.claims_for_source(gconn, sid), now=now)
                     intent = run.intent(sources=[sid], claims=rec["claims"])
@@ -597,6 +617,13 @@ def extract_claims(
                 # The journal record keeps every claim this commit may retire — the document's
                 # current ones, unioned with any an interrupted attempt saved — so superseding their
                 # evidence below can't lose them (the record goes only after the artifact).
+                # ADR-0068: the manifest read at the run's start may be stale (an archive applied
+                # during the model call); ADR-0074 decision 2: one gone or damaged meanwhile stops
+                # this document before anything is retired (never the scan's copy instead).
+                now_read = recheck(manifests_dir, sid, inventory)
+                if now_read.state != OK:
+                    errors.append({"source_id": sid, "error": read_reason(now_read)})
+                    continue
                 rec = journal.begin(root, _PRODUCER, sid,
                                     claims=graph.claims_for_source(gconn, sid), now=now)
                 intent = run.intent(sources=[sid], claims=rec["claims"])
@@ -605,7 +632,7 @@ def extract_claims(
                 affected = set(rec["claims"]) | set(graph.supersede_source_edges(gconn, sid, now=now))
                 graph.upsert_node(
                     gconn, node_id=sid, node_type="source", slug=sid,
-                    status=get_status(load_manifest(manifests_dir, sid) or manifest), now=now)
+                    status=get_status(now_read.record), now=now)
                 source_claims: list[dict[str, Any]] = []
                 seen: set[tuple[str, int, int]] = set()
                 for w, result in staged:
@@ -697,7 +724,7 @@ def extract_claims(
             "stale_claim_layer_preserved": stale_claim_layer_preserved,
             "skipped_fresh": skipped_fresh, "skipped_not_extracted": skipped_not_extracted,
             "skipped_empty": skipped_empty, "skipped_no_key": skipped_no_key,
-            "manifests_skipped_invalid": len(skipped_invalid),
+            **inventory.report(),
             "errors": len(errors), "error_details": errors,
             # ADR-0068 producer journal: documents whose commit is still unfinished (redone by the
             # next run that reaches them), and the ones finished here from authority.

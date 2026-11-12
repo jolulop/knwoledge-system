@@ -74,7 +74,7 @@ def _vault(tmp_path, *, pdf_meta=None):
         _pdf(inbox / "Day_1_v3.pdf", pdf_meta)
     intake.scan_inbox(tmp_path, jobs_db=tmp_path / "db" / "jobs.sqlite")
     extract.extract_sources(tmp_path, jobs_db=tmp_path / "db" / "jobs.sqlite")
-    (sid,) = [m["source_id"] for m in manifests.list_manifests(tmp_path / "raw" / "manifests")]
+    (sid,) = [m["source_id"] for m in manifests.scan_manifests(tmp_path / "raw" / "manifests").valid]
     return sid
 
 
@@ -115,7 +115,7 @@ def _artifact(tmp_path, sid, suffix=""):
 
 
 def _set_confirmed_title(tmp_path, sid, title):
-    m = manifests.load_manifest(tmp_path / "raw" / "manifests", sid)
+    m = manifests.get_manifest(tmp_path / "raw" / "manifests", sid)
     m["provenance"] = {**(m.get("provenance") or {}), "title": title}
     manifests.save_manifest(tmp_path / "raw" / "manifests", m)
 
@@ -198,7 +198,7 @@ def test_enrich_sees_the_hint_and_stores_cleaned_suggestions(tmp_path):
     assert a["tags"][0] == {"name": "planning taxonomy", "item_type": "method_technique"}
     assert len(a["tags"]) == prompts.ENRICH_TAGS_PROMPT_MAX == 7    # capped, duplicates folded
     assert "provenance_suggested" not in json.dumps(
-        manifests.load_manifest(tmp_path / "raw" / "manifests", sid))
+        manifests.get_manifest(tmp_path / "raw" / "manifests", sid))
 
 
 def test_unknown_values_and_bad_types_are_stored_safely(tmp_path):
@@ -215,12 +215,12 @@ def test_unknown_values_and_bad_types_are_stored_safely(tmp_path):
 def test_re_enrichment_never_touches_confirmed_provenance(tmp_path):
     sid = _vault(tmp_path)
     _run(tmp_path, Router(), "enrich")
-    m = manifests.load_manifest(tmp_path / "raw" / "manifests", sid)
+    m = manifests.get_manifest(tmp_path / "raw" / "manifests", sid)
     m["provenance"] = {"title": "Mine", "author": ["Grace Hopper"], "publisher": "Navy"}
     manifests.save_manifest(tmp_path / "raw" / "manifests", m)
     _run(tmp_path, Router(_enrich_result(title="Other", authors=["Someone Else"])), "enrich",
          force=True, cached=False)
-    after = manifests.load_manifest(tmp_path / "raw" / "manifests", sid)
+    after = manifests.get_manifest(tmp_path / "raw" / "manifests", sid)
     assert after["provenance"] == {"title": "Mine", "author": ["Grace Hopper"], "publisher": "Navy"}
     assert _artifact(tmp_path, sid)["title"] == "Other"
 
@@ -414,7 +414,7 @@ def test_rendering_rejects_an_enrich_artifact_whose_hint_changed(tmp_path):
     assert fm["summary_status"] == "stub"                      # the stale artifact is not used
     md = (tmp_path / "normalized" / "markdown" / f"{sid}.md").read_text()
     assert titles.prompt_title_for(
-        manifests.load_manifest(tmp_path / "raw" / "manifests", sid), md,
+        manifests.get_manifest(tmp_path / "raw" / "manifests", sid), md,
         enrichment_dir=tmp_path / "normalized" / "enrichment",
         logs_dir=tmp_path / "normalized" / "extraction_logs") == "A Newer Embedded Title"
 

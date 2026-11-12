@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from app.backend import db, durable_write, graph, keyword_index, manifests, write_lock
-from app.backend.manifests import iso_now, load_manifest, valid_manifests
+from app.backend.manifests import OK, get_manifest, iso_now, read_manifest, scan_manifests
 from app.backend.policy import load_yaml
 from app.llm import cache as llm_cache
 from app.workers import apply_outcomes, reviews, wiki
@@ -123,8 +123,8 @@ def run_stale_check(
         # ADR-0068: each source's status check and its filing are one commit phase (an archive
         # applied meanwhile is seen before anything is filed).
         with write_lock.hold(reviews_dir):
-            valid, manifests_skipped_invalid = valid_manifests(manifests_dir)
-            for m in valid:
+            inventory = scan_manifests(manifests_dir)
+            for m in inventory.valid:
                 sid = m.get("source_id")
                 if not sid:
                     continue
@@ -180,7 +180,7 @@ def run_stale_check(
                     priority="low", now=now, filed=cache_purge_filed, existing=cache_purge_existing)
 
         summary = {"considered": considered,
-                   "manifests_skipped_invalid": len(manifests_skipped_invalid),
+                   **inventory.report(),
                    "archive_candidates": archive_detected,
                    "archive_candidates_filed": len(archive_filed),
                    "archive_candidates_existing": len(archive_existing),
@@ -358,10 +358,12 @@ def _apply_source_status_transition(
             if not manifests.is_source_id(sid):  # untrusted review subject — reject before any path use
                 skip("invalid_source_id")
                 continue
-            m = load_manifest(manifests_dir, sid)
-            if m is None:
-                skip("source_missing")
+            read = read_manifest(manifests_dir, sid)
+            if read.state != OK:
+                # ADR-0074 decision 2: a damaged manifest is never written (nor taken as missing).
+                skip("source_missing" if read.state == manifests.ABSENT else f"manifest_{read.state}")
                 continue
+            m = read.record
             current = manifests.get_status(m)
             if current == to_status:
                 # Idempotent no-op: already at the target lifecycle state (silent in `skipped`, not a
@@ -410,10 +412,10 @@ def _apply_source_status_transition(
             # the target (B2a review round 1): the manifest read back at `to_status`, then the page
             # mirroring it. Every read here is reporting-only (`guarded`): a failure never changes what
             # was executed, and is `incomplete` (this run wrote) with `verification_unavailable`.
-            after_m = apply_outcomes.guarded(load_manifest, manifests_dir, sid)
+            after_m = apply_outcomes.guarded(get_manifest, manifests_dir, sid)
             after = (apply_outcomes.guarded(manifests.get_status, after_m)
                      if isinstance(after_m, dict) else apply_outcomes.UNAVAILABLE)
-            if not isinstance(after, str):           # unreadable (load_manifest folds errors into None)
+            if not isinstance(after, str):           # absent, unreadable or corrupt on read-back
                 report_unverified(changed=True, before=current, source_id=sid)
                 continue
             if after != to_status:

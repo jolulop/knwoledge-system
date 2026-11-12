@@ -291,6 +291,7 @@ def _build_search_corpus(tmp_path: Path) -> str:
     """Write one chunk + a source page + a matching active concept page, then build the index
     and a graph (source mentions concept). Returns the concept node id."""
     src, cpt = "src_eeeeeeeeeeeeeeee", "itm_searchxxxxxxxxx"
+    fixtures.manifest_stub(tmp_path, src)        # ADR-0074: evidence needs a manifest
     chunks = tmp_path / "normalized" / "chunks" / f"{src}.jsonl"
     chunks.parent.mkdir(parents=True, exist_ok=True)
     text = "Synergy capture is central to post-merger integration."
@@ -421,6 +422,7 @@ def _configure_vector(tmp_path, client, monkeypatch):
     from app.backend import keyword_index, vector_index
 
     src = "src_ffffffffffffffff"
+    fixtures.manifest_stub(tmp_path, src)        # ADR-0074: evidence needs a manifest
     text = "synergy capture is central to post-merger integration"
     chunks = tmp_path / "normalized" / "chunks" / f"{src}.jsonl"
     chunks.parent.mkdir(parents=True, exist_ok=True)
@@ -732,6 +734,7 @@ def test_query_source_quote_with_path_is_returned_intact(client, tmp_path, monke
     # A source document legitimately contains an absolute path. The verbatim quote MUST survive
     # (grounding requires it); only system/generated paths are withheld (ADR-0034 Q2).
     src, text = "src_ffffffffffffffff", "Logs live at /var/log/app per the runbook."
+    fixtures.manifest_stub(tmp_path, src)        # ADR-0074: evidence needs a manifest
     ch = tmp_path / "normalized" / "chunks" / f"{src}.jsonl"
     ch.parent.mkdir(parents=True, exist_ok=True)
     ch.write_text(json.dumps({
@@ -942,6 +945,7 @@ def test_query_validator_rejects_bad_saved_citations(tmp_path):
 
 def test_query_save_preserves_source_quote_path(client, tmp_path, monkeypatch):
     src, text = "src_ffffffffffffffff", "Logs live at /var/log/app per the runbook."
+    fixtures.manifest_stub(tmp_path, src)        # ADR-0074: evidence needs a manifest
     ch = tmp_path / "normalized" / "chunks" / f"{src}.jsonl"
     ch.parent.mkdir(parents=True, exist_ok=True)
     ch.write_text(json.dumps({

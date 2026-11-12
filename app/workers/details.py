@@ -39,7 +39,7 @@ def vault_names(manifests_dir: Path) -> tuple[list[str], set[str]]:
     Authors page (a confirmed `show_page` anywhere)."""
     names: dict[str, str] = {}
     paged: set[str] = set()
-    for m in manifests.valid_manifests(manifests_dir)[0]:
+    for m in manifests.scan_manifests(manifests_dir).valid:
         details = manifests.confirmed_details(m.get("provenance") or {})
         entries = list(details["authors"]) + ([details["publisher"]] if details["publisher"] else [])
         for e in entries:

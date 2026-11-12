@@ -83,7 +83,7 @@ def _extract(tmp_path, routes, *, force=False, source_ids=None):
 
 def _sids(tmp_path):
     return {m["original_filename"]: m["source_id"]
-            for m in manifests.list_manifests(tmp_path / "raw" / "manifests")}
+            for m in manifests.scan_manifests(tmp_path / "raw" / "manifests").valid}
 
 
 def _rewrite_md(tmp_path, sid, body):

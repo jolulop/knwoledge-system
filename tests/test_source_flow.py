@@ -79,7 +79,7 @@ def _extract(tmp_path, adapter):
 
 def _sids(tmp_path):
     return {m["original_filename"]: m["source_id"]
-            for m in manifests.list_manifests(tmp_path / "raw" / "manifests")}
+            for m in manifests.scan_manifests(tmp_path / "raw" / "manifests").valid}
 
 
 def _rewrite_md(tmp_path, sid, body):
@@ -669,13 +669,17 @@ def test_raw_endpoint_never_renders_active_content_inline(client, tmp_path):
 def test_raw_endpoint_uses_the_manifest_quarantine(client, tmp_path):
     _build(tmp_path, {"a.md": "alpha body"})
     a = _sids(tmp_path)["a.md"]
-    # An internal source_id mismatch quarantines the manifest (valid_manifests) -> plain 404.
+    # An internal source_id mismatch quarantines the manifest (scan_manifests). Quarantined
+    # authority is ambiguous, never absent (ADR-0074 decision 2): 409 for both ids the file names.
     mpath = tmp_path / "raw" / "manifests" / f"{a}.json"
     m = json.loads(mpath.read_text(encoding="utf-8"))
     m["source_id"] = "src_00000000000000ff"
     mpath.write_text(json.dumps(m), encoding="utf-8")
-    assert client.get(f"/raw/{a}").status_code == 404
-    assert client.get("/raw/src_00000000000000ff").status_code == 404
+    for sid in (a, "src_00000000000000ff"):
+        res = client.get(f"/raw/{sid}")
+        assert res.status_code == 409 and res.json()["detail"]["reason"] == \
+            "manifest_filename_mismatch"
+    assert client.get("/raw/src_00000000000000ee").status_code == 404     # absent stays 404
 
 
 def test_raw_endpoint_is_lifecycle_status_agnostic(client, tmp_path):

@@ -275,7 +275,7 @@ def discovered_at(reviews_dir: Path, source_id: str) -> Any:
     `reviews/`), or None when it can't be read."""
     from app.backend import manifests
     try:
-        m = manifests.load_manifest(Path(reviews_dir).parent / "raw" / "manifests", source_id)
-    except Exception:  # noqa: BLE001 - an unreadable manifest only reduces certainty
+        read = manifests.read_manifest(Path(reviews_dir).parent / "raw" / "manifests", source_id)
+    except Exception:  # noqa: BLE001 - an unusable id or manifest only reduces certainty
         return None
-    return (m or {}).get("discovered_at")
+    return read.record.get("discovered_at") if read.state == manifests.OK else None

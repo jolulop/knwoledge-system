@@ -25,6 +25,9 @@ from app.backend import graph, graph_read, revision, search, write_lock  # noqa:
 from app.backend import main as main_module  # noqa: E402
 from app.backend.config import get_settings  # noqa: E402
 
+# ADR-0074: search requires a manifests dir; none here, so every document reads as absent.
+NO_MANIFESTS = Path("/nonexistent/raw/manifests")
+
 NOW = "2026-10-29T00:00:00Z"
 
 
@@ -186,7 +189,7 @@ def test_missing_indexes_refuse_graph_views_and_degrade_search(client, tmp_path)
         assert resp.json()["detail"]["action"] == "restart the API to install graph indexes"
     gconn = _conn(tmp_path / "db" / "graph.sqlite")
     policy = main_module.load_retrieval_policy(ROOT / "policies" / "retrieval.yaml")
-    res = search.run_search(q="which sources disagree", mode="auto", keyword_conn=None,
+    res = search.run_search(manifests_dir=NO_MANIFESTS, q="which sources disagree", mode="auto", keyword_conn=None,
                             graph_conn=gconn, policy=policy)
     gconn.close()
     assert res["graph"]["nodes"] == [] and any("graph_index_missing" in n for n in res["notes"])

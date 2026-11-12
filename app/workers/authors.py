@@ -136,9 +136,10 @@ def stale_link_sources(root: Path, *, wiki_dir: Path | None = None) -> set[str]:
     :class:`LinkScanError` when the Source pages can't all be read."""
     root = Path(root)
     wiki_dir = Path(wiki_dir) if wiki_dir else root / "wiki"
-    valid, _skipped = manifests.valid_manifests(root / "raw" / "manifests")
+    # A document whose manifest can't be read has no wanted links, so its page counts as stale:
+    # conservative — its refresh fails until the manifest is recovered, so old pages stay.
     wanted: dict[str, set[str]] = {}
-    for m in valid:
+    for m in manifests.scan_manifests(root / "raw" / "manifests").valid:
         try:
             names = linked_names(m)
         except (KeyError, TypeError, ValueError):
@@ -181,15 +182,15 @@ def inventory(root: Path, *, wiki_dir: Path | None = None) -> list[dict[str, Any
     root = Path(root)
     wiki_dir = Path(wiki_dir) if wiki_dir else root / "wiki"
     manifests_dir = root / "raw" / "manifests"
-    # `valid_manifests` skips an unparseable file silently; here that must stop the step, or a
-    # manifest that can't be read would look like a removed reference and prune its pages.
-    for path in sorted(manifests_dir.glob("*.json")) if manifests_dir.exists() else []:
-        try:
-            json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            raise InventoryError(f"manifest {path.name} can't be read ({type(exc).__name__}); "
-                                 "Authors pages left as they are until it is fixed") from exc
-    valid, skipped = manifests.valid_manifests(manifests_dir)
+    # ADR-0074 decision 2: pruning Authors pages depends on proving a reference gone, so an
+    # unreadable or corrupt manifest (or an unlistable directory) stops the step — as does an
+    # identity-quarantined one, which can't be told from a removed reference either.
+    scanned = manifests.scan_manifests(manifests_dir)
+    try:
+        scanned.require_complete("refreshing the Authors pages")
+    except manifests.IncompleteManifestInventory as exc:
+        raise InventoryError(f"{exc}; Authors pages left as they are until it is fixed") from exc
+    valid, skipped = scanned.valid, scanned.skipped
     if skipped:
         raise InventoryError(f"{len(skipped)} manifest(s) can't be read; Authors pages left as they "
                              "are until they are fixed")

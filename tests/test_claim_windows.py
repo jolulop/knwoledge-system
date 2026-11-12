@@ -110,7 +110,7 @@ def _build_two_window_doc(tmp_path: Path) -> tuple[str, str]:
     intake.scan_inbox(tmp_path, jobs_db=tmp_path / "db" / "jobs.sqlite")
     extract.extract_sources(tmp_path, jobs_db=tmp_path / "db" / "jobs.sqlite",
                             target_chars=200, max_chars=400)
-    sid = next(iter(m["source_id"] for m in manifests.list_manifests(tmp_path / "raw" / "manifests")))
+    sid = next(iter(m["source_id"] for m in manifests.scan_manifests(tmp_path / "raw" / "manifests").valid))
     md = (tmp_path / "normalized" / "markdown" / f"{sid}.md").read_text(encoding="utf-8")
     return sid, md
 
@@ -250,7 +250,7 @@ def test_artifact_records_strategy_ref_and_stays_fresh_for_renderers(tmp_path):
     from app.backend import manifests
     from app.workers import titles
     title = titles.prompt_title_for(   # ADR-0066 part 3: freshness takes the CURRENT prompt title
-        manifests.load_manifest(tmp_path / "raw" / "manifests", sid), md,
+        manifests.get_manifest(tmp_path / "raw" / "manifests", sid), md,
         enrichment_dir=tmp_path / "normalized" / "enrichment",
         logs_dir=tmp_path / "normalized" / "extraction_logs")
     artifact = art.load_fresh_claims(tmp_path / "normalized" / "enrichment", sid, md,
@@ -370,7 +370,7 @@ def test_claim_beyond_first_12k_chars_is_extracted_and_grounded(tmp_path):
     (inbox / "long.md").write_text(f"# Long\n\n{filler}\n\n{tail_fact}\n", encoding="utf-8")
     intake.scan_inbox(tmp_path, jobs_db=tmp_path / "db" / "jobs.sqlite")
     extract.extract_sources(tmp_path, jobs_db=tmp_path / "db" / "jobs.sqlite")
-    sid = next(iter(m["source_id"] for m in manifests.list_manifests(tmp_path / "raw" / "manifests")))
+    sid = next(iter(m["source_id"] for m in manifests.scan_manifests(tmp_path / "raw" / "manifests").valid))
     md = (tmp_path / "normalized" / "markdown" / f"{sid}.md").read_text(encoding="utf-8")
     assert md.index(tail_fact) > 12000, "fixture must place the fact beyond the old head bias"
     wiki.generate_wiki(tmp_path, jobs_db=tmp_path / "db" / "jobs.sqlite",

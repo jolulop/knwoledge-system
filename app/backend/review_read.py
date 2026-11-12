@@ -391,8 +391,8 @@ def _manifest_status(manifests_dir: Path | None, source_id: str | None) -> str |
     """A source's lifecycle status from the manifest (the authority, ADR-0036), or None if unreadable."""
     if manifests_dir is None or not manifests.is_source_id(source_id):
         return None  # never hand an untrusted/non-canonical id to the path layer
-    m = manifests.load_manifest(Path(manifests_dir), source_id)
-    return manifests.get_status(m) if m is not None else None
+    read = manifests.read_manifest(Path(manifests_dir), source_id)
+    return manifests.get_status(read.record) if read.state == manifests.OK else None
 
 
 def _page_frontmatter(wiki_dir: Path | None, page: str | None) -> dict[str, Any] | None:
@@ -1659,8 +1659,9 @@ def _source_flow(reviews_dir: Path, *, gconn: Any, wiki_dir: Path | None,
     `promote_candidate_node` items).
     """
     from app.workers import identity_journal, tag_links  # lazy: the worker imports the read model
-    valid, _skipped = manifests.valid_manifests(manifests_dir) if manifests_dir else ([], [])
-    ordered = sorted(valid, key=lambda m: (str(m.get("discovered_at") or ""), m["source_id"]))
+    inventory = manifests.scan_manifests(manifests_dir) if manifests_dir else \
+        manifests.ManifestInventory()
+    ordered = sorted(inventory.valid, key=lambda m: (str(m.get("discovered_at") or ""), m["source_id"]))
 
     all_items: list[dict[str, Any]] = []
     for dir_name in ("pending", "approved", "rejected"):
@@ -1801,6 +1802,8 @@ def _source_flow(reviews_dir: Path, *, gconn: Any, wiki_dir: Path | None,
                                           for s in sources),
                    "first_untagged_source": next_source(sources, None, _untagged)},
         "global_remaining_by_type": dict(sorted(global_by_type.items())),
+        # ADR-0074 decision 2: documents whose manifest can't be read are not listed — say so.
+        "manifest_inventory": inventory.report(),
     }
 
 
@@ -1885,9 +1888,10 @@ def details_section(reviews_dir: Path, source_id: str, *, manifests_dir: Path,
     vault's confirmed names, and the baseline token a Save must still match."""
     from app.workers import details as details_mod
     from app.workers import tag_links  # lazy: the worker imports the read model
-    manifest = manifests.load_manifest(manifests_dir, source_id)
-    if manifest is None:
-        return {}
+    read = manifests.read_manifest(manifests_dir, source_id)
+    if read.state != manifests.OK:
+        return {}                                 # absent or damaged: no Details form
+    manifest = read.record
     root = Path(reviews_dir).parent
     md_path = root / "normalized" / "markdown" / f"{source_id}.md"
     markdown = md_path.read_text(encoding="utf-8") if md_path.exists() else ""

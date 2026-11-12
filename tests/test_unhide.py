@@ -89,7 +89,7 @@ def test_source_unhide_flips_hidden_to_active(tmp_path):
     _approve_unhide_source(tmp_path)
     res = _apply_source(tmp_path)
     assert res["applied"] == 1
-    assert manifests.get_status(manifests.load_manifest(md, SID)) == "active"        # manifest authority
+    assert manifests.get_status(manifests.get_manifest(md, SID)) == "active"        # manifest authority
     assert parse_frontmatter((tmp_path / "wiki" / "Sources" / f"{SID}.md").read_text())["status"] \
         == "active"                                                                  # page mirror
 
@@ -111,7 +111,7 @@ def test_source_unhide_third_state_is_source_not_hidden_skip(tmp_path):
     res = _apply_source(tmp_path)
     assert res["applied"] == 0
     assert res["skipped"] == [{"review_id": "rev_u", "reason": "source_not_hidden"}]
-    assert manifests.get_status(manifests.load_manifest(md, SID)) == "archive_candidate"  # untouched
+    assert manifests.get_status(manifests.get_manifest(md, SID)) == "archive_candidate"  # untouched
 
 
 def test_source_unhide_not_graph_required(tmp_path):

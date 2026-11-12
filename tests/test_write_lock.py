@@ -273,7 +273,7 @@ def test_a_reopen_waits_for_a_running_apply(client, tmp_path, monkeypatch):
     fixtures.write_markdown(inbox / "doc.md")
     intake.scan_inbox(tmp_path, jobs_db=tmp_path / "db" / "jobs.sqlite")
     md = tmp_path / "raw" / "manifests"
-    sid = manifests.list_manifests(md)[0]["source_id"]
+    sid = manifests.scan_manifests(md).valid[0]["source_id"]
     rid = reviews.create_review_item(tmp_path / "reviews", review_type="archive_source",
                                      subject={"source_id": sid},
                                      proposal={"to_status": "archive_candidate"})
@@ -300,7 +300,7 @@ def test_a_reopen_waits_for_a_running_apply(client, tmp_path, monkeypatch):
     t_reopen.join(30)
     assert "error" not in applied and "error" not in reopened
     # One outcome: Apply archived the source, so the reopen that followed it is refused.
-    assert manifests.get_status(manifests.load_manifest(md, sid)) == "archive_candidate"
+    assert manifests.get_status(manifests.get_manifest(md, sid)) == "archive_candidate"
     r = reopened["value"]
     assert r.status_code == 409, r.text
     assert (tmp_path / "reviews" / "approved" / f"{rid}.json").exists()
@@ -328,7 +328,7 @@ def test_an_archive_during_a_claims_model_call_survives_the_commit(tmp_path):
             return super().parse(*args, **kwargs)
 
     assert claims_t._extract(tmp_path, ArchivingAdapter())["claims_written"] == 2
-    assert manifests.get_status(manifests.load_manifest(tmp_path / "raw" / "manifests", sid)) \
+    assert manifests.get_status(manifests.get_manifest(tmp_path / "raw" / "manifests", sid)) \
         == "archive_candidate"
     gconn = graph.connect(gdb)
     assert graph.get_node(gconn, sid)["status"] == "archive_candidate"
@@ -399,7 +399,7 @@ def test_an_archive_during_extraction_survives_the_manifest_write(tmp_path, monk
     jobs = tmp_path / "db" / "jobs.sqlite"
     intake.scan_inbox(tmp_path, jobs_db=jobs)
     md = tmp_path / "raw" / "manifests"
-    sid = manifests.list_manifests(md)[0]["source_id"]
+    sid = manifests.scan_manifests(md).valid[0]["source_id"]
     real = extract._extract_one
 
     def archiving(manifest, *args, **kwargs):             # an Apply lands while the file extracts
@@ -409,7 +409,7 @@ def test_an_archive_during_extraction_survives_the_manifest_write(tmp_path, monk
         return out
     monkeypatch.setattr(extract, "_extract_one", archiving)
     assert extract.extract_sources(tmp_path, jobs_db=jobs)["extracted"] == 1
-    m = manifests.load_manifest(md, sid)
+    m = manifests.get_manifest(md, sid)
     assert manifests.get_status(m) == "archive_candidate" and m["ingestion_status"] == "extracted"
 
 

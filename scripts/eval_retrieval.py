@@ -32,7 +32,7 @@ if str(ROOT) not in sys.path:
 
 from app.backend import embeddings, graph, keyword_index, search, vector_index
 from app.backend.config import get_settings
-from app.backend.manifests import list_manifests
+from app.backend.manifests import scan_manifests
 from app.backend.policy import load_retrieval_policy, load_yaml
 
 CORPUS_DIR = ROOT / "evals" / "corpus"
@@ -128,7 +128,7 @@ def _build_corpus_vault(corpus_dir: Path, work_root: Path, embedder: Any, settin
 
 def _filename_to_source(manifests_dir: Path) -> dict[str, str]:
     return {m["original_filename"]: m["source_id"]
-            for m in list_manifests(manifests_dir)
+            for m in scan_manifests(manifests_dir).valid
             if m.get("original_filename") and m.get("source_id")}
 
 
@@ -244,6 +244,7 @@ def run(root: Path, settings: Any, embedder: Any, cases: list[dict], ks: list[in
             return vector_index.search(root, embedder.embed([_q])[0], limit=limit, metric=metric)
 
         return search.run_search(q=q, mode=case.get("mode", "auto"), keyword_conn=kconn,
+                                 manifests_dir=root / "raw" / "manifests",
                                  graph_conn=gconn, policy=policy, vector_search=vector_search)
 
     try:

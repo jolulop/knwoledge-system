@@ -52,7 +52,8 @@ def verify(manifests_dir: Path, captured: dict[str, str], status: str) -> dict[s
     if status not in _COMPLETE:
         return {}
     current = capture({m["source_id"]: manifests.get_provenance(m)
-                       for m in manifests.valid_manifests(manifests_dir)[0]})
+                       for m in manifests.scan_manifests(manifests_dir).valid})
+    # A document whose manifest became unreadable has no current digest: never acknowledged.
     return {sid: d for sid, d in captured.items() if current.get(sid) == d}
 
 
@@ -87,7 +88,7 @@ def awaiting(manifests_dir: Path, jobs_db: Path, *,
              source_id: str | None = None) -> dict[str, list[str]]:
     """`{producer: [source_id…]}` of documents awaiting reconciliation (only producers with any)."""
     current = capture({m["source_id"]: manifests.get_provenance(m)
-                       for m in manifests.valid_manifests(manifests_dir)[0]
+                       for m in manifests.scan_manifests(manifests_dir).valid
                        if source_id is None or m["source_id"] == source_id})
     out: dict[str, list[str]] = {}
     for producer in PRODUCERS:

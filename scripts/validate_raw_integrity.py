@@ -11,10 +11,12 @@ the manifest and only re-hashes a file whose size or mtime has drifted. A refere
 that is simply missing is reported but is not a failure here (deletion/retention is a
 separate concern). Manifests are gitignored local state: no manifests means nothing to
 validate (a pass).
+
+ADR-0074 decision 2: an unreadable or corrupt manifest, and a `raw/manifests/` that cannot be
+listed, **fail** — by a safely rendered repository-relative path, never the file's contents.
 """
 from __future__ import annotations
 
-import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,7 +25,15 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.backend.manifests import is_source_id, sha256_file
+from app.backend.manifests import (
+    DAMAGED,
+    OK,
+    is_source_id,
+    manifest_files,
+    read_manifest_file,
+    safe_display,
+    sha256_file,
+)
 from app.backend.paths import safe_under as _safe_under_raw
 
 
@@ -47,7 +57,12 @@ def main(argv: list[str]) -> int:
     root = Path(argv[0]).resolve() if argv else Path.cwd()
     manifests_dir = root / "raw" / "manifests"
     raw_root = (root / "raw").resolve()
-    if not manifests_dir.exists():
+    paths, listing_error = manifest_files(manifests_dir)
+    if listing_error is not None:
+        print("Raw integrity validation failed:")
+        print(f"- raw/manifests: could not be listed ({listing_error})")
+        return 1
+    if not paths and not manifests_dir.exists():
         print("Raw integrity validation passed (no manifests).")
         return 0
 
@@ -55,22 +70,23 @@ def main(argv: list[str]) -> int:
     missing: list[str] = []
     checked = hashed = 0
 
+    reads = [(mp, read_manifest_file(mp)) for mp in paths]
+    for mp, read in reads:
+        if read.state in DAMAGED:
+            mismatches.append(f"{safe_display(mp.name)}: manifest is {read.state} ({read.error}) — "
+                              "recover it (ADR-0074 decision 3)")
     # Pre-pass: count canonical content source_ids so a duplicate across files is detected
     # order-independently (every copy is flagged, even the correctly-named one).
     id_counts: dict[str, int] = {}
-    for mp in sorted(manifests_dir.glob("*.json")):
-        try:
-            s = json.loads(mp.read_text(encoding="utf-8")).get("source_id")
-        except (OSError, json.JSONDecodeError):
-            continue
+    for _mp, read in reads:
+        s = read.record.get("source_id") if read.state == OK else None
         if is_source_id(s):
             id_counts[s] = id_counts.get(s, 0) + 1
 
-    for mpath in sorted(manifests_dir.glob("*.json")):
-        try:
-            manifest = json.loads(mpath.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+    for mpath, read in reads:
+        if read.state != OK:
             continue
+        manifest = read.record
         expected_sha = manifest.get("sha256")
         raw_sid = manifest.get("source_id")
         # Hard gate: manifests live at raw/manifests/<source_id>.json (ADR-0007). Fail on a non-canonical
@@ -78,11 +94,12 @@ def main(argv: list[str]) -> int:
         # runtime authority. Diagnostics print a sanitized id only (no leak/log-injection).
         sid = raw_sid if is_source_id(raw_sid) else "<invalid source_id>"
         if not is_source_id(raw_sid):
-            mismatches.append(f"{mpath.name}: non-canonical source_id (expected src_<16 hex>)")
+            mismatches.append(f"{safe_display(mpath.name)}: non-canonical source_id "
+                              "(expected src_<16 hex>)")
         elif id_counts.get(raw_sid, 0) > 1:
             mismatches.append(f"{sid}: duplicate source_id across manifests")
         elif mpath.stem != raw_sid:
-            mismatches.append(f"{mpath.name}: filename does not match source_id {sid}")
+            mismatches.append(f"{safe_display(mpath.name)}: filename does not match source_id {sid}")
         for occ in _occurrences(manifest):
             rel = occ.get("relative_path")
             if not rel:

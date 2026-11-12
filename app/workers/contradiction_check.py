@@ -70,7 +70,7 @@ from app.backend.manifests import (
     independent_sources,
     iso_now,
     name_identity,
-    valid_manifests,
+    scan_manifests,
 )
 from app.llm import prompts
 from app.llm.adapters import AdapterError
@@ -181,7 +181,14 @@ def _documents(manifests_dir: Path, source_ids: list[str]) -> dict[str, dict[str
     distinct = sorted(dict.fromkeys(source_ids))
     if len(distinct) < 2:
         raise Refused("too_few_documents", "select at least two distinct documents")
-    valid = {m["source_id"]: m for m in valid_manifests(manifests_dir)[0]}
+    inventory = scan_manifests(manifests_dir)
+    valid = {m["source_id"]: m for m in inventory.valid}
+    # ADR-0074 decision 2: a damaged or identity-quarantined manifest is unavailable authority —
+    # never an unknown document.
+    excluded = [(s, r) for s in distinct if (r := inventory.excluded_reason(s)) is not None]
+    if excluded:
+        raise Refused("manifest_unavailable", "a document's manifest can't be used: "
+                      + ", ".join(f"{s} ({r.removeprefix('manifest_')})" for s, r in excluded))
     unknown = [s for s in distinct if s not in valid]
     if unknown:
         raise Refused("unknown_document", "not a valid source id: " + ", ".join(unknown))
@@ -603,7 +610,7 @@ def _revalidate(gconn, settings: Any, plan: dict[str, Any], window: dict[str, An
     """Why a window no longer stands as estimated, or None: its documents' independence inputs, and
     each of its claims still active with the same wording and evidence from its document."""
     prov = {m["source_id"]: get_provenance(m)
-            for m in valid_manifests(settings.manifests_dir)[0]}
+            for m in scan_manifests(settings.manifests_dir).valid}
     for sid in (window["a"], window["b"]):
         if sid not in prov:
             return f"{sid} is no longer a valid document"

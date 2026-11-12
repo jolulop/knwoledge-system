@@ -2,7 +2,9 @@
 
 - **Status:** accepted — design-locked by grill-phase 2026-11-11 (Q1–Q9). **Slice 1 (decision 1)
   implemented 2026-11-11** — `app/backend/durable_write.py`, guard `tests/write_guard.py` +
-  `tests/test_authority_write_guard.py`. Slices 2–6 and changes 7a–7c per decision 9 not yet.
+  `tests/test_authority_write_guard.py`. **Slice 2 (decision 2) implemented 2026-11-12** — typed
+  manifest read states in `app/backend/manifests.py`. Slices 3–6 and changes 7a–7c per decision 9
+  not yet.
 - **Date:** 2026-11-11
 - **Drivers:** external review of `06f3d56` (2026-11-11), blocking findings 1 and 3. Finding 2
   (item descriptions corrupted across re-renders) was fixed separately in `dfda610`.
@@ -175,6 +177,81 @@ modules, `app/` and `scripts/`) is moved to the typed states; **no compatibility
 collapsing a failure into `None` or an empty inventory. A caller that only needs "the record if it is
 usable" must still receive and propagate the failure state (count it, report it, block absence-based
 actions), not drop it.
+
+**As implemented (slice 2).** `manifests.read_manifest_file` / `read_manifest` return a
+`ManifestRead(state, path, record, error)`, where `error` is a categorical tag, never contents.
+
+- **How each state is decided:**
+  - `absent` needs ENOENT on the file *and* a confirmable, non-dangling parent directory.
+  - The file is opened non-blocking (`O_NONBLOCK`), so a FIFO can't hang the read. A directory,
+    FIFO or other non-regular file, a dangling symlink, a permission error and an I/O error are all
+    `unreadable`.
+  - Invalid UTF-8, invalid JSON (including nesting too deep to parse), and JSON that is not an
+    object are `corrupt`.
+  - A record whose own `source_id` differs from its filename is `corrupt` (`id_mismatch`) for that
+    document.
+- **Single-document reads:** `get_manifest` returns the record, `None` *only* for a verified
+  absence, and raises `ManifestUnavailable` for a damaged manifest. Every read refuses a
+  non-canonical id with `ValueError`; the old lenient read path returned `None` for it.
+- **Writers:** `set_status` and `set_provenance` raise on a damaged manifest and never overwrite
+  it.
+- **Inventory:** `scan_manifests` returns a `ManifestInventory`.
+  - `valid`: the records that pass the unchanged identity checks.
+  - `skipped`: one categorical reason per skipped file, which now includes `unreadable` and
+    `corrupt`.
+  - `damaged`: the safely rendered paths of damaged files. `damaged_ids` maps the canonical-named
+    ones to their state.
+  - `quarantined_ids`: every canonical id an identity-quarantined file names (its filename stem
+    or the `source_id` it claims), mapped to the unchanged reason (`duplicate_source_id`,
+    `filename_mismatch`, `non_canonical_id`).
+  - `enumeration_error`: set when `os.listdir` fails, so an unlistable directory is never an empty
+    inventory.
+  - `complete`, `coverage` (`complete` / `incomplete` / `unavailable`), `report()` (the job-result
+    counts) and `require_complete(action)`, which raises `IncompleteManifestInventory`.
+  - Identity quarantine counts as excluded authority: the inventory is not `complete` while a
+    damaged **or** quarantined file exists, so neither can establish an absence (review round 1).
+- **Revalidation:** `manifests.recheck(dir, sid, inventory)` is the under-lock re-read before a
+  mutation or recovery: the fresh typed read, with an id the inventory quarantined kept excluded
+  (`read_reason` names it `manifest_<identity reason>`). A duplicate created after the scan is not
+  detected by the single-file re-read; the next scan quarantines it.
+- **Old readers removed:** `load_manifest`, `list_manifests` and `valid_manifests` are gone, with
+  no compatibility wrapper. All 50 call sites in 24 modules moved:
+  - **Intake** reports `manifest_<state>` and preserves the file.
+  - **Extract, Claims, Items and generate_wiki** re-read under the write lock before committing, and
+    stop the document on any state other than `ok`. They never fall back to the scan's copy.
+    Claims and Items do so on **every** mutating branch — the empty-input replacement and the
+    producer-journal recovery included. Recovery finishes an unfinished commit from authority only
+    for a verified absence or a usable manifest whose status no longer extracts; a damaged or
+    quarantined one keeps its record queued and its evidence / mentions standing
+    (`journal_preserved`).
+  - **Every worker's job result** carries `manifests_unreadable`, `manifests_corrupt` and
+    `manifest_coverage`.
+  - **Absence-dependent actions** are blocked on an incomplete inventory: synthesis retraction
+    (`retraction_blocked`), Authors-page pruning (`InventoryError`), and contradiction maintenance
+    (`manifest_inventory_incomplete` is unverifiable, never "not independent").
+  - **Producer-journal repair** keeps damaged and quarantined documents for redo.
+  - **Contradiction checks** refuse a damaged or quarantined document as `manifest_unavailable`.
+  - **Publication** reports the typed state.
+  - **Lint** files a `manifest_<state>` finding instead of "missing raw".
+- **Retrieval:** `search.run_search` requires `manifests_dir`. A per-search gate admits evidence
+  and Source navigation hits only for ids in the inventory's identity-validated `valid` set, so a
+  damaged, quarantined or absent manifest (a removed manifests folder included) excludes the
+  document, with a note. The inventory is scanned once per search, only when a hit needs it.
+  `/query` uses the same search; a test drives `/query` with a fake model and checks the excluded
+  document never reaches its prompt.
+- **Validators:** `validate_raw_integrity` fails on damage and on an enumeration failure, by a safe
+  path. `validate_projection`, `validate_wiki` and `validate_normalized`
+  report a damaged manifest's documents as uncheckable, never as orphans.
+- **API:** every per-document endpoint — `GET /sources/{id}`, `/raw/{id}`,
+  `/sources/{id}/chunks` and `/normalized` — resolves through one inventory-aware lookup,
+  `manifests.lookup`, so it agrees with `GET /sources` and search. A damaged or quarantined
+  manifest (a duplicate elsewhere included) is 409 `manifest_<state>` / `manifest_<identity
+  reason>`. An inventory that can't be listed is 409 `manifest_inventory_incomplete` for any id,
+  since an enumeration failure never establishes an absence. Only a verified absence (or a
+  non-canonical id) is a 404. Damage or quarantine of other documents never blocks a validated
+  one. `GET /sources` returns the counts and the coverage (review round 2).
+- **Not in this slice:** recovery tooling (slice 4) and visibility suppression of *valid* manifests
+  (change 7a).
 
 ### Decision 3 — operator recovery of a damaged manifest (grill Q3)
 

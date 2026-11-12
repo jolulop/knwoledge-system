@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from app.backend import db, taxonomy, write_lock
-from app.backend.manifests import iso_now, valid_manifests
+from app.backend.manifests import iso_now, scan_manifests
 from app.llm import prompts
 from app.llm.client import LLMClient, ParseError
 from app.workers import enrichment_artifact as art
@@ -67,7 +67,8 @@ def enrich_sources(
 
     run = publication.Run(root, "enrich")
     try:
-        manifests, skipped_invalid = valid_manifests(manifests_dir)
+        inventory = scan_manifests(manifests_dir)
+        manifests = inventory.valid
         if source_ids is not None:
             wanted = set(source_ids)
             manifests = [m for m in manifests if m.get("source_id") in wanted]
@@ -180,7 +181,7 @@ def enrich_sources(
             "skipped_empty": skipped_empty,
             "skipped_no_key": skipped_no_key,
             "skipped_input_changed": input_changed,
-            "manifests_skipped_invalid": len(skipped_invalid),
+            **inventory.report(),
             "errors": len(errors),
             "error_details": errors,
             "enriched_at": now,

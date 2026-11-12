@@ -22,7 +22,7 @@ from typing import Any
 
 from app.backend import db, durable_write, graph, write_lock
 from app.backend.config import get_settings
-from app.backend.manifests import iso_now, load_manifest, valid_manifests
+from app.backend.manifests import OK, iso_now, read_manifest, scan_manifests
 from app.backend.search import RETENTION_DEFAULT_STATUSES
 from app.workers import authors, enrichment_artifact, labels, tag_projection, titles, wiki_render
 
@@ -174,7 +174,8 @@ def generate_wiki(
                                   templates_dir=templates_dir)
             with write_lock.hold(root / "reviews"):
                 run.intent()                              # the end refresh, queued first
-        manifests, skipped_invalid = valid_manifests(manifests_dir)
+        inventory = scan_manifests(manifests_dir)
+        manifests = inventory.valid
         if source_ids is not None:
             wanted = set(source_ids)
             manifests = [m for m in manifests if m.get("source_id") in wanted]
@@ -307,8 +308,15 @@ def generate_wiki(
                 # ADR-0068: record the page (renewing the run's end refresh, which another
                 # publication may have cleared meanwhile) before writing it, and acknowledge it once
                 # written; a page that failed stays queued for the end refresh to retry.
-                entry = run.intent(sources=[source_id]) if run is not None else None
-                outcome = _render_one(load_manifest(manifests_dir, source_id) or manifest)
+                now_read = read_manifest(manifests_dir, source_id)
+                if now_read.state != OK:
+                    # ADR-0074 decision 2: gone or damaged since the scan — no page from the
+                    # scan's copy; reported, and the page stays as it is.
+                    outcome = {"source_id": source_id, "error": f"manifest {now_read.state}",
+                               "reason": f"manifest_{now_read.state}"}
+                else:
+                    entry = run.intent(sources=[source_id]) if run is not None else None
+                    outcome = _render_one(now_read.record)
                 if run is not None and not isinstance(outcome, dict):
                     run.done(entry)
             if isinstance(outcome, dict):
@@ -324,7 +332,7 @@ def generate_wiki(
             "generated": generated,
             "skipped_unchanged": skipped_unchanged,
             "skipped_not_extracted": skipped_not_extracted,
-            "manifests_skipped_invalid": len(skipped_invalid),  # quarantined non-canonical ids (tamper)
+            **inventory.report(),  # identity-quarantined, unreadable, corrupt; coverage
             "errors": len(errors),
             "error_details": errors,
             "generated_at": now,

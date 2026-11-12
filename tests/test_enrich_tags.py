@@ -170,7 +170,7 @@ def _vault(tmp_path):
     (inbox / "notes.md").write_text(BODY, encoding="utf-8")
     intake.scan_inbox(tmp_path, jobs_db=tmp_path / "db" / "jobs.sqlite")
     extract.extract_sources(tmp_path, jobs_db=tmp_path / "db" / "jobs.sqlite")
-    (sid,) = [m["source_id"] for m in manifests.list_manifests(tmp_path / "raw" / "manifests")]
+    (sid,) = [m["source_id"] for m in manifests.scan_manifests(tmp_path / "raw" / "manifests").valid]
     return sid
 
 

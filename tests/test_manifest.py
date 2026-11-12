@@ -30,7 +30,7 @@ def test_manifest_has_required_fields(tmp_path):
 
     summary = intake.scan_inbox(tmp_path, jobs_db=tmp_path / "db" / "jobs.sqlite")
     sid = summary["source_ids"][0]
-    manifest = manifests.load_manifest(tmp_path / "raw" / "manifests", sid)
+    manifest = manifests.get_manifest(tmp_path / "raw" / "manifests", sid)
 
     assert manifest is not None
     assert manifest["source_id"] == sid
@@ -52,7 +52,7 @@ def test_empty_file_is_flagged(tmp_path):
 
     summary = intake.scan_inbox(tmp_path, jobs_db=tmp_path / "db" / "jobs.sqlite")
     sid = summary["source_ids"][0]
-    manifest = manifests.load_manifest(tmp_path / "raw" / "manifests", sid)
+    manifest = manifests.get_manifest(tmp_path / "raw" / "manifests", sid)
 
     assert "empty_file" in manifest["notes"]
     assert any(w["warning"] == "empty_file" for w in summary["warnings"])
@@ -76,13 +76,16 @@ def test_is_source_id():
     assert not manifests.is_source_id(None)
 
 
-def test_load_manifest_invalid_id_returns_none_no_traversal(tmp_path):
+def test_reads_refuse_an_invalid_id_without_traversal(tmp_path):
     md = tmp_path / "raw" / "manifests"
     md.mkdir(parents=True)
     # plant a file one level up that a traversal id would resolve to
     (tmp_path / "raw" / "secret.json").write_text('{"x":1}', encoding="utf-8")
     for bad in _BAD_IDS:
-        assert manifests.load_manifest(md, bad) is None  # read -> None, never escapes
+        with pytest.raises(ValueError):              # names no manifest path: never resolved
+            manifests.get_manifest(md, bad)
+        with pytest.raises(ValueError):
+            manifests.read_manifest(md, bad)
 
 
 def test_write_paths_raise_on_invalid_id(tmp_path):
@@ -111,7 +114,10 @@ def test_valid_manifests_partitions(tmp_path):
     dup = "src_00000000000000cc"                                                      # duplicate across files
     (md / f"{dup}.json").write_text(f'{{"source_id": "{dup}"}}', encoding="utf-8")
     (md / "copy.json").write_text(f'{{"source_id": "{dup}"}}', encoding="utf-8")
-    valid, skipped = manifests.valid_manifests(md)
+    inv = manifests.scan_manifests(md)
+    valid, skipped = inv.valid, inv.skipped
+    assert not inv.damaged                            # identity quarantine is not damage...
+    assert not inv.complete                           # ...but never proves an absence (ADR-0074)
     assert [r["source_id"] for r in valid] == [good]  # only the clean, correctly-named, unique record
     assert sorted(skipped) == ["duplicate_source_id", "duplicate_source_id",
                                "filename_mismatch", "non_canonical_id"]

@@ -37,7 +37,7 @@ from typing import Any
 
 from app.backend import db, durable_write, graph, write_lock
 from app.backend import producer_journal as journal
-from app.backend.manifests import get_provenance, independent_sources, iso_now, valid_manifests
+from app.backend.manifests import get_provenance, independent_sources, iso_now, scan_manifests
 from app.backend.paths import safe_child
 from app.llm import prompts
 from app.llm.client import LLMClient, ParseError
@@ -187,7 +187,7 @@ def _current_fingerprint(gconn, topic_id: str, model_ref: str, *, manifests_dir:
                          claims_dir: Path, markdown_dir: Path) -> str | None:
     """The evidence fingerprint `topic_id` has now, or None when it is no longer an eligible topic
     (ADR-0068: compared under the write lock with the one the model was given)."""
-    prov = {m["source_id"]: get_provenance(m) for m in valid_manifests(manifests_dir)[0]}
+    prov = {m["source_id"]: get_provenance(m) for m in scan_manifests(manifests_dir).valid}
     topic = topic_for(gconn, topic_id, prov, claims_dir=claims_dir, markdown_dir=markdown_dir)
     return _fingerprint(topic, model_ref) if topic is not None else None
 
@@ -896,39 +896,45 @@ def generate_syntheses(
                                                   enrichment_dir=enrichment_dir, now=now)
 
             # 2. Eligible topics from the current active graph.
-            _valid, _skipped_invalid = valid_manifests(manifests_dir)
-            prov = {m["source_id"]: get_provenance(m) for m in _valid}
+            inventory = scan_manifests(manifests_dir)
+            prov = {m["source_id"]: get_provenance(m) for m in inventory.valid}
             # ADR-0066 part 3 slice 3: the independence inputs this run decides with.
             captured = reconciliation.capture(prov)
             topics = eligible_topics(gconn, prov, claims_dir=claims_dir, markdown_dir=markdown_dir)
             eligible_ids = {t["node_id"] for t in topics}
 
             # 3. Retract syntheses whose topic is no longer eligible (audited deprecation, keyless).
-            for syn in graph.nodes_of_type(gconn, "synthesis"):
-                page = synthesis_dir / f"{syn['node_id']}.md"
-                page_fm = parse_frontmatter(page.read_text(encoding="utf-8")) if page.exists() else {}
-                # ADR-0049: a `hidden`/`evidence_hidden` synthesis (page authority OR graph mirror) is a
-                # visibility-suppression state — the generate pass NEVER retracts it (a tombstone would re-expose
-                # it: deprecated_candidate is in default retrieval). Skip-only; the executor/fan-out owns drift.
-                if (syn["status"] in ("deprecated_candidate", *_PRESERVED_GENERATE_STATUSES)
-                        or page_fm.get("status") in _PRESERVED_GENERATE_STATUSES):
-                    continue
-                topic_node = page_fm.get("topic_node")
-                if topic_node not in eligible_ids:
-                    _deprecate_synthesis(gconn, syn_id=syn["node_id"], topic_node=topic_node or "",
-                                         reviews_dir=reviews_dir, synthesis_dir=synthesis_dir,
-                                         enrichment_dir=enrichment_dir,
-                                         reason="topic no longer an eligible synthesis subject", now=now)
-                    retracted += 1
-            # A topic no longer eligible is never regenerated: its record is done once step 3
-            # retracted the synthesis (or it never reached the graph); a hidden one stays blocked.
-            for tid in sorted(set(unfinished) - eligible_ids):
-                if _retired_or_absent(gconn, syn_id=synthesis_id(tid), synthesis_dir=synthesis_dir):
-                    journal.finish(root, _PRODUCER, tid)
-                    journal_verified.append(tid)
-                    del unfinished[tid]
-                else:
-                    blocked.append(tid)
+            # ADR-0074 decision 2: eligibility counts independent sources, so a manifest that is
+            # unreadable, corrupt or identity-quarantined could make a topic look ineligible — on an
+            # incomplete inventory nothing is retracted (and no unfinished record is closed as
+            # ineligible).
+            retraction_blocked = not inventory.complete
+            if not retraction_blocked:
+                for syn in graph.nodes_of_type(gconn, "synthesis"):
+                    page = synthesis_dir / f"{syn['node_id']}.md"
+                    page_fm = parse_frontmatter(page.read_text(encoding="utf-8")) if page.exists() else {}
+                    # ADR-0049: a `hidden`/`evidence_hidden` synthesis (page authority OR graph mirror) is a
+                    # visibility-suppression state — the generate pass NEVER retracts it (a tombstone would re-expose
+                    # it: deprecated_candidate is in default retrieval). Skip-only; the executor/fan-out owns drift.
+                    if (syn["status"] in ("deprecated_candidate", *_PRESERVED_GENERATE_STATUSES)
+                            or page_fm.get("status") in _PRESERVED_GENERATE_STATUSES):
+                        continue
+                    topic_node = page_fm.get("topic_node")
+                    if topic_node not in eligible_ids:
+                        _deprecate_synthesis(gconn, syn_id=syn["node_id"], topic_node=topic_node or "",
+                                             reviews_dir=reviews_dir, synthesis_dir=synthesis_dir,
+                                             enrichment_dir=enrichment_dir,
+                                             reason="topic no longer an eligible synthesis subject", now=now)
+                        retracted += 1
+                # A topic no longer eligible is never regenerated: its record is done once step 3
+                # retracted the synthesis (or it never reached the graph); a hidden one stays blocked.
+                for tid in sorted(set(unfinished) - eligible_ids):
+                    if _retired_or_absent(gconn, syn_id=synthesis_id(tid), synthesis_dir=synthesis_dir):
+                        journal.finish(root, _PRODUCER, tid)
+                        journal_verified.append(tid)
+                        del unfinished[tid]
+                    else:
+                        blocked.append(tid)
             run.publish(intent, refresh=bool(retracted or resolution["promoted"]
                                              or resolution["rejected"]))
 
@@ -1127,7 +1133,7 @@ def generate_syntheses(
             "skipped_changed_during_call": changed_during_call,
             "stale_active": stale_active, "retracted": retracted,
             "promoted": resolution["promoted"], "rejected": resolution["rejected"],
-            "manifests_skipped_invalid": len(_skipped_invalid),
+            **inventory.report(), "retraction_blocked": retraction_blocked,
             "index_rebuilt": bool(pub and pub["index_rebuilt"]),
             "keyword_reindexed": bool(pub and pub["keyword_reindexed"]),
             "publication": publication.summary(pub),

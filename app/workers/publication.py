@@ -40,7 +40,7 @@ from typing import Any
 
 from app.backend import graph, keyword_index, write_lock
 from app.backend import publication_queue as queue
-from app.backend.manifests import is_source_id, iso_now, manifest_path, valid_manifests
+from app.backend.manifests import ManifestInventory, is_source_id, iso_now, scan_manifests
 
 PUBLISHED = "published"
 PENDING = "saved_publication_pending"
@@ -183,12 +183,13 @@ def _open_graph(root: Path) -> tuple[Any, bool]:
     return None, True
 
 
-def _documents(root: Path) -> tuple[set[str], set[str]]:
-    """`(extracted documents, documents with a valid manifest)`."""
+def _documents(root: Path) -> tuple[set[str], set[str], ManifestInventory]:
+    """`(extracted documents, documents with a valid manifest, the inventory)`."""
     from app.workers import wiki
-    manifests, _skipped = valid_manifests(Path(root) / "raw" / "manifests")
+    inventory = scan_manifests(Path(root) / "raw" / "manifests")
+    manifests = inventory.valid
     return ({m["source_id"] for m in manifests if m.get("ingestion_status") in wiki._GENERATED_STATUSES},
-            {m["source_id"] for m in manifests})
+            {m["source_id"] for m in manifests}, inventory)
 
 
 def _scope(entry: dict[str, Any], gconn, wiki_dir: Path, extracted: set[str]) -> dict[str, set[str]]:
@@ -382,17 +383,23 @@ def _render_items(gconn, nids: list[str], *, wiki_dir: Path, root: Path, now: st
             failed[nid] = outcome
 
 
-def _render_sources(root: Path, sids: list[str], *, documents: tuple[set[str], set[str]],
+def _render_sources(root: Path, sids: list[str], *,
+                    documents: tuple[set[str], set[str], ManifestInventory],
                     wiki_dir: Path, templates_dir: Path | None, failed: dict[str, str]) -> list[str]:
     """Render the extracted Source pages and return the rendered ids. A document with a valid manifest
     that is not extracted yet has no page to publish (its extraction publishes it); a missing or
     invalid manifest is never taken as a removal (the system never deletes manifests)."""
     from app.workers import wiki
-    extracted, valid = documents
+    extracted, valid, inventory = documents
     for sid in sids:
         if sid not in valid:
-            failed[sid] = ("manifest_unreadable" if is_source_id(sid) and manifest_path(
-                root / "raw" / "manifests", sid).exists() else "manifest_missing")
+            # ADR-0074 decision 2: a damaged manifest keeps its own state; one quarantined by an
+            # identity check (or absent) is reported as such — none of them is a removal.
+            state = inventory.damaged_ids.get(sid)
+            failed[sid] = f"manifest_{state}" if state else (
+                "manifest_invalid" if inventory.enumeration_error is None and is_source_id(sid)
+                and (Path(root) / "raw" / "manifests" / f"{sid}.json").exists()
+                else "manifest_unavailable" if inventory.enumeration_error else "manifest_missing")
     render = [s for s in sids if s in extracted]
     if not render:
         return []

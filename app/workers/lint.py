@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from app.backend import db, durable_write, graph, taxonomy, write_lock
-from app.backend.manifests import get_provenance, is_source_id, iso_now, valid_manifests
+from app.backend.manifests import get_provenance, is_source_id, iso_now, scan_manifests
 from app.backend.paths import safe_child, safe_under
 from app.backend.policy import load_yaml
 from app.llm.client import ConfigError, parse_chain
@@ -126,9 +126,21 @@ def _check_missing_raw(manifests_dir: Path, root: Path, reviews_dir: Path, *, fi
     """
     findings: list[dict[str, Any]] = []
     raw_root = (root / "raw").resolve()
-    # valid_manifests quarantines non-canonical ids; validate_raw_integrity (run via run_validators)
-    # is the loud signal that surfaces such tampering as a lint failure.
-    for m in valid_manifests(manifests_dir)[0]:
+    # scan_manifests quarantines non-canonical ids; validate_raw_integrity (run via run_validators)
+    # is the loud signal that surfaces such tampering as a lint failure. ADR-0074 decision 2: an
+    # unreadable or corrupt manifest is a finding of its own (its safely rendered path, never its
+    # contents) — and never a "missing raw file", which it can't prove.
+    inventory = scan_manifests(manifests_dir)
+    for shown, state in inventory.damaged:
+        findings.append({"check": f"manifest_{state}", "severity": "high", "subject": shown,
+                         "detail": f"manifest is {state}; recover it with the operator procedure "
+                                   "(ADR-0074 decision 3)"})
+    if inventory.enumeration_error is not None:
+        findings.append({"check": "manifest_inventory_unavailable", "severity": "high",
+                         "subject": "raw/manifests",
+                         "detail": f"raw/manifests could not be listed "
+                                   f"({inventory.enumeration_error})"})
+    for m in inventory.valid:
         sid = m.get("source_id")
         if not sid:
             continue
@@ -399,7 +411,7 @@ def _check_summary_rot(enrichment_dir: Path, markdown_dir: Path, wiki_dir: Path,
     chain_refs = _chain_refs(summary_model_ref)
     # ADR-0066 part 3: Enrich's freshness includes its file title and PDF hint (from the manifest
     # and the extraction log); a source without a readable manifest falls back to the text alone.
-    by_sid = {m["source_id"]: m for m in valid_manifests(manifests_dir)[0]} if manifests_dir else {}
+    by_sid = {m["source_id"]: m for m in scan_manifests(manifests_dir).valid} if manifests_dir else {}
     logs_dir = markdown_dir.parent / "extraction_logs"
     if enrichment_dir.exists() and chain_refs:
         for apath in sorted(enrichment_dir.glob("*.json")):
@@ -644,7 +656,10 @@ def _check_synthesis_rot(gconn, manifests_dir: Path, claims_dir: Path, markdown_
     chain_refs = _chain_refs(model_ref)
     if not chain_refs:
         return findings, degraded
-    prov = {m["source_id"]: get_provenance(m) for m in valid_manifests(manifests_dir)[0]}
+    inventory = scan_manifests(manifests_dir)
+    prov = {m["source_id"]: get_provenance(m) for m in inventory.valid}
+    if not inventory.complete:
+        degraded = True              # ADR-0074: eligibility may be wrong while a manifest is damaged
     for topic in synthesis.eligible_topics(
             gconn, prov, claims_dir=claims_dir, markdown_dir=markdown_dir):
         tid = topic["node_id"]

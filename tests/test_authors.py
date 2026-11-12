@@ -47,7 +47,7 @@ def vault(tmp_path):
     intake.scan_inbox(tmp_path, jobs_db=tmp_path / "db" / "jobs.sqlite")
     extract.extract_sources(tmp_path, jobs_db=tmp_path / "db" / "jobs.sqlite")
     sids = {m["original_filename"]: m["source_id"]
-            for m in manifests.list_manifests(tmp_path / "raw" / "manifests")}
+            for m in manifests.scan_manifests(tmp_path / "raw" / "manifests").valid}
     return tmp_path, sids
 
 
@@ -57,7 +57,7 @@ def _confirm(root, sid, authors_=(), publisher=None, title="A Title"):
 
 
 def _set_status(root, sid, status):
-    m = manifests.load_manifest(root / "raw" / "manifests", sid)
+    m = manifests.get_manifest(root / "raw" / "manifests", sid)
     m["status"] = status
     manifests.save_manifest(root / "raw" / "manifests", m)
 
@@ -254,7 +254,7 @@ def test_source_page_links_follow_ticks_and_visibility(vault):
     _publish(root)
     assert _page(root, "ada-lovelace").exists()
     assert "[[Authors/ada-lovelace|" in (root / "wiki" / "Sources" / f"{two}.md").read_text()
-    assert manifests.load_manifest(root / "raw" / "manifests", two)["provenance"]["authors"] == \
+    assert manifests.get_manifest(root / "raw" / "manifests", two)["provenance"]["authors"] == \
         _a("Ada Lovelace")                                          # the saved tick never changed
 
 
@@ -456,7 +456,7 @@ def test_malformed_provenance_in_valid_json_stops_the_step(vault):
     _confirm(root, sids["one.md"], _a("Ada Lovelace"))
     _publish(root)
     before = _page(root, "ada-lovelace").read_text(encoding="utf-8")
-    m = manifests.load_manifest(root / "raw" / "manifests", sids["one.md"])
+    m = manifests.get_manifest(root / "raw" / "manifests", sids["one.md"])
     m["provenance"]["authors"] = "Ada Lovelace"                     # a string, not a list
     manifests.save_manifest(root / "raw" / "manifests", m)
     with pytest.raises(authors.InventoryError):

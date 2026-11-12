@@ -11,7 +11,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import stat
+from collections import Counter
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -66,60 +70,255 @@ def manifest_path(manifests_dir: Path, source_id: str) -> Path:
     return Path(manifests_dir) / f"{source_id}.json"
 
 
-def load_manifest(manifests_dir: Path, source_id: str) -> dict[str, Any] | None:
-    # Read path is lenient: an invalid/unknown id is treated as "not found" (None), never a traversal.
+# --------------------------------------------------------------------------- typed read states
+# ADR-0074 decision 2. A manifest read has exactly one of four states; only `absent` is a verified
+# "no manifest here", so only `absent` may ever lead to creating one, and a damaged manifest is never
+# folded into "missing" or dropped from an inventory without being counted.
+ABSENT = "absent"          # verified: no entry at raw/manifests/<source_id>.json
+UNREADABLE = "unreadable"  # an entry exists (or can't be confirmed) but can't be read; maybe transient
+CORRUPT = "corrupt"        # read, but not a manifest object (bad UTF-8, bad JSON, not an object)
+OK = "ok"                  # a parsed object — NOT yet a validated manifest (identity checks follow)
+DAMAGED = (UNREADABLE, CORRUPT)
+
+# Identity quarantine reasons of `scan_manifests` (categorical; never the malformed text itself).
+IDENTITY_REASONS = ("non_canonical_id", "filename_mismatch", "duplicate_source_id")
+
+_O_READ = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+_UNSAFE = re.compile(r"[^\x21-\x7e]")
+
+
+@dataclass(frozen=True)
+class ManifestRead:
+    """One manifest read: `state`, the parsed `record` (only when `ok`), and for a damaged read a
+    categorical `error` (an exception class name or a fixed tag — never file contents)."""
+    state: str
+    path: Path
+    record: dict[str, Any] | None = None
+    error: str | None = None
+
+    @property
+    def damaged(self) -> bool:
+        return self.state in DAMAGED
+
+
+class ManifestUnavailable(Exception):
+    """A manifest exists but is unreadable or corrupt (or, from an inventory, quarantined by identity
+    validation): nothing may treat it as absent, recreate it or
+    overwrite it (ADR-0074 decisions 2–3). The message is categorical."""
+
+    def __init__(self, source_id: str, state: str) -> None:
+        shown = f"quarantined ({state})" if state in IDENTITY_REASONS else state
+        super().__init__(f"manifest {source_id} is {shown}; it is left as it is (no write, no "
+                         "recreation) until an operator recovers it")
+        self.source_id = source_id
+        self.state = state
+
+
+class IncompleteManifestInventory(Exception):
+    """An action whose correctness depends on proving a document absent was refused because the
+    manifest inventory is incomplete (a damaged manifest, or the directory could not be listed)."""
+
+
+def safe_display(name: str, *, limit: int = 120) -> str:
+    """`raw/manifests/<name>` with every non-printable or non-ASCII character escaped and the name
+    truncated — a file name is untrusted input, so reports render it, never echo it raw."""
+    shown = _UNSAFE.sub(lambda m: f"\\x{ord(m.group()):02x}" if ord(m.group()) < 256
+                        else f"\\u{ord(m.group()):04x}", name)
+    if len(shown) > limit:
+        shown = shown[:limit] + "…"
+    return f"raw/manifests/{shown}"
+
+
+def _lexists(path: Path) -> bool | None:
+    """True / False when an entry's existence is known, None when it can't be determined."""
     try:
-        path = manifest_path(manifests_dir, source_id)
-    except ValueError:
+        os.lstat(path)
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
         return None
-    if not path.exists():
-        return None
+
+
+def read_manifest_file(path: Path) -> ManifestRead:
+    """The typed read of one manifest file (ADR-0074 decision 2). Never raises for the file's state."""
+    path = Path(path)
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        fd = os.open(path, _O_READ)
+    except FileNotFoundError:
+        here = _lexists(path)
+        if here is not False:                            # a dangling symlink, or can't confirm
+            return ManifestRead(UNREADABLE, path, error="dangling_symlink" if here else "unknown")
+        parent = _lexists(path.parent)
+        if parent is None or (parent and not path.parent.is_dir()):
+            return ManifestRead(UNREADABLE, path, error="directory_unavailable")
+        return ManifestRead(ABSENT, path)
+    except OSError as exc:
+        return ManifestRead(UNREADABLE, path, error=type(exc).__name__)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return ManifestRead(UNREADABLE, path, error="not_a_regular_file")
+        chunks = []
+        while chunk := os.read(fd, _CHUNK):
+            chunks.append(chunk)
+    except OSError as exc:
+        return ManifestRead(UNREADABLE, path, error=type(exc).__name__)
+    finally:
+        os.close(fd)
+    try:
+        record = json.loads(b"".join(chunks).decode("utf-8"))
+    except UnicodeDecodeError:
+        return ManifestRead(CORRUPT, path, error="invalid_utf8")
+    except (ValueError, RecursionError):
+        return ManifestRead(CORRUPT, path, error="invalid_json")
+    if not isinstance(record, dict):
+        return ManifestRead(CORRUPT, path, error="not_an_object")
+    return ManifestRead(OK, path, record=record)
+
+
+def read_manifest(manifests_dir: Path, source_id: str) -> ManifestRead:
+    """The typed read of `raw/manifests/<source_id>.json`. A non-canonical id raises ValueError (it
+    names no manifest path). An `ok` record whose own `source_id` differs from the file's is
+    reported as `corrupt` (`id_mismatch`): it is not this document's manifest."""
+    path = manifest_path(manifests_dir, source_id)
+    read = read_manifest_file(path)
+    if read.state == OK and read.record.get("source_id") != source_id:
+        return ManifestRead(CORRUPT, path, error="id_mismatch")
+    return read
+
+
+def get_manifest(manifests_dir: Path, source_id: str) -> dict[str, Any] | None:
+    """The record when it is usable, None **only** for a verified absence; a damaged manifest raises
+    :class:`ManifestUnavailable` (never folded into None). A non-canonical id raises ValueError."""
+    read = read_manifest(manifests_dir, source_id)
+    if read.state == ABSENT:
+        return None
+    if read.state != OK:
+        raise ManifestUnavailable(source_id, read.state)
+    return read.record
+
+
+@dataclass
+class ManifestInventory:
+    """The manifest inventory (ADR-0074 decision 2): the identity-validated records, every skipped
+    file by categorical reason, and whether the inventory is complete enough to prove an absence.
+
+    - `valid` — canonical records (canonical id, filename stem equals it, no duplicate);
+    - `skipped` — one categorical reason per skipped file: the identity reasons plus `unreadable`
+      and `corrupt` (never the file's name or contents);
+    - `damaged` — `(safe display path, state)` per unreadable / corrupt file, for operator reports;
+    - `damaged_ids` — `{source_id: state}` for damaged files named like a canonical id;
+    - `quarantined_ids` — `{source_id: identity reason}` for every canonical id an
+      identity-quarantined file names (its filename stem, or the `source_id` its record claims):
+      that id's authority is ambiguous, so it is neither usable nor provably absent;
+    - `enumeration_error` — set when `raw/manifests/` itself could not be listed.
+
+    Identity quarantine keeps its reason names in `skipped` and in the report, but a quarantined
+    file is excluded authority like a damaged one: the inventory is not complete while one exists.
+    """
+    valid: list[dict[str, Any]] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)
+    damaged: list[tuple[str, str]] = field(default_factory=list)
+    damaged_ids: dict[str, str] = field(default_factory=dict)
+    quarantined_ids: dict[str, str] = field(default_factory=dict)
+    enumeration_error: str | None = None
+
+    @property
+    def quarantined(self) -> int:
+        """How many files identity validation excluded."""
+        return sum(1 for r in self.skipped if r in IDENTITY_REASONS)
+
+    @property
+    def complete(self) -> bool:
+        """Whether the inventory can prove a document absent: listed, nothing damaged and nothing
+        identity-quarantined (excluded, ambiguous authority never establishes an absence)."""
+        return self.enumeration_error is None and not self.damaged and not self.quarantined
+
+    @property
+    def coverage(self) -> str:
+        if self.enumeration_error is not None:
+            return "unavailable"
+        return "complete" if self.complete else "incomplete"
+
+    @property
+    def valid_ids(self) -> set[str]:
+        return {m["source_id"] for m in self.valid}
+
+    def excluded_reason(self, source_id: str) -> str | None:
+        """Why `source_id`'s authority is excluded by this inventory (`manifest_<state>` for a
+        damaged file, `manifest_<identity reason>` for a quarantined one), or None."""
+        if source_id in self.damaged_ids:
+            return f"manifest_{self.damaged_ids[source_id]}"
+        if source_id in self.quarantined_ids:
+            return f"manifest_{self.quarantined_ids[source_id]}"
         return None
 
+    def report(self) -> dict[str, Any]:
+        """The job-result fields every runtime worker reports (counts only)."""
+        counts = Counter(self.skipped)
+        return {"manifests_skipped_invalid": sum(counts[r] for r in IDENTITY_REASONS),
+                "manifests_unreadable": counts[UNREADABLE], "manifests_corrupt": counts[CORRUPT],
+                "manifest_coverage": self.coverage}
 
-def list_manifests(manifests_dir: Path) -> list[dict[str, Any]]:
-    """Every parseable manifest record, unfiltered. Validators use this + fail hard on a bad id;
-    runtime workers should use `valid_manifests` so a tampered record can't drive a path."""
+    def require_complete(self, action: str) -> None:
+        """Refuse an absence-dependent `action` on an incomplete inventory."""
+        if self.enumeration_error is not None:
+            raise IncompleteManifestInventory(
+                f"raw/manifests could not be listed ({self.enumeration_error}); {action} needs a "
+                "complete manifest inventory and was not done")
+        if self.damaged:
+            raise IncompleteManifestInventory(
+                f"{len(self.damaged)} manifest(s) unreadable or corrupt; {action} needs a complete "
+                "manifest inventory and was not done")
+        if self.quarantined:
+            raise IncompleteManifestInventory(
+                f"{self.quarantined} manifest(s) quarantined by identity validation; {action} needs "
+                "a complete manifest inventory and was not done")
+
+
+def manifest_files(manifests_dir: Path) -> tuple[list[Path], str | None]:
+    """`(the *.json entries of raw/manifests, sorted; enumeration error or None)`. A missing directory
+    is a verified empty inventory; a directory that cannot be listed (permission, not a directory,
+    a dangling link) is an error — never an empty inventory."""
     manifests_dir = Path(manifests_dir)
-    if not manifests_dir.exists():
-        return []
-    out: list[dict[str, Any]] = []
-    for path in sorted(manifests_dir.glob("*.json")):
-        try:
-            out.append(json.loads(path.read_text(encoding="utf-8")))
-        except (OSError, json.JSONDecodeError):
-            continue
-    return out
+    try:
+        names = os.listdir(manifests_dir)
+    except FileNotFoundError:
+        here = _lexists(manifests_dir)
+        if here is False:
+            return [], None
+        return [], "dangling_symlink" if here else "unknown"
+    except OSError as exc:
+        return [], type(exc).__name__
+    return [manifests_dir / n for n in sorted(names) if n.endswith(".json")], None
 
 
-def valid_manifests(manifests_dir: Path) -> tuple[list[dict[str, Any]], list[str]]:
-    """Partition manifests into (canonical records, skipped reasons) — the runtime-worker entry point.
+def scan_manifests(manifests_dir: Path) -> ManifestInventory:
+    """Read every manifest and partition it — the runtime-worker entry point.
 
-    A manifest's `source_id` flows into filesystem paths (Source pages, normalized files) and graph node
-    ids, and manifest JSON is untrusted local input (AGENTS.md). A record is **valid** only when all hold:
-    the `source_id` is canonical `src_<16 hex>`, the **filename stem equals it** (ADR-0007:
-    `raw/manifests/<source_id>.json`), and the id has **not already been seen**. This blocks a tampered /
-    misnamed / duplicate manifest from driving a worker for some id and clobbering that id's artifacts.
-
-    `skipped` carries **categorical reasons only** — `"non_canonical_id"` | `"filename_mismatch"` |
-    `"duplicate_source_id"` — never the malformed id text, so callers surface counts without echoing
-    attacker-controlled input. Validators stay on `list_manifests` (all records) + fail hard."""
-    manifests_dir = Path(manifests_dir)
-    valid: list[dict[str, Any]] = []
-    skipped: list[str] = []
-    if not manifests_dir.exists():
-        return valid, skipped
+    A manifest's `source_id` flows into filesystem paths (Source pages, normalized files) and graph
+    node ids, and manifest JSON is untrusted local input (AGENTS.md). A record is **valid** only when
+    all hold: the `source_id` is canonical `src_<16 hex>`, the **filename stem equals it** (ADR-0007:
+    `raw/manifests/<source_id>.json`), and the id has **not already been seen**. This blocks a
+    tampered / misnamed / duplicate manifest from driving a worker for some id and clobbering that
+    id's artifacts. Unreadable and corrupt files are counted, never dropped (ADR-0074 decision 2)."""
+    inv = ManifestInventory()
+    paths, inv.enumeration_error = manifest_files(manifests_dir)
     records: list[tuple[Path, dict[str, Any]]] = []
-    for path in sorted(manifests_dir.glob("*.json")):
-        try:
-            records.append((path, json.loads(path.read_text(encoding="utf-8"))))
-        except (OSError, json.JSONDecodeError):
+    for path in paths:
+        read = read_manifest_file(path)
+        if read.state == OK:
+            records.append((path, read.record))
+        elif read.state == ABSENT:                       # removed between the listing and the read
             continue
-    # A canonical content source_id appearing in 2+ files is ambiguous authority — quarantine every copy
-    # (order-independent), even the correctly-named one: with a tampered duplicate present, none is trusted.
+        else:
+            inv.skipped.append(read.state)
+            inv.damaged.append((safe_display(path.name), read.state))
+            if is_source_id(path.stem):
+                inv.damaged_ids[path.stem] = read.state
+    # A canonical content source_id appearing in 2+ files is ambiguous authority — quarantine every
+    # copy (order-independent), even the correctly-named one: with a tampered duplicate present, none
+    # is trusted.
     id_counts: dict[str, int] = {}
     for _p, rec in records:
         sid = rec.get("source_id")
@@ -128,14 +327,69 @@ def valid_manifests(manifests_dir: Path) -> tuple[list[dict[str, Any]], list[str
     for path, rec in records:
         sid = rec.get("source_id")
         if not is_source_id(sid):
-            skipped.append("non_canonical_id")
+            reason = "non_canonical_id"
         elif id_counts[sid] > 1:
-            skipped.append("duplicate_source_id")
+            reason = "duplicate_source_id"
         elif path.stem != sid:
-            skipped.append("filename_mismatch")
+            reason = "filename_mismatch"
         else:
-            valid.append(rec)
-    return valid, skipped
+            inv.valid.append(rec)
+            continue
+        inv.skipped.append(reason)
+        for named in (path.stem, sid):                  # every canonical id the file names
+            if is_source_id(named):
+                inv.quarantined_ids.setdefault(named, reason)
+    return inv
+
+
+def lookup(manifests_dir: Path, source_id: str,
+           inventory: ManifestInventory | None = None) -> dict[str, Any] | None:
+    """One document's usable manifest **as the inventory sees it** — the lookup every per-document
+    API surface shares, so `/sources/{id}`, `/raw/{id}`, `/sources` and search agree:
+
+    - the identity-validated record when `source_id` is in the inventory's `valid` set;
+    - :class:`ManifestUnavailable` when its file is damaged or identity validation quarantined it
+      (a duplicate elsewhere included);
+    - :class:`IncompleteManifestInventory` when `raw/manifests` can't be listed — an enumeration
+      failure never establishes an absence, nor rules out a duplicate;
+    - None only for a verified absence.
+
+    Damage or quarantine of *other* documents never blocks this one. A non-canonical id raises
+    ValueError (it names no manifest)."""
+    if not is_source_id(source_id):
+        raise ValueError(f"not a canonical source id: {safe_display(str(source_id))}")
+    inv = inventory if inventory is not None else scan_manifests(manifests_dir)
+    if inv.enumeration_error is not None:
+        raise IncompleteManifestInventory(
+            f"raw/manifests could not be listed ({inv.enumeration_error}); source {source_id} "
+            "can't be confirmed present or absent")
+    record = next((m for m in inv.valid if m.get("source_id") == source_id), None)
+    if record is not None:
+        return record
+    if source_id in inv.damaged_ids:
+        raise ManifestUnavailable(source_id, inv.damaged_ids[source_id])
+    if source_id in inv.quarantined_ids:
+        raise ManifestUnavailable(source_id, inv.quarantined_ids[source_id])
+    return None
+
+
+def recheck(manifests_dir: Path, source_id: str, inventory: ManifestInventory) -> ManifestRead:
+    """Re-read one document's manifest under the write lock, before a mutation or a recovery
+    acts on it: the fresh typed read, except that an id `inventory` quarantined stays excluded
+    (`error` names the identity reason; the single file can't show a duplicate elsewhere). Callers
+    act only on `ok`, and treat `absent` as an absence only when that is their branch's premise."""
+    read = read_manifest(manifests_dir, source_id)
+    if source_id in inventory.quarantined_ids:
+        return ManifestRead(CORRUPT, read.path, error=inventory.quarantined_ids[source_id])
+    return read
+
+
+def read_reason(read: ManifestRead) -> str:
+    """The categorical error reason for a non-`ok` read: `manifest_<identity reason>` for a
+    quarantined id (see :func:`recheck`), else `manifest_<state>`."""
+    if read.error in IDENTITY_REASONS:
+        return f"manifest_{read.error}"
+    return f"manifest_{read.state}"
 
 
 def normalized_paths(source_id: str) -> dict[str, str]:
@@ -368,7 +622,7 @@ def set_provenance(manifests_dir: Path, source_id: str, **fields: Any) -> dict[s
     if unknown:
         raise ValueError(f"unknown provenance field(s) {sorted(unknown)}; allowed: {PROVENANCE_FIELDS}")
     checked = {k: (None if v is None else _check_field(k, v)) for k, v in fields.items()}
-    manifest = load_manifest(manifests_dir, source_id)
+    manifest = get_manifest(manifests_dir, source_id)    # damaged: raises, never overwritten
     if manifest is None:
         return None
     prov = dict(manifest.get("provenance") or {})
@@ -420,7 +674,7 @@ def set_status(manifests_dir: Path, source_id: str, status: str) -> dict[str, An
     _require_source_id(source_id)  # write path: a non-canonical id raises, never returns None
     if status not in SOURCE_STATUSES:
         raise ValueError(f"unknown source status {status!r}; allowed: {list(SOURCE_STATUSES)}")
-    manifest = load_manifest(manifests_dir, source_id)
+    manifest = get_manifest(manifests_dir, source_id)    # damaged: raises, never overwritten
     if manifest is None:
         return None
     manifest["status"] = status

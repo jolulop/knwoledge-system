@@ -539,7 +539,7 @@ def test_generate_wiki_re_records_its_refresh_after_another_publication_cleared_
                                                                                    monkeypatch):
     _ingest(tmp_path, {"a.md": "alpha", "b.md": "bravo"})
     _extract_sources(tmp_path)
-    real_valid = wiki.valid_manifests
+    real_scan = wiki.scan_manifests
 
     class _Between(list):
         """Another screen's publication runs between the two documents (outside the lock)."""
@@ -552,8 +552,11 @@ def test_generate_wiki_re_records_its_refresh_after_another_publication_cleared_
                     assert publication_queue.load(tmp_path) == []      # the run's marker is gone
                 yield m
 
-    monkeypatch.setattr(wiki, "valid_manifests",
-                        lambda d: (lambda ms, bad: (_Between(ms), bad))(*real_valid(d)))
+    def scan(d):
+        inv = real_scan(d)
+        inv.valid = _Between(inv.valid)
+        return inv
+    monkeypatch.setattr(wiki, "scan_manifests", scan)
     # The second page is written, then the process dies before acknowledging it.
     real_done = publication.Run.done
     calls = []

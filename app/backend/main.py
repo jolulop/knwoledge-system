@@ -176,6 +176,39 @@ async def _producer_journal_corrupt(request: Request, exc: producer_journal.Jour
     return JSONResponse(status_code=503, content={"detail": detail})
 
 
+@app.exception_handler(manifests.ManifestUnavailable)
+async def _manifest_unavailable(request: Request, exc: manifests.ManifestUnavailable) -> Any:
+    """A damaged (unreadable or corrupt) manifest is never written, recreated or taken as missing
+    (ADR-0074 decision 2): a visible 409 naming its state, never its contents."""
+    detail = {"reason": f"manifest_{exc.state}", "source_id": exc.source_id, "detail": str(exc)}
+    if request.url.path.startswith("/ui/"):
+        return HTMLResponse(review_html.render_error(409, str(exc)), status_code=409)
+    return JSONResponse(status_code=409, content={"detail": detail})
+
+
+@app.exception_handler(manifests.IncompleteManifestInventory)
+async def _manifest_inventory_incomplete(request: Request,
+                                         exc: manifests.IncompleteManifestInventory) -> Any:
+    """An action that must prove a document absent was refused on an incomplete inventory."""
+    detail = {"reason": "manifest_inventory_incomplete", "detail": str(exc)}
+    if request.url.path.startswith("/ui/"):
+        return HTMLResponse(review_html.render_error(409, str(exc)), status_code=409)
+    return JSONResponse(status_code=409, content={"detail": detail})
+
+
+def _manifest_or_404(source_id: str, *, detail: str = "source not found") -> dict[str, Any]:
+    """The usable manifest of `source_id` through the shared inventory lookup
+    (:func:`manifests.lookup`): 404 only for a non-canonical id or a verified absence; a damaged or
+    identity-quarantined manifest raises :class:`manifests.ManifestUnavailable` (409), and an
+    inventory that can't be listed :class:`manifests.IncompleteManifestInventory` (409)."""
+    if not manifests.is_source_id(source_id):
+        raise HTTPException(status_code=404, detail=f"{detail}: {source_id}")
+    manifest = manifests.lookup(settings.manifests_dir, source_id)
+    if manifest is None:
+        raise HTTPException(status_code=404, detail=f"{detail}: {source_id}")
+    return manifest
+
+
 @app.exception_handler(graph.GraphIndexMissing)
 async def _graph_index_missing(request: Request, exc: graph.GraphIndexMissing) -> Any:
     """A graph view refuses rather than run an unbounded traversal (ADR-0068 decision 7)."""
@@ -284,16 +317,13 @@ def health() -> dict[str, Any]:
 def list_sources() -> dict[str, Any]:
     # Quarantine tampered/misnamed/duplicate manifests like the workers do; expose only counts for
     # skipped records (never their filenames/ids) so the API can't echo attacker-controlled input.
-    sources, skipped = manifests.valid_manifests(settings.manifests_dir)
-    return {"count": len(sources), "manifests_skipped_invalid": len(skipped), "sources": sources}
+    inventory = manifests.scan_manifests(settings.manifests_dir)
+    return {"count": len(inventory.valid), **inventory.report(), "sources": inventory.valid}
 
 
 @app.get("/sources/{source_id}", response_model=Source)
 def get_source(source_id: str) -> dict[str, Any]:
-    manifest = manifests.load_manifest(settings.manifests_dir, source_id)
-    if manifest is None:
-        raise HTTPException(status_code=404, detail=f"source not found: {source_id}")
-    return manifest
+    return _manifest_or_404(source_id)
 
 
 @app.get("/jobs", response_model=JobsResponse)
@@ -417,9 +447,7 @@ def _require_extracted(source_id: str) -> None:
     not-yet-extracted source never serves artifacts, and that the served evidence is
     the state the manifest claims (consistency after a preserved-last-good failure).
     """
-    manifest = manifests.load_manifest(settings.manifests_dir, source_id)
-    if manifest is None:
-        raise HTTPException(status_code=404, detail=f"source not found: {source_id}")
+    manifest = _manifest_or_404(source_id)
     if manifest.get("ingestion_status") not in _EXTRACTED_STATUSES:
         raise HTTPException(status_code=404, detail=f"source not extracted: {source_id}")
 
@@ -2087,9 +2115,10 @@ def get_raw_original(source_id: str) -> FileResponse:
     """Serve a source's ORIGINAL raw bytes for operator review (UAT round).
 
     Read-only view seam for the review flow ("view original"). Trust posture:
-    - The source resolves through `valid_manifests` — the SAME quarantine the rest of the
-      system uses (canonical id, filename↔id match, duplicate rejection); a quarantined
-      manifest is a plain 404.
+    - The source resolves through the shared inventory lookup (`manifests.lookup`) — the SAME
+      quarantine the rest of the system uses (canonical id, filename↔id match, duplicate
+      rejection): a quarantined, unreadable or corrupt manifest is a 409, and so is an inventory
+      that can't be listed; only a verified absence is a 404 (ADR-0074).
     - The path comes ONLY from the manifest's `relative_raw_path`, containment-checked under
       `raw/` (`safe_under`, ADR-0009) — a tampered/escaping path is a 404, never a traversal.
     - Only passive media renders inline (`_RAW_INLINE_TYPES`; markdown re-served as
@@ -2100,10 +2129,7 @@ def get_raw_original(source_id: str) -> FileResponse:
       navigation, and this is a loopback-only governance surface — a human deciding about a
       hidden/archived source must be able to inspect it. A physically absent file is a 404.
     """
-    valid, _quarantined = manifests.valid_manifests(settings.manifests_dir)
-    manifest = next((m for m in valid if m.get("source_id") == source_id), None)
-    if manifest is None:
-        raise HTTPException(status_code=404, detail=f"unknown source: {source_id}")
+    manifest = _manifest_or_404(source_id, detail="unknown source")
     rel = manifest.get("relative_raw_path")
     if not isinstance(rel, str) or not rel:
         raise HTTPException(status_code=404, detail="source has no catalogued raw path")
@@ -3154,7 +3180,8 @@ def _run_search(
                 vector_reason = reason
 
         result = search.run_search(
-            q=q, mode=mode, keyword_conn=keyword_conn, graph_conn=graph_conn, policy=policy,
+            q=q, mode=mode, manifests_dir=settings.manifests_dir,
+            keyword_conn=keyword_conn, graph_conn=graph_conn, policy=policy,
             source_id=source_id, page_type=page_type, node_type=node_type, item_types=item_types,
             language=language,
             source_statuses=source_statuses, node_statuses=node_statuses, edge_statuses=edge_statuses,
@@ -3408,7 +3435,7 @@ def run_eval_endpoint(req: EvalRunRequest) -> dict[str, Any]:
     if req.limit is not None and req.limit < 0:
         raise HTTPException(status_code=400, detail="limit must be >= 0")
     cases = eval_answers.load_corpus(corpus_path.read_text(encoding="utf-8"))
-    known = {m["source_id"] for m in manifests.valid_manifests(settings.manifests_dir)[0]
+    known = {m["source_id"] for m in manifests.scan_manifests(settings.manifests_dir).valid
              if isinstance(m.get("source_id"), str)}
     requested = req.limit if req.limit is not None else settings.eval_max_questions_default
     limit = max(0, min(requested, settings.eval_max_questions_hard_cap))

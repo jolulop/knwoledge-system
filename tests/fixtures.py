@@ -159,3 +159,16 @@ def legacy_item_slug(root: Path, node_id: str, slug: str) -> None:
     finally:
         gconn.close()
     publication.republish_all(root)
+
+
+def manifest_stub(root: Path, source_id: str) -> Path:
+    """The minimal manifest a searchable document has in a real vault (`raw/manifests/<id>.json`),
+    unless one exists. Retrieval admits evidence only from identity-validated manifests (ADR-0074
+    decision 2), so a retrieval fixture that writes chunks writes this too. Returns the dir."""
+    import json
+    md = Path(root) / "raw" / "manifests"
+    md.mkdir(parents=True, exist_ok=True)
+    path = md / f"{source_id}.json"
+    if not path.exists():
+        path.write_text(json.dumps({"source_id": source_id}), encoding="utf-8")
+    return md

@@ -28,9 +28,10 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from pathlib import Path
 from typing import Any, Callable
 
-from app.backend import graph, graph_read
+from app.backend import graph, graph_read, manifests
 from app.backend.policy import RetrievalPolicy
 
 # Injected by the endpoint for the vector channel: returns LanceDB rows (citation fields +
@@ -532,10 +533,41 @@ def graph_group(
 # --------------------------------------------------------------------------- orchestrator
 
 
+class _ManifestGate:
+    """ADR-0074 decision 2 — fail closed before evidence reaches the model: a document contributes
+    evidence and Source navigation hits only when its manifest is **usable authority** — readable,
+    well-formed, and identity-validated by the manifest inventory (canonical id, filename stem
+    equal to it, no duplicate claiming it). Unreadable, corrupt, quarantined and absent manifests
+    (a removed manifests folder included) all exclude the document. The inventory is scanned once
+    per search, only when a hit needs it. This is the unavailable-authority exclusion only;
+    visibility suppression of valid manifests (hide / archive status filtering) is change 7a."""
+
+    def __init__(self, manifests_dir: Path) -> None:
+        self.manifests_dir = Path(manifests_dir)
+        self.blocked: set[str] = set()
+        self._usable: set[str] | None = None
+
+    def allows(self, source_id: Any) -> bool:
+        sid = str(source_id or "")
+        if self._usable is None:
+            self._usable = manifests.scan_manifests(self.manifests_dir).valid_ids
+        if sid in self._usable:
+            return True
+        self.blocked.add(sid)
+        return False
+
+    def evidence(self, hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [h for h in hits if self.allows(h.get("source_id"))]
+
+    def navigation(self, hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [h for h in hits if h.get("page_type") != "source" or self.allows(h.get("node_id"))]
+
+
 def run_search(
     *,
     q: str,
     mode: str,
+    manifests_dir: Path,
     keyword_conn: sqlite3.Connection | None,
     graph_conn: sqlite3.Connection | None,
     policy: RetrievalPolicy,
@@ -553,7 +585,9 @@ def run_search(
     vector_search: VectorSearchFn | None = None,
     vector_unavailable_reason: str | None = None,
 ) -> dict[str, Any]:
-    """Run the routed channels and assemble the grouped ``/search`` response."""
+    """Run the routed channels and assemble the grouped ``/search`` response. `manifests_dir` is
+    required: every evidence and Source navigation hit passes the damaged-manifest gate."""
+    gate = _ManifestGate(manifests_dir)
     modes, shape = route(mode, q, policy)
     prefusion = policy.cap("per_channel_prefusion_limit")
     ev_limit = evidence_limit or policy.cap("max_evidence_hits")
@@ -577,15 +611,15 @@ def run_search(
     nav_hits: list[dict[str, Any]] = []
     if keyword_conn is not None:
         if "keyword" in modes and evidence_match is not None:
-            channel_hits["keyword"] = search_evidence(
+            channel_hits["keyword"] = gate.evidence(search_evidence(
                 keyword_conn, evidence_match, source_id=source_id, source_statuses=source_statuses,
                 prefusion_limit=prefusion, limit=prefusion,
-            )
+            ))
         if ("navigation" in modes or "graph" in modes) and nav_match is not None:
-            nav_hits = search_navigation(
+            nav_hits = gate.navigation(search_navigation(
                 keyword_conn, nav_match, page_type=page_type, node_statuses=node_statuses,
                 language=language, item_types=item_types, prefusion_limit=prefusion, limit=nav_limit,
-            )
+            ))
             if "navigation" in modes:
                 navigation = nav_hits
 
@@ -614,10 +648,10 @@ def run_search(
     )
     if want_vector and vector_search is not None:
         try:
-            channel_hits["vector"] = search_vector(
+            channel_hits["vector"] = gate.evidence(search_vector(
                 vector_search, keyword_conn, source_id=source_id, source_statuses=source_statuses,
                 prefusion_limit=prefusion, limit=prefusion,
-            )
+            ))
         except VectorUnavailable as exc:  # backend failed: explicit -> 503; auto -> degrade
             if mode != "auto":
                 raise VectorChannelError(str(exc)) from exc
@@ -660,6 +694,11 @@ def run_search(
                   if ("navigation" in modes or "graph" in modes)
                   else "item_type facet: ")
         notes.append(f"{prefix}{boost_clause}; off-type evidence retained")
+
+    if gate.blocked:
+        notes.append(f"{len(gate.blocked)} document(s) excluded: manifest unreadable, corrupt, "
+                     "quarantined or missing (ADR-0074) — recover it to make the document "
+                     "searchable again")
 
     counts = {
         "evidence": len(evidence),

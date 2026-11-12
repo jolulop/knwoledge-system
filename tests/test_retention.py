@@ -79,11 +79,11 @@ def _approve_archive(tmp_path, sid, rid="rev_arch"):
 def test_set_get_status_roundtrip(tmp_path):
     _write_manifest(tmp_path, "src_00000000000000ab")
     md = tmp_path / "raw" / "manifests"
-    assert manifests.get_status(manifests.load_manifest(md, "src_00000000000000ab")) == "active"  # default
+    assert manifests.get_status(manifests.get_manifest(md, "src_00000000000000ab")) == "active"  # default
     manifests.set_status(md, "src_00000000000000ab", "archive_candidate")
-    assert manifests.get_status(manifests.load_manifest(md, "src_00000000000000ab")) == "archive_candidate"
+    assert manifests.get_status(manifests.get_manifest(md, "src_00000000000000ab")) == "archive_candidate"
     manifests.set_status(md, "src_00000000000000ab", "active")  # reversible
-    assert manifests.get_status(manifests.load_manifest(md, "src_00000000000000ab")) == "active"
+    assert manifests.get_status(manifests.get_manifest(md, "src_00000000000000ab")) == "active"
 
 
 def test_set_status_validates(tmp_path):
@@ -183,7 +183,7 @@ def test_apply_archive_flips_manifest_page_and_graph(tmp_path):
     res = _apply(tmp_path)
     assert res["applied"] == 1 and res["changed_pages"] == ["Sources/src_000000000000000a.md"]
     md = tmp_path / "raw" / "manifests"
-    assert manifests.get_status(manifests.load_manifest(md, "src_000000000000000a")) == "archive_candidate"
+    assert manifests.get_status(manifests.get_manifest(md, "src_000000000000000a")) == "archive_candidate"
     assert parse_frontmatter(page.read_text())["status"] == "archive_candidate"
     conn = graph.connect(gdb)
     assert graph.get_node(conn, "src_000000000000000a")["status"] == "archive_candidate"
@@ -200,7 +200,7 @@ def test_apply_archive_graph_absent_graph_changed_false(tmp_path):
     res = _apply(tmp_path)
     assert res["applied"] == 1 and res["graph_changed"] is False
     md = tmp_path / "raw" / "manifests"
-    assert manifests.get_status(manifests.load_manifest(md, "src_000000000000000a")) == "archive_candidate"
+    assert manifests.get_status(manifests.get_manifest(md, "src_000000000000000a")) == "archive_candidate"
 
 
 def test_apply_archive_idempotent_noop_when_already_archived(tmp_path):
@@ -289,7 +289,7 @@ def test_executor_skips_unexpected_to_status(tmp_path):
     assert res["applied"] == 0
     assert res["skipped"] == [{"review_id": "rev_bad", "reason": "unexpected_to_status"}]
     md = tmp_path / "raw" / "manifests"
-    assert manifests.get_status(manifests.load_manifest(md, "src_000000000000000a")) == "active"  # untouched
+    assert manifests.get_status(manifests.get_manifest(md, "src_000000000000000a")) == "active"  # untouched
 
 
 def test_executor_skips_non_approved_and_missing_subject(tmp_path):

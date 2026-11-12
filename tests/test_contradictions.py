@@ -87,7 +87,7 @@ def _ingest(tmp_path, name, text):
 
 
 def _sid(tmp_path, name):
-    for m in manifests.list_manifests(tmp_path / "raw" / "manifests"):
+    for m in manifests.scan_manifests(tmp_path / "raw" / "manifests").valid:
         if m.get("original_filename") == name:
             return m["source_id"]
     raise KeyError(name)

@@ -426,8 +426,8 @@ def _llm_aliases(root) -> list[str]:
 
 
 def _order(root) -> list[str]:
-    from app.backend.manifests import valid_manifests
-    return [m["source_id"] for m in valid_manifests(root / "raw" / "manifests")[0]]
+    from app.backend.manifests import scan_manifests
+    return [m["source_id"] for m in scan_manifests(root / "raw" / "manifests").valid]
 
 
 def test_batch_and_per_document_runs_accumulate_the_same_aliases(tmp_path):

@@ -90,7 +90,7 @@ def confirmed_names(manifests_dir: Path) -> dict[str, dict[str, Any]]:
     """`{identity: {name, tokens, uses: [{role, source_id, title}]}}` — every confirmed author and
     publisher on a valid manifest (the spelling first seen per identity is the shown name)."""
     out: dict[str, dict[str, Any]] = {}
-    for m in sorted(manifests.valid_manifests(Path(manifests_dir))[0],
+    for m in sorted(manifests.scan_manifests(Path(manifests_dir)).valid,
                     key=lambda m: str(m.get("source_id"))):
         details = manifests.confirmed_details(m.get("provenance") or {})
         title = details.get("title") or m.get("original_filename") or m.get("source_id")

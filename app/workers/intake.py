@@ -17,8 +17,10 @@ from typing import Any
 
 from app.backend import db, durable_write, write_lock
 from app.backend.manifests import (
+    ABSENT,
+    OK,
     iso_now,
-    load_manifest,
+    read_manifest,
     save_manifest,
     sha256_file,
     source_id_for,
@@ -231,10 +233,19 @@ def scan_inbox(
                 canonical_meta = observed[0]
                 canonical_path = (root / canonical_meta["relative_path"]).resolve()
                 source_id = source_id_for(sha)
-                existing = load_manifest(manifests_dir, source_id)
+                read = read_manifest(manifests_dir, source_id)
+                if read.state not in (ABSENT, OK):
+                    # ADR-0074 decision 2: only a verified absence permits creation. A damaged
+                    # manifest is preserved as it is — no write, no occurrence update, no new
+                    # canonical path — and reported; the other documents go on.
+                    errors.append({"path": canonical_meta["relative_path"],
+                                   "error": f"manifest {source_id} is {read.state}; left as it "
+                                            "is until an operator recovers it",
+                                   "reason": f"manifest_{read.state}", "source_id": source_id})
+                    continue
 
-                if existing is not None:
-                    manifest = existing
+                if read.state == OK:
+                    manifest = read.record
                     # Manifests are authoritative (ADR-0008): never merge into a record
                     # whose stored checksum disagrees with the scanned content.
                     if manifest.get("sha256") != sha:

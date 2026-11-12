@@ -243,8 +243,13 @@ def rebuild(root: Path, *, now: str | None = None) -> list[dict[str, Any]]:
 
     records: list[dict[str, Any]] = []
     try:
-        extracted = {m["source_id"] for m in manifests.valid_manifests(root / "raw" / "manifests")[0]
+        inventory = manifests.scan_manifests(root / "raw" / "manifests")
+        # ADR-0074 decision 2: a document whose manifest can't be read may be extracted — it is
+        # kept for redo (its producer skips it until the manifest is recovered), never dropped;
+        # likewise one whose id identity validation quarantined (ambiguous authority).
+        extracted = {m["source_id"] for m in inventory.valid
                      if m.get("ingestion_status") in ("extracted", "partial")}
+        extracted |= set(inventory.damaged_ids) | set(inventory.quarantined_ids)
         for producer, suffix, edge in (("extract_claims", ".claims.json", "derived_from"),
                                        ("extract_items", ".items.json", "mentions")):
             docs = extracted | _glob(suffix)

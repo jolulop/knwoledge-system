@@ -27,6 +27,7 @@ if str(ROOT) not in sys.path:
 
 from app.backend import graph, keyword_index, search, vector_index  # noqa: E402
 from app.backend.policy import RetrievalPolicy, load_yaml  # noqa: E402
+from tests import fixtures  # noqa: E402
 
 EVALS_FILE = ROOT / "evals" / "golden_retrieval.yaml"
 
@@ -58,6 +59,7 @@ def _chunk(sid, ordinal, text, start, *, page=1):
 
 
 def _write_chunks(root, sid, chunks):
+    fixtures.manifest_stub(root, sid)          # ADR-0074: evidence needs a usable manifest
     p = root / "normalized" / "chunks" / f"{sid}.jsonl"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text("\n".join(json.dumps(c) for c in chunks) + "\n", encoding="utf-8")
@@ -131,7 +133,7 @@ def _run_case(harness, case):
         return vector_index.search(root, fake.embed([q])[0], limit=limit, metric="cosine")
 
     item_types = frozenset(case["item_type"]) if case.get("item_type") else None
-    return search.run_search(q=q, mode=case.get("mode", "auto"), keyword_conn=kconn, graph_conn=gconn,
+    return search.run_search(manifests_dir=root / "raw" / "manifests", q=q, mode=case.get("mode", "auto"), keyword_conn=kconn, graph_conn=gconn,
                              policy=RetrievalPolicy(), item_types=item_types, vector_search=vector_search)
 
 

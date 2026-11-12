@@ -50,7 +50,7 @@ def _setup(tmp_path, contents, adapter=None):
                        cache=ResponseCache(tmp_path / "db" / "llm_cache.sqlite"))
     items.extract_items(tmp_path, client=client, model_ref=MODEL,
                         jobs_db=tmp_path / "db" / "jobs.sqlite", rebuild_index=False)
-    return {m["original_filename"]: m["source_id"] for m in manifests.list_manifests(tmp_path / "raw" / "manifests")}
+    return {m["original_filename"]: m["source_id"] for m in manifests.scan_manifests(tmp_path / "raw" / "manifests").valid}
 
 
 def _node_status(tmp_path):

@@ -25,7 +25,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.backend import graph
-from app.backend.manifests import load_manifest
+from app.backend.manifests import ABSENT, OK, is_source_id, read_manifest
 from app.backend.search import RETENTION_DEFAULT_STATUSES
 from app.workers import tag_projection
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter
@@ -151,7 +151,12 @@ def _check(root: Path, db_path: Path) -> list[str]:
             # tags); unkept suggestions are listed unlinked, so they are not part of the projection.
             curated = graph.source_tag_projection(conn, sid)[0]
             active_mentions = {(m["node_type"], m["slug"]) for m in curated}
-            manifest = load_manifest(root / "raw" / "manifests", sid) or {}
+            read = (read_manifest(root / "raw" / "manifests", sid) if is_source_id(sid)
+                    else None)
+            if read is not None and read.state not in (ABSENT, OK):
+                errors.append(f"{sid}: manifest is {read.state} — its projection can't be checked")
+                continue
+            manifest = read.record if read is not None and read.state == OK else {}
             visible = (manifest.get("status") or "active") in RETENTION_DEFAULT_STATUSES
             projectable = manifest and visible and any(
                 m.get("node_type") == "item" and m.get("status") == "active" for m in curated)

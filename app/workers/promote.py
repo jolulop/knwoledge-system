@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from app.backend import db, durable_write, graph, taxonomy
-from app.backend.manifests import iso_now, valid_manifests
+from app.backend.manifests import iso_now, scan_manifests
 from app.workers import apply_outcomes as oc
 from app.workers import item_names, item_pages, items, publication, reviews
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter, render_item_page
@@ -283,7 +283,7 @@ def _promote_candidates(
     # Apply's own intent and fan-out cover it.
     run = publication.Run(root, "promote", wiki_dir=wiki_dir) if rebuild_index else None
     try:
-        _valid, _skipped_invalid = valid_manifests(manifests_dir)
+        inventory = scan_manifests(manifests_dir)
         considered = promoted_review = amended = 0
         skipped: list[dict[str, Any]] = []
         advisories: list[dict[str, Any]] = []
@@ -355,7 +355,7 @@ def _promote_candidates(
             "promoted_by_review": promoted_review,
             "amended": amended, "skipped": skipped, "advisories": advisories, "outcomes": outcomes,
             "affected_sources": sorted(affected_sources),
-            "manifests_skipped_invalid": len(_skipped_invalid),
+            **inventory.report(),
             "index_rebuilt": bool(pub and pub["index_rebuilt"]),
             "keyword_reindexed": bool(pub and pub["keyword_reindexed"]),
             "publication": publication.summary(pub), "promoted_at": now,

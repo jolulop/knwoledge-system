@@ -43,7 +43,7 @@ def _gen(tmp_path: Path, **kw):
 
 
 def _status(tmp_path, name):
-    for m in manifests.list_manifests(tmp_path / "raw" / "manifests"):
+    for m in manifests.scan_manifests(tmp_path / "raw" / "manifests").valid:
         if m["original_filename"] == name:
             return m
     return None

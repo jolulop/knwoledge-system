@@ -30,12 +30,12 @@ def sid(tmp_path):
     inbox.mkdir(parents=True)
     fixtures.write_markdown(inbox / "doc.md")
     intake.scan_inbox(tmp_path, jobs_db=tmp_path / "db" / "jobs.sqlite")
-    (m,) = manifests.list_manifests(tmp_path / "raw" / "manifests")
+    (m,) = manifests.scan_manifests(tmp_path / "raw" / "manifests").valid
     return m["source_id"]
 
 
 def _prov(tmp_path, sid):
-    return manifests.load_manifest(tmp_path / "raw" / "manifests", sid)["provenance"]
+    return manifests.get_manifest(tmp_path / "raw" / "manifests", sid)["provenance"]
 
 
 # --- independence (Q2) ---------------------------------------------------------------------------
@@ -109,10 +109,10 @@ def test_confirm_writes_the_new_keys_and_removes_the_legacy_author(tmp_path, sid
 ])
 def test_malformed_details_are_rejected_and_write_nothing(tmp_path, sid, field, value):
     md = tmp_path / "raw" / "manifests"
-    before = manifests.load_manifest(md, sid)
+    before = manifests.get_manifest(md, sid)
     with pytest.raises(ValueError):
         manifests.set_provenance(md, sid, **{field: value})
-    assert manifests.load_manifest(md, sid) == before
+    assert manifests.get_manifest(md, sid) == before
 
 
 def test_clear_removes_details_and_keeps_unrelated_provenance(tmp_path, sid):

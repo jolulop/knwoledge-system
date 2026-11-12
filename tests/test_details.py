@@ -63,7 +63,7 @@ def vault(tmp_path, monkeypatch):
         fn(tmp_path, client=LLMClient({"anthropic": Model()}), model_ref=MODEL_REF,
            jobs_db=tmp_path / "db" / "jobs.sqlite")
     monkeypatch.setattr(main_module, "settings", get_settings(tmp_path))
-    (m,) = manifests.list_manifests(tmp_path / "raw" / "manifests")
+    (m,) = manifests.scan_manifests(tmp_path / "raw" / "manifests").valid
     return tmp_path, m["source_id"]
 
 
@@ -102,7 +102,7 @@ def _form(root, sid, *, authors=None, title=None, publisher=..., tick=False, **e
 
 
 def _prov(root, sid):
-    return manifests.load_manifest(root / "raw" / "manifests", sid).get("provenance") or {}
+    return manifests.get_manifest(root / "raw" / "manifests", sid).get("provenance") or {}
 
 
 def _post(client, sid, form):
@@ -237,7 +237,7 @@ def test_an_explicit_unchecked_box_beats_an_existing_page(client, vault, tmp_pat
     # Another document gives "Ada Lovelace" a page.
     _doc(root, "other.md")
     intake.scan_inbox(root, jobs_db=root / "db" / "jobs.sqlite")
-    other = next(m["source_id"] for m in manifests.list_manifests(root / "raw" / "manifests")
+    other = next(m["source_id"] for m in manifests.scan_manifests(root / "raw" / "manifests").valid
                  if m["source_id"] != sid)
     manifests.confirm_details(root / "raw" / "manifests", other, title="Other",
                               authors=_a("Ada Lovelace", show=True), publisher=None,

@@ -566,7 +566,7 @@ def test_queue_repair_finds_a_source_page_whose_manifest_is_invalid(tmp_path):
     publication_queue.queue_path(tmp_path).write_text("{damaged", encoding="utf-8")
     out = publication.repair(tmp_path)
     assert out["status"] == publication.PENDING
-    assert out["failed"]["sources"] == {a: "manifest_unreadable"}
+    assert out["failed"]["sources"] == {a: "manifest_corrupt"}      # ADR-0074: its own state
     assert _queue(tmp_path)[0]["sources"] == [a]
 
 
