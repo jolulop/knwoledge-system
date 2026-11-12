@@ -42,13 +42,12 @@ from __future__ import annotations
 import contextlib
 import functools
 import json
-import os
 import re
 import uuid
 from pathlib import Path
 from typing import Any
 
-from app.backend import graph, taxonomy, write_lock
+from app.backend import durable_write, graph, taxonomy, write_lock
 from app.backend.manifests import is_source_id, iso_now
 from app.workers import identity_journal, item_pages, items, merge_candidates, merges, promote
 from app.workers import tag_history
@@ -193,16 +192,14 @@ def load_ledger(reviews_dir: Path, source_id: str) -> dict[str, Any]:
 
 def _save_ledger(reviews_dir: Path, ledger: dict[str, Any]) -> None:
     path = ledger_path(reviews_dir, ledger["source_id"])
-    path.parent.mkdir(parents=True, exist_ok=True)
+    durable_write.make_dirs(path.parent)
     tagging = ledger.get("tagging")
     ledger = {"source_id": ledger["source_id"],
               "kept": {k: ledger["kept"][k] for k in sorted(ledger["kept"])},
               "drops": sorted(ledger["drops"], key=lambda d: (d["key"], d.get("item_id") or ""))}
     if tagging is not None:                   # carried by every writer; never dropped
         ledger["tagging"] = tagging
-    tmp = path.with_suffix(f".tmp-{uuid.uuid4().hex[:8]}")
-    tmp.write_text(json.dumps(ledger, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    durable_write.write_json(path, ledger)
 
 
 def _decision_tagging(reviews_dir: Path, source_id: str, ledger: dict[str, Any],
@@ -307,10 +304,8 @@ def corrupt_ledgers(reviews_dir: Path) -> list[dict[str, str]]:
 
 def _audit(reviews_dir: Path, subject_id: str, event: str, record: dict[str, Any], now: str) -> None:
     audit = Path(reviews_dir) / "audit_log"
-    audit.mkdir(parents=True, exist_ok=True)
-    (audit / f"{subject_id}-{event}-{uuid.uuid4().hex[:8]}.json").write_text(json.dumps(
-        {"event": event, "actor": "human", "at": now, **record},
-        ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    durable_write.write_json(audit / f"{subject_id}-{event}-{uuid.uuid4().hex[:8]}.json",
+                             {"event": event, "actor": "human", "at": now, **record})
 
 
 # --- the blocked-tag list --------------------------------------------------------
@@ -335,11 +330,7 @@ def load_blocked(policies_dir: Path) -> dict[str, str]:
 
 
 def _write_blocklist(policies_dir: Path, lines: list[str]) -> None:
-    path = blocklist_path(policies_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(f".tmp-{uuid.uuid4().hex[:8]}")
-    tmp.write_text("\n".join(lines).rstrip("\n") + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    durable_write.write_text(blocklist_path(policies_dir), "\n".join(lines).rstrip("\n") + "\n")
 
 
 def _add_blocked(policies_dir: Path, name: str) -> bool:
@@ -732,11 +723,8 @@ def pending_resolutions(reviews_dir: Path, source_id: str | None = None) -> list
 
 
 def _write_resolving(reviews_dir: Path, record: dict[str, Any]) -> None:
-    path = _resolving_path(reviews_dir, record["source_id"], record["node_id"])
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(f".tmp-{uuid.uuid4().hex[:8]}")
-    tmp.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    durable_write.write_json(_resolving_path(reviews_dir, record["source_id"], record["node_id"]),
+                             record)
 
 
 def _end_resolving(reviews_dir: Path, source_id: str, node_id: str) -> None:
@@ -973,12 +961,9 @@ def delete_tag(gconn, *, node_id: str, wiki_dir: Path, reviews_dir: Path, reason
         "AND status = 'active'", (node_id,))})
     meta = _node_meta(wiki_dir, node) or {}
     intent = _deletion_path(reviews_dir, node_id)
-    intent.parent.mkdir(parents=True, exist_ok=True)
-    tmp = intent.with_suffix(f".tmp-{uuid.uuid4().hex[:8]}")
-    tmp.write_text(json.dumps({"node_id": node_id, "reason": reason, "slug": node["slug"],
-                               "title": meta.get("title"), "at": now}, indent=2) + "\n",
-                   encoding="utf-8")
-    os.replace(tmp, intent)
+    durable_write.write_text(intent, json.dumps(
+        {"node_id": node_id, "reason": reason, "slug": node["slug"], "title": meta.get("title"),
+         "at": now}, indent=2) + "\n")
     item_pages.remove_page(wiki_dir, node_id, node["slug"])
     edges_removed = graph.delete_node(gconn, node_id)
     withdrawn = merges._withdraw_b_subjects(reviews_dir, node_id, page_rel, now, reason="tag_deleted")

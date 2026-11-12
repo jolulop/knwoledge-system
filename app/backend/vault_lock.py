@@ -24,6 +24,8 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import IO, Any
 
+from app.backend import durable_write
+
 try:
     import fcntl
 except ImportError:                                       # non-POSIX: no cross-process exclusion
@@ -47,7 +49,7 @@ def acquire_shared(db_dir: Path) -> IO[Any] | None:
     if fcntl is None:
         return None
     path = lock_path(db_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    durable_write.make_dirs(path.parent)
     fh = open(path, "a", encoding="utf-8")                # noqa: SIM115 - released by release()
     try:
         fcntl.flock(fh, fcntl.LOCK_SH)
@@ -84,7 +86,7 @@ def exclusive(db_dir: Path, *, timeout: float = DEFAULT_TIMEOUT, poll: float = 0
         yield
         return
     path = lock_path(db_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    durable_write.make_dirs(path.parent)
     with open(path, "a", encoding="utf-8") as fh:
         deadline = time.monotonic() + timeout
         while True:

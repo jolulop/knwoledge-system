@@ -42,7 +42,7 @@ import threading
 from collections.abc import Iterator
 from pathlib import Path
 
-from app.backend import publication_queue, revision, vault_lock
+from app.backend import durable_write, publication_queue, revision, vault_lock
 
 try:
     import fcntl
@@ -81,7 +81,7 @@ def hold(reviews_dir: Path, *, vault: bool = True, authority: bool = True,
             _held.depth -= 1
         return
     path = lock_path(reviews_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    durable_write.make_dirs(path.parent)
     vault_handle = vault_lock.acquire_shared(Path(reviews_dir).parent / "db") if vault else None
     try:
         with _PROCESS_LOCK, open(path, "a", encoding="utf-8") as fh:

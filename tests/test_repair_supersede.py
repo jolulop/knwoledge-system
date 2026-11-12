@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.backend import graph, publication_queue, review_read, revision, run_guard  # noqa: E402
+from app.backend import durable_write, graph, publication_queue, review_read, revision, run_guard  # noqa: E402
 from app.workers import (claim_marker, claims, identity_journal,  # noqa: E402
                          publication, supersede)
 from app.workers import supersede_repair as sr  # noqa: E402
@@ -437,14 +437,18 @@ def test_a_marked_page_is_mirrored_only_after_its_flush_succeeds(tmp_path, monke
     gs._apply(tmp_path, conn)                             # journal at loser_deprecated, open
     conn.close()
     _set_node(tmp_path, B, "active")                      # a lagging mirror
-    real = claims.sync_page_durably
-    monkeypatch.setattr(claims, "sync_page_durably",
-                        lambda path: (_ for _ in ()).throw(OSError("fsync failed")))
+    real = durable_write.sync_existing
+
+    def failing(path):
+        if Path(path).parent.name == "Claims":
+            raise OSError("fsync failed")
+        return real(path)
+    monkeypatch.setattr(durable_write, "sync_existing", failing)
     for _ in range(2):
         failed = _render(tmp_path, [A, B])
         assert failed[B].startswith("page_flush_failed") and A not in failed
         assert _node(tmp_path, B) == "active"
-    monkeypatch.setattr(claims, "sync_page_durably", real)
+    monkeypatch.setattr(durable_write, "sync_existing", real)
     assert _render(tmp_path, [A, B]) == {}
     assert _node(tmp_path, B) == "deprecated_candidate"
     assert gs._journal(tmp_path, rid) is not None         # publication never touches the journal

@@ -63,6 +63,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+from app.backend import durable_write  # noqa: E402
 from app.backend.paths import safe_under  # noqa: E402
 
 # Gitignored runtime state whose only durability is this backup (ADR-0014): raw manifests, the
@@ -513,9 +514,9 @@ def _restore_backup(archive: Path, root: Path, *, force: bool, dry_run: bool) ->
             if dry_run:
                 (report.overwritten if exists else report.written).append(name)
                 continue
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            with zf.open(name) as src, dest.open("wb") as out_fh:
-                out_fh.write(src.read())
+            # ADR-0074 decision 1: each restored file lands whole or not at all, durably.
+            with zf.open(name) as src:
+                durable_write.write_stream(dest, src)
             (report.overwritten if exists else report.written).append(name)
             applied.add(name)
 

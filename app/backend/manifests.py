@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from app.backend import durable_write
+
 _CHUNK = 1 << 20  # 1 MiB streaming read for checksums
 
 # Canonical content-derived source id (ADR-0007): src_<first 16 hex chars of SHA256>. Manifest JSON is
@@ -182,14 +184,11 @@ def save_manifest(manifests_dir: Path, manifest: dict[str, Any]) -> Path:
     """Write a manifest with the canonical formatting.
 
     This is the single place manifests are written: 2-space indent, UTF-8, trailing
-    newline. Both intake and extraction route writes through here.
+    newline. Both intake and extraction route writes through here. The write is durable and
+    all-or-nothing (ADR-0074 decision 1): an interruption leaves the previous manifest intact.
     """
-    manifests_dir = Path(manifests_dir)
-    manifests_dir.mkdir(parents=True, exist_ok=True)
-    path = manifest_path(manifests_dir, manifest["source_id"])
-    path.write_text(
-        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
+    path = manifest_path(Path(manifests_dir), manifest["source_id"])
+    durable_write.write_json(path, manifest)
     return path
 
 

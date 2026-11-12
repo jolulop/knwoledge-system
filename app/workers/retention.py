@@ -23,7 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from app.backend import db, graph, keyword_index, manifests, write_lock
+from app.backend import db, durable_write, graph, keyword_index, manifests, write_lock
 from app.backend.manifests import iso_now, load_manifest, valid_manifests
 from app.backend.policy import load_yaml
 from app.llm import cache as llm_cache
@@ -61,7 +61,7 @@ def _file_tracked(reviews_dir: Path, *, review_type: str, subject: dict[str, Any
 
 def _append_log(wiki_dir: Path, message: str) -> None:
     log = Path(wiki_dir) / "log.md"
-    log.parent.mkdir(parents=True, exist_ok=True)
+    durable_write.make_dirs(log.parent)
     with log.open("a", encoding="utf-8") as fh:
         fh.write(f"- {message}\n")
 

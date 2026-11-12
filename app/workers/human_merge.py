@@ -30,7 +30,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from app.backend import graph
+from app.backend import durable_write, graph
 from app.backend.manifests import iso_now
 from app.workers import items, merges, reviews
 from app.workers.wiki_render import NODE_DIR
@@ -164,12 +164,11 @@ def file_merge(
                                 note="human-filed merge (ADR-0064)", now=now)
 
     audit = reviews_dir / "audit_log"
-    audit.mkdir(parents=True, exist_ok=True)
-    (audit / f"{rid}-human-filed-merge-{uuid.uuid4().hex[:8]}.json").write_text(json.dumps({
+    durable_write.write_json(audit / f"{rid}-human-filed-merge-{uuid.uuid4().hex[:8]}.json", {
         "review_id": rid, "event": "human_filed_merge", "actor": "human", "at": now,
         "subject": subject, "outcome": outcome, "withdrawn": withdrawn,
         "survivor_slug": a["slug"], "absorbed_slug": b["slug"],
-    }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    })
     return {"outcome": outcome, "review_id": rid, "withdrawn": withdrawn}
 
 

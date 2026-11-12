@@ -18,7 +18,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from app.backend import taxonomy
+from app.backend import durable_write, taxonomy
 from app.backend.manifests import iso_now
 
 # Build Spec §6.1 node types under the ADR-0059 overlay: the old concept/entity/person/
@@ -212,7 +212,7 @@ def _check_compatible(conn: sqlite3.Connection, db_path: Path) -> None:
 
 def connect(db_path: Path) -> sqlite3.Connection:
     db_path = Path(db_path)
-    db_path.parent.mkdir(parents=True, exist_ok=True)
+    durable_write.make_dirs(db_path.parent)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     return conn

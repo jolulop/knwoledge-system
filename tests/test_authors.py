@@ -6,6 +6,7 @@ and the lock flag (Q3), Source-page links, the index section, the validators and
 """
 from __future__ import annotations
 
+import io
 import shutil
 import subprocess
 import sys
@@ -22,7 +23,7 @@ import rebuild_index  # noqa: E402
 import validate_frontmatter  # noqa: E402
 import validate_wiki  # noqa: E402
 
-from app.backend import keyword_index, manifests, publication_queue, write_lock  # noqa: E402
+from app.backend import durable_write, keyword_index, manifests, publication_queue, write_lock  # noqa: E402
 from app.workers import authors, extract, intake, publication, wiki  # noqa: E402
 from app.workers.wiki_render import parse_frontmatter  # noqa: E402
 from tests import fixtures  # noqa: E402
@@ -427,18 +428,24 @@ def test_a_failed_write_never_leaves_a_page_retry_cannot_replace(vault, monkeypa
         _confirm(root, sids["two.md"], _a("Ada Lovelace"))          # the page must be replaced
     else:
         _confirm(root, sids["one.md"], _a("Ada Lovelace"))
-    real = authors._write_durably
+    real = durable_write._write_temp
 
-    def dies(path, data):
-        real(path, data[: len(data) // 2])                          # half written, then the crash
+    def dies(tmp, write, mode=None):
+        if tmp.parent.name != "Authors":
+            return real(tmp, write, mode)
+        buf = io.BytesIO()
+        write(buf)
+        data = buf.getvalue()
+        with open(tmp, "xb") as fh:                                 # half written, then the crash
+            fh.write(data[: len(data) // 2])
         raise OSError(28, "No space left on device")
-    monkeypatch.setattr(authors, "_write_durably", dies)
+    monkeypatch.setattr(durable_write, "_write_temp", dies)
     failed = _publish(root)                     # ADR-0071 round 1: reported, not raised
     assert failed["write_failed"] == [{"file": "Authors/ada-lovelace.md", "error": "OSError"}]
     page = _page(root, "ada-lovelace")
     assert (page.read_text(encoding="utf-8") == before) if existing else not page.exists()
     assert not [p for p in (root / "wiki" / "Authors").iterdir() if ".tmp-" in p.name]
-    monkeypatch.setattr(authors, "_write_durably", real)
+    monkeypatch.setattr(durable_write, "_write_temp", real)
     out = _publish(root)                                            # retry recovers by itself
     assert out["conflicts"] == [] and authors.ownership(page) == "owned"
 

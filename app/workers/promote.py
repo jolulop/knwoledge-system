@@ -21,7 +21,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from app.backend import db, graph, taxonomy
+from app.backend import db, durable_write, graph, taxonomy
 from app.backend.manifests import iso_now, valid_manifests
 from app.workers import apply_outcomes as oc
 from app.workers import item_names, item_pages, items, publication, reviews
@@ -199,7 +199,8 @@ def activate_node(gconn, *, node: dict[str, Any], wiki_dir: Path, reviews_dir: P
                 if renamed else None)
     sources, suggested = graph.tag_projection(gconn, nid, "active")
     duplicates = graph.active_duplicates(gconn, nid)
-    new_page.write_text(
+    durable_write.write_text(
+        new_page,
         render_item_page({
             "node_id": nid, "item_type": eff["item_type"], "title": eff["title"],
             "aliases": eff["aliases"], "confidence": "low",
@@ -208,8 +209,7 @@ def activate_node(gconn, *, node: dict[str, Any], wiki_dir: Path, reviews_dir: P
             "split_from": meta.get("split_from"),        # ADR-0052: preserve spin-off lineage
             "split_review_id": meta.get("split_review_id"),
             "description": eff["description"],           # ADR-0058: page-owned description
-        }, labels=items._link_labels(wiki_dir, sources + suggested, duplicates)),
-        encoding="utf-8")
+        }, labels=items._link_labels(wiki_dir, sources + suggested, duplicates)))
     graph.upsert_node(gconn, node_id=nid, node_type=node_type, slug=slug, status="active",
                       item_type=eff["item_type"], now=now)
     # Every Source page that lists the tag changes on activation (its projection follows the status;
@@ -461,14 +461,13 @@ def _write_executor_record(reviews_dir: Path, rid: str, nid: str, out: dict[str,
     fingerprint, so it can never verify anything."""
     item = _approval_item(reviews_dir, rid)
     audit = Path(reviews_dir) / "audit_log"
-    audit.mkdir(parents=True, exist_ok=True)
-    (audit / f"{rid}-{_RECORD_DECISION}-{uuid.uuid4().hex[:8]}.json").write_text(
-        json.dumps({"review_id": rid, "decision": _RECORD_DECISION, "decided_by": "system",
-                    "decided_at": now, "node_id": nid,
-                    "approval_fingerprint": approval_fingerprint(item, amendments) if item else None,
-                    "title_before": out.get("title_before"),
-                    "effective": out.get("effective")}, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8")
+    durable_write.write_json(
+        audit / f"{rid}-{_RECORD_DECISION}-{uuid.uuid4().hex[:8]}.json",
+        {"review_id": rid, "decision": _RECORD_DECISION, "decided_by": "system",
+         "decided_at": now, "node_id": nid,
+         "approval_fingerprint": approval_fingerprint(item, amendments) if item else None,
+         "title_before": out.get("title_before"),
+         "effective": out.get("effective")})
 
 
 def _complete_effective(eff: Any) -> bool:

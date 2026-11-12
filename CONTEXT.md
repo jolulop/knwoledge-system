@@ -439,7 +439,7 @@ The **preview token** is an opaque random id returned only by an `ok` Apply prev
 **Durable field / projection** (ADR-0068)
 A page can hold both. **Durable fields** are read back from the page on every re-render and are authority. On item pages: `title`, `aliases`, `item_type`, `status`, `review_status`, `confidence`, `description`, `split_from`/`split_review_id`, `merged_into`. On claim and synthesis pages: `status`. Everything else is a **projection**, rebuildable at any time: Source pages, `index.md`, `wiki/Authors/`, backlink and list sections, summary callouts, `generation_status`, `input_fingerprint`. Rebuilding projections never touches durable fields.
 
-**Durable write / uncertain completion** (ADR-0074 decision 1; not yet implemented)
+**Durable write / uncertain completion** (ADR-0074 decision 1; implemented 2026-11-11 in slice 1 — `app/backend/durable_write.py`)
 Every write of file-backed authority — manifests, Item/Claim/Synthesis pages, everything under `reviews/` (audit records and recovery journals included), `policies/`, the `db/*.json` authority records — goes through one shared helper: temporary file in the destination directory, flush, fsync, `os.replace`, directory fsync. It makes each single-file write all-or-nothing; it does not replace the write lock, multi-file journals or create-only / ownership checks. SQLite, lock files, staging and projections are outside it. A directory-fsync failure after the replacement is **uncertain completion**: an error the caller must handle safely, never success and never "nothing happened".
 
 **Authority read state** (ADR-0074 decisions 2 and 4; not yet implemented)

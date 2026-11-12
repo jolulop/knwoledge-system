@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.backend import manifests  # noqa: E402
+from app.backend import durable_write, manifests  # noqa: E402
 from app.workers import authors, publication, wiki  # noqa: E402
 from tests.test_authors import TEMPLATES, _a, _confirm, _page, vault  # noqa: E402,F401
 
@@ -141,13 +141,13 @@ def _retry(root):
 
 
 def _fail_writes_to(monkeypatch, stem):
-    real = authors._write_atomically
+    real = durable_write.write_text
 
     def failing(path, content):
         if path.stem == stem:
             raise OSError(28, "No space left on device")
         return real(path, content)
-    monkeypatch.setattr(authors, "_write_atomically", failing)
+    monkeypatch.setattr(durable_write, "write_text", failing)
     return real
 
 
@@ -162,7 +162,7 @@ def test_a_failed_replacement_write_keeps_the_old_links_through_repeated_retries
         assert _links(root, sid) == {OLD} and _page(root, OLD).exists()
         assert not _page(root, NEW).exists()
         _no_dangling(root)
-    monkeypatch.setattr(authors, "_write_atomically", real)
+    monkeypatch.setattr(durable_write, "write_text", real)
     assert _retry(root)["status"] == publication.PUBLISHED
     assert _links(root, sid) == {NEW} and not _page(root, OLD).exists()
     _no_dangling(root)
@@ -283,7 +283,7 @@ def test_a_failed_update_of_an_existing_page_stays_pending_on_a_source_only_refr
     _no_dangling(root)
     again = _retry(root)                                             # still failing: still pending
     assert again["status"] == publication.PENDING
-    monkeypatch.setattr(authors, "_write_atomically", real)
+    monkeypatch.setattr(durable_write, "write_text", real)
     assert _retry(root)["status"] == publication.PUBLISHED
     assert two in _page(root, "ada-lovelace").read_text(encoding="utf-8")
     _no_dangling(root)
@@ -341,7 +341,7 @@ def test_direct_generation_with_a_failed_replacement_keeps_the_old_links(legacy,
     _no_dangling(root)
 
     monkeypatch.undo()                                         # writes work again (and finish)
-    monkeypatch.setattr(authors, "_write_atomically", real)
+    monkeypatch.setattr(durable_write, "write_text", real)
     assert _retry(root)["status"] == publication.PUBLISHED
     assert _links(root, sid) == {NEW} and not _page(root, OLD).exists()
     _no_dangling(root)

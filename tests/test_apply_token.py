@@ -28,7 +28,7 @@ import apply_reviews  # noqa: E402
 import backup  # noqa: E402
 import validate_revision  # noqa: E402
 from app.backend import (  # noqa: E402
-    apply_authorization, apply_gate, apply_sandbox, revision, write_lock,
+    apply_authorization, apply_gate, apply_sandbox, durable_write, revision, write_lock,
 )
 from app.backend import main as main_module  # noqa: E402
 from app.backend.config import get_settings  # noqa: E402
@@ -126,10 +126,20 @@ def test_a_writer_killed_after_an_authority_write_leaves_the_old_token_stale(vau
     assert exc.value.reason == "stale_preview" and not _archived(vault.root)
 
 
+def _fail_writes(monkeypatch, prefix):
+    """Every durable write of a `db/<prefix>*` file fails with ENOSPC; other writes proceed."""
+    real = durable_write.write_bytes
+
+    def failing(path, data, **kw):
+        if Path(path).name.startswith(prefix):
+            raise OSError(28, "No space left")
+        return real(path, data, **kw)
+    monkeypatch.setattr(durable_write, "write_bytes", failing)
+
+
 def test_failing_to_persist_the_increment_refuses_the_write(tmp_path, monkeypatch):
     _rev(tmp_path)
-    monkeypatch.setattr(revision, "_write_durably",
-                        lambda *a: (_ for _ in ()).throw(OSError(28, "No space left")))
+    _fail_writes(monkeypatch, "revision")
     ran = []
     with pytest.raises(revision.RevisionUnavailable):
         with write_lock.hold(tmp_path / "reviews"):
@@ -138,8 +148,7 @@ def test_failing_to_persist_the_increment_refuses_the_write(tmp_path, monkeypatc
 
 
 def test_the_api_refuses_a_change_when_the_revision_cannot_advance(client, vault, monkeypatch):
-    monkeypatch.setattr(revision, "_write_durably",
-                        lambda *a: (_ for _ in ()).throw(OSError(28, "No space left")))
+    _fail_writes(monkeypatch, "revision")
     resp = client.post("/ui/reviews/apply/preview")       # the snapshot only reads: still works
     assert resp.status_code == 200
     resp = client.post("/reviews/rev_arch/reopen", json={"reason": "changed my mind"})
@@ -182,15 +191,17 @@ def test_a_crash_during_recovery_keeps_the_damaged_file_or_its_copy(tmp_path, mo
     path = revision.revision_path(tmp_path)
     path.parent.mkdir(parents=True)
     path.write_text("garbage", encoding="utf-8")
-    real = revision._write_durably
+    real = durable_write.write_bytes
     calls = []
 
-    def flaky(target, data):
+    def flaky(target, data, **kw):
+        if not Path(target).name.startswith("revision"):
+            return real(target, data, **kw)
         calls.append(target)
         if (fail_at == "preserve" and len(calls) == 1) or (fail_at == "replace" and len(calls) == 2):
             raise KeyboardInterrupt                         # killed at this step
-        real(target, data)
-    monkeypatch.setattr(revision, "_write_durably", flaky)
+        real(target, data, **kw)
+    monkeypatch.setattr(durable_write, "write_bytes", flaky)
     with pytest.raises(KeyboardInterrupt):
         with write_lock.hold(tmp_path / "reviews", changes=False):
             revision.current(tmp_path)
@@ -345,8 +356,7 @@ def test_a_revision_change_during_the_sandbox_run_withholds_the_token(vault):
 
 
 def test_an_authorization_write_failure_withholds_the_token(vault, monkeypatch):
-    monkeypatch.setattr(apply_authorization, "_write_durably",
-                        lambda *a: (_ for _ in ()).throw(OSError(28, "No space left")))
+    _fail_writes(monkeypatch, "apply_authorizations")
     out = _preview(vault)
     assert out["status"] == "ok" and out["preview_token"] is None
     assert out["token_withheld"] == "authorization_write_failed"

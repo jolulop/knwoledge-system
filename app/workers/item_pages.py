@@ -23,7 +23,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from app.backend import graph
+from app.backend import durable_write, graph
 from app.workers.wiki_render import NODE_DIR, parse_frontmatter
 
 _ITEM_ID = re.compile(r"itm_[0-9a-f]{16}")
@@ -115,9 +115,7 @@ def write_page(gconn, wiki_dir: Path, node_id: str, slug: str, text: str) -> Non
     """Write the item's page, or raise :class:`PageOwnershipError` without writing."""
     if (problem := page_problem(gconn, wiki_dir, node_id, slug)) is not None:
         raise PageOwnershipError(problem)
-    path = page_path(wiki_dir, slug)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    durable_write.write_text(page_path(wiki_dir, slug), text)
 
 
 def remove_page(wiki_dir: Path, node_id: str, slug: str) -> None:

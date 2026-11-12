@@ -171,11 +171,10 @@ def load_published(root: Path) -> dict[str, str] | None:
 
 
 def save_published(root: Path, mapping: dict[str, str]) -> None:
-    from app.backend.publication_queue import _write_durably
-    path = snapshot_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    from app.backend import durable_write
     data = {"schema_version": SNAPSHOT_SCHEMA, "labels": dict(sorted(mapping.items()))}
-    _write_durably(path, (json.dumps(data, ensure_ascii=False, indent=1) + "\n").encode("utf-8"))
+    durable_write.write_text(snapshot_path(root),
+                             json.dumps(data, ensure_ascii=False, indent=1) + "\n")
 
 
 def changed_ids(published: dict[str, str] | None, current: dict[str, str]) -> set[str] | None:

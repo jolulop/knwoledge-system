@@ -61,7 +61,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from app.backend import db, graph, write_lock
+from app.backend import db, durable_write, graph, write_lock
 from app.backend.manifests import (
     confirmed_details,
     get_provenance,
@@ -72,7 +72,6 @@ from app.backend.manifests import (
     name_identity,
     valid_manifests,
 )
-from app.backend.publication_queue import _sync_dir, _write_durably
 from app.llm import prompts
 from app.llm.adapters import AdapterError
 from app.llm.cache import ResponseCache, cache_key
@@ -401,13 +400,9 @@ def _load(root: Path) -> list[dict[str, Any]]:
 
 
 def _save(root: Path, records: list[dict[str, Any]]) -> None:
-    path = store_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(f".tmp-{uuid.uuid4().hex[:8]}")
-    _write_durably(tmp, (json.dumps({"schema_version": SCHEMA_VERSION, "records": records},
-                                    indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
-    tmp.replace(path)
-    _sync_dir(path.parent)
+    durable_write.write_bytes(store_path(root), (json.dumps(
+        {"schema_version": SCHEMA_VERSION, "records": records},
+        indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
 
 
 def find_estimate(root: Path, token: str) -> dict[str, Any] | None:

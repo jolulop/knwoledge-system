@@ -27,7 +27,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.backend import (
-    apply_gate, apply_sandbox, db, embeddings, graph, graph_read, keyword_index, manifests, producer_journal,
+    apply_gate, apply_sandbox, db, durable_write, embeddings, graph, graph_read, keyword_index, manifests, producer_journal,
     publication_queue, revision,
     review_html, review_read, run_guard, search, taxonomy, vault_lock, vector_index, write_lock,
 )
@@ -3182,7 +3182,7 @@ def _append_wiki_log(message: str) -> None:
     """Append a one-line audit entry to wiki/log.md (the wiki-write log; CLAUDE.md ingest workflow).
     Deterministic — no wall-clock — so it doesn't perturb byte-stable artifacts."""
     log = settings.wiki_dir / "log.md"
-    log.parent.mkdir(parents=True, exist_ok=True)
+    durable_write.make_dirs(log.parent)
     with log.open("a", encoding="utf-8") as fh:
         fh.write(f"- {message}\n")
 
@@ -3278,9 +3278,7 @@ def run_query_endpoint(req: QueryRequest) -> dict[str, Any]:
             "unsourced_claims": answer.unsourced_claims,
             "security_rejected_count": answer.security_rejected_count,
         }, labels=link_labels)
-        qpath = settings.wiki_dir / "Queries" / f"{saved_id}.md"
-        qpath.parent.mkdir(parents=True, exist_ok=True)
-        qpath.write_text(page, encoding="utf-8")
+        durable_write.write_text(settings.wiki_dir / "Queries" / f"{saved_id}.md", page)
         # Audit only (ADR-0034 Q3): the nav/index are NOT synchronously rebuilt — the saved query is
         # discoverable after the next reindex. Surfaced via navigation_stale so the API stays honest.
         _append_wiki_log(f"query saved: Queries/{saved_id}.md")

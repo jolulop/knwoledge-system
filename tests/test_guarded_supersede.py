@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.backend import graph, review_read
+from app.backend import durable_write, graph, review_read
 from app.workers import (claim_marker, claims, contradiction_check, contradictions, deprecations,
                          identity_journal, lint, reviews, supersede, tag_links, wiki_render)
 from scripts import validate_frontmatter
@@ -787,8 +787,7 @@ def test_the_preview_reports_an_in_flight_supersede_as_not_reopenable(tmp_path, 
 
 
 def _failing_claims_dir_sync(monkeypatch, tmp_path):
-    from app.backend import publication_queue as pq
-    real = pq._sync_dir
+    real = durable_write.sync_dir
     state = {"fail": True}
     target = tmp_path / "wiki" / "Claims"
 
@@ -797,7 +796,7 @@ def _failing_claims_dir_sync(monkeypatch, tmp_path):
             raise OSError("fsync failed")
         return real(path)
 
-    monkeypatch.setattr(pq, "_sync_dir", sync)
+    monkeypatch.setattr(durable_write, "sync_dir", sync)
     return state
 
 
@@ -822,7 +821,7 @@ def test_a_marked_page_is_certified_only_after_its_flush_succeeds(tmp_path, monk
 def test_a_recovered_journal_is_flushed_before_any_recovery_mutation(tmp_path, monkeypatch):
     conn, rid = _world(tmp_path)
     conn = _to_edge_written(tmp_path, monkeypatch, conn)
-    real = identity_journal._sync_dir
+    real = durable_write.sync_dir
     state = {"fail": True}
 
     def sync(path):
@@ -830,7 +829,7 @@ def test_a_recovered_journal_is_flushed_before_any_recovery_mutation(tmp_path, m
             raise OSError("fsync failed")
         return real(path)
 
-    monkeypatch.setattr(identity_journal, "_sync_dir", sync)
+    monkeypatch.setattr(durable_write, "sync_dir", sync)
     before = _page(tmp_path, B)
     for _ in range(2):
         with pytest.raises(OSError):

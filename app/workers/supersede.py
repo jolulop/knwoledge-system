@@ -35,10 +35,10 @@ import re
 from pathlib import Path
 from typing import Any
 
-from app.backend import graph
+from app.backend import durable_write, graph
 from app.backend.manifests import iso_now
 from app.workers import apply_outcomes as ao
-from app.workers import claim_marker, claims, identity_journal, reviews
+from app.workers import claim_marker, claims, identity_journal
 from app.workers.wiki_render import parse_frontmatter
 
 OP = "supersede"
@@ -153,13 +153,12 @@ def _ensure_audit(path: Path, *, event: str, time_key: str, bind: dict[str, Any]
     entry blocks and is never overwritten; the original time is kept (decisions 13 and 17)."""
     state, _rec = read_audit(path, event=event, bind=bind, edge_id=edge_id)
     if state == "valid":
-        reviews.sync_durably(path)
+        durable_write.sync_existing(path)
         return
     if state == "invalid":
         raise Blocked("completion_audit_conflict" if event == COMPLETED_EVENT
                       else "rollback_audit_conflict", {"audit": path.name})
-    path.parent.mkdir(parents=True, exist_ok=True)
-    reviews.write_json_durably(path, {
+    durable_write.write_json(path, {
         "event": event, "review_id": bind["review_id"], "approval_id": bind["approval_id"],
         "winner": bind["winner"], "loser": bind["loser"], "edge_id": edge_id, time_key: now})
 
@@ -527,7 +526,7 @@ def _resume(gconn, reviews_dir, claims_dir, markdown_dir, bind, journal, res, no
     if page["status"] == "deprecated_candidate" and marked:
         # A marked page an earlier run wrote is certified only after its durability barrier is
         # repeated (that run's flush may have failed after the rename); a failure propagates.
-        claims.sync_page_durably(claims_dir / f"{bind['loser']}.md")
+        durable_write.sync_existing(claims_dir / f"{bind['loser']}.md")
     if page["status"] == "deprecated_candidate" and marked and node == "active":   # row 3
         graph.upsert_node(gconn, node_id=bind["loser"], node_type="claim", slug=bind["loser"],
                           status="deprecated_candidate", now=now)
@@ -573,7 +572,7 @@ def _run_from(gconn, reviews_dir, claims_dir, markdown_dir, bind, journal, res, 
     marker = {"review_id": rid, "approval_id": bind["approval_id"], "winner": bind["winner"]}
     outcome = claims.recompose_claim(
         gconn, cid=bind["loser"], claims_dir=claims_dir, reviews_dir=reviews_dir,
-        markdown_dir=markdown_dir, now=now, deprecate=True, supersede_marker=marker, durable=True)
+        markdown_dir=markdown_dir, now=now, deprecate=True, supersede_marker=marker)
     if outcome != "written":
         raise Blocked(outcome if outcome in ("marker_unreadable", "marker_conflict")
                       else ao.POSTCONDITION_NOT_MET, {"loser_render": outcome})
@@ -648,10 +647,9 @@ def _ensure_repair_audit(reviews_dir: Path, bind: dict[str, Any], repair: dict[s
             have = None
         if have != want:
             raise Blocked("repair_audit_conflict", {"audit": path.name})
-        reviews.sync_durably(path)
+        durable_write.sync_existing(path)
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    reviews.write_json_durably(path, want)
+    durable_write.write_json(path, want)
 
 
 def initiate_rollback(gconn, reviews_dir: Path, item: dict[str, Any], *, claims_dir: Path,

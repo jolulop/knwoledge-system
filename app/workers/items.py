@@ -38,7 +38,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from app.backend import db, graph, taxonomy
+from app.backend import db, durable_write, graph, taxonomy
 from app.backend import producer_journal as journal
 from app.backend.manifests import get_status, iso_now, load_manifest, valid_manifests
 from app.llm import prompts
@@ -587,17 +587,17 @@ def _recompose_node(gconn, *, node_id, wiki_dir, reviews_dir, now, text_hint=Non
         status = "candidate"
     if item_pages.page_problem(gconn, wiki_dir, node_id, slug) is not None:
         return "page_conflict"                     # ADR-0070 B1 review: never another item's page
-    page_dir.mkdir(parents=True, exist_ok=True)
+    durable_write.make_dirs(page_dir)
     duplicates = graph.active_duplicates(gconn, node_id)
     kept, suggested = graph.tag_projection(gconn, node_id, status)
-    page_path.write_text(render_item_page({
+    durable_write.write_text(page_path, render_item_page({
         "node_id": node_id, "item_type": item_type,
         "title": title, "aliases": aliases, "confidence": "low", "source_ids": kept,
         "suggested_ids": suggested, "status": status, "duplicates": duplicates,
         "split_from": (existing or {}).get("split_from"),               # ADR-0052: preserve spin-off lineage
         "split_review_id": (existing or {}).get("split_review_id"),
         "description": (existing or {}).get("description"),            # ADR-0058: preserve human description
-    }, labels=_link_labels(wiki_dir, kept + suggested, duplicates)), encoding="utf-8")
+    }, labels=_link_labels(wiki_dir, kept + suggested, duplicates)))
     graph.upsert_node(gconn, node_id=node_id, node_type=node_type, slug=slug,
                       status=status, item_type=item_type, now=now)
     page_rel = f"{NODE_DIR[node_type]}/{slug}.md"
@@ -664,7 +664,7 @@ def recompose_semantic_node_page(
     # mirror always runs, idempotently). Callers that gate on `== "written"` get an honest signal.
     changed = page_path.read_text(encoding="utf-8") != rendered
     if changed:
-        page_path.write_text(rendered, encoding="utf-8")
+        durable_write.write_text(page_path, rendered)
     graph.upsert_node(gconn, node_id=node_id, node_type=node_type, slug=slug, status=status,
                       item_type=item_type, now=now or iso_now())
     return "written" if changed else "unchanged"

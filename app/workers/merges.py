@@ -22,7 +22,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from app.backend import graph, taxonomy
+from app.backend import durable_write, graph, taxonomy
 from app.backend.manifests import iso_now
 from app.workers import apply_outcomes as oc
 from app.workers import item_pages as ownership
@@ -248,11 +248,9 @@ def _render_tombstone(gconn, *, b: str, nb: dict[str, Any], nt: str, a: str, a_s
 
 def _write_audit(reviews_dir: Path, rid: str, record: dict[str, Any], now: str) -> None:
     audit = Path(reviews_dir) / "audit_log"
-    audit.mkdir(parents=True, exist_ok=True)
-    (audit / f"{rid}-merged-{uuid.uuid4().hex[:8]}.json").write_text(
-        json.dumps({"review_id": rid, "decision": "merged", "decided_by": "system",
-                    "decided_at": now, **record}, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8")
+    durable_write.write_json(audit / f"{rid}-merged-{uuid.uuid4().hex[:8]}.json",
+                             {"review_id": rid, "decision": "merged", "decided_by": "system",
+                              "decided_at": now, **record})
 
 
 def journal_stage(reviews_dir: Path, review_id: str) -> str | None:

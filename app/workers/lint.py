@@ -36,7 +36,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from app.backend import db, graph, taxonomy, write_lock
+from app.backend import db, durable_write, graph, taxonomy, write_lock
 from app.backend.manifests import get_provenance, is_source_id, iso_now, valid_manifests
 from app.backend.paths import safe_child, safe_under
 from app.backend.policy import load_yaml
@@ -86,7 +86,7 @@ def _open_graph_ro(graph_db: Path) -> Any:
 
 def _append_log(wiki_dir: Path, message: str) -> None:
     log = Path(wiki_dir) / "log.md"
-    log.parent.mkdir(parents=True, exist_ok=True)
+    durable_write.make_dirs(log.parent)
     with log.open("a", encoding="utf-8") as fh:
         fh.write(f"- {message}\n")
 

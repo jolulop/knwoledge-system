@@ -35,7 +35,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from app.backend import db, graph, write_lock
+from app.backend import db, durable_write, graph, write_lock
 from app.backend.manifests import get_provenance, independent_sources, iso_now, valid_manifests
 from app.workers import apply_outcomes, claims, identity_journal, reviews, supersede
 
@@ -496,11 +496,11 @@ def _mark_retiring(reviews_dir: Path, rid: str, mark: dict[str, Any], *, retry: 
     if not path.exists():
         return
     if retry:
-        reviews.sync_durably(path)
+        durable_write.sync_existing(path)
         return
     item = json.loads(path.read_text(encoding="utf-8"))
     item[reviews.RETIRING] = mark
-    reviews.write_json_durably(path, item)
+    durable_write.write_json(path, item)
 
 
 def maintain_assertions(gconn, *, reviews_dir: Path, claims_dir: Path, markdown_dir: Path,

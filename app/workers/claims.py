@@ -42,7 +42,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from app.backend import db, graph, write_lock
+from app.backend import db, durable_write, graph, write_lock
 from app.backend import producer_journal as journal
 from app.backend.manifests import get_status, iso_now, load_manifest, valid_manifests
 from app.llm import prompts
@@ -188,30 +188,6 @@ def _write_source_artifact(apath, sid, fingerprint, source_claims, model_ref, no
 _MIRRORED_PAGE_STATUSES = frozenset({"active", "hidden", "deprecated_candidate"})
 
 
-def _write_page_durably(path: Path, content: str) -> None:
-    """Replace a page durably: temp file fsynced, renamed, directory fsynced (ADR-0073 decision 10:
-    the marked deprecation must be on disk before the journal records it)."""
-    from app.backend import publication_queue as pq
-    tmp = path.with_name(path.name + f".tmp-{uuid.uuid4().hex[:8]}")
-    pq._write_durably(tmp, content.encode("utf-8"))
-    tmp.replace(path)
-    pq._sync_dir(path.parent)
-
-
-def sync_page_durably(path: Path) -> None:
-    """Repeat a page's durability barrier (fsync the file, then its directory). Recovery calls it
-    before certifying a marked page an earlier run wrote — that run's flush may have failed after
-    its rename (ADR-0073 slice 2 review)."""
-    import os
-    from app.backend import publication_queue as pq
-    fd = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    pq._sync_dir(Path(path).parent)
-
-
 # The shared Claim-page authority check (ADR-0073 decision 20): publication's mirror and every
 # render go through it before using an existing page.
 PAGE_ABSENT, PAGE_OK = "absent", "ok"
@@ -263,7 +239,7 @@ def mirror_page_status(gconn, *, cid: str, claims_dir: Path, now: str) -> str:
     if auth["status"] not in _MIRRORED_PAGE_STATUSES or graph.get_node(gconn, cid) is None:
         return PAGE_OK
     if auth["marker_state"] == claim_marker.OK:
-        sync_page_durably(page_path)
+        durable_write.sync_existing(page_path)
     graph.upsert_node(gconn, node_id=cid, node_type="claim", slug=cid, status=auth["status"],
                       now=now)
     return PAGE_OK
@@ -271,8 +247,7 @@ def mirror_page_status(gconn, *, cid: str, claims_dir: Path, now: str) -> str:
 
 def recompose_claim(gconn, *, cid, claims_dir, reviews_dir, now, markdown_dir, text_hint=None,
                     contradiction_affected=None, deprecate=False, review_status=None,
-                    hide=False, unhide=False, project_only=False, supersede_marker=None,
-                    durable=False) -> str:
+                    hide=False, unhide=False, project_only=False, supersede_marker=None) -> str:
     """Render a Claim page from its `active` derived_from edges (tombstone if none).
 
     The single, shared claim renderer (used by the claim worker and the contradiction worker):
@@ -301,7 +276,8 @@ def recompose_claim(gconn, *, cid, claims_dir, reviews_dir, now, markdown_dir, t
     unchanged by every render. `supersede_marker` (the supersede executor only) adds one; it never
     replaces a different marker (`"marker_conflict"`). A damaged marker — partial or malformed —
     returns `"marker_unreadable"` before anything is written (page and graph untouched); the caller
-    reports that work incomplete. `durable` fsyncs the page write (the marked deprecation)."""
+    reports that work incomplete. Every page write is durable (ADR-0074 decision 1), so the marked
+    deprecation is on disk before the journal records it (ADR-0073 decision 10)."""
     edges = [e for e in graph.outgoing_active(gconn, cid) if e["edge_type"] == "derived_from"]
     page_path = claims_dir / f"{cid}.md"
     claim_text = text_hint or _read_claim_text(page_path)
@@ -346,7 +322,7 @@ def recompose_claim(gconn, *, cid, claims_dir, reviews_dir, now, markdown_dir, t
         saved = parse_frontmatter(page_path.read_text(encoding="utf-8", errors="replace")) \
             .get("review_status") if page_path.exists() else None
         review_status = saved if saved in REVIEW_STATUSES else None
-    claims_dir.mkdir(parents=True, exist_ok=True)
+    durable_write.make_dirs(claims_dir)
     # ADR-0060: resolve display labels worker-side (page-local) for the evidence-table source
     # links and contradicting-claim backlinks; the renderer stays IO-free.
     link_labels = labels.display_labels(
@@ -356,10 +332,7 @@ def recompose_claim(gconn, *, cid, claims_dir, reviews_dir, now, markdown_dir, t
                                  "citations": cites, "contradicts": contradicts,
                                  "deprecated": deprecated, "hidden": hidden},
                                 review_status=review_status, labels=link_labels, marker=marker)
-    if durable:
-        _write_page_durably(page_path, content)
-    else:
-        page_path.write_text(content, encoding="utf-8")
+    durable_write.write_text(page_path, content)
     # Mirror the page's status into the derived node index (hidden > deprecated/tombstone > active).
     node_status = "hidden" if hidden else ("deprecated_candidate" if (deprecated or not cites) else "active")
     graph.upsert_node(gconn, node_id=cid, node_type="claim", slug=cid, status=node_status, now=now)

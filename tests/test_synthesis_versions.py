@@ -21,7 +21,7 @@ if str(ROOT) not in sys.path:
 
 from fastapi.testclient import TestClient
 
-from app.backend import graph
+from app.backend import durable_write, graph
 from app.backend import main as main_module
 from app.backend.config import get_settings
 from app.workers import reviews, synthesis
@@ -450,7 +450,7 @@ def test_decide_again_finishes_an_interrupted_attempt(tmp_path, monkeypatch):
     _candidate(tmp_path, status="active").close()
     _review(tmp_path, "approved", "rev_p", bound=False)
     shown = _digest(tmp_path)
-    real = reviews.write_json_durably
+    real = durable_write.write_json
     calls = []
 
     def crash_on_item(path, obj):
@@ -459,11 +459,11 @@ def test_decide_again_finishes_an_interrupted_attempt(tmp_path, monkeypatch):
             raise KeyboardInterrupt
         return real(path, obj)
 
-    monkeypatch.setattr(reviews, "write_json_durably", crash_on_item)
+    monkeypatch.setattr(durable_write, "write_json", crash_on_item)
     with pytest.raises(KeyboardInterrupt):
         reviews.decide_again(tmp_path / "reviews", "rev_p", decision="rejected",
                              version_digest=shown)
-    monkeypatch.setattr(reviews, "write_json_durably", real)
+    monkeypatch.setattr(durable_write, "write_json", real)
     assert len(_audits(tmp_path, "rev_p")) == 1 and _location(tmp_path, "rev_p") == ["approved"]
     assert reviews.decide_again(tmp_path / "reviews", "rev_p", decision="rejected",
                                 version_digest=shown) is True
@@ -689,7 +689,7 @@ def test_an_unreadable_page_comparison_is_unverified(tmp_path, monkeypatch):
 
 
 def _failing_dir_sync(monkeypatch, tmp_path, *, name="rejected"):
-    real = reviews._sync_dir
+    real = durable_write.sync_dir
     target = tmp_path / "reviews" / name
 
     def flaky(path):
@@ -697,7 +697,7 @@ def _failing_dir_sync(monkeypatch, tmp_path, *, name="rejected"):
             raise OSError("fsync failed")
         return real(path)
 
-    monkeypatch.setattr(reviews, "_sync_dir", flaky)
+    monkeypatch.setattr(durable_write, "sync_dir", flaky)
     return real
 
 
@@ -714,10 +714,16 @@ def test_a_retry_never_deletes_the_predecessor_before_the_replacement_is_durable
         assert (tmp_path / "reviews" / "approved" / "rev_p.json").exists()
         assert (tmp_path / "reviews" / "rejected" / "rev_p.json").exists()
         assert len(_audits(tmp_path, "rev_p")) == 1
-    monkeypatch.setattr(reviews, "_sync_dir", real)
+    monkeypatch.setattr(durable_write, "sync_dir", real)
     synced = []
-    monkeypatch.setattr(reviews, "sync_durably", lambda p: synced.append(Path(p)))
-    monkeypatch.setattr(reviews, "_sync_dir", lambda p: synced.append(("dir", Path(p))))
+    ledger = tmp_path / "reviews"                         # the review ledger's flushes only
+    real_existing = durable_write.sync_existing
+    monkeypatch.setattr(durable_write, "sync_existing",
+                        lambda p: synced.append(Path(p)) if ledger in Path(p).parents
+                        else real_existing(p))
+    monkeypatch.setattr(durable_write, "sync_dir",
+                        lambda p: synced.append(("dir", Path(p))) if ledger in Path(p).parents
+                        else real(p))
     assert reviews.decide_again(tmp_path / "reviews", "rev_p", decision="rejected",
                                 version_digest=shown) is False
     (audit,) = _audits(tmp_path, "rev_p")
@@ -738,7 +744,7 @@ def test_a_retry_without_its_audit_entry_keeps_the_predecessor(tmp_path, monkeyp
     with pytest.raises(OSError):
         reviews.decide_again(tmp_path / "reviews", "rev_p", decision="rejected",
                              version_digest=shown)
-    monkeypatch.setattr(reviews, "_sync_dir", real)
+    monkeypatch.setattr(durable_write, "sync_dir", real)
     (audit,) = _audits(tmp_path, "rev_p")
     if damage == "missing":
         audit.unlink()
@@ -798,7 +804,7 @@ def test_bulk_confirmation_leaves_out_an_undecidable_version(client, tmp_path, b
 
 def _recording_dir_sync(monkeypatch, fail):
     """Record every directory flush; raise OSError where `fail(path)` says so."""
-    real = reviews._sync_dir
+    real = durable_write.sync_dir
     calls = []
 
     def sync(path):
@@ -807,7 +813,7 @@ def _recording_dir_sync(monkeypatch, fail):
             raise OSError("fsync failed")
         return real(path)
 
-    monkeypatch.setattr(reviews, "_sync_dir", sync)
+    monkeypatch.setattr(durable_write, "sync_dir", sync)
     return calls
 
 
@@ -875,14 +881,14 @@ def test_an_unflushable_existing_terminal_directory_is_not_mistaken_for_absence(
                                 version_digest=shown) is True
     rejected_dir = tmp_path / "reviews" / "rejected"
     rejected_dir.mkdir()
-    real = reviews._sync_dir
+    real = durable_write.sync_dir
 
     def denied(path):
         if Path(path) == rejected_dir:
             raise PermissionError("denied")
         return real(path)
 
-    monkeypatch.setattr(reviews, "_sync_dir", denied)
+    monkeypatch.setattr(durable_write, "sync_dir", denied)
     with pytest.raises(PermissionError):
         reviews.decide_again(tmp_path / "reviews", "rev_p", decision="approved",
                              version_digest=shown)
@@ -892,7 +898,7 @@ def test_an_unflushable_existing_terminal_directory_is_not_mistaken_for_absence(
             raise FileNotFoundError("racy")
         return real(path)
 
-    monkeypatch.setattr(reviews, "_sync_dir", vanished_but_present)
+    monkeypatch.setattr(durable_write, "sync_dir", vanished_but_present)
     with pytest.raises(FileNotFoundError):
         reviews.decide_again(tmp_path / "reviews", "rev_p", decision="approved",
                              version_digest=shown)

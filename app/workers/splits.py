@@ -41,7 +41,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from app.backend import graph, taxonomy
+from app.backend import durable_write, graph, taxonomy
 from app.backend.manifests import is_source_id, iso_now
 from app.workers import apply_outcomes as oc
 from app.workers import item_pages as ownership
@@ -108,11 +108,9 @@ def _target_assertion_collision(gconn, moved: list[dict[str, Any]], b: str) -> b
 
 def _write_audit(reviews_dir: Path, rid: str, record: dict[str, Any], now: str) -> None:
     audit = Path(reviews_dir) / "audit_log"
-    audit.mkdir(parents=True, exist_ok=True)
-    (audit / f"{rid}-split-{uuid.uuid4().hex[:8]}.json").write_text(
-        json.dumps({"review_id": rid, "decision": "split", "decided_by": "system",
-                    "decided_at": now, **record}, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8")
+    durable_write.write_json(audit / f"{rid}-split-{uuid.uuid4().hex[:8]}.json",
+                             {"review_id": rid, "decision": "split", "decided_by": "system",
+                              "decided_at": now, **record})
 
 
 def apply_splits(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = None) -> dict[str, Any]:

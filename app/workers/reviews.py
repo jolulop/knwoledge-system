@@ -23,9 +23,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from app.backend import write_lock
+from app.backend import durable_write, write_lock
 from app.backend.manifests import iso_now
-from app.backend.publication_queue import _sync_dir, _write_durably
 
 REVIEW_TYPES = frozenset({
     "delete_raw_file", "archive_source", "deprecate_wiki_page", "resolve_contradiction",
@@ -79,35 +78,6 @@ def is_retiring(item: dict[str, Any]) -> bool:
     return isinstance(item.get(RETIRING), dict)
 
 
-def write_json_durably(path: Path, obj: Any) -> None:
-    """Replace `path` with `obj` as JSON, durably: the temp file is flushed and fsynced, renamed
-    over `path`, and the directory fsynced, so the new file survives a power loss once this
-    returns (the recovery records of a contradiction retirement depend on it, ADR-0069)."""
-    path = Path(path)
-    tmp = path.with_name(path.name + ".tmp")
-    _write_durably(tmp, (json.dumps(obj, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
-    tmp.replace(path)
-    _sync_dir(path.parent)
-
-
-def _sync_file(path: Path) -> None:
-    fd = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
-def sync_durably(path: Path) -> None:
-    """Make an existing file durable: fsync it, then its directory. A retried retirement calls this
-    on a recovery record an earlier run already renamed into place — that run's own flush may have
-    failed after the rename — so the retry repeats the barrier before the effect it guards
-    (ADR-0069)."""
-    path = Path(path)
-    _sync_file(path)
-    _sync_dir(path.parent)
-
-
 def review_id(review_type: str, subject: dict[str, Any]) -> str:
     key = review_type + "|" + json.dumps(subject, sort_keys=True, ensure_ascii=False)
     return "rev_" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
@@ -135,13 +105,11 @@ def create_review_item(
     for state in _STATE_DIRS:
         if (reviews_dir / state / f"{rid}.json").exists():
             return rid
-    pending = reviews_dir / "pending"
-    pending.mkdir(parents=True, exist_ok=True)
-    (pending / f"{rid}.json").write_text(json.dumps({
+    durable_write.write_json(reviews_dir / "pending" / f"{rid}.json", {
         "review_id": rid, "type": review_type, "status": "pending", "priority": priority,
         "created_at": now or iso_now(), "subject": subject, "proposal": proposal,
         "context": context or {},
-    }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    })
     return rid
 
 
@@ -171,20 +139,20 @@ def withdraw_review_item(
     except (OSError, json.JSONDecodeError):
         item = {"review_id": review_id}
     audit = reviews_dir / "audit_log"
-    audit.mkdir(parents=True, exist_ok=True)
+    durable_write.make_dirs(audit)
     # Unique suffix: a withdraw/re-file/withdraw cycle for the same review_id must not overwrite
     # earlier audit entries (unlike a terminal approve/reject, a withdrawal can recur).
     entry = audit / f"{review_id}-withdrawn-{audit_key or uuid.uuid4().hex[:8]}.json"
-    if entry.exists():                                    # a retried keyed withdrawal keeps its first,
-        sync_durably(entry)                               # flushed again before the item is deleted
+    if entry.exists():                    # a retried keyed withdrawal keeps its first,
+        durable_write.sync_existing(entry)  # flushed again before the item is deleted
     else:
-        write_json_durably(entry, {                       # durable before the item is deleted
+        durable_write.write_json(entry, {   # durable before the item is deleted
             "review_id": review_id, "type": item.get("type"), "decision": "withdrawn",
             "decided_by": "system", "decided_at": now, "subject": item.get("subject"),
             "note": reason,
         })
     src.unlink()
-    _sync_dir(src.parent)
+    durable_write.sync_dir(src.parent)
     return True
 
 
@@ -254,13 +222,10 @@ def resolve_review_item(
     item.pop(DECIDED_VERSION, None)
     if version_digest is not None:
         item[DECIDED_VERSION] = version_digest
-    dest_dir = reviews_dir / decision
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    (dest_dir / f"{review_id}.json").write_text(
-        json.dumps(item, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    durable_write.write_json(reviews_dir / decision / f"{review_id}.json", item)
     src.unlink()
     audit = reviews_dir / "audit_log"
-    audit.mkdir(parents=True, exist_ok=True)
+    durable_write.make_dirs(audit)
     audit_entry = {
         "review_id": review_id, "type": item.get("type"), "decision": decision,
         "decided_by": decided_by, "decided_at": now, "subject": item.get("subject"),
@@ -274,8 +239,7 @@ def resolve_review_item(
         audit_entry["amendments"] = amendments
     if version_digest is not None:
         audit_entry[DECIDED_VERSION] = version_digest
-    (audit / f"{review_id}-{decision}.json").write_text(
-        json.dumps(audit_entry, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    durable_write.write_json(audit / f"{review_id}-{decision}.json", audit_entry)
     return True
 
 
@@ -321,17 +285,16 @@ def reopen_review_item(
         item.pop(field, None)
     item["status"] = "pending"
     dest = reviews_dir / "pending" / f"{review_id}.json"
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(json.dumps(item, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    durable_write.write_json(dest, item)
     src.unlink()
     # Sequence-suffixed so repeated decide->reopen cycles never clobber prior reopened audit (ADR-0045).
     audit = reviews_dir / "audit_log"
-    audit.mkdir(parents=True, exist_ok=True)
+    durable_write.make_dirs(audit)
     seq = 1 + len(list(audit.glob(f"{review_id}-reopened-*.json")))
-    (audit / f"{review_id}-reopened-{seq}.json").write_text(json.dumps({
+    durable_write.write_json(audit / f"{review_id}-reopened-{seq}.json", {
         "review_id": review_id, "type": item.get("type"), "event": "reopened",
         "reopened_at": now, "reason": reason, **prior,
-    }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    })
     return True
 
 
@@ -376,22 +339,22 @@ def defer_review_item(
     if item.get("status") == "deferred":
         if draft_amendments is not None and item.get("draft_amendments") != draft_amendments:
             item["draft_amendments"] = draft_amendments
-            src.write_text(json.dumps(item, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            durable_write.write_json(src, item)
         return False  # idempotent: already deferred, no duplicate audit
     now = now or iso_now()
     if draft_amendments is not None:
         item["draft_amendments"] = draft_amendments
     item.update(status="deferred", decided_by=decided_by, decided_at=now, decision_note=note)
-    src.write_text(json.dumps(item, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    durable_write.write_json(src, item)
     audit = reviews_dir / "audit_log"
-    audit.mkdir(parents=True, exist_ok=True)
+    durable_write.make_dirs(audit)
     # A deferral is non-terminal (the item may later be re-opened to a real decision), so use a
     # unique suffix rather than overwriting — mirrors `withdraw_review_item`.
-    (audit / f"{review_id}-deferred-{uuid.uuid4().hex[:8]}.json").write_text(json.dumps({
+    durable_write.write_json(audit / f"{review_id}-deferred-{uuid.uuid4().hex[:8]}.json", {
         "review_id": review_id, "type": item.get("type"), "decision": "deferred",
         "decided_by": decided_by, "decided_at": now, "subject": item.get("subject"),
         "note": note,
-    }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    })
     return True
 
 
@@ -419,7 +382,7 @@ def _sync_terminal_dir(path: Path) -> None:
     same-status re-decision never created the opposite one) holds nothing to flush; any other
     failure — permission, I/O — propagates."""
     try:
-        _sync_dir(path)
+        durable_write.sync_dir(path)
     except FileNotFoundError:
         if os.path.lexists(path):                # it exists after all: not an absence
             raise
@@ -484,8 +447,8 @@ def decide_again(
                     "the replaced decision is kept")
             audits.append(entry)
         for entry in audits:
-            sync_durably(entry)
-        sync_durably(found[decision])
+            durable_write.sync_existing(entry)
+        durable_write.sync_existing(found[decision])
         for p in left.values():                   # the replaced file an interruption left behind
             p.unlink()
         # Flush BOTH terminal directories, even when no predecessor file remains: an earlier run may
@@ -503,12 +466,12 @@ def decide_again(
     now = now or iso_now()
     key = _decide_again_key(review_id, prior, decision, version_digest)
     audit = reviews_dir / "audit_log"
-    audit.mkdir(parents=True, exist_ok=True)
+    durable_write.make_dirs(audit)
     entry = audit / f"{review_id}-decided-again-{key}.json"
     if _audit_records_decide_again(entry, review_id, prior_status, decision, version_digest):
-        sync_durably(entry)
+        durable_write.sync_existing(entry)
     else:                                        # absent, or a torn/unreadable one: write it again
-        write_json_durably(entry, {
+        durable_write.write_json(entry, {
             "review_id": review_id, "type": prior.get("type"), "event": "decided_again",
             "decided_by": decided_by, "decided_at": now, "subject": prior.get("subject"),
             "note": note, "prior_status": prior_status,
@@ -524,11 +487,11 @@ def decide_again(
     if decision == "approved":
         item["approval_id"] = uuid.uuid4().hex
     dest = reviews_dir / decision / f"{review_id}.json"
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    write_json_durably(dest, item)
+    durable_write.make_dirs(dest.parent)
+    durable_write.write_json(dest, item)
     if dest != src:
         src.unlink()
-        _sync_dir(src.parent)
+        durable_write.sync_dir(src.parent)
     return True
 
 
@@ -559,16 +522,16 @@ def refresh_pending_proposal(
     if new == old:
         return False
     audit = reviews_dir / "audit_log"
-    audit.mkdir(parents=True, exist_ok=True)
+    durable_write.make_dirs(audit)
     entry = audit / f"{review_id}-proposal-refreshed-{audit_key}.json"
     if entry.exists():
-        sync_durably(entry)
+        durable_write.sync_existing(entry)
     else:
-        write_json_durably(entry, {
+        durable_write.write_json(entry, {
             "review_id": review_id, "type": item.get("type"), "event": "proposal_refreshed",
             "decided_by": "system", "decided_at": now or iso_now(), "subject": item.get("subject"),
             "prior_proposal": old, "proposal": new,
         })
     item["proposal"] = new
-    write_json_durably(src, item)
+    durable_write.write_json(src, item)
     return True

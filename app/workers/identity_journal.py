@@ -24,14 +24,12 @@ entry (`op: "supersede"`) also carries its binding: `winner`, `loser` and `appro
 from __future__ import annotations
 
 import json
-import os
 import re
-import uuid
 from pathlib import Path
 from typing import Any
 
 from app.backend.manifests import iso_now
-from app.backend.publication_queue import _sync_dir, _write_durably
+from app.backend import durable_write
 
 JOURNAL_DIR = "in_flight"
 _RID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
@@ -54,11 +52,7 @@ class JournalUnreadable(Exception):
 
 def _write(path: Path, data: dict[str, Any]) -> None:
     """Replace `path` durably: temp file written and fsynced, renamed, then the directory fsynced."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(f".tmp-{uuid.uuid4().hex[:8]}")
-    _write_durably(tmp, (json.dumps(data, indent=2) + "\n").encode("utf-8"))
-    os.replace(tmp, path)
-    _sync_dir(path.parent)
+    durable_write.write_bytes(path, (json.dumps(data, indent=2) + "\n").encode("utf-8"))
 
 
 def begin(reviews_dir: Path, review_id: str, *, op: str, nodes: list[str],
@@ -100,13 +94,7 @@ def sync(reviews_dir: Path, review_id: str) -> None:
     """Repeat an existing entry's durability barrier (fsync the file, then the directory). Recovery
     calls it after validating a recovered entry and BEFORE acting on it: the run that wrote it may
     have failed after its rename, during the flush (ADR-0073 slice 2 review)."""
-    path = _path(reviews_dir, review_id)
-    fd = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    _sync_dir(path.parent)
+    durable_write.sync_existing(_path(reviews_dir, review_id))
 
 
 def set_stage(reviews_dir: Path, review_id: str, stage: str, *,
@@ -139,7 +127,7 @@ def end(reviews_dir: Path, review_id: str) -> None:
     path = _path(reviews_dir, review_id)
     if path.exists():
         path.unlink()
-        _sync_dir(path.parent)
+        durable_write.sync_dir(path.parent)
 
 
 def open_operations(reviews_dir: Path) -> list[dict[str, Any]]:

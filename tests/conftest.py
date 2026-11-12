@@ -18,6 +18,19 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.backend import db, embeddings
+from tests import write_guard
+
+write_guard.install()
+
+
+@pytest.fixture(autouse=True)
+def _authority_writes_are_durable():
+    """ADR-0074 decision 1, enforced on every test: any write of file-backed authority that does not
+    go through `app.backend.durable_write` fails the test that caused it (`tests/write_guard.py`)."""
+    write_guard.take_violations()
+    yield
+    found = write_guard.take_violations()
+    assert not found, "unguarded authority write(s):\n" + "\n".join(found)
 
 
 @pytest.fixture(autouse=True)

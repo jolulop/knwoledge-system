@@ -24,7 +24,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from app.backend import graph, taxonomy
+from app.backend import durable_write, graph, taxonomy
 from app.backend.manifests import iso_now
 from app.workers import apply_outcomes as oc
 from app.workers import item_pages, items, reviews
@@ -299,21 +299,17 @@ def _write_verification(reviews_dir: Path, item: dict[str, Any], nid: str, item_
     approval for the guard and for ordering."""
     rid = str(item.get("review_id") or "")
     audit = Path(reviews_dir) / "audit_log"
-    audit.mkdir(parents=True, exist_ok=True)
-    (audit / f"{rid}-{VERIFIED}-{uuid.uuid4().hex[:8]}.json").write_text(
-        json.dumps({"review_id": rid, "decision": "retype_verified_in_effect",
-                    "decided_by": "system", "decided_at": now, "node_id": nid,
-                    "item_type": item_type, **_identity(item)},
-                   ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    durable_write.write_json(audit / f"{rid}-{VERIFIED}-{uuid.uuid4().hex[:8]}.json",
+                             {"review_id": rid, "decision": "retype_verified_in_effect",
+                              "decided_by": "system", "decided_at": now, "node_id": nid,
+                              "item_type": item_type, **_identity(item)})
 
 
 def _write_audit(reviews_dir: Path, rid: str, record: dict[str, Any], now: str) -> None:
     audit = Path(reviews_dir) / "audit_log"
-    audit.mkdir(parents=True, exist_ok=True)
-    (audit / f"{rid}-retyped-{uuid.uuid4().hex[:8]}.json").write_text(
-        json.dumps({"review_id": rid, "decision": "retyped", "decided_by": "system",
-                    "decided_at": now, **record}, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8")
+    durable_write.write_json(audit / f"{rid}-retyped-{uuid.uuid4().hex[:8]}.json",
+                             {"review_id": rid, "decision": "retyped", "decided_by": "system",
+                              "decided_at": now, **record})
 
 
 def retype_check(gconn, item: dict[str, Any], *, wiki_dir: Path) -> tuple[str, Any]:

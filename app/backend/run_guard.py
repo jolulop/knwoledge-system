@@ -21,6 +21,8 @@ import threading
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
+from app.backend import durable_write
+
 try:
     import fcntl
 except ImportError:                                       # non-POSIX: no cross-process exclusion
@@ -61,7 +63,7 @@ def guard(db_dir: Path, producer: str) -> Iterator[None]:
         finally:
             names[producer] -= 1
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
+    durable_write.make_dirs(path.parent)
     with open(path, "a", encoding="utf-8") as fh:
         if fcntl is not None:
             try:

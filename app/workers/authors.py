@@ -29,14 +29,13 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import uuid
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
 from app.backend import manifests
 from app.backend.search import RETENTION_DEFAULT_STATUSES
-from app.backend.publication_queue import _sync_dir, _write_durably
+from app.backend import durable_write
 from app.workers import page_names
 from app.workers.wiki_render import display_link_label
 
@@ -282,19 +281,6 @@ def _head(path: Path) -> str:
         return ""
 
 
-def _write_atomically(path: Path, content: str) -> None:
-    """A complete temporary file, flushed, then an atomic replace (slice-4 review round 1): a crash or
-    a failed write never leaves a truncated page that a retry would mistake for a handwritten one."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp-{uuid.uuid4().hex[:8]}")
-    try:
-        _write_durably(tmp, content.encode("utf-8"))
-        tmp.replace(path)
-    finally:
-        tmp.unlink(missing_ok=True)
-    _sync_dir(path.parent)
-
-
 UNAVAILABLE = "authors_page_unavailable"
 
 
@@ -350,7 +336,7 @@ def publish(root: Path, *, wiki_dir: Path | None = None, prune: bool = True) -> 
         content = render_page(page)
         try:
             if not path.exists() or path.read_text(encoding="utf-8") != content:
-                _write_atomically(path, content)
+                durable_write.write_text(path, content)
                 written.append(page["filename"])
         except (OSError, UnicodeDecodeError) as exc:
             write_failed.append({"file": f"{DIR}/{path.name}", "error": type(exc).__name__})

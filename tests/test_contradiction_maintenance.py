@@ -10,6 +10,8 @@ evidence itself, so a failed targeted run stays visible.
 from __future__ import annotations
 
 import json
+import os
+import re
 import sys
 from pathlib import Path
 
@@ -20,7 +22,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import tests.test_contradictions as con_t  # noqa: E402
-from app.backend import graph, manifests  # noqa: E402
+from app.backend import durable_write, graph, manifests  # noqa: E402
 from app.llm.client import LLMClient  # noqa: E402
 from app.workers import claims, contradictions, lint, reviews  # noqa: E402
 
@@ -375,12 +377,17 @@ def _fail_once(monkeypatch, owner, name, *, when=lambda *a, **k: True, times=1):
     monkeypatch.setattr(owner, name, flaky)
 
 
-def _pending_tmp(self, *a, **k):
-    return self.name.endswith(".json.tmp") and self.parent.name == "pending"
+_HELPER_TMP = re.compile(r"\.(?P<name>.+)\.tmp-[0-9a-f]+")     # durable_write's temporary file
 
 
-def _audit_tmp(self, *a, **k):
-    return self.name.endswith(".json.tmp") and self.parent.name == "audit_log"
+def _pending_tmp(src, *a, **k):
+    src = Path(src)
+    return bool(_HELPER_TMP.fullmatch(src.name)) and src.parent.name == "pending"
+
+
+def _audit_tmp(src, *a, **k):
+    src = Path(src)
+    return bool(_HELPER_TMP.fullmatch(src.name)) and src.parent.name == "audit_log"
 
 
 def _lint_reasons(tmp_path):
@@ -413,7 +420,7 @@ def _completes_on_retry(tmp_path, a, b, sb):
 def test_a_failure_before_any_effect_leaves_the_proposal_to_retry(tmp_path, monkeypatch):
     a, b, _sa, sb = _vault(tmp_path)
     _same_author(tmp_path, sb)
-    _fail_once(monkeypatch, Path, "replace", when=_pending_tmp)       # marking the review fails
+    _fail_once(monkeypatch, os, "replace", when=_pending_tmp)       # marking the review fails
     with pytest.raises(OSError):
         _maintain(tmp_path)
     assert _edge_status(tmp_path, a, b) == ["proposed"] and _pending(tmp_path, _rid(a, b))
@@ -437,7 +444,7 @@ def test_a_failure_superseding_the_edge_is_completed_on_retry(tmp_path, monkeypa
 def test_a_failure_after_edge_supersession_is_completed_on_retry(tmp_path, monkeypatch):
     a, b, _sa, sb = _vault(tmp_path)
     _same_author(tmp_path, sb)
-    _fail_once(monkeypatch, Path, "replace", when=_audit_tmp)         # the audit write fails
+    _fail_once(monkeypatch, os, "replace", when=_audit_tmp)         # the audit write fails
     with pytest.raises(OSError):
         _maintain(tmp_path)
     assert _edge_status(tmp_path, a, b) == ["superseded"]            # no longer a proposal...
@@ -556,7 +563,7 @@ def _interrupt_after_marking(tmp_path, monkeypatch, sb):
 def _interrupt_after_supersession(tmp_path, monkeypatch, sb):
     """Leave a retirement interrupted after the edge was superseded (the review still pending)."""
     _same_author(tmp_path, sb)
-    _fail_once(monkeypatch, Path, "replace", when=_audit_tmp)
+    _fail_once(monkeypatch, os, "replace", when=_audit_tmp)
     with pytest.raises(OSError):
         _maintain(tmp_path)                                       # _fail_once fails only once
 
@@ -626,26 +633,34 @@ def _record_persistence(monkeypatch, tmp_path, rid) -> list[str]:
 
     def where(path):
         path = Path(path)
-        return f"{path.parent.name}/{path.name.replace(rid, 'RID')}"
+        tmp = _HELPER_TMP.fullmatch(path.name)
+        name = f"{tmp['name']}.tmp" if tmp else path.name
+        return f"{path.parent.name}/{name.replace(rid, 'RID')}"
 
-    real_write, real_sync, real_sync_file = reviews._write_durably, reviews._sync_dir, \
-        reviews._sync_file
-    real_replace, real_unlink, real_set = Path.replace, Path.unlink, graph.set_status
+    real_write, real_sync, real_fsync = (durable_write._write_temp, durable_write.sync_dir,
+                                         durable_write._fsync_path)
+    real_replace, real_unlink, real_set = os.replace, Path.unlink, graph.set_status
 
-    def write(path, data):
-        real_write(path, data)
-        events.append(f"fsync {where(path)}")
+    def ours(path):                                       # the review ledger's files only
+        return reviews_dir in Path(path).parents
+
+    def write(path, data, mode=None):
+        real_write(path, data, mode)
+        if ours(path):
+            events.append(f"fsync {where(path)}")
 
     def sync(path):
         real_sync(path)
-        events.append(f"dirsync {Path(path).name}")
+        if ours(path):
+            events.append(f"dirsync {Path(path).name}")
 
-    def sync_file(path):
-        real_sync_file(path)
-        events.append(f"fsync existing {where(path)}")
+    def fsync_path(path):                                 # a file's re-sync barrier (not a dir's)
+        real_fsync(path)
+        if ours(path) and Path(path).is_file():
+            events.append(f"fsync existing {where(path)}")
 
-    def replace(self, target):
-        out = real_replace(self, target)
+    def replace(src, target):
+        out = real_replace(src, target)
         if reviews_dir in Path(target).parents:
             events.append(f"rename {where(target)}")
         return out
@@ -659,10 +674,10 @@ def _record_persistence(monkeypatch, tmp_path, rid) -> list[str]:
         real_set(conn, edge_id, status, **kwargs)
         events.append(f"edge {status}")
 
-    monkeypatch.setattr(reviews, "_write_durably", write)
-    monkeypatch.setattr(reviews, "_sync_dir", sync)
-    monkeypatch.setattr(reviews, "_sync_file", sync_file)
-    monkeypatch.setattr(Path, "replace", replace)
+    monkeypatch.setattr(durable_write, "_write_temp", write)
+    monkeypatch.setattr(durable_write, "sync_dir", sync)
+    monkeypatch.setattr(durable_write, "_fsync_path", fsync_path)
+    monkeypatch.setattr(os, "replace", replace)
     monkeypatch.setattr(Path, "unlink", unlink)
     monkeypatch.setattr(graph, "set_status", set_status)
     return events
@@ -688,7 +703,7 @@ def test_a_failed_directory_sync_stops_before_the_guarded_effect(tmp_path, monke
     a, b, _sa, sb = _vault(tmp_path)
     _same_author(tmp_path, sb)
     rid = _rid(a, b)
-    _fail_once(monkeypatch, reviews, "_sync_dir", when=lambda path: Path(path).name == failing_dir)
+    _fail_once(monkeypatch, durable_write, "sync_dir", when=lambda path: Path(path).name == failing_dir)
     with pytest.raises(OSError):
         _maintain(tmp_path)
     if failing_dir == "pending":          # the marker isn't known durable: the edge is untouched
@@ -711,7 +726,7 @@ def test_a_retry_repeats_the_failed_durability_barrier_first(tmp_path, monkeypat
     a, b, _sa, sb = _vault(tmp_path)
     _same_author(tmp_path, sb)
     rid = _rid(a, b)
-    _fail_once(monkeypatch, reviews, "_sync_dir", when=lambda path: Path(path).name == failing_dir)
+    _fail_once(monkeypatch, durable_write, "sync_dir", when=lambda path: Path(path).name == failing_dir)
     with pytest.raises(OSError):
         _maintain(tmp_path)
     audit = f"audit_log/RID-withdrawn-m{_mark_id(tmp_path, rid)}.json"
@@ -734,7 +749,7 @@ def test_a_repeated_sync_failure_still_stops_before_the_guarded_effect(tmp_path,
     a, b, _sa, sb = _vault(tmp_path)
     _same_author(tmp_path, sb)
     rid = _rid(a, b)
-    _fail_once(monkeypatch, reviews, "_sync_dir", times=2,
+    _fail_once(monkeypatch, durable_write, "sync_dir", times=2,
                when=lambda path: Path(path).name == failing_dir)
     for _attempt in range(2):                 # the first run, then a retry: both fail to flush
         with pytest.raises(OSError):

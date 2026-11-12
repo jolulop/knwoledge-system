@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from app.backend.publication_queue import _sync_dir, _write_durably
+from app.backend import durable_write
 
 STORE_NAME = "apply_authorizations.json"
 SCHEMA_VERSION = 1
@@ -81,12 +81,8 @@ def _parse(data: bytes) -> list[dict[str, Any]] | None:
 def _save(root: Path, records: list[dict[str, Any]]) -> None:
     path = store_path(root)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(f".tmp-{uuid.uuid4().hex[:8]}")
-        _write_durably(tmp, (json.dumps({"schema_version": SCHEMA_VERSION, "records": records},
-                                        indent=2) + "\n").encode("utf-8"))
-        tmp.replace(path)
-        _sync_dir(path.parent)
+        durable_write.write_bytes(path, (json.dumps(
+            {"schema_version": SCHEMA_VERSION, "records": records}, indent=2) + "\n").encode("utf-8"))
     except OSError as exc:
         raise StoreUnavailable("write", exc) from exc
 
@@ -105,9 +101,9 @@ def load(root: Path) -> list[dict[str, Any]]:
         return records
     stamp = _iso_now().replace(":", "").replace("-", "")
     try:
-        _write_durably(path.with_name(
-            f"apply_authorizations.damaged-{stamp}-{uuid.uuid4().hex[:6]}.json"), data)
-        _sync_dir(path.parent)
+        durable_write.write_bytes(path.with_name(
+            f"apply_authorizations.damaged-{stamp}-{uuid.uuid4().hex[:6]}.json"), data,
+            create_only=True)
     except OSError as exc:
         raise StoreUnavailable("preserve", exc) from exc
     _save(root, [])

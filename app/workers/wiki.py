@@ -20,7 +20,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from app.backend import db, graph, write_lock
+from app.backend import db, durable_write, graph, write_lock
 from app.backend.config import get_settings
 from app.backend.manifests import iso_now, load_manifest, valid_manifests
 from app.backend.search import RETENTION_DEFAULT_STATUSES
@@ -148,7 +148,7 @@ def generate_wiki(
     graph_db = Path(graph_db) if graph_db else root / "db" / "graph.sqlite"
     sources_dir = wiki_dir / "Sources"
     claims_dir = wiki_dir / "Claims"
-    sources_dir.mkdir(parents=True, exist_ok=True)
+    durable_write.make_dirs(sources_dir)
     # Read-only graph connection for the Source-page Claims projection (slice 3b). Absent
     # before any claim extraction -> no claim links, just the pending placeholder.
     gconn = graph.connect(graph_db) if graph_db.exists() else None

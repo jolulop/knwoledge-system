@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from app.backend.publication_queue import _sync_dir, _write_durably
+from app.backend import durable_write
 
 REVISION_NAME = "revision.json"
 SCHEMA_VERSION = 1
@@ -65,12 +65,8 @@ def _parse(data: bytes) -> dict[str, Any] | None:
 def _save(root: Path, rev: dict[str, Any]) -> None:
     path = revision_path(root)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(f".tmp-{uuid.uuid4().hex[:8]}")
-        _write_durably(tmp, (json.dumps({"schema_version": SCHEMA_VERSION, **rev}) + "\n")
-                       .encode("utf-8"))
-        tmp.replace(path)
-        _sync_dir(path.parent)
+        durable_write.write_bytes(path, (json.dumps({"schema_version": SCHEMA_VERSION, **rev})
+                                         + "\n").encode("utf-8"))
     except OSError as exc:
         raise RevisionUnavailable("replace", exc) from exc
 
@@ -97,8 +93,9 @@ def current(root: Path) -> dict[str, Any]:
     # at any point leaves the damaged file or its copy, never neither.
     stamp = _iso_now().replace(":", "").replace("-", "")
     try:
-        _write_durably(path.with_name(f"revision.damaged-{stamp}-{uuid.uuid4().hex[:6]}.json"), data)
-        _sync_dir(path.parent)
+        durable_write.write_bytes(
+            path.with_name(f"revision.damaged-{stamp}-{uuid.uuid4().hex[:6]}.json"), data,
+            create_only=True)
     except OSError as exc:
         raise RevisionUnavailable("preserve", exc) from exc
     rev = _fresh()

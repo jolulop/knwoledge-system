@@ -22,6 +22,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from app.backend import durable_write
+
 
 def cache_retention_report(db_path: Path, *, ttl_days: int, cap_mb: int,
                            now: datetime) -> dict[str, Any]:
@@ -120,7 +122,7 @@ class ResponseCache:
 
     def __init__(self, db_path: Path) -> None:
         self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        durable_write.make_dirs(self.db_path.parent)
         conn = sqlite3.connect(self.db_path)
         try:
             conn.executescript(_SCHEMA)

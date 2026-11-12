@@ -35,7 +35,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from app.backend import db, graph, write_lock
+from app.backend import db, durable_write, graph, write_lock
 from app.backend import producer_journal as journal
 from app.backend.manifests import get_provenance, independent_sources, iso_now, valid_manifests
 from app.backend.paths import safe_child
@@ -273,11 +273,11 @@ def _render_page(gconn, *, syn_id, topic_node, title, summary, synthesis_text, c
     content = _page_content(gconn, syn_id=syn_id, topic_node=topic_node, title=title, summary=summary,
                             synthesis_text=synthesis_text, confidence=confidence, status=status,
                             review_status=review_status, synthesis_dir=synthesis_dir)
-    synthesis_dir.mkdir(parents=True, exist_ok=True)
+    durable_write.make_dirs(synthesis_dir)
     page_path = synthesis_dir / f"{syn_id}.md"
     page_changed = (not page_path.exists()) or page_path.read_text(encoding="utf-8") != content
     if page_changed:
-        page_path.write_text(content, encoding="utf-8")
+        durable_write.write_text(page_path, content)
     node = graph.get_node(gconn, syn_id)
     graph_changed = node is None or node["status"] != status
     if graph_changed:

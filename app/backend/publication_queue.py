@@ -25,14 +25,13 @@ check it without importing the renderers.
 from __future__ import annotations
 
 import json
-import os
 import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from app.backend import manifests
+from app.backend import durable_write, manifests
 
 QUEUE_NAME = "publication_pending.json"
 SCHEMA_VERSION = 1
@@ -111,31 +110,12 @@ def load(root: Path) -> list[dict[str, Any]]:
     return [dict(e) for e in entries]
 
 
-def _write_durably(path: Path, data: bytes) -> None:
-    with open(path, "wb") as fh:
-        fh.write(data)
-        fh.flush()
-        os.fsync(fh.fileno())
-
-
-def _sync_dir(path: Path) -> None:
-    fd = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
 def save(root: Path, entries: list[dict[str, Any]]) -> None:
     """Replace the queue atomically and durably (flushed before and after the rename). The caller
     holds the write lock."""
-    path = queue_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(f".tmp-{uuid.uuid4().hex[:8]}")
-    _write_durably(tmp, (json.dumps({"schema_version": SCHEMA_VERSION, "entries": entries},
-                                    ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
-    os.replace(tmp, path)
-    _sync_dir(path.parent)
+    durable_write.write_bytes(queue_path(root), (json.dumps(
+        {"schema_version": SCHEMA_VERSION, "entries": entries},
+        ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
 
 
 def check_readable(root: Path) -> None:
@@ -254,8 +234,7 @@ def preserve_damaged(root: Path, now: str | None = None) -> Path | None:
         return None
     stamp = (now or _iso_now()).replace(":", "").replace("-", "")
     target = path.with_name(f"publication_pending.damaged-{stamp}-{uuid.uuid4().hex[:6]}.json")
-    _write_durably(target, path.read_bytes())
-    _sync_dir(path.parent)
+    durable_write.write_bytes(target, path.read_bytes(), create_only=True)
     return target
 
 

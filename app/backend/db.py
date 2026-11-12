@@ -27,7 +27,7 @@ from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
-from app.backend import vault_lock
+from app.backend import durable_write, vault_lock
 
 JOB_TYPES = frozenset(
     {"intake_scan", "manifest_create", "duplicate_check", "extract", "generate_wiki",
@@ -120,7 +120,7 @@ INSERT OR IGNORE INTO llm_ledger_meta (key, value)
 
 def connect(db_path: Path) -> sqlite3.Connection:
     db_path = Path(db_path)
-    db_path.parent.mkdir(parents=True, exist_ok=True)
+    durable_write.make_dirs(db_path.parent)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     return conn

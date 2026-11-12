@@ -27,12 +27,11 @@ separately") or picks one (`existing_node_id`, "Use existing", which keeps that 
 """
 from __future__ import annotations
 
-import json
 import uuid
 from pathlib import Path
 from typing import Any
 
-from app.backend import graph, publication_queue, taxonomy
+from app.backend import durable_write, graph, publication_queue, taxonomy
 from app.backend.manifests import iso_now
 from app.workers import identity_journal, item_names, item_pages, items, reviews, tag_links
 
@@ -189,8 +188,7 @@ def add_candidate(
                      "from_item_type": routed_retype[0]}, now=now)
 
     audit = reviews_dir / "audit_log"
-    audit.mkdir(parents=True, exist_ok=True)
-    (audit / f"{rid}-human-added-{uuid.uuid4().hex[:8]}.json").write_text(json.dumps({
+    durable_write.write_json(audit / f"{rid}-human-added-{uuid.uuid4().hex[:8]}.json", {
         "review_id": rid, "event": "human_added", "actor": "human", "at": now,
         "source_id": source_id, "node_id": nid, "item_type": used_type,
         "title": title, "aliases": clean_aliases, "description": description,
@@ -199,7 +197,7 @@ def add_candidate(
         "routed_retype": (
             {"from_item_type": routed_retype[0], "to_item_type": routed_retype[1]}
             if routed_retype else None),
-    }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    })
 
     # Producer contract: re-render the Source page (its Items projection) and rebuild the index.
     refresh = tag_links.finish(Path(root), kept["affected_sources"], wiki_dir=wiki_dir,

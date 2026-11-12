@@ -23,11 +23,11 @@ establishes nothing earlier was missed. **Display is read-only** (:func:`classif
 from __future__ import annotations
 
 import json
-import os
-import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from app.backend import durable_write
 
 TRACKING_NAME = "_tracking.json"
 TAGGED, UNKNOWN = "tagged", "unknown"
@@ -84,11 +84,7 @@ def load_tracking(reviews_dir: Path) -> dict[str, Any] | None:
 
 
 def _write_tracking(reviews_dir: Path, record: dict[str, Any]) -> None:
-    path = tracking_path(reviews_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(f".tmp-{uuid.uuid4().hex[:8]}")
-    tmp.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    durable_write.write_text(tracking_path(reviews_dir), json.dumps(record, indent=2) + "\n")
 
 
 def _tag_audit_exists(reviews_dir: Path) -> bool:

@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from app.backend import db, write_lock
+from app.backend import db, durable_write, write_lock
 from app.backend.manifests import (
     iso_now,
     load_manifest,
@@ -190,7 +190,7 @@ def scan_inbox(
     inbox = Path(inbox) if inbox else root / "raw" / "inbox"
     manifests_dir = Path(manifests_dir) if manifests_dir else root / "raw" / "manifests"
     jobs_db = Path(jobs_db) if jobs_db else root / "db" / "jobs.sqlite"
-    manifests_dir.mkdir(parents=True, exist_ok=True)
+    durable_write.make_dirs(manifests_dir)
 
     now = iso_now()
     job_id = f"job_{uuid.uuid4().hex[:16]}"

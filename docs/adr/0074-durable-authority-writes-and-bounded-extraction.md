@@ -1,7 +1,8 @@
 # ADR-0074 — Durable authority writes and bounded extraction
 
-- **Status:** accepted — design-locked by grill-phase 2026-11-11 (Q1–Q9). **Not implemented**;
-  slices 1–6 and changes 7a–7c per decision 9.
+- **Status:** accepted — design-locked by grill-phase 2026-11-11 (Q1–Q9). **Slice 1 (decision 1)
+  implemented 2026-11-11** — `app/backend/durable_write.py`, guard `tests/write_guard.py` +
+  `tests/test_authority_write_guard.py`. Slices 2–6 and changes 7a–7c per decision 9 not yet.
 - **Date:** 2026-11-11
 - **Drivers:** external review of `06f3d56` (2026-11-11), blocking findings 1 and 3. Finding 2
   (item descriptions corrupted across re-renders) was fixed separately in `dfda610`.
@@ -73,6 +74,54 @@ the helper. It recognises the known writer entry points **and** the authority de
 including aliases and wrappers (a path variable bound to an authority directory, a local helper that
 calls `write_text` / `json.dump` / `open(..., "w")`), not merely literal `write_text` / `json.dump`
 calls. Allowed exceptions (the helper itself, lock files, staging) are listed explicitly.
+
+**As implemented (slice 1).** `durable_write.write_bytes / write_text / write_json / write_stream`
+(replace, or `create_only=True`: the complete temp file is hard-linked into place, so an existing
+destination — a dangling symlink included — is never replaced), `sync_existing` (a file's re-sync
+barrier) and `sync_dir`; `UncertainCompletion(OSError)` for a directory-sync failure after the
+replacement. Temporary files are `.<name>.tmp-<hex>` beside the destination. Existing semantics are
+kept: writes that overwrote still overwrite; only the quarantine copies of damaged journals
+(`*.damaged-*.json`) became create-only. Claim pages lost their `durable=` switch (every page write is
+durable now). Backup restore writes each file through the helper. The guard has two halves: a static
+**deny-by-default** AST scan of `app/` and `scripts/` (every raw write primitive, called or
+referenced, under any import alias, must be the helper or an allowlisted non-authority write with a
+reason; stale entries fail) plus a registry of each family's known writer entry points; and a
+**runtime audit hook** active for the whole test suite (`tests/conftest.py`) that fails any test in
+which project code writes an authority-shaped path outside the helper.
+
+Review round 1 added three guarantees:
+
+- **Directories are durable too.** `durable_write.make_dirs` creates missing directories top-down,
+  one level at a time, and fsyncs each new entry into its parent before creating the next level. If
+  a parent can't be synced, the directory just created is removed and the error is raised, so a
+  retry never trusts an entry that was never synced. If it can't be removed either, that is
+  `UncertainCompletion`.
+  - Review round 2: an existing directory is never trusted just because it is visible. Its creator
+    may have died between `mkdir` and the parent sync, or may not have synced yet. Before a write
+    first relies on an existing directory, the helper **establishes** it: it fsyncs the parent of
+    each directory in the chain, top-down, and caches the result for the process, keyed by
+    `(st_dev, st_ino)`.
+    - The walk stops at a directory this process has already established, or at one the current
+      user doesn't own, since the system never creates those.
+    - The same applies with `mkdir=False` and in `sync_existing`, so the next writer, or a retry,
+      repairs an interrupted creation.
+    - Steady state costs one `stat` per write.
+    - Known limit: if another process deletes and recreates an established directory and its inode
+      number is reused, the cache would trust the new directory.
+  - The helper's own `mkdir=True` uses `make_dirs`, and so does every caller that creates an
+    authority directory or a vault-level ancestor of one: `raw/`, `raw/manifests/`, `wiki/`, the
+    page directories, `reviews/**`, `policies/**` and `db/`. That includes the SQLite and lock-file
+    openers and the `wiki/log.md` appenders that create `db/` or `wiki/` as a side effect.
+  - Both halves of the guard check directory creation: `.mkdir`, `os.mkdir` and `os.makedirs` in
+    the static scan, and the `os.mkdir` audit event at runtime.
+- **A replacement never widens access.** The temp file gets the existing destination's permission
+  bits (`fchmod`) before any content is written. If those bits can't be read, the write is not
+  attempted. Ownership is not carried over; the vault is single-user.
+- **Cleanup can't skip the barrier.** For a create-only write, installing the file (`os.link`) and
+  removing its temporary name are separate steps. The directory sync runs whenever the destination
+  is installed, even if removing the temp name fails, and only that sync confirms durability. If
+  the sync fails, the result is `UncertainCompletion`. If it succeeds, the leftover hidden link is
+  logged as a warning and the write counts as complete.
 
 **Tests.** One implementation, many tests: a **focused fault-injection suite** for the helper
 (failure at each step — temp write, file fsync, replace, directory fsync — leaves the old content
