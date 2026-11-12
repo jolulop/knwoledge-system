@@ -44,8 +44,9 @@ ALLOWED: dict[tuple[str, str, str], str] = {
     ("app/backend/durable_write.py", "_write_temp", "os.fdopen"): _HELPER,
     ("app/backend/durable_write.py", "_commit", "os.link"): _HELPER,
     ("app/backend/durable_write.py", "_commit", "os.replace"): _HELPER,
-    ("app/backend/manifests.py", "read_manifest_file", "os.open"):
-        "a read-only open (O_RDONLY | O_NONBLOCK) of the typed manifest reader, ADR-0074 decision 2",
+    ("app/backend/authority_read.py", "read_file", "os.open"):
+        "a read-only open (O_RDONLY | O_NONBLOCK) of the shared typed authority reader, ADR-0074 "
+        "decisions 2 and 4",
     ("app/backend/run_guard.py", "guard", "open(a)"): _LOCK,
     ("app/backend/vault_lock.py", "acquire_shared", "open(a)"): _LOCK,
     ("app/backend/vault_lock.py", "exclusive", "open(a)"): _LOCK,

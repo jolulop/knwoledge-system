@@ -42,7 +42,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from app.backend import db, durable_write, graph, write_lock
+from app.backend import authority_read, db, durable_write, graph, write_lock
 from app.backend import producer_journal as journal
 from app.backend.manifests import (
     ABSENT, OK, get_status, iso_now, read_reason, recheck, scan_manifests)
@@ -51,21 +51,12 @@ from app.llm.client import LLMClient, ParseError
 from app.workers import citations, claim_marker, publication, reviews, titles
 from app.workers import enrichment_artifact as art
 from app.workers import labels
-from app.workers.wiki_render import REVIEW_STATUSES, parse_frontmatter, render_claim_page
+from app.workers.wiki_render import _FRONTMATTER, REVIEW_STATUSES, parse_frontmatter, render_claim_page
 
 _ENRICHABLE_STATUSES = {"extracted", "partial"}
 _PRODUCER = "extract_claims"                 # its run guard and journal name
 _WS = re.compile(r"\s+")
 _CLAIM_TEXT_RE = re.compile(r'(?m)^claim_text:\s*"(.*)"\s*$')
-_STATUS_RE = re.compile(r"(?m)^status:\s*(\S+)\s*$")
-
-
-def _read_status(page_path: Path) -> str | None:
-    """Read the lifecycle `status` from an existing Claim page (the status authority, ADR-0022)."""
-    if not page_path.exists():
-        return None
-    m = _STATUS_RE.search(page_path.read_text(encoding="utf-8", errors="replace"))
-    return m.group(1) if m else None
 
 
 CLAIM_ID_RE = re.compile(r"clm_[0-9a-f]{16}")
@@ -88,12 +79,16 @@ def claim_id(claim_text: str) -> str:
     return f"clm_{hashlib.sha256(norm.encode('utf-8')).hexdigest()[:16]}"
 
 
-def _read_claim_text(page_path: Path) -> str | None:
-    """Read the durable claim_text from an existing Claim page's frontmatter (unescaped)."""
-    if not page_path.exists():
-        return None
-    m = _CLAIM_TEXT_RE.search(page_path.read_text(encoding="utf-8", errors="replace"))
+def _claim_text_of(text: str) -> str | None:
+    m = _CLAIM_TEXT_RE.search(text)
     return re.sub(r"\\(.)", r"\1", m.group(1)) if m else None
+
+
+def _read_claim_text(page_path: Path) -> str | None:
+    """The durable claim_text of a readable Claim page (unescaped); None for a missing or damaged
+    page (ADR-0074 decision 4: never a lossy decode)."""
+    read = authority_read.read_text(page_path)
+    return _claim_text_of(read.text) if read.state == authority_read.OK else None
 
 
 # --- claim windows (ADR-0056, `chunk-greedy-v1`) ----------------------------
@@ -194,32 +189,58 @@ _MIRRORED_PAGE_STATUSES = frozenset({"active", "hidden", "deprecated_candidate"}
 PAGE_ABSENT, PAGE_OK = "absent", "ok"
 IDENTITY_MISMATCH = "claim_identity_mismatch"
 MARKER_UNREADABLE = "marker_unreadable"
+# ADR-0074 decision 4 — the Claim page family. A page that can't be read, or is not valid UTF-8
+# or has no frontmatter, is damaged; so is one whose `status` is missing or unsupported when it is
+# about to be re-rendered (the page owns hide / supersede decisions, ADR-0022 / 0048).
+PAGE_UNREADABLE, PAGE_CORRUPT = "page_unreadable", "page_corrupt"
+LOST_AUTHORITY = "lost_authority"
 
 
 def page_authority(page_path: Path, cid: str, *, text: str | None = None) -> dict[str, Any]:
-    """`{state, status, marker_state, marker}` for the Claim page of `cid`. `state`:
-    - `absent`: no page;
+    """`{state, status, marker_state, marker, claim_text, review_status}` for the Claim page of
+    `cid`. `state`:
+    - `absent`: verified — no page (a dangling link or an unavailable directory is not absence);
+    - `page_unreadable` / `page_corrupt` (ADR-0074 decision 4): the page can't be read, is not
+      valid UTF-8, or has no frontmatter block — `error` names the category;
     - `marker_unreadable`: the frontmatter or the supersede marker can't be read (decision 16);
     - `claim_identity_mismatch`: a readable page whose frontmatter `claim_id` isn't `cid` (a
       wrong-owner page is never mirrored or rendered over);
     - `ok`: a readable page that belongs to `cid` (its `status` may still be unsupported).
     `text` lets a caller pass the bytes it already read, so one read serves every decision."""
     page_path = Path(page_path)
+    empty = {"status": None, "marker_state": claim_marker.NONE, "marker": None,
+             "claim_text": None, "review_status": None}
     if text is None:
-        if not page_path.exists():
-            return {"state": PAGE_ABSENT, "status": None, "marker_state": claim_marker.NONE,
-                    "marker": None}
-        text = page_path.read_text(encoding="utf-8", errors="replace")
+        read = authority_read.read_text(page_path)
+        if read.state == authority_read.ABSENT:
+            return {"state": PAGE_ABSENT, **empty}
+        if read.state != authority_read.OK:
+            return {"state": PAGE_UNREADABLE if read.state == authority_read.UNREADABLE
+                    else PAGE_CORRUPT, **empty, "error": read.error}
+        text = read.text
+    # ADR-0073 decision 16's contract comes first (decision 4.5): broken frontmatter around a
+    # supersede marker is `marker_unreadable`, which the supersede recovery relies on.
     marker_state, marker = claim_marker.parse(text)
     if claim_marker.is_unreadable(marker_state):
-        return {"state": MARKER_UNREADABLE, "status": None, "marker_state": marker_state,
-                "marker": None}
+        return {"state": MARKER_UNREADABLE, **empty, "marker_state": marker_state}
+    if not _FRONTMATTER.match(text):
+        return {"state": PAGE_CORRUPT, **empty, "error": "no_frontmatter"}
     fm = parse_frontmatter(text)
     status = fm.get("status") if isinstance(fm.get("status"), str) else None
+    fields = {"status": status, "marker_state": marker_state, "marker": marker,
+              "claim_text": _claim_text_of(text), "review_status": fm.get("review_status")}
     if str(fm.get("claim_id") or "") != cid:
-        return {"state": IDENTITY_MISMATCH, "status": status, "marker_state": marker_state,
-                "marker": marker}
-    return {"state": PAGE_OK, "status": status, "marker_state": marker_state, "marker": marker}
+        return {"state": IDENTITY_MISMATCH, **fields}
+    return {"state": PAGE_OK, **fields}
+
+
+def page_may_be_created(gconn, cid: str) -> bool:
+    """ADR-0074 decision 4.1 — when a verified-absent Claim page legitimately means "new": the claim
+    has no graph node yet, or its mirror is the producer's `active`. A missing page whose mirror
+    records `hidden` or `deprecated_candidate` (a human hide or supersede decision, or a tombstone
+    that may have been approved) is **lost authority**: never re-rendered from defaults."""
+    node = graph.get_node(gconn, cid)
+    return node is None or node.get("status") in (None, "active")
 
 
 def mirror_page_status(gconn, *, cid: str, claims_dir: Path, now: str) -> str:
@@ -281,12 +302,20 @@ def recompose_claim(gconn, *, cid, claims_dir, reviews_dir, now, markdown_dir, t
     deprecation is on disk before the journal records it (ADR-0073 decision 10)."""
     edges = [e for e in graph.outgoing_active(gconn, cid) if e["edge_type"] == "derived_from"]
     page_path = claims_dir / f"{cid}.md"
-    claim_text = text_hint or _read_claim_text(page_path)
-    if claim_text is None:
-        return "skipped"  # no durable wording to render from (shouldn't happen)
+    # ADR-0074 decision 4: one typed read decides. Damaged, wrong-owner or lost authority is never
+    # rendered away; a page that is about to be re-rendered must carry a supported status (the page
+    # owns hide / supersede decisions — re-rendering without one would silently undo them).
     auth = page_authority(page_path, cid)
-    if auth["state"] in (MARKER_UNREADABLE, IDENTITY_MISMATCH):
-        return auth["state"]       # unreadable or wrong-owner authority: never render it away
+    if auth["state"] == PAGE_ABSENT:
+        if not page_may_be_created(gconn, cid):
+            return LOST_AUTHORITY
+    elif auth["state"] != PAGE_OK:
+        return auth["state"]
+    elif auth["status"] not in _MIRRORED_PAGE_STATUSES:
+        return PAGE_CORRUPT
+    claim_text = text_hint or auth["claim_text"]
+    if claim_text is None:
+        return "skipped" if auth["state"] == PAGE_ABSENT else PAGE_CORRUPT   # no durable wording
     marker = auth["marker"]
     if supersede_marker is not None:
         if marker is not None and marker != supersede_marker:
@@ -300,7 +329,7 @@ def recompose_claim(gconn, *, cid, claims_dir, reviews_dir, now, markdown_dir, t
         quote = md[start:end] if start is not None and end is not None and end <= len(md) else ""
         cites.append({"source_id": src, "char_start": start, "char_end": end, "quote": quote})
     cites.sort(key=lambda c: (c["source_id"], c["char_start"] if c["char_start"] is not None else -1))
-    current_status = _read_status(page_path)
+    current_status = auth["status"]
     # ADR-0048 hidden governance status: precedence over evidence; set by hide, cleared by unhide, else
     # preserved from the page (the status authority, ADR-0022) so re-render never silently un-hides.
     hidden = True if hide else (False if unhide else current_status == "hidden")
@@ -320,8 +349,7 @@ def recompose_claim(gconn, *, cid, claims_dir, reviews_dir, now, markdown_dir, t
     if project_only:
         if not cites and not hidden and current_status != "deprecated_candidate":
             return "evidence_gone"
-        saved = parse_frontmatter(page_path.read_text(encoding="utf-8", errors="replace")) \
-            .get("review_status") if page_path.exists() else None
+        saved = auth["review_status"]
         review_status = saved if saved in REVIEW_STATUSES else None
     durable_write.make_dirs(claims_dir)
     # ADR-0060: resolve display labels worker-side (page-local) for the evidence-table source
@@ -689,6 +717,9 @@ def extract_claims(
         marker_unreadable = sorted(c for c, o in page_outcomes.items()
                                    if o in ("marker_unreadable", "marker_conflict"))
         identity_mismatch = sorted(c for c, o in page_outcomes.items() if o == IDENTITY_MISMATCH)
+        # ADR-0074 decision 4: damaged or lost Claim pages were left as they are (never defaults).
+        pages_refused = [{"claim_id": c, "reason": o} for c, o in sorted(page_outcomes.items())
+                         if o in (PAGE_UNREADABLE, PAGE_CORRUPT, LOST_AUTHORITY)]
         pub = run.finish()                    # index.md + the keyword index, once (decision 5)
         left = journal.pending(root, _PRODUCER)
         # A document this run attempted whose commit is still unfinished is never a clean success.
@@ -697,7 +728,7 @@ def extract_claims(
         # ADR-0069 slice 2(a): a failed contradiction maintenance keeps the claims but leaves the
         # run incomplete (lint reports the proposals until `detect_contradictions.py maintain`).
         if (errors or left_attempted or maintenance["errors"] or marker_unreadable
-                or identity_mismatch):
+                or identity_mismatch or pages_refused):
             status = "partial"
         elif not has_key and considered > 0:
             status = "skipped"
@@ -712,6 +743,7 @@ def extract_claims(
             "claim_pages_tombstoned": pages_tombstoned,
             "claim_pages_marker_unreadable": marker_unreadable,
             "claim_pages_identity_mismatch": identity_mismatch,
+            "claim_pages_refused": pages_refused,
             "claims_dropped_ungrounded": claims_dropped_ungrounded,
             # ADR-0056 coverage/staging observability: window calls made, over-budget
             # singleton windows, and the staging outcomes ("nothing changed because staging

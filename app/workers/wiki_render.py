@@ -15,7 +15,7 @@ import hashlib
 import re
 from typing import Any
 
-from app.backend import taxonomy
+from app.backend import authority_read, taxonomy
 
 _TOKEN = re.compile(r"\{\{(\w+)\}\}")
 _FRONTMATTER = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
@@ -84,6 +84,35 @@ def parse_frontmatter(text: str) -> dict[str, Any]:
         # strip inline comments from scalar values (not inside quotes/brackets)
         data[key.strip()] = _parse_value(value.split("  #", 1)[0])
     return data
+
+
+class PageRead:
+    """A typed read of a code-rendered page (ADR-0074 decision 4): the :mod:`authority_read` state,
+    the text and the parsed frontmatter when `ok`. A page with no frontmatter block is `corrupt`
+    (`no_frontmatter`) — every code-rendered page has one, so re-rendering it would reset its
+    durable fields. Families add their own required-field checks."""
+
+    __slots__ = ("state", "path", "text", "fm", "error")
+
+    def __init__(self, state, path, text=None, fm=None, error=None) -> None:
+        self.state, self.path, self.text, self.fm, self.error = state, path, text, fm, error
+
+    @property
+    def ok(self) -> bool:
+        return self.state == authority_read.OK
+
+    def failed(self, error: str) -> "PageRead":
+        """This read, reclassified as `corrupt` by a family check."""
+        return PageRead(authority_read.CORRUPT, self.path, error=error)
+
+
+def read_page(path) -> PageRead:
+    read = authority_read.read_text(path)
+    if read.state != authority_read.OK:
+        return PageRead(read.state, read.path, error=read.error)
+    if not _FRONTMATTER.match(read.text):
+        return PageRead(authority_read.CORRUPT, read.path, error="no_frontmatter")
+    return PageRead(authority_read.OK, read.path, text=read.text, fm=parse_frontmatter(read.text))
 
 
 # --- rendering --------------------------------------------------------------

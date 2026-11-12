@@ -83,22 +83,9 @@ def normalize_amendments(amendments: Any) -> dict[str, Any] | None:
 
 
 def _read_meta(page_path: Path) -> dict[str, Any] | None:
-    if not page_path.exists():
-        return None
-    text = page_path.read_text(encoding="utf-8", errors="replace")
-    m = _TITLE_RE.search(text)
-    if not m:
-        return None
-    fm = parse_frontmatter(text)
-    aliases = fm.get("aliases")
-    return {"title": re.sub(r"\\(.)", r"\1", m.group(1)),
-            "aliases": aliases if isinstance(aliases, list) else [],
-            # ADR-0059: the page owns the governed classification.
-            "item_type": fm.get("item_type"),
-            # ADR-0052: preserve a spin-off's split lineage when the promote pass re-renders it active.
-            "split_from": fm.get("split_from"), "split_review_id": fm.get("split_review_id"),
-            # ADR-0058: preserve the page-owned human description (decoded, like the title).
-            "description": items._description(text, fm)}
+    """The Item page's durable meta (:func:`items.read_item_page`): None for a missing or damaged
+    page — never a partial read (ADR-0074 decision 4)."""
+    return items._read_node_meta(page_path)
 
 
 def _read_amendments(reviews_dir: Path, rid: str) -> dict[str, Any] | None:
@@ -168,7 +155,7 @@ def activate_node(gconn, *, node: dict[str, Any], wiki_dir: Path, reviews_dir: P
     old_page = page_dir / f"{node['slug']}.md"
     meta = _read_meta(old_page)
     if meta is None:
-        return {"outcome": "skipped", "reason": "page_missing"}
+        return {"outcome": "skipped", "reason": items.page_skip_reason(old_page)}
     eff = _apply_amendments(meta, amendments)
     if not taxonomy.is_production_item_type(eff.get("item_type")):
         return {"outcome": "skipped", "reason": "missing_required_item_type"}

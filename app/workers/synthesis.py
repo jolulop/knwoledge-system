@@ -35,7 +35,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from app.backend import db, durable_write, graph, write_lock
+from app.backend import authority_read, db, durable_write, graph, write_lock
 from app.backend import producer_journal as journal
 from app.backend.manifests import get_provenance, independent_sources, iso_now, scan_manifests
 from app.backend.paths import safe_child
@@ -45,7 +45,7 @@ from app.workers import enrichment_artifact as art
 from app.workers import apply_outcomes, publication, reconciliation, reviews
 from app.workers import labels
 from app.workers import synthesis_version as sv
-from app.workers.wiki_render import NODE_DIR, parse_frontmatter, render_synthesis_page
+from app.workers.wiki_render import NODE_DIR, PageRead, parse_frontmatter, read_page, render_synthesis_page
 
 _PROMOTABLE = ("item",)
 _CLAIM_TEXT_RE = re.compile(r'(?m)^claim_text:\s*"(.*)"\s*$')
@@ -71,12 +71,69 @@ def _read_fm_title(page_path: Path) -> str | None:
     return re.sub(r"\\(.)", r"\1", m.group(1)) if m else None
 
 
+# ADR-0074 decision 4 — the Synthesis page family. Required durable fields: `status` (the page owns
+# hide / approval decisions, ADR-0049) and `topic_node`, which must bind to this synthesis id.
+# `review_status` and the prose are carried by the renderer; a missing one is not damage.
+PAGE_UNREADABLE, PAGE_CORRUPT, LOST_AUTHORITY = "page_unreadable", "page_corrupt", "lost_authority"
+_PAGE_UNUSABLE = (PAGE_UNREADABLE, PAGE_CORRUPT)
+
+
+def read_synthesis_page(synthesis_dir: Path, syn_id: str) -> tuple[PageRead, dict[str, Any] | None]:
+    """`(the typed read, the frontmatter when usable)` of a Synthesis page."""
+    read = read_page(Path(synthesis_dir) / f"{syn_id}.md")
+    if not read.ok:
+        return read, None
+    status = read.fm.get("status")
+    if not isinstance(status, str) or status not in graph.NODE_STATUSES:
+        return read.failed("missing_status" if status in (None, "") else "invalid_status"), None
+    topic = read.fm.get("topic_node")
+    if not isinstance(topic, str) or synthesis_id(topic) != syn_id:
+        return read.failed("topic_mismatch"), None
+    return read, read.fm
+
+
 def _page_status(synthesis_dir: Path, syn_id: str) -> str | None:
     """The synthesis PAGE status — the authority (ADR-0049: page frontmatter is authoritative, graph is the
     mirror). The generate-pass hidden guards check this too, so a page-hidden/graph-active partial state is
-    still preserved (skip-only); drift repair belongs to the visibility executor/validator, not the generator."""
-    p = synthesis_dir / f"{syn_id}.md"
-    return parse_frontmatter(p.read_text(encoding="utf-8")).get("status") if p.exists() else None
+    still preserved (skip-only); drift repair belongs to the visibility executor/validator, not the generator.
+    None for a verified-absent page; `page_unreadable` / `page_corrupt` for a damaged one (ADR-0074
+    decision 4), which every guard holds like a suppressed one — never regenerated or retracted."""
+    read, fm = read_synthesis_page(synthesis_dir, syn_id)
+    if read.state == authority_read.ABSENT:
+        return None
+    if fm is None:
+        return PAGE_UNREADABLE if read.state == authority_read.UNREADABLE else PAGE_CORRUPT
+    return fm["status"]
+
+
+def page_may_be_created(gconn, syn_id: str) -> bool:
+    """ADR-0074 decision 4.1 — a verified-absent Synthesis page is "new" only while the synthesis
+    has no node yet or is still the producer's `candidate`; an approved, retracted or suppressed one
+    whose page is gone is **lost authority** (its decision lived on the page)."""
+    node = graph.get_node(gconn, syn_id)
+    return node is None or node.get("status") in (None, "candidate")
+
+
+class SynthesisPageRefused(RuntimeError):
+    """A Synthesis page write was refused: the page is damaged or lost authority (ADR-0074
+    decision 4). Nothing was written — neither the page nor the graph mirror."""
+
+    def __init__(self, syn_id: str, reason: str) -> None:
+        super().__init__(f"Synthesis/{syn_id}.md: {reason}; left as it is")
+        self.syn_id, self.reason = syn_id, reason
+
+
+def page_refusal(gconn, synthesis_dir: Path, syn_id: str) -> str | None:
+    """Why the Synthesis page of `syn_id` may not be (re)written now, or None: `page_unreadable` /
+    `page_corrupt` for a damaged page, `lost_authority` for a verified-absent page that
+    :func:`page_may_be_created` refuses. Every synthesis writer checks this before it changes
+    anything; :func:`_render_page` enforces it again as the backstop."""
+    read, fm = read_synthesis_page(synthesis_dir, syn_id)
+    if read.state == authority_read.ABSENT:
+        return None if page_may_be_created(gconn, syn_id) else LOST_AUTHORITY
+    if fm is None:
+        return PAGE_UNREADABLE if read.state == authority_read.UNREADABLE else PAGE_CORRUPT
+    return None
 
 
 # Synthesis statuses the generate pass must PRESERVE (never promote/refresh/retract/regenerate): an operator
@@ -270,6 +327,10 @@ def _render_page(gconn, *, syn_id, topic_node, title, summary, synthesis_text, c
     so the claim fan-out can re-reconcile on every apply without steady-state churn). Returns True iff
     ANYTHING changed — the page file OR the graph node-status mirror — so the caller still triggers a
     reindex on a graph-mirror-only repair (e.g. a page-correct / graph-stale partial state)."""
+    # ADR-0074 decision 4 backstop: no writer re-renders damaged or lost authority (each caller
+    # checks `page_refusal` first, before any other change, and reports the reason).
+    if (refusal := page_refusal(gconn, synthesis_dir, syn_id)) is not None:
+        raise SynthesisPageRefused(syn_id, refusal)
     content = _page_content(gconn, syn_id=syn_id, topic_node=topic_node, title=title, summary=summary,
                             synthesis_text=synthesis_text, confidence=confidence, status=status,
                             review_status=review_status, synthesis_dir=synthesis_dir)
@@ -528,7 +589,7 @@ def apply_resolved_syntheses(gconn, reviews_dir: Path, *, synthesis_dir: Path,
                     or node["status"] in _PRESERVED_GENERATE_STATUSES)
             if not hold:
                 page_status = _page_status(synthesis_dir, syn_id)
-                hold = page_status in _PRESERVED_GENERATE_STATUSES
+                hold = page_status in _PRESERVED_GENERATE_STATUSES or page_status in _PAGE_UNUSABLE
             elif node is not None:
                 page_status = apply_outcomes.guarded(_page_status, synthesis_dir, syn_id)
             if hold:
@@ -546,6 +607,10 @@ def apply_resolved_syntheses(gconn, reviews_dir: Path, *, synthesis_dir: Path,
                 elif page_status is apply_outcomes.UNAVAILABLE:   # graph in target, page unreadable
                     rec = apply_outcomes.unverified(rid, "propose_synthesis", changed=False,
                                                     subject=subject, decision=state)
+                elif page_status in _PAGE_UNUSABLE:            # ADR-0074: damaged, left as it is
+                    rec = apply_outcomes.outcome(
+                        rid, "propose_synthesis", apply_outcomes.SKIPPED, reason=page_status,
+                        subject=subject, decision=state, problem={"node_status": node["status"]})
                 elif page_status in _PRESERVED_GENERATE_STATUSES:
                     rec = apply_outcomes.outcome(
                         rid, "propose_synthesis", apply_outcomes.SKIPPED, reason="visibility_suppressed",
@@ -574,6 +639,13 @@ def apply_resolved_syntheses(gconn, reviews_dir: Path, *, synthesis_dir: Path,
                 if rec is not None:
                     outcomes.append(rec)
                     continue
+            # ADR-0074 decision 4: the same page rule as generation — a damaged page, or a missing one
+            # whose synthesis was already approved, retracted or suppressed, is never re-created.
+            if (refusal := page_refusal(gconn, synthesis_dir, syn_id)) is not None:
+                outcomes.append(apply_outcomes.outcome(
+                    rid, "propose_synthesis", apply_outcomes.SKIPPED, reason=refusal,
+                    subject=subject, decision=state, problem={"node_status": node["status"]}))
+                continue
             a = version["artifact"]                      # validated above; no defaults
             wrote = _render_page(gconn, syn_id=syn_id, topic_node=topic_node, title=a["title"],
                                  summary=a["summary"], synthesis_text=a["synthesis"],
@@ -677,7 +749,16 @@ def _apply_synthesis_visibility_transition(
         # Read BOTH authorities (page authoritative, graph node mirrored): a page/graph disagreement is a
         # typed skip, NEVER a silent no-op (ADR-0049 reopen-safety; mirrors the claim/semantic executors).
         page_path = synthesis_dir / f"{node['slug']}.md"
-        fm = parse_frontmatter(page_path.read_text(encoding="utf-8")) if page_path.exists() else {}
+        # ADR-0074 decision 4: a damaged page is a typed skip, never read as an empty page.
+        page_read, page_fm = read_synthesis_page(synthesis_dir, node["slug"])
+        if page_read.state != authority_read.ABSENT and page_fm is None:
+            if page_read.error == "topic_mismatch":      # the existing, more specific refusal
+                _skip("synthesis_topic_mismatch")
+            else:
+                _skip(PAGE_UNREADABLE if page_read.state == authority_read.UNREADABLE
+                      else PAGE_CORRUPT, {"node_status": node["status"]})
+            continue
+        fm = page_fm or {}
         page_hidden = fm.get("status") == "hidden"
         graph_hidden = node["status"] == "hidden"
         status_problem = {"page_status": fm.get("status"), "node_status": node["status"]}
@@ -740,6 +821,9 @@ def _apply_synthesis_visibility_transition(
         # outlives it).
         render_status = expected_to if hide else (
             "evidence_hidden" if _evidence_hidden(gconn, nid) else "active")
+        if (refusal := page_refusal(gconn, synthesis_dir, nid)) is not None:
+            _skip(refusal, {"node_status": node["status"]})
+            continue
         wrote = _render_page(gconn, syn_id=nid, topic_node=topic_node, title=a.get("title", topic_node),
                              summary=a.get("summary", ""), synthesis_text=a.get("synthesis", ""),
                              confidence=a.get("confidence", "low"), status=render_status,
@@ -776,7 +860,9 @@ def rerender_synthesis_page(gconn, syn_id: str, *, synthesis_dir: Path, enrichme
       - page `hidden` (operator hide_synthesis) -> stays `hidden` (operator hide wins over evidence restore);
       - page `active` / `evidence_hidden` -> `evidence_hidden` if ANY supporting claim is hidden, else
         `active` (auto-suppress / restore — only `active` is default-discoverable, so only it is suppressed);
-      - page `candidate` / `deprecated_candidate` -> unchanged (already not default-discoverable; no leak).
+      - page `candidate` / `deprecated_candidate` / any other valid status -> unchanged (never reset);
+      - a damaged page (unreadable, no frontmatter, a missing status, an unbound topic; ADR-0074) -> None,
+        page and graph untouched.
     Bound to the node via `synthesis_id(topic_node) == syn_id` + the artifact's own `node_id` (the untrusted
     -page guard). Returns `(new_status, changed)` — `changed` is True iff the page OR the graph mirror was
     written (False when already fully current, so the fan-out re-reconciles every apply without steady-state
@@ -786,11 +872,12 @@ def rerender_synthesis_page(gconn, syn_id: str, *, synthesis_dir: Path, enrichme
     node = graph.get_node(gconn, syn_id)
     if node is None:
         return None
-    page_path = synthesis_dir / f"{syn_id}.md"
-    fm = parse_frontmatter(page_path.read_text(encoding="utf-8")) if page_path.exists() else {}
+    # ADR-0074 decision 4: the family read — a damaged page (no frontmatter, a missing or unknown
+    # status, an unbound topic) is left as it is, page bytes and graph mirror untouched.
+    _read, fm = read_synthesis_page(synthesis_dir, syn_id)
+    if fm is None:
+        return None                                      # missing / damaged / unbindable: untouched
     topic_node = fm.get("topic_node")
-    if not topic_node or synthesis_id(topic_node) != syn_id:
-        return None                                      # untrusted/unbindable page -> leave it untouched
     apath = safe_child(enrichment_dir, f"{topic_node}.synthesis.json")
     if apath is None or not apath.exists():
         return None
@@ -800,13 +887,13 @@ def rerender_synthesis_page(gconn, syn_id: str, *, synthesis_dir: Path, enrichme
         return None
     if a.get("node_id") != syn_id:
         return None
-    page_status = fm.get("status")                       # PAGE is authoritative (ADR-0049), not the mirror
-    if page_status in ("hidden", "candidate", "deprecated_candidate"):
-        target = page_status                             # operator-hidden / not-default-discoverable -> preserve
-        review_status = fm.get("review_status") or "approved"
-    else:                                                # active / evidence_hidden / unknown -> recompute
+    page_status = fm["status"]                           # PAGE is authoritative (ADR-0049), not the mirror
+    if page_status in ("active", "evidence_hidden"):     # the evidence-derived pair -> recompute
         target = "evidence_hidden" if _evidence_hidden(gconn, syn_id) else "active"
         review_status = "approved"
+    else:                                                # hidden / candidate / deprecated / any other
+        target = page_status                             # decided status -> preserved, never reset
+        review_status = fm.get("review_status") or "approved"
     changed = _render_page(gconn, syn_id=syn_id, topic_node=topic_node, title=a.get("title", topic_node),
                            summary=a.get("summary", ""), synthesis_text=a.get("synthesis", ""),
                            confidence=a.get("confidence", "low"), status=target,
@@ -884,6 +971,7 @@ def generate_syntheses(
         # records its intent first (`full`: the syntheses it changes are not known up front).
         run = publication.Run(root, "generate_synthesis", search=rebuild_index, wiki_dir=wiki_dir)
         retracted = 0
+        pages_refused: list[dict[str, str]] = []    # ADR-0074: damaged or lost pages left as they are
         # ADR-0068: topics whose commit an earlier run left unfinished (fails closed when damaged).
         unfinished = journal.pending(root, _PRODUCER)
         journal_verified: list[str] = []      # unfinished records found complete and cleared
@@ -911,8 +999,20 @@ def generate_syntheses(
             retraction_blocked = not inventory.complete
             if not retraction_blocked:
                 for syn in graph.nodes_of_type(gconn, "synthesis"):
-                    page = synthesis_dir / f"{syn['node_id']}.md"
-                    page_fm = parse_frontmatter(page.read_text(encoding="utf-8")) if page.exists() else {}
+                    # ADR-0074 decision 4: retraction re-renders the page, so it needs the page's
+                    # authority — a damaged page or a lost one is reported and left as it is.
+                    page_read, page_fm = read_synthesis_page(synthesis_dir, syn["node_id"])
+                    if page_fm is None:
+                        if syn["status"] == "deprecated_candidate" or (
+                                page_read.state == authority_read.ABSENT
+                                and page_may_be_created(gconn, syn["node_id"])):
+                            continue          # already retracted, or a candidate never published
+                        pages_refused.append({
+                            "synthesis_id": syn["node_id"],
+                            "reason": LOST_AUTHORITY if page_read.state == authority_read.ABSENT
+                            else (PAGE_UNREADABLE if page_read.state == authority_read.UNREADABLE
+                                  else PAGE_CORRUPT)})
+                        continue
                     # ADR-0049: a `hidden`/`evidence_hidden` synthesis (page authority OR graph mirror) is a
                     # visibility-suppression state — the generate pass NEVER retracts it (a tombstone would re-expose
                     # it: deprecated_candidate is in default retrieval). Skip-only; the executor/fan-out owns drift.
@@ -963,8 +1063,15 @@ def generate_syntheses(
                     rec = None
                 # ADR-0049: never regenerate a `hidden`/`evidence_hidden` synthesis (page authority OR graph
                 # mirror) — no LLM call, no node reset. Skip-only; the executor/claim fan-out owns drift.
+                page_now = _page_status(synthesis_dir, syn_id)
+                if page_now in _PAGE_UNUSABLE:
+                    pages_refused.append({"synthesis_id": syn_id, "reason": page_now})
+                    continue                           # ADR-0074: a damaged page is never regenerated
+                if page_now is None and not page_may_be_created(gconn, syn_id):
+                    pages_refused.append({"synthesis_id": syn_id, "reason": LOST_AUTHORITY})
+                    continue
                 if (status in _PRESERVED_GENERATE_STATUSES
-                        or _page_status(synthesis_dir, syn_id) in _PRESERVED_GENERATE_STATUSES):
+                        or page_now in _PRESERVED_GENERATE_STATUSES):
                     if rec is not None:
                         blocked.append(tid)            # a hide wins over replaying the commit
                     continue
@@ -1031,8 +1138,14 @@ def generate_syntheses(
                 # approved this synthesis meanwhile, so re-read its status under the lock first.
                 with write_lock.hold(reviews_dir):
                     now_status = (graph.get_node(gconn, syn_id) or {}).get("status")
+                    page_now = _page_status(synthesis_dir, syn_id)
+                    if page_now in _PAGE_UNUSABLE or (
+                            page_now is None and not page_may_be_created(gconn, syn_id)):
+                        pages_refused.append({"synthesis_id": syn_id,
+                                              "reason": page_now or LOST_AUTHORITY})
+                        continue
                     if (now_status in _PRESERVED_GENERATE_STATUSES
-                            or _page_status(synthesis_dir, syn_id) in _PRESERVED_GENERATE_STATUSES
+                            or page_now in _PRESERVED_GENERATE_STATUSES
                             or (now_status == "active" and status != "active")):
                         if rec is not None:
                             blocked.append(tid)
@@ -1114,7 +1227,7 @@ def generate_syntheses(
         # A topic this run attempted whose commit is still unfinished is never a clean success.
         left_attempted = sorted(set(left) & {t["node_id"] for t in topics}) if has_key else []
 
-        if errors or left_attempted:
+        if errors or left_attempted or pages_refused:
             status = "partial"
         elif not has_key and considered > 0:
             status = "skipped"
@@ -1134,6 +1247,7 @@ def generate_syntheses(
             "stale_active": stale_active, "retracted": retracted,
             "promoted": resolution["promoted"], "rejected": resolution["rejected"],
             **inventory.report(), "retraction_blocked": retraction_blocked,
+            "synthesis_pages_refused": pages_refused,
             "index_rebuilt": bool(pub and pub["index_rebuilt"]),
             "keyword_reindexed": bool(pub and pub["keyword_reindexed"]),
             "publication": publication.summary(pub),

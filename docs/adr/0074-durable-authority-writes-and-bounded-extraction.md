@@ -3,8 +3,9 @@
 - **Status:** accepted — design-locked by grill-phase 2026-11-11 (Q1–Q9). **Slice 1 (decision 1)
   implemented 2026-11-11** — `app/backend/durable_write.py`, guard `tests/write_guard.py` +
   `tests/test_authority_write_guard.py`. **Slice 2 (decision 2) implemented 2026-11-12** — typed
-  manifest read states in `app/backend/manifests.py`. Slices 3–6 and changes 7a–7c per decision 9
-  not yet.
+  manifest read states in `app/backend/manifests.py`. **Slice 3a (decision 4: Item / Claim /
+  Synthesis pages) implemented 2026-11-12** — shared reader `app/backend/authority_read.py`.
+  Slices 3b–3c, 4–6 and changes 7a–7c per decision 9 not yet.
 - **Date:** 2026-11-11
 - **Drivers:** external review of `06f3d56` (2026-11-11), blocking findings 1 and 3. Finding 2
   (item descriptions corrupted across re-renders) was fixed separately in `dfda610`.
@@ -353,6 +354,64 @@ replacement, the vault lock → write lock order with preconditions re-checked i
 recorded before replacement, and refusal when later human decisions cannot be preserved. Dedicated
 per-family tooling is deferred; **reopening triggers:** the first damage observed in a family, or a
 backup recovery that cannot safely preserve later human decisions.
+
+**As implemented (slice 3a — pages).** Slice 3 is split per decision 9: **3a** the Item, Claim and
+Synthesis pages; **3b** review and audit records; **3c** policies, journals and the `db/*.json`
+records.
+
+- **Shared mechanics:** `app/backend/authority_read.py` (`read_file`, `read_text`; states `absent`
+  / `unreadable` / `corrupt` / `ok`; strict UTF-8, never a lossy decode). The manifest reader now
+  reads through it. `wiki_render.read_page` adds the page rule: a page without a frontmatter block
+  is `corrupt` (`no_frontmatter`).
+- **Item pages** (`items.read_item_page`):
+  - Required: `title` and `status` (a known node status). `aliases`, when present, must be a list.
+  - Legacy-optional, never damage: `item_type` (the graph mirror backs it), `review_status`,
+    `confidence`, `split_from` / `split_review_id`, `description`.
+  - `_recompose_node` returns `page_unreadable` / `page_corrupt` instead of rendering from
+    defaults; `recompose_semantic_node_page` and the executors (split, merge, duplicate, retype,
+    promote, tag edits) skip with the precise reason (`items.page_skip_reason`).
+  - **Absence means "new"** only when the tag carries no human authority elsewhere
+    (`items.page_may_be_created`): its mirror is the producer's `candidate` and no human or
+    authored assertion touches it — or the caller created the node in this commit (`human_add`).
+    Otherwise the page is `lost_authority` and is never re-created.
+  - A damaged tombstone page reads as a decided retirement (`decided_status`), so extraction never
+    resurrects it.
+  - `extract_items` reports `pages_refused` and finishes `partial`.
+- **Claim pages** (`claims.page_authority`):
+  - Adds `page_unreadable` / `page_corrupt` (unreadable, invalid UTF-8, no frontmatter) to the
+    ADR-0073 states; a dangling link is never absence.
+  - `recompose_claim` also refuses a page whose `status` is missing or unsupported (re-rendering
+    would undo a hide or a supersede).
+  - **Absence means "new"** only when the claim has no node or its mirror is `active`
+    (`claims.page_may_be_created`); a `hidden` / `deprecated_candidate` mirror makes the missing
+    page `lost_authority`.
+  - `extract_claims` reports `claim_pages_refused` and finishes `partial`; publication excludes the
+    page like any other failed authority check.
+- **Synthesis pages** (`synthesis.read_synthesis_page`):
+  - Required: `status` and a `topic_node` that binds to the synthesis id.
+  - A damaged page is held like a suppressed one: never regenerated, never retracted, never
+    promoted over (the approval path skips it with the reason).
+  - **Absence means "new"** only for a synthesis with no node or a `candidate` one
+    (`synthesis.page_may_be_created`); an approved, retracted or suppressed one whose page is gone
+    is `lost_authority`.
+  - `generate_syntheses` reports `synthesis_pages_refused` and finishes `partial`.
+  - **Every Synthesis writer** enforces the rule (review round 1): generation, retraction, approval
+    (`apply_resolved_syntheses` — a missing page whose node is retracted, approved or suppressed
+    is `lost_authority`, the decision stays), the hide / unhide executor, and re-rendering
+    (`rerender_synthesis_page`, used by the claim-visibility fan-out and by publication). Each checks
+    `synthesis.page_refusal` before it changes anything and reports the reason, leaving page bytes
+    and the graph mirror unchanged. The shared renderer `_render_page` checks again and raises
+    `SynthesisPageRefused` as the backstop. Re-rendering recomputes only the evidence-derived pair
+    (`active` / `evidence_hidden`); every other valid status is preserved, never reset.
+- **Split recovery** (review round 1): an open identity journal proves the split owns the
+  spin-off's slot, not that the spin-off's page is readable. A spin-off page that exists but can't
+  be used stops the split before any link moves or page is written (`page_unreadable` /
+  `page_corrupt`), and the journal stays open for the next apply. Merge recovery already validates
+  both pages before acting.
+- **Tests:** `tests/test_page_read_states.py` — every damage class per family, lost authority vs
+  legitimate creation, legacy pages, run-level reporting. Each refusal reverted fails its tests.
+- **Not in 3a:** review and audit records (3b); policies, journals and the `db/*.json` records
+  (3c). Read-only display paths (e.g. `review_read._family_page_meta`) keep their tolerant reads.
 
 ## Part B — bounded extraction (finding 3)
 

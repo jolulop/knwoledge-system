@@ -13,14 +13,13 @@ import hashlib
 import json
 import os
 import re
-import stat
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from app.backend import durable_write
+from app.backend import authority_read, durable_write
 
 _CHUNK = 1 << 20  # 1 MiB streaming read for checksums
 
@@ -74,16 +73,14 @@ def manifest_path(manifests_dir: Path, source_id: str) -> Path:
 # ADR-0074 decision 2. A manifest read has exactly one of four states; only `absent` is a verified
 # "no manifest here", so only `absent` may ever lead to creating one, and a damaged manifest is never
 # folded into "missing" or dropped from an inventory without being counted.
-ABSENT = "absent"          # verified: no entry at raw/manifests/<source_id>.json
-UNREADABLE = "unreadable"  # an entry exists (or can't be confirmed) but can't be read; maybe transient
-CORRUPT = "corrupt"        # read, but not a manifest object (bad UTF-8, bad JSON, not an object)
-OK = "ok"                  # a parsed object — NOT yet a validated manifest (identity checks follow)
-DAMAGED = (UNREADABLE, CORRUPT)
+# The states and the byte reading are shared with every authority family (`authority_read`).
+ABSENT, UNREADABLE, CORRUPT, OK = (authority_read.ABSENT, authority_read.UNREADABLE,
+                                   authority_read.CORRUPT, authority_read.OK)
+DAMAGED = authority_read.DAMAGED
 
 # Identity quarantine reasons of `scan_manifests` (categorical; never the malformed text itself).
 IDENTITY_REASONS = ("non_canonical_id", "filename_mismatch", "duplicate_source_id")
 
-_O_READ = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
 _UNSAFE = re.compile(r"[^\x21-\x7e]")
 
 
@@ -129,51 +126,23 @@ def safe_display(name: str, *, limit: int = 120) -> str:
     return f"raw/manifests/{shown}"
 
 
-def _lexists(path: Path) -> bool | None:
-    """True / False when an entry's existence is known, None when it can't be determined."""
-    try:
-        os.lstat(path)
-        return True
-    except FileNotFoundError:
-        return False
-    except OSError:
-        return None
+_lexists = authority_read.lexists
 
 
 def read_manifest_file(path: Path) -> ManifestRead:
     """The typed read of one manifest file (ADR-0074 decision 2). Never raises for the file's state."""
-    path = Path(path)
+    read = authority_read.read_file(path)
+    if read.state != OK:
+        return ManifestRead(read.state, read.path, error=read.error)
     try:
-        fd = os.open(path, _O_READ)
-    except FileNotFoundError:
-        here = _lexists(path)
-        if here is not False:                            # a dangling symlink, or can't confirm
-            return ManifestRead(UNREADABLE, path, error="dangling_symlink" if here else "unknown")
-        parent = _lexists(path.parent)
-        if parent is None or (parent and not path.parent.is_dir()):
-            return ManifestRead(UNREADABLE, path, error="directory_unavailable")
-        return ManifestRead(ABSENT, path)
-    except OSError as exc:
-        return ManifestRead(UNREADABLE, path, error=type(exc).__name__)
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return ManifestRead(UNREADABLE, path, error="not_a_regular_file")
-        chunks = []
-        while chunk := os.read(fd, _CHUNK):
-            chunks.append(chunk)
-    except OSError as exc:
-        return ManifestRead(UNREADABLE, path, error=type(exc).__name__)
-    finally:
-        os.close(fd)
-    try:
-        record = json.loads(b"".join(chunks).decode("utf-8"))
+        record = json.loads(read.data.decode("utf-8"))
     except UnicodeDecodeError:
-        return ManifestRead(CORRUPT, path, error="invalid_utf8")
+        return ManifestRead(CORRUPT, read.path, error="invalid_utf8")
     except (ValueError, RecursionError):
-        return ManifestRead(CORRUPT, path, error="invalid_json")
+        return ManifestRead(CORRUPT, read.path, error="invalid_json")
     if not isinstance(record, dict):
-        return ManifestRead(CORRUPT, path, error="not_an_object")
-    return ManifestRead(OK, path, record=record)
+        return ManifestRead(CORRUPT, read.path, error="not_an_object")
+    return ManifestRead(OK, read.path, record=record)
 
 
 def read_manifest(manifests_dir: Path, source_id: str) -> ManifestRead:

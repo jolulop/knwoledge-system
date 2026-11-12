@@ -185,6 +185,12 @@ REASONS = {
     "missing_subject": "the review names no subject",
     "out_of_scope": "this review type doesn't apply to that kind of page",
     "page_missing": "its page is missing",
+    # ADR-0074 decision 4: a damaged page is never re-rendered; restore it from backup.
+    "page_unreadable": "its page can't be read; restore it from backup",
+    "page_corrupt": "its page is damaged (no usable title, status or frontmatter); restore it "
+                    "from backup",
+    "lost_authority": "its page is missing although a human decision depends on it; restore it "
+                      "from backup",
     "page_not_active": "its page doesn't show it as active",
     "page_node_mismatch": "the page and the graph disagree",
     "page_status_mismatch": "the page and the graph disagree on its status",

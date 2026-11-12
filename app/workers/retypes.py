@@ -343,7 +343,7 @@ def retype_check(gconn, item: dict[str, Any], *, wiki_dir: Path) -> tuple[str, A
         return "skip", problem["reason"]         # ADR-0070 B1 review: never another item's page
     meta = items._read_node_meta(page_path)
     if meta is None:
-        return "skip", "page_missing"
+        return "skip", items.page_skip_reason(page_path)
     from_type = meta.get("item_type") or node.get("item_type")
     if from_type == to_type:
         return "done", None             # already in the target state — idempotent no-op (re-apply safe)

@@ -173,7 +173,7 @@ def _apply_marked_duplicates(gconn, reviews_dir: Path, *, wiki_dir: Path,
         page_b = wiki_dir / NODE_DIR[nt] / f"{nb['slug']}.md"
         meta_a, meta_b = items._read_node_meta(page_a), items._read_node_meta(page_b)
         if meta_a is None or meta_b is None:
-            _skip(rid, "page_missing", **names)
+            _skip(rid, items.page_skip_reason(page_a if meta_a is None else page_b), **names)
             continue
 
         # Classify steady-state (ADR-0041): applied (new edge) / normalized (edge active, projection

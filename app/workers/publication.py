@@ -57,6 +57,11 @@ REASON_HINTS = {
     "page_missing": "the page is missing or unreadable; restore the page from backup (its title and "
                     "description live only on the page, so publishing never recreates it), or rerun "
                     "the extraction that creates it if a run stopped before writing it",
+    "page_unreadable": "the page can't be read; it is left as it is — restore it from backup",
+    "page_corrupt": "the page is damaged (no usable title, status or frontmatter); it is left as it "
+                    "is — restore it from backup",
+    "lost_authority": "the page is missing although a human decision depends on it; it is never "
+                      "recreated from defaults — restore it from backup",
     "node_missing": "the graph has no such tag and nothing records its deletion",
     "deletion_unfinished": "a deletion started and did not finish; run "
                            "`scripts/rebuild_tag_links.py --apply`",

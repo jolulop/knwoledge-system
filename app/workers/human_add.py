@@ -170,7 +170,7 @@ def add_candidate(
                                asserted_by="human", status="active", now=now)
         items._recompose_node(gconn, node_id=nid, wiki_dir=wiki_dir, reviews_dir=reviews_dir,
                               now=now, text_hint={"title": title, "aliases": clean_aliases,
-                                                  "item_type": used_type})
+                                                  "item_type": used_type}, created=node_created)
 
     kept = tag_links.keep(gconn, source_id=source_id, node_id=nid, wiki_dir=wiki_dir,
                           reviews_dir=reviews_dir, amendments=amendments or None, now=now)

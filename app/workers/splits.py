@@ -41,7 +41,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from app.backend import durable_write, graph, taxonomy
+from app.backend import authority_read, durable_write, graph, taxonomy
 from app.backend.manifests import is_source_id, iso_now
 from app.workers import apply_outcomes as oc
 from app.workers import item_pages as ownership
@@ -226,7 +226,7 @@ def apply_splits(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = 
             a_page = f"{NODE_DIR[a_type]}/{n_a['slug']}.md"
             meta_a = items._read_node_meta(wiki_dir / a_page)
             if meta_a is None:
-                _skip("page_missing")
+                _skip(items.page_skip_reason(wiki_dir / a_page))
                 continue
             # ADR-0059: the spin-off inherits the primary's governed classification. A node whose
             # page AND mirror both lack a valid type is drifted state — typed skip, never a raise.
@@ -238,7 +238,10 @@ def apply_splits(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = 
             # --- B-slot state branch: fresh apply | no-op-or-repair | typed block ---
             n_b = graph.get_node(gconn, b)
             b_page_abs = wiki_dir / b_page_rel
-            b_meta = items._read_node_meta(b_page_abs) if b_page_abs.exists() else None
+            # ADR-0074 decision 4: one typed read of B's page. "Present" is anything but a verified
+            # absence (a dangling link or an unreadable entry is present, never free).
+            b_read, b_meta = items.read_item_page(b_page_abs)
+            b_page_present = b_read.state != authority_read.ABSENT
             our_lineage = bool(b_meta and b_meta.get("split_from") == a
                                and b_meta.get("split_review_id") == rid)
 
@@ -246,9 +249,15 @@ def apply_splits(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = 
             # split may have minted B and moved some links before writing B's lineage page) — resume:
             # move whatever is still on A for the listed documents, then render.
             resuming = identity_journal.is_open(reviews_dir, rid)
+            if resuming and b_page_present and b_meta is None:
+                # The journal proves the operation owns the slot, not that B's page is readable: a
+                # damaged spin-off page is never rendered over (nothing moves; the journal stays open).
+                # A fresh split refuses any occupied slot below (`target_spinoff_page_exists`).
+                _skip(items.page_skip_reason(b_page_abs), started=True)
+                continue
             if resuming:
                 repaired = True
-            elif n_b is not None or b_page_abs.exists():
+            elif n_b is not None or b_page_present:
                 # B's id-slot is already touched — never silently adopt a slot we can't prove is ours.
                 if not our_lineage:
                     _skip("target_spinoff_id_exists" if n_b is not None else "target_spinoff_page_exists")

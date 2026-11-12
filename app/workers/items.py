@@ -38,7 +38,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from app.backend import db, durable_write, graph, taxonomy
+from app.backend import authority_read, db, durable_write, graph, taxonomy
 from app.backend import producer_journal as journal
 from app.backend.manifests import (
     ABSENT, OK, get_status, iso_now, read_reason, recheck, scan_manifests)
@@ -47,7 +47,8 @@ from app.llm.client import CacheMiss, LLMClient, ParseError
 from app.workers import citations, page_names, publication, reconcile, reviews, titles
 from app.workers import enrichment_artifact as art
 from app.workers import item_pages, labels
-from app.workers.wiki_render import NODE_DIR, frontmatter_string, parse_frontmatter, render_item_page
+from app.workers.wiki_render import (
+    NODE_DIR, PageRead, frontmatter_string, read_page, render_item_page)
 
 _ENRICHABLE_STATUSES = {"extracted", "partial"}
 _PRODUCER = "extract_items"                  # its run guard and journal name
@@ -141,14 +142,15 @@ def _body_aliases(aliases: list[str], folded_body: str) -> tuple[list[str], list
     return kept, [a for a in aliases if a not in kept]
 
 
-def _page_fm(wiki_dir: Path, node: dict[str, Any]) -> dict[str, Any]:
+def _page_fm(wiki_dir: Path, node: dict[str, Any]) -> dict[str, Any] | None:
+    """The Item page's frontmatter: `{}` for a verified-absent page (or an unsafe slug), None for a
+    damaged one (ADR-0074 decision 4 — damage is never read as an empty page)."""
     if not graph.is_safe_slug(node.get("slug")):
         return {}
-    path = Path(wiki_dir) / NODE_DIR["item"] / f"{node['slug']}.md"
-    try:
-        return parse_frontmatter(path.read_text(encoding="utf-8", errors="replace"))
-    except OSError:
+    read = read_page(Path(wiki_dir) / NODE_DIR["item"] / f"{node['slug']}.md")
+    if read.state == authority_read.ABSENT:
         return {}
+    return read.fm if read.ok else None
 
 
 def decided_status(wiki_dir: Path, node: dict[str, Any]) -> str | None:
@@ -162,8 +164,11 @@ def decided_status(wiki_dir: Path, node: dict[str, Any]) -> str | None:
         return "merged"
     if status in _RETIRED:
         return "retired"
-    if status == "deprecated_candidate" and _page_fm(wiki_dir, node).get("review_status") == "approved":
-        return "retired"
+    if status == "deprecated_candidate":
+        fm = _page_fm(wiki_dir, node)
+        # A damaged tombstone page may be a human-approved retirement: fail closed (never resurrect).
+        if fm is None or fm.get("review_status") == "approved":
+            return "retired"
     return None
 
 
@@ -177,7 +182,7 @@ def _decided_effect(gconn, wiki_dir: Path, node: dict[str, Any]) -> tuple[str, s
     for _ in range(_MAX_MERGE_HOPS):
         if decision != "merged":
             return (decision, None)
-        target = _page_fm(wiki_dir, node).get("merged_into")
+        target = (_page_fm(wiki_dir, node) or {}).get("merged_into")   # damaged -> no redirect
         node = graph.get_node(gconn, target) if isinstance(target, str) else None
         if node is None:
             return ("retired", None)
@@ -496,29 +501,74 @@ def _description(text: str, fm: dict[str, Any]) -> Any:
     return decoded if decoded is not None else fm.get("description")
 
 
-def _read_node_meta(page_path: Path) -> dict[str, Any] | None:
-    """Read the durable title + aliases + item_type from an existing node page (page is the authority)."""
-    if not page_path.exists():
-        return None
-    text = page_path.read_text(encoding="utf-8", errors="replace")
+# ADR-0074 decision 4 — the Item page family. Required durable fields: `title` and `status` (every
+# rendered page carries both; re-rendering without them resets the tag's name or its decided
+# lifecycle). `aliases`, when present, must be a list. Legacy-optional, never damage when absent:
+# `item_type` (pre-ADR-0059; the graph mirror backs it), `review_status`, `confidence`,
+# `split_from` / `split_review_id`, `description`.
+PAGE_REFUSALS = ("page_unreadable", "page_corrupt", "lost_authority")
+
+
+def read_item_page(page_path: Path) -> tuple[PageRead, dict[str, Any] | None]:
+    """`(the typed read, the durable meta when ok)` of an Item page — the page is the authority for
+    the tag's title, aliases, status, classification, lineage and description (ADR-0030)."""
+    read = read_page(page_path)
+    if not read.ok:
+        return read, None
+    text, fm = read.text, read.fm
     m = _TITLE_RE.search(text)
-    if not m:
-        return None
-    fm = parse_frontmatter(text)
-    aliases = fm.get("aliases")
-    return {"title": re.sub(r"\\(.)", r"\1", m.group(1)),
-            "aliases": aliases if isinstance(aliases, list) else [],
-            "status": fm.get("status"),
-            "review_status": fm.get("review_status"),
-            "confidence": fm.get("confidence", "low"),
-            # ADR-0059: the page owns the governed classification; recompose preserves it.
-            "item_type": fm.get("item_type"),
-            # ADR-0052: preserve a spin-off's split lineage across re-renders (page-authoritative).
-            "split_from": fm.get("split_from"),
-            "split_review_id": fm.get("split_review_id"),
-            # ADR-0058: preserve the page-owned human description across re-renders (decoded like
-            # the title — the inverse of the renderer's escaping, so it never compounds).
-            "description": _description(text, fm)}
+    title = re.sub(r"\\(.)", r"\1", m.group(1)) if m else fm.get("title")
+    if not isinstance(title, str) or not title.strip():
+        return read.failed("missing_title"), None
+    status = fm.get("status")
+    if not isinstance(status, str) or status not in graph.NODE_STATUSES:
+        return read.failed("missing_status" if status in (None, "") else "invalid_status"), None
+    aliases = fm.get("aliases", [])
+    if not isinstance(aliases, list):
+        return read.failed("invalid_aliases"), None
+    return read, {"title": title,
+                  "aliases": aliases,
+                  "status": status,
+                  "review_status": fm.get("review_status"),
+                  "confidence": fm.get("confidence", "low"),
+                  # ADR-0059: the page owns the governed classification; recompose preserves it.
+                  "item_type": fm.get("item_type"),
+                  # ADR-0052: preserve a spin-off's split lineage across re-renders.
+                  "split_from": fm.get("split_from"),
+                  "split_review_id": fm.get("split_review_id"),
+                  # ADR-0058: preserve the page-owned human description across re-renders
+                  # (decoded like the title — the inverse of the renderer's escaping).
+                  "description": _description(text, fm)}
+
+
+def _read_node_meta(page_path: Path) -> dict[str, Any] | None:
+    """The durable meta of a usable Item page, else None — for a missing **or** damaged page. Every
+    caller that writes refuses on None; :func:`page_skip_reason` names which it was."""
+    return read_item_page(page_path)[1]
+
+
+def page_skip_reason(page_path: Path) -> str:
+    """Why an Item page can't be used: `page_missing` (verified absent), `page_unreadable` or
+    `page_corrupt` (ADR-0074 decision 4: damage is reported by category, never as a missing page)."""
+    read, _meta = read_item_page(page_path)
+    if read.state == authority_read.ABSENT:
+        return "page_missing"
+    return "page_unreadable" if read.state == authority_read.UNREADABLE else "page_corrupt"
+
+
+def page_may_be_created(gconn, node: dict[str, Any]) -> bool:
+    """ADR-0074 decision 4.1 — when a verified-absent Item page legitimately means "new": only for
+    a tag that carries no human authority anywhere else, so nothing human-owned can have lived on
+    the lost page. Its graph mirror is still the producer's `candidate` and no human or authored
+    assertion touches it (a keep, a human add, a promotion, a decided lifecycle all leave one of
+    those). Otherwise the missing page is **lost authority**: never re-created from defaults."""
+    if node.get("status") not in (None, "candidate"):
+        return False
+    row = gconn.execute(
+        "SELECT 1 FROM edges WHERE (src_id = ? OR dst_id = ?) "
+        "AND asserted_by NOT IN ('llm', 'deterministic') LIMIT 1",
+        (node["node_id"], node["node_id"])).fetchone()
+    return row is None
 
 
 def _link_labels(wiki_dir: Path, source_ids, duplicates) -> dict[str, str]:
@@ -529,7 +579,8 @@ def _link_labels(wiki_dir: Path, source_ids, duplicates) -> dict[str, str]:
     return labels.display_labels(wiki_dir, targets)
 
 
-def _recompose_node(gconn, *, node_id, wiki_dir, reviews_dir, now, text_hint=None) -> str:
+def _recompose_node(gconn, *, node_id, wiki_dir, reviews_dir, now, text_hint=None,
+                    created=False) -> str:
     """Render a node's stub page from its active mentions (tombstone if none).
 
     The existing page is the authority for the node's title, aliases, and item_type
@@ -548,7 +599,14 @@ def _recompose_node(gconn, *, node_id, wiki_dir, reviews_dir, now, text_hint=Non
     node_type, slug = node["node_type"], node["slug"]
     page_dir = wiki_dir / NODE_DIR[node_type]
     page_path = page_dir / f"{slug}.md"
-    existing = _read_node_meta(page_path)
+    # ADR-0074 decision 4: a damaged page is never re-rendered from defaults, and a missing one is
+    # created only when nothing human-owned can have been on it (else it is lost authority).
+    read, existing = read_item_page(page_path)
+    if read.state == authority_read.ABSENT:
+        if not (created or page_may_be_created(gconn, node)):
+            return "lost_authority"
+    elif existing is None:
+        return "page_unreadable" if read.state == authority_read.UNREADABLE else "page_corrupt"
     # Part-2 review: a decided lifecycle is never re-derived from mentions. A merge tombstone is left
     # as it is; a hidden or retired tag re-renders at its own status (its suggestion list may change).
     decision = decided_status(wiki_dir, node)
@@ -631,7 +689,7 @@ def recompose_semantic_node_page(
     re-renders with the **explicit** status (never re-derived from mentions, so a still-mentioned node
     cannot resurrect out of a deprecation) and mirrors the graph node status. Idempotent and
     deterministic. Returns "written", else a typed skip reason
-    ("node_missing"/"unsupported_node_type"/"page_missing"). `aliases`, when given, replaces the
+    ("node_missing"/"unsupported_node_type"/"page_missing"/"page_unreadable"/"page_corrupt"). `aliases`, when given, replaces the
     page's aliases (the human alias edit of an in-use tag, UAT round 8)."""
     node = graph.get_node(gconn, node_id)
     if node is None:
@@ -644,7 +702,7 @@ def recompose_semantic_node_page(
         return "page_conflict"                     # ADR-0070 B1 review: never another item's page
     meta = _read_node_meta(page_path)
     if meta is None:
-        return "page_missing"
+        return page_skip_reason(page_path)          # missing, unreadable or corrupt: never defaults
     item_type = meta.get("item_type") or node.get("item_type")
     if not taxonomy.is_item_type(item_type):
         return "page_missing"
@@ -663,7 +721,7 @@ def recompose_semantic_node_page(
     # Write only when content differs (avoid churn; ADR-0041). confidence is page-owned, preserved.
     # Returns "written" only when the page actually changed, "unchanged" otherwise (the graph node-status
     # mirror always runs, idempotently). Callers that gate on `== "written"` get an honest signal.
-    changed = page_path.read_text(encoding="utf-8") != rendered
+    changed = read_page(page_path).text != rendered
     if changed:
         durable_write.write_text(page_path, rendered)
     graph.upsert_node(gconn, node_id=node_id, node_type=node_type, slug=slug, status=status,
@@ -1113,6 +1171,9 @@ def extract_items(
 
         pages_written = sum(o == "written" for o in page_outcomes.values())
         pages_tombstoned = sum(o == "tombstoned" for o in page_outcomes.values())
+        # ADR-0074 decision 4: pages left as they are because they are damaged or lost authority.
+        pages_refused = [{"node_id": n, "reason": o} for n, o in sorted(page_outcomes.items())
+                         if o in PAGE_REFUSALS]
         # The end refresh (decision 5): the Source pages of every tag touched, index.md and the
         # keyword index, once — the job succeeds only after it.
         pub = run.finish()
@@ -1121,7 +1182,7 @@ def extract_items(
         left_attempted = sorted(set(left) & attempted)
 
         if (errors or cache_miss_sources or in_flight_sources or left_attempted or replan_unavailable
-                or slug_skips):
+                or slug_skips or pages_refused):
             status = "partial"
         elif not has_key and not cache_only and considered > 0 and not replanned_sources:
             # Derived from the work done (slice 2 review round 1): a provider-free run that re-planned
@@ -1140,7 +1201,7 @@ def extract_items(
             "mentions_written": mentions_written, "node_pages_written": pages_written,
             "node_pages_tombstoned": pages_tombstoned, "skipped_fresh": skipped_fresh,
             "skipped_not_extracted": skipped_not_extracted, "skipped_empty": skipped_empty,
-            "skipped_no_key": skipped_no_key, **inventory.report(),
+            "skipped_no_key": skipped_no_key, **inventory.report(), "pages_refused": pages_refused,
             "topic_starved": len(topic_starved_sources),
             "topic_starved_sources": sorted(topic_starved_sources),
             "unclassified_items": unclassified_count,

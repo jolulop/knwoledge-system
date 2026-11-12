@@ -369,7 +369,9 @@ def _claims_setup(tmp_path):
         graph.upsert_assertion(gconn, src_id=CX, dst_id=CY, edge_type="contradicts",
                                asserted_by="llm", status="active")
         syn = synthesis.synthesis_id(nid)
-        graph.upsert_node(gconn, node_id=syn, node_type="synthesis", slug=syn, status="active")
+        # Created as a candidate, promoted by its first render (ADR-0074: a page is never created for a
+        # synthesis that is already decided — that would be lost authority).
+        graph.upsert_node(gconn, node_id=syn, node_type="synthesis", slug=syn, status="candidate")
         for cid in (CX, CY):
             graph.upsert_assertion(gconn, src_id=syn, dst_id=cid, edge_type="derived_from",
                                    asserted_by="llm", status="active")

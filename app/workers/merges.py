@@ -386,10 +386,11 @@ def apply_merges(gconn, reviews_dir: Path, *, wiki_dir: Path, now: str | None = 
             if nb["status"] not in _MERGEABLE_STATUSES and nb["status"] != "merged":
                 _skip("absorbed_not_active")
                 continue
-            meta_a = items._read_node_meta(wiki_dir / f"{NODE_DIR[nt]}/{na['slug']}.md")
+            page_a = wiki_dir / f"{NODE_DIR[nt]}/{na['slug']}.md"
+            meta_a = items._read_node_meta(page_a)
             meta_b = items._read_node_meta(wiki_dir / b_page)
             if meta_a is None or meta_b is None:
-                _skip("page_missing")
+                _skip(items.page_skip_reason(page_a if meta_a is None else wiki_dir / b_page))
                 continue
             # ADR-0059: both pages must carry a valid governed classification (drifted state is a
             # typed skip, never a mid-apply raise from the graph write gate).

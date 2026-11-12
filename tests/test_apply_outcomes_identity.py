@@ -433,6 +433,15 @@ def _unreadable(monkeypatch, page):
             raise PermissionError(13, "Permission denied", str(self))
         return real(self, *a, **k)
     monkeypatch.setattr(Path, "read_text", _read)
+    # The typed authority reader (ADR-0074 decision 4) opens the file itself.
+    from app.backend import authority_read
+    real_open = authority_read.os.open
+
+    def _open(path, *a, **k):
+        if Path(path) == page:
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_open(path, *a, **k)
+    monkeypatch.setattr(authority_read.os, "open", _open)
 
 
 def test_retype_with_unreadable_page_is_refused_not_raised(tmp_path, monkeypatch):

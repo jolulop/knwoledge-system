@@ -429,7 +429,10 @@ def project_page(gconn, *, node_id: str, wiki_dir: Path, reviews_dir: Path,
             return "removed"
         return "deletion_unfinished" if node_id in deletion_intents(reviews_dir) else "node_missing"
     meta = _node_meta(wiki_dir, node)
-    if meta is None or not taxonomy.is_item_type(meta.get("item_type") or node.get("item_type")):
+    if meta is None:
+        return items.page_skip_reason(
+            Path(wiki_dir) / NODE_DIR[node.get("node_type") or "item"] / f"{node['slug']}.md")
+    if not taxonomy.is_item_type(meta.get("item_type") or node.get("item_type")):
         return "page_missing"
     if node["status"] == "merged":
         return "merged"
@@ -633,7 +636,9 @@ def edit_aliases(gconn, *, source_id: str, node_id: str, aliases: list[str], wik
         return _blocked("invalid_amendments", detail=str(exc))
     meta = _node_meta(wiki_dir, node)
     if meta is None:
-        return _blocked("page_missing", node_id=node_id)
+        return _blocked(items.page_skip_reason(
+            Path(wiki_dir) / NODE_DIR[node.get("node_type") or "item"] / f"{node['slug']}.md"),
+            node_id=node_id)
     old = [str(a) for a in meta.get("aliases") or []]
     if expected is not None and items._union(
             [str(a).strip() for a in expected if str(a).strip()], []) != items._union(old, []):

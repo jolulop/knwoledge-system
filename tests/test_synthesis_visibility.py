@@ -84,7 +84,9 @@ def _active_synthesis(tmp_path, conn, *, claim_ids=(CX,), status="active"):
         _build_claim(tmp_path, conn, cid, text="The sky is blue today.")
     graph.upsert_node(conn, node_id=TOPIC, node_type="item", slug=TOPIC, status="active",
                       item_type="method_technique")
-    graph.upsert_node(conn, node_id=SYN, node_type="synthesis", slug=SYN, status=status)
+    # Created as a candidate; the first render below sets `status` (ADR-0074: a page is never created
+    # for a synthesis that is already decided — that would be lost authority).
+    graph.upsert_node(conn, node_id=SYN, node_type="synthesis", slug=SYN, status="candidate")
     for cid in claim_ids:
         graph.upsert_assertion(conn, src_id=SYN, dst_id=cid, edge_type="derived_from",
                                asserted_by="llm", status="active")
