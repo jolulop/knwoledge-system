@@ -48,6 +48,11 @@ REFUSALS: dict[str, tuple[int, str]] = {
     "stale_preview": (409, "the vault, code or settings changed since the preview; preview again"),
     "authorization_store_unavailable": (503, "retry; check db/ permissions and free space"),
     "restart_required": (503, "restart the API, then preview again"),
+    # ADR-0074 decision 4 (slice 3b): an approved record is damaged or approved/ can't be listed.
+    "review_records_unavailable": (409, "restore the listed damaged review records from backup "
+                                         "(scripts/backup.py), or finish each listed interrupted "
+                                         "decision or reopen (repeat the action on its review "
+                                         "page), then preview again"),
 }
 
 
@@ -58,13 +63,38 @@ class _SettingsNotCarried(RuntimeError):
 class ApplyRefused(RuntimeError):
     """Apply (or a preview) refused before any authority change."""
 
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, problems: dict[str, Any] | None = None) -> None:
         self.reason = reason
+        self.problems = problems
         self.status_code, self.action = REFUSALS[reason]
         super().__init__(f"{reason}: {self.action}")
 
-    def detail(self) -> dict[str, str]:
-        return {"reason": self.reason, "action": self.action}
+    def detail(self) -> dict[str, Any]:
+        out: dict[str, Any] = {"reason": self.reason, "action": self.action}
+        if self.problems is not None:
+            out["problems"] = self.problems
+        return out
+
+
+def _approved_preflight(st: Settings) -> dict[str, Any] | None:
+    """The shared Apply preflight (ADR-0074 decision 4, slice 3b), run under the write lock before
+    anything is copied, authorized or executed: the problems when an approved record is damaged
+    or `approved/` can't be listed, else None. A damaged approval's subject is unknown, so no other
+    approval can be shown independent of it — the whole Apply is refused."""
+    from app.workers import reviews                       # lazy: the review family lives in workers
+    try:
+        reviews.approved_preflight(st.reviews_dir)
+    except reviews.ReviewRecordsUnavailable as exc:
+        return exc.scan.problems()
+    return None
+
+
+def _blocked_preview(problems: dict[str, Any]) -> dict[str, Any]:
+    return {"status": "blocked", "reason": "review_records_unavailable", "problems": problems,
+            "diff": {"graph": apply_sandbox.empty_graph_diff(), "wiki": [], "reviews": [],
+                     "manifests": []},
+            "items": [], "not_appliable": [], "validators": {"passed": False, "failures": []},
+            "warnings": ["review_records_unavailable"], "preview_token": None}
 
 
 def code_fingerprint(base: Path) -> str:
@@ -151,6 +181,8 @@ def preview(st: Settings, *, evaluate: Callable[[Settings], dict[str, Any]],
     tmp_root: Path | None = None
     try:
         with write_lock.hold(st.reviews_dir, authority=False, changes=False):
+            if (problems := _approved_preflight(st)) is not None:
+                return _blocked_preview(problems)          # no copy, no run, no token
             rev = revision.current(st.root)
             # The settings this preview executes with, captured with the snapshot: the sandbox must
             # reproduce them, and the authorization binds exactly these.
@@ -214,6 +246,8 @@ def apply(st: Settings, token: str | None, *, run_apply: Callable[[Settings], di
         raise ApplyRefused("preview_required")
     check_loaded_code(loaded_code, repo)
     with write_lock.hold(st.reviews_dir, changes=False):
+        if (problems := _approved_preflight(st)) is not None:
+            raise ApplyRefused("review_records_unavailable", problems)   # token not consumed
         try:
             rec = apply_authorization.find(st.root, token)
         except apply_authorization.StoreUnavailable:

@@ -62,7 +62,9 @@ def _approved_item(tmp_path: Path, rid: str = "rev_c") -> dict:
 
 
 def _audit(tmp_path: Path, rid: str = "rev_c") -> dict:
-    return json.loads((tmp_path / "reviews" / "audit_log" / f"{rid}-approved.json").read_text())
+    # One entry per decision, named by its decision_id (ADR-0074 slice 3b, review round 2).
+    (path,) = (tmp_path / "reviews" / "audit_log").glob(f"{rid}-approved-*.json")
+    return json.loads(path.read_text())
 
 
 def test_is_claim_id_shape():

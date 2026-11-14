@@ -229,6 +229,26 @@ async def _revision_unavailable(request: Request, exc: revision.RevisionUnavaila
     return JSONResponse(status_code=503, content={"detail": detail})
 
 
+@app.exception_handler(reviews.ReviewRecordsUnavailable)
+async def _review_records_unavailable(request: Request, exc: reviews.ReviewRecordsUnavailable) -> Any:
+    """A whole-directory review operation refused on damaged records (ADR-0074 decision 4): 409 with
+    the safely rendered paths and categories, never record contents."""
+    detail = {"reason": "review_records_unavailable", "detail": str(exc),
+              "problems": exc.scan.problems()}
+    if request.url.path.startswith("/ui/"):
+        return HTMLResponse(review_html.render_error(409, str(exc)), status_code=409)
+    return JSONResponse(status_code=409, content={"detail": detail})
+
+
+@app.exception_handler(reviews.ReviewRecordUnavailable)
+async def _review_record_unavailable(request: Request, exc: reviews.ReviewRecordUnavailable) -> Any:
+    """A human action on a damaged review record (ADR-0074 decision 4): 409, nothing recorded."""
+    detail = {"reason": f"review_{exc.state}", "review_id": exc.review_id, "detail": str(exc)}
+    if request.url.path.startswith("/ui/"):
+        return HTMLResponse(review_html.render_error(409, str(exc)), status_code=409)
+    return JSONResponse(status_code=409, content={"detail": detail})
+
+
 @app.exception_handler(apply_gate.ApplyRefused)
 async def _apply_refused(request: Request, exc: apply_gate.ApplyRefused) -> Any:
     """A refused preview or Apply (ADR-0068 decision 6): nothing changed, no token consumed."""
@@ -653,17 +673,28 @@ def get_review(review_id: str) -> dict[str, Any]:
     """One review item plus its mandatory normalized preview projection (ADR-0035 A1, decision 6).
 
     The preview's ``apply`` block carries a read-only, best-effort ``effect_status`` derived from the
-    actual wiki/graph state. A corrupt review file is a 404 (the queue never crashes on bad JSON).
+    actual wiki/graph state. A missing review is a 404, a damaged one a categorical 409
+    (the queue never crashes on bad JSON).
     """
     result = review_read.get_review(
         settings.reviews_dir, review_id, graph_db=settings.graph_db_path,
         wiki_dir=settings.wiki_dir, manifests_dir=settings.manifests_dir,
         enrichment_dir=_enrichment_dir())
-    # A missing, corrupt, or schema-invalid review file is a 404 (the read model never 500s on bad
-    # queue state; the parse_error/schema_error markers are diagnostic only).
-    if result is None or result.get("parse_error") or result.get("schema_error"):
+    # A missing review is a 404; a damaged one a categorical 409 (ADR-0074 slice 3b: damage is never
+    # "not found"). The read model never 500s on bad queue state.
+    if result is None:
         raise HTTPException(status_code=404, detail=f"review not found: {review_id}")
+    _refuse_damaged(result)
     return result
+
+
+def _refuse_damaged(result: dict[str, Any]) -> None:
+    """A `review_read.get_review` result for a damaged record -> :class:`ReviewRecordUnavailable`
+    (409 with its category, the shared handler; HTML on /ui/ routes)."""
+    damage = result.get("damage")
+    if damage is not None:
+        raise reviews.ReviewRecordUnavailable(result["review_id"], reviews.ReviewRead(
+            damage["state"], Path(result["review_id"]), error=damage["error"]))
 
 
 def _validate_supersede_winner(decision: str, rtype: str, item: dict[str, Any], winner: str) -> None:
@@ -761,6 +792,16 @@ def _require_no_conflicting_merge(item: dict[str, Any]) -> None:
                     "conflicting merges are never approved together"))
 
 
+def _find_review_or_refuse(review_id: str) -> dict[str, Any] | None:
+    """A review for a mutation route through the typed lookup (`reviews.lookup_review`): the usable
+    record, None when there is none (404); any damaged slot raises
+    :class:`reviews.ReviewRecordUnavailable` (409, with its category) — ADR-0074 decision 4: damage
+    is never "not found", and nothing is recorded next to it."""
+    if not reviews.is_review_id(review_id):
+        return None
+    return reviews.lookup_review(settings.reviews_dir, review_id)
+
+
 @_commit_phase
 def _record_decision(
     review_id: str, decision: str, body: ReviewDecisionRequest | None
@@ -769,13 +810,13 @@ def _record_decision(
 
     A recorded terminal decision (approved/rejected) is immutable: re-sending the same decision is an
     idempotent no-op (``decision_recorded: false``); trying to flip it is a 409. A pending or deferred
-    item can be approved/rejected/deferred. Missing/corrupt item -> 404.
+    item can be approved/rejected/deferred. Missing item -> 404; a damaged record -> 409 (ADR-0074).
     """
     note = body.note if body else ""
     winner = (body.winner if body else None) or None
     amendments = (body.amendments if body else None) or None
     version_digest = (body.version_digest if body else None) or None
-    item, error = review_read.find_review(settings.reviews_dir, review_id)
+    item = _find_review_or_refuse(review_id)
     if item is None:
         raise HTTPException(status_code=404, detail=f"review not found: {review_id}")
     current = item.get("status")
@@ -895,7 +936,7 @@ def _decide_again(review_id: str, decision: str, version_digest: str, note: str)
     identified audit entry; no page changes (Apply executes it like any bound decision)."""
     if decision not in ("approved", "rejected"):
         raise HTTPException(status_code=400, detail="decision must be approved or rejected")
-    item, _err = review_read.find_review(settings.reviews_dir, review_id)
+    item = _find_review_or_refuse(review_id)
     if item is None:
         raise HTTPException(status_code=404, detail=f"review not found: {review_id}")
     if item.get("type") != "propose_synthesis":
@@ -958,18 +999,28 @@ def _reopen_decision(review_id: str, reason: str) -> dict[str, Any]:
     JSON endpoint + the UI route. Graph-aware (unlike the graph-free approve): it projects the item to
     read the live effect_status and reopens ONLY when that proves no live effect.
 
-    404 missing; 400 blank reason; 409 if the item is not terminal, or its effect is live / unconfirmable
+    404 missing; 400 blank reason; 409 for a damaged record (by category); 409 if the item is not
+    terminal, or its effect is live / unconfirmable
     (EFFECTED / UNKNOWN / INVALID_SUBJECT / APPLY_DEFERRED -> reason code). No ledger mutation on refusal.
     """
     reason = (reason or "").strip()
     if not reason:
         raise HTTPException(status_code=400, detail="reopen requires a non-empty reason")
+    # ADR-0074 slice 3b round 2: the typed lookup first — a damaged slot is a categorical 409
+    # (ReviewRecordUnavailable), never a 404, and nothing is opened as a stream.
+    if _find_review_or_refuse(review_id) is None:
+        raise HTTPException(status_code=404, detail=f"review not found: {review_id}")
+    # Slice 3b round 2: a reopen (or a decision) an interruption left half-done is finished first —
+    # repeating the reopen is how the operator settles it. A finished reopen is this call's result.
+    if reviews.finish_interrupted(settings.reviews_dir, review_id) == "reopen":
+        return {"review_id": review_id, "reopened": True, "status": "pending"}
     result = review_read.get_review(
         settings.reviews_dir, review_id, graph_db=settings.graph_db_path,
         wiki_dir=settings.wiki_dir, manifests_dir=settings.manifests_dir,
         enrichment_dir=_enrichment_dir())
-    if result is None or result.get("parse_error") or result.get("schema_error"):
+    if result is None:
         raise HTTPException(status_code=404, detail=f"review not found: {review_id}")
+    _refuse_damaged(result)
     status = result["item"].get("status")
     if status not in ("approved", "rejected"):
         raise HTTPException(
@@ -1206,6 +1257,9 @@ def run_apply(st: Any) -> dict[str, Any]:
     `approved/`, every executor, the index rebuild and the validators — holds the write lock, so a
     reopen, a decision or a tag action never interleaves with it."""
     with write_lock.hold(Path(st.reviews_dir)):
+        # ADR-0074 decision 4 (slice 3b): the shared preflight, again, as the backstop — before the
+        # first write (the publication intent): a damaged approval refuses the whole Apply.
+        reviews.approved_preflight(st.reviews_dir)
         # ADR-0068 decision 4: the publication intent comes first. Its scope is unknown until the
         # executors ran, so a crash mid-Apply republishes everything from authority.
         intent = publication_queue.record(st.root, origin="apply", full=True)
@@ -1949,7 +2003,14 @@ def _bulk_record(action: str, ids: list[str], fingerprints: dict[str, str], note
     recorded: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     for rid in ids:
-        item, _err = review_read.find_review(settings.reviews_dir, rid)
+        # ADR-0074 slice 3b round 2: the typed, non-blocking lookup (this runs under the write lock);
+        # damage is skipped with its category, never read as "not found".
+        try:
+            item = _find_review_or_refuse(rid)
+        except reviews.ReviewRecordUnavailable as exc:
+            skipped.append({"review_id": rid,
+                            "reason": f"record damaged ({exc.state}: {exc.error})"})
+            continue
         if item is None:
             skipped.append({"review_id": rid, "reason": "not found"})
             continue
@@ -2924,9 +2985,10 @@ def ui_review_detail(review_id: str) -> HTMLResponse:
         settings.reviews_dir, review_id, graph_db=settings.graph_db_path,
         wiki_dir=settings.wiki_dir, manifests_dir=settings.manifests_dir,
         enrichment_dir=_enrichment_dir())
-    if result is None or result.get("parse_error") or result.get("schema_error"):
+    if result is None:
         return HTMLResponse(
             review_html.render_error(404, f"review not found: {review_id}"), status_code=404)
+    _refuse_damaged(result)                       # 409 page with its category (ADR-0074)
     result = {**result, "subject": review_read.readable_subject(        # ADR-0070 §5 heading
         result["item"], wiki_dir=settings.wiki_dir)}
     if result["item"].get("type") == "change_item_type":               # ADR-0070 B4
@@ -2947,7 +3009,7 @@ def ui_review_decide(
     """
     winner: str | None = None
     if action in ("supersede_a", "supersede_b"):
-        item, _err = review_read.find_review(settings.reviews_dir, review_id)
+        item = _find_review_or_refuse(review_id)
         if item is None:  # route consistency: a missing review is 404, like the other decision paths
             return HTMLResponse(
                 review_html.render_error(404, f"review not found: {review_id}"), status_code=404)

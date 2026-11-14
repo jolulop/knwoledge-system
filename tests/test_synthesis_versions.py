@@ -259,7 +259,8 @@ def test_the_api_requires_the_digest_and_records_it(client, tmp_path):
     assert resp.status_code == 200 and resp.json()["decision_recorded"] is True
     item = _item(tmp_path, "rev_p")
     assert item["status"] == "approved" and item[sv.DECIDED] == shown["version_digest"]
-    audit = json.loads((tmp_path / "reviews" / "audit_log" / "rev_p-approved.json").read_text())
+    (entry,) = (tmp_path / "reviews" / "audit_log").glob("rev_p-approved-*.json")
+    audit = json.loads(entry.read_text())
     assert audit[sv.DECIDED] == shown["version_digest"]
     assert client.get("/reviews/rev_p").json()["item"][sv.DECIDED] == shown["version_digest"]
     assert "version_digest" not in _artifact(tmp_path)    # displaying/deciding wrote nothing
@@ -727,9 +728,10 @@ def test_a_retry_never_deletes_the_predecessor_before_the_replacement_is_durable
     assert reviews.decide_again(tmp_path / "reviews", "rev_p", decision="rejected",
                                 version_digest=shown) is False
     (audit,) = _audits(tmp_path, "rev_p")
-    # audit flush → replacement file+directory flush → predecessor deletion → both terminal
-    # directories flushed
+    # audit flush → replacement file+directory flush → predecessor deletion (durable: its directory
+    # flushed by the removal itself) → both terminal directories flushed
     assert synced == [audit, tmp_path / "reviews" / "rejected" / "rev_p.json",
+                      ("dir", tmp_path / "reviews" / "approved"),
                       ("dir", tmp_path / "reviews" / "approved"),
                       ("dir", tmp_path / "reviews" / "rejected")]
     assert _location(tmp_path, "rev_p") == ["rejected"]
@@ -756,7 +758,9 @@ def test_a_retry_without_its_audit_entry_keeps_the_predecessor(tmp_path, monkeyp
     assert sorted(_location(tmp_path, "rev_p")) == ["approved", "rejected"]
 
 
-def test_a_torn_audit_entry_is_rewritten_before_the_first_move(tmp_path):
+def test_a_damaged_audit_entry_is_preserved_and_the_re_decision_refused(tmp_path):
+    # ADR-0074 slice 3b: audit entries are written durably and atomically (slice 1), so an entry
+    # that can't be read is damage, not a torn write — evidence that is kept, never overwritten.
     _candidate(tmp_path, status="active").close()
     _review(tmp_path, "approved", "rev_p", bound=False)
     shown = _digest(tmp_path)
@@ -765,10 +769,12 @@ def test_a_torn_audit_entry_is_rewritten_before_the_first_move(tmp_path):
     entry = tmp_path / "reviews" / "audit_log" / f"rev_p-decided-again-{key}.json"
     entry.parent.mkdir(parents=True, exist_ok=True)
     entry.write_text("{torn", encoding="utf-8")
-    assert reviews.decide_again(tmp_path / "reviews", "rev_p", decision="rejected",
-                                version_digest=shown) is True
-    rec = json.loads(entry.read_text(encoding="utf-8"))
-    assert rec["event"] == "decided_again" and rec["prior_status"] == "approved"
+    with pytest.raises(reviews.DecideAgainRefused):
+        reviews.decide_again(tmp_path / "reviews", "rev_p", decision="rejected",
+                             version_digest=shown)
+    assert entry.read_text(encoding="utf-8") == "{torn"
+    assert _item(tmp_path, "rev_p") == prior                     # the decision is kept
+    assert not (tmp_path / "reviews" / "rejected" / "rev_p.json").exists()
 
 
 def test_bulk_confirmation_shows_the_version_it_binds(client, tmp_path):

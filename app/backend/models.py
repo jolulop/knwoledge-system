@@ -652,6 +652,9 @@ class ReviewDryRunResponse(BaseModel):
     # settings_changed / authorization_write_failed).
     preview_token: str | None = None
     token_withheld: str | None = None
+    # ADR-0074 decision 4 (slice 3b): with `reason: "review_records_unavailable"`, the damaged
+    # approved records (safe relative paths + categorical states) or the listing error.
+    problems: dict[str, Any] | None = None
     # ADR-0072 decision 2: the sandbox run's per-review outcomes (the readable preview's source).
     handled: list[dict[str, Any]] = []
     outcomes: list[dict[str, Any]] = []

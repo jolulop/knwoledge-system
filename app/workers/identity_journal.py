@@ -125,9 +125,7 @@ def is_open(reviews_dir: Path, review_id: str) -> bool:
 
 def end(reviews_dir: Path, review_id: str) -> None:
     path = _path(reviews_dir, review_id)
-    if path.exists():
-        path.unlink()
-        durable_write.sync_dir(path.parent)
+    durable_write.remove(path, missing_ok=True)
 
 
 def open_operations(reviews_dir: Path) -> list[dict[str, Any]]:

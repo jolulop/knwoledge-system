@@ -127,7 +127,8 @@ def test_an_unsearchable_directory_never_establishes_absence(tmp_path):
 def test_an_io_error_while_reading_is_unreadable(tmp_path, monkeypatch):
     md = _md(tmp_path)
     (md / f"{SID}.json").write_text(_good(), encoding="utf-8")
-    monkeypatch.setattr(m.os, "read", lambda fd, n: (_ for _ in ()).throw(OSError(5, "EIO")))
+    from app.backend import authority_read            # the shared byte reader
+    monkeypatch.setattr(authority_read.os, "read", lambda fd, n: (_ for _ in ()).throw(OSError(5, "EIO")))
     r = m.read_manifest(md, SID)
     monkeypatch.undo()
     assert (r.state, r.error) == (m.UNREADABLE, "OSError")

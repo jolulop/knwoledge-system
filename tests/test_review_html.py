@@ -60,7 +60,7 @@ def test_queue_renders_html(client, tmp_path):
 def test_queue_default_excludes_deferred(client, tmp_path):
     _write_review(tmp_path, "pending", {
         "review_id": "rev_d", "type": "deprecate_wiki_page", "status": "deferred",
-        "subject": {}, "proposal": {}, "context": {}})
+        "subject": {"node_id": "itm_d", "page": "Items/d.md"}, "proposal": {}, "context": {}})
     assert "rev_d" not in client.get("/ui/reviews").text
     assert "rev_d" in client.get("/ui/reviews", params={"status": "deferred"}).text
 
@@ -239,7 +239,7 @@ def test_nested_details_escaped_recursively(client, tmp_path):
 def test_detail_renders_full_synthesis_proposal_payload(client, tmp_path):
     _write_review(tmp_path, "pending", {
         "review_id": "rev_s", "type": "propose_synthesis", "status": "pending",
-        "subject": {"topic_node_id": "cpt_topic"},
+        "subject": {"topic_node_id": "cpt_topic", "fingerprint": "fp"},
         "proposal": {"to_status": "active", "synthesis_id": "syn_1", "title": "Big Finding",
                      "claim_ids": ["clm_1", "clm_2"], "summary": "It all connects."},
         "context": {"node_type": "item"}})

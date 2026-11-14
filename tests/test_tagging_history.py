@@ -334,7 +334,7 @@ def test_validation_reports_unmarked_ledgers_as_advisory_and_a_bad_record_as_an_
 def _pending_retype(root, sid, rid, *, status="pending", name="Alpha Tag"):
     d = root / "reviews" / ("deferred" if status == "deferred" else "pending")
     d.mkdir(parents=True, exist_ok=True)
-    (d / f"{rid}-{status}.json").write_text(json.dumps({
+    (d / f"{rid}.json").write_text(json.dumps({     # a record is named by its review id
         "review_id": rid, "type": "change_item_type", "status": status, "created_at": NOW,
         "subject": {"node_id": items.node_id(name), "to_item_type": "domain"},
         "context": {"source_id": sid, "from_item_type": "method_technique", "name": name}}),
@@ -344,8 +344,10 @@ def _pending_retype(root, sid, rid, *, status="pending", name="Alpha Tag"):
 def test_undecided_rows_split_by_kind_count_each_review_once_and_skip_deferred(fresh):
     root, a, b, c = fresh
     _pending_retype(root, a, "rev_t1")
-    (root / "reviews" / "pending" / "rev_t1-copy.json").write_text(       # a second association
-        (root / "reviews" / "pending" / "rev_t1-pending.json").read_text(encoding="utf-8"),
+    # A copy under another file name is not a usable record (ADR-0074 slice 3b: the review id must
+    # be the file name), so it can never be counted a second time.
+    (root / "reviews" / "pending" / "rev_t1-copy.json").write_text(
+        (root / "reviews" / "pending" / "rev_t1.json").read_text(encoding="utf-8"),
         encoding="utf-8")
     _pending_retype(root, a, "rev_t2", status="deferred")
     u = _flow(root)[0][a]["undecided"]

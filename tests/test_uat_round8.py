@@ -278,12 +278,21 @@ def test_collision_lookup_ignores_the_tag_itself_and_dead_tags():
 # --- 4. the approved queue marks what apply carried out --------------------------------------------
 
 
+# Each type's subject, as filed (the review family's schema, ADR-0074 slice 3b).
+_SUBJECTS = {
+    "change_item_type": {"node_id": "itm_0000000000000001", "to_item_type": "domain"},
+    "merge_items": {"survivor_node_id": "itm_0000000000000001",
+                    "absorbed_node_id": "itm_0000000000000002"},
+    "archive_source": {"source_id": "src_0000000000000001"},
+}
+
+
 def _approved(tmp_path, rid, rtype, decided_at="2026-10-27T21:32:00+00:00"):
     d = tmp_path / "reviews" / "approved"
     d.mkdir(parents=True, exist_ok=True)
     (d / f"{rid}.json").write_text(json.dumps({
         "review_id": rid, "type": rtype, "status": "approved", "priority": "low",
-        "created_at": "2026-10-27T15:45:49+00:00", "subject": {"node_id": "itm_0000000000000001"},
+        "created_at": "2026-10-27T15:45:49+00:00", "subject": _SUBJECTS[rtype],
         "decided_by": "human", "decided_at": decided_at}), encoding="utf-8")
 
 

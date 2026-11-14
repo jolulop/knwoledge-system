@@ -18,7 +18,10 @@ Apply's sandbox copies both count):
 Lock files (`*.lock`) are never authority. Directory creation is checked too (`os.mkdir`, which
 `Path.mkdir` and `os.makedirs` go through): an authority directory — `raw/`, `raw/manifests/`,
 `wiki/`, `wiki/Items|Claims|Synthesis/`, `reviews/**`, `policies/**`, `db/` — must be created by
-`durable_write.make_dirs`, so its entry is synced into its parent. The static half is
+`durable_write.make_dirs`, so its entry is synced into its parent. Removal is checked the same way
+(`os.remove` / `os.unlink` / `Path.unlink`, `os.rmdir`, `shutil.rmtree` of an authority directory):
+an authority entry must be removed by `durable_write.remove` / `remove_dir`, which sync the
+directory after the removal (slice 3b, review round 2). The static half is
 `tests/test_authority_write_guard.py`.
 """
 from __future__ import annotations
@@ -53,6 +56,9 @@ _state = threading.local()
 violations: list[str] = []
 helper_writes: list[tuple[str, str]] = []        # (family, path) written through the helper
 helper_dirs: list[tuple[str, str]] = []          # (family, path) directories the helper created
+helper_removals: list[tuple[str, str]] = []      # (family, path) entries the helper removed
+# Events whose path is a directory (classified with `directory_family`).
+_DIR_EVENTS = frozenset({"os.mkdir", "os.rmdir", "shutil.rmtree"})
 _enabled = False
 
 
@@ -127,7 +133,7 @@ def _writer() -> tuple[str, str] | None:
 def _check(event: str, path) -> None:
     if not isinstance(path, (str, bytes, os.PathLike)):
         return
-    fam = directory_family(path) if event == "os.mkdir" else family(path)
+    fam = directory_family(path) if event in _DIR_EVENTS else family(path)
     if fam is None:
         return
     if durable_write.in_progress():
@@ -136,11 +142,13 @@ def _check(event: str, path) -> None:
             helper_writes.append((fam, shown))
         elif event == "os.mkdir":
             helper_dirs.append((fam, shown))
+        elif event in ("os.remove", "os.rmdir"):
+            helper_removals.append((fam, shown))
         return
     writer = _writer()
     if writer is None or writer[0].startswith("tests/") or writer in RUNTIME_ALLOWED:
         return
-    what = f"{fam} directory" if event == "os.mkdir" else fam
+    what = f"{fam} directory" if event in _DIR_EVENTS else fam
     violations.append(f"{event} of {what} {os.fspath(path)!s} by {writer[0]}:{writer[1]}"
                       " — route it through app.backend.durable_write")
 
@@ -148,7 +156,8 @@ def _check(event: str, path) -> None:
 def _hook(event: str, args: tuple) -> None:
     if not _enabled or getattr(_state, "busy", False):
         return
-    if event not in ("open", "os.rename", "os.link", "os.symlink", "os.truncate", "os.mkdir"):
+    if event not in ("open", "os.rename", "os.link", "os.symlink", "os.truncate", "os.mkdir",
+                     "os.remove", "os.rmdir", "shutil.rmtree"):
         return
     _state.busy = True                            # our own path work must not re-enter
     try:
@@ -162,7 +171,9 @@ def _hook(event: str, args: tuple) -> None:
             _check(event, args[1])                # the destination...
             if event == "os.rename":
                 _check(event + " (source)", args[0])   # ...and a rename's source
-        elif event == "os.mkdir":
+        elif event in ("os.mkdir", "os.remove", "os.rmdir", "shutil.rmtree"):
+            if event != "shutil.rmtree" and args[-1] not in (None, -1):   # last argument: dir_fd
+                return                # relative to a dir_fd (rmtree internals): the tree is checked
             _check(event, args[0])
         elif event == "os.symlink":
             _check(event, args[1])

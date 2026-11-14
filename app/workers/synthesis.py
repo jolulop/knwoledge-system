@@ -972,6 +972,7 @@ def generate_syntheses(
         run = publication.Run(root, "generate_synthesis", search=rebuild_index, wiki_dir=wiki_dir)
         retracted = 0
         pages_refused: list[dict[str, str]] = []    # ADR-0074: damaged or lost pages left as they are
+        review_records_problems: dict[str, Any] | None = None   # ADR-0074: approvals not applied
         # ADR-0068: topics whose commit an earlier run left unfinished (fails closed when damaged).
         unfinished = journal.pending(root, _PRODUCER)
         journal_verified: list[str] = []      # unfinished records found complete and cleared
@@ -979,9 +980,16 @@ def generate_syntheses(
         captured: dict[str, str] = {}         # independence digests this run decides with
         with write_lock.hold(reviews_dir):
             intent = run.intent(full=True, refresh=False)
-            # 1. Apply human decisions (deterministic; runs without a key).
-            resolution = apply_resolved_syntheses(gconn, reviews_dir, synthesis_dir=synthesis_dir,
-                                                  enrichment_dir=enrichment_dir, now=now)
+            # 1. Apply human decisions (deterministic; runs without a key). ADR-0074 decision 4
+            # (slice 3b): only when every approved record is readable — Apply's own preflight; a
+            # damaged approval skips this step (reported), never the decisions around it.
+            try:
+                reviews.approved_preflight(reviews_dir)
+                resolution = apply_resolved_syntheses(gconn, reviews_dir, synthesis_dir=synthesis_dir,
+                                                      enrichment_dir=enrichment_dir, now=now)
+            except reviews.ReviewRecordsUnavailable as exc:
+                review_records_problems = exc.scan.problems()
+                resolution = {"promoted": 0, "rejected": 0, "outcomes": []}
 
             # 2. Eligible topics from the current active graph.
             inventory = scan_manifests(manifests_dir)
@@ -1227,7 +1235,7 @@ def generate_syntheses(
         # A topic this run attempted whose commit is still unfinished is never a clean success.
         left_attempted = sorted(set(left) & {t["node_id"] for t in topics}) if has_key else []
 
-        if errors or left_attempted or pages_refused:
+        if errors or left_attempted or pages_refused or review_records_problems:
             status = "partial"
         elif not has_key and considered > 0:
             status = "skipped"
@@ -1248,6 +1256,7 @@ def generate_syntheses(
             "promoted": resolution["promoted"], "rejected": resolution["rejected"],
             **inventory.report(), "retraction_blocked": retraction_blocked,
             "synthesis_pages_refused": pages_refused,
+            "review_records_unavailable": review_records_problems,
             "index_rebuilt": bool(pub and pub["index_rebuilt"]),
             "keyword_reindexed": bool(pub and pub["keyword_reindexed"]),
             "publication": publication.summary(pub),

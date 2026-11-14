@@ -609,3 +609,55 @@ def test_a_hard_kill_mid_write_keeps_the_old_content(tmp_path):
     left = _leftovers(path.parent)
     assert len(left) == 1 and left[0].startswith(".rec.json.tmp-")   # hidden, no inventory sees it
     assert [p.name for p in path.parent.glob("*.json")] == ["rec.json"]
+
+
+# --- durable removal (slice 3b, review round 2) ---------------------------------------------------
+
+
+def test_remove_unlinks_then_syncs_the_directory(tmp_path, monkeypatch):
+    path = _seed(tmp_path)
+    seen = []
+    real = dw._fsync_path
+    monkeypatch.setattr(dw, "_fsync_path",
+                        lambda p: (seen.append((Path(p), Path(path).exists())), real(p)))
+    assert dw.remove(path) is True
+    assert seen == [(path.parent, False)]                 # the sync runs after the unlink
+    assert not path.exists()
+
+
+def test_a_failed_sync_after_a_removal_is_uncertain_completion(tmp_path, monkeypatch):
+    path = _seed(tmp_path)
+
+    def fail(_p):
+        raise OSError(5, "EIO")
+    monkeypatch.setattr(dw, "_fsync_path", fail)
+    with pytest.raises(dw.UncertainCompletion) as exc:
+        dw.remove(path)
+    assert isinstance(exc.value, OSError) and "removed rec.json" in str(exc.value)
+    assert not path.exists()
+
+
+def test_remove_of_an_absent_entry(tmp_path, monkeypatch):
+    path = _seed(tmp_path)
+    path.unlink()
+    with pytest.raises(FileNotFoundError):
+        dw.remove(path)
+    synced = []
+    monkeypatch.setattr(dw, "_fsync_path", lambda p: synced.append(Path(p)))
+    # An absence proves nothing durable (an earlier run may have died before its sync): synced.
+    assert dw.remove(path, missing_ok=True) is False and synced == [path.parent]
+    assert dw.remove(tmp_path / "nowhere" / "x.json", missing_ok=True) is False
+
+
+def test_remove_dir_rmdirs_then_syncs_the_parent(tmp_path, monkeypatch):
+    d = tmp_path / "a" / "b"
+    d.mkdir(parents=True)
+    synced = []
+    monkeypatch.setattr(dw, "_fsync_path", lambda p: synced.append((Path(p), d.exists())))
+    dw.remove_dir(d)
+    assert synced == [(d.parent, False)]
+    (d / "x").parent.mkdir()
+    (d / "x").write_text("y")
+    with pytest.raises(OSError):                          # not empty: nothing removed
+        dw.remove_dir(d)
+    assert (d / "x").exists()

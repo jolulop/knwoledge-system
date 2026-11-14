@@ -1005,7 +1005,7 @@ def test_reviews_list_unknown_status_is_400(client, tmp_path):
 def test_reviews_list_malformed_json_counted_not_crashing(client, tmp_path):
     _write_review(tmp_path, "pending", {
         "review_id": "rev_ok", "type": "promote_candidate_node", "status": "pending",
-        "subject": {}, "proposal": {}, "context": {}})
+        "subject": {"node_id": "itm_1"}, "proposal": {}, "context": {}})
     (tmp_path / "reviews" / "pending" / "rev_bad.json").write_text("{nope", encoding="utf-8")
     body = client.get("/reviews").json()
     assert body["parse_errors"] == 1
@@ -1016,7 +1016,7 @@ def test_reviews_list_schema_invalid_json_does_not_500(client, tmp_path):
     # valid JSON object but not a usable ReviewItem (missing review_id/type) must not crash the queue
     _write_review(tmp_path, "pending", {
         "review_id": "rev_ok", "type": "promote_candidate_node", "status": "pending",
-        "subject": {}, "proposal": {}, "context": {}})
+        "subject": {"node_id": "itm_1"}, "proposal": {}, "context": {}})
     (tmp_path / "reviews" / "pending" / "rev_bad.json").write_text(
         json.dumps({"status": "pending"}), encoding="utf-8")
     resp = client.get("/reviews")
@@ -1027,11 +1027,13 @@ def test_reviews_list_schema_invalid_json_does_not_500(client, tmp_path):
     assert [it["review_id"] for it in body["items"]] == ["rev_ok"]
 
 
-def test_reviews_detail_404_for_schema_invalid(client, tmp_path):
+def test_reviews_detail_409_for_schema_invalid(client, tmp_path):
+    # ADR-0074 slice 3b round 2: damage is never "not found" — a categorical 409.
     (tmp_path / "reviews" / "pending").mkdir(parents=True, exist_ok=True)
     (tmp_path / "reviews" / "pending" / "rev_bad.json").write_text(
         json.dumps({"status": "pending"}), encoding="utf-8")
-    assert client.get("/reviews/rev_bad").status_code == 404
+    res = client.get("/reviews/rev_bad")
+    assert res.status_code == 409 and res.json()["detail"]["reason"] == "review_corrupt"
 
 
 def test_reviews_detail_returns_item_and_preview(client, tmp_path):
@@ -1052,10 +1054,11 @@ def test_reviews_detail_404_for_missing(client, tmp_path):
     assert client.get("/reviews/rev_nope").status_code == 404
 
 
-def test_reviews_detail_404_for_malformed(client, tmp_path):
+def test_reviews_detail_409_for_malformed(client, tmp_path):
     (tmp_path / "reviews" / "pending").mkdir(parents=True, exist_ok=True)
     (tmp_path / "reviews" / "pending" / "rev_bad.json").write_text("{broken", encoding="utf-8")
-    assert client.get("/reviews/rev_bad").status_code == 404
+    res = client.get("/reviews/rev_bad")
+    assert res.status_code == 409 and res.json()["detail"]["reason"] == "review_corrupt"
 
 
 def test_reviews_detail_no_server_path_leak(client, tmp_path):
@@ -1087,7 +1090,9 @@ def test_approve_records_decision_and_moves_to_approved(client, tmp_path):
                     "apply_required": True}
     assert (tmp_path / "reviews" / "approved" / "rev_a.json").exists()
     assert not (tmp_path / "reviews" / "pending" / "rev_a.json").exists()
-    assert (tmp_path / "reviews" / "audit_log" / "rev_a-approved.json").exists()
+    # One audit entry per decision, named by its decision_id (slice 3b round 2).
+    (entry,) = (tmp_path / "reviews" / "audit_log").glob("rev_a-approved-*.json")
+    assert entry.name == f"rev_a-approved-{json.loads((tmp_path / 'reviews' / 'approved' / 'rev_a.json').read_text())['decision_id']}.json"
 
 
 def test_approve_without_body_works(client, tmp_path):

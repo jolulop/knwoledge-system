@@ -42,7 +42,8 @@ from app.backend.config import get_settings  # noqa: E402
 
 EXIT_USAGE = 2
 EXIT_CODES = {"preview_required": 6, "unknown_preview": 6, "stale_preview": 6,
-              "restart_required": 7, "authorization_store_unavailable": 8}
+              "restart_required": 7, "authorization_store_unavailable": 8,
+              "review_records_unavailable": 10}
 EXIT_REVISION_UNAVAILABLE = 9
 
 
@@ -60,10 +61,24 @@ def _parse(argv: list[str]) -> tuple[str | None, str | None, Path, bool]:
     return command, token, root, as_json
 
 
+def _print_problems(problems: dict | None) -> None:
+    """ADR-0074 slice 3b: the damaged approved records (safe relative paths, categories only)."""
+    if not problems:
+        return
+    if problems.get("enumeration_error"):
+        print(f"  {problems['directory']} can't be listed ({problems['enumeration_error']})")
+    for d in problems.get("damaged") or []:
+        print(f"  {d['path']}: {d['state']} ({d['error']}) — restore it from backup")
+    for d in problems.get("interrupted") or []:      # slice 3b review round 2
+        print(f"  {d['path']} is also in {d['also']}: an interrupted decision or reopen — repeat "
+              "the action on the review's page to finish it")
+
+
 def _print_preview(out: dict) -> None:
     print(f"Preview: {out['status']}" + (f" ({out['reason']})" if out.get("reason") else ""))
     if out.get("error"):
         print(f"  error: {out['error']}")
+    _print_problems(out.get("problems"))
     diff = out.get("diff") or {}
     g = diff.get("graph") or {}
     for key in ("nodes_added", "nodes_status_changed", "edges_added", "edges_removed",
@@ -115,6 +130,7 @@ def main(argv: list[str]) -> int:
         return run_guard.run_cli(st.db_dir, "apply", lambda: _apply(st, token, api))
     except apply_gate.ApplyRefused as exc:
         print(f"Refused: {exc.reason}: {exc.action}. Nothing was changed.", file=sys.stderr)
+        _print_problems(exc.problems)
         return EXIT_CODES[exc.reason]
     except revision.RevisionUnavailable as exc:
         print(f"Refused: revision_unavailable: {exc}.", file=sys.stderr)

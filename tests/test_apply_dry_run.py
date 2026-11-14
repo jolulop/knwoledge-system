@@ -276,7 +276,8 @@ def test_dry_run_graph_unavailable_blocked_mirrors_503(client, tmp_path):
 
 def test_dry_run_not_appliable_record_only(client, tmp_path):
     _approve(tmp_path, {"review_id": "rev_m", "type": "delete_raw_file", "status": "approved",
-                        "subject": {}, "proposal": {}, "context": {}})
+                        "subject": {"source_id": "src_0000000000000a11"}, "proposal": {},
+                        "context": {}})
     dry = client.post("/reviews/apply/dry-run").json()
     assert dry["status"] == "ok"
     assert any(n["review_id"] == "rev_m" and n["reason"] == "no_executor_in_phase_6"

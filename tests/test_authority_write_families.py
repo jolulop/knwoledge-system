@@ -85,7 +85,8 @@ def test_the_review_ledger_lifecycle_writes_through_the_helper(tmp_path):
     assert f"reviews/pending/{rid}.json" in w and any("-deferred-" in p for p in w)
     reviews.resolve_review_item(rdir, rid, decision="approved", decided_by="human")
     w = _written(tmp_path)["reviews"]
-    assert {f"reviews/approved/{rid}.json", f"reviews/audit_log/{rid}-approved.json"} <= w
+    assert f"reviews/approved/{rid}.json" in w
+    assert any(p.startswith(f"reviews/audit_log/{rid}-approved-") for p in w)
     reviews.reopen_review_item(rdir, rid, reason="changed my mind")
     w = _written(tmp_path)["reviews"]
     assert f"reviews/pending/{rid}.json" in w and any("-reopened-" in p for p in w)

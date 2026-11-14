@@ -44,7 +44,10 @@ def _write(tmp_path: Path, where: str, rid: str, item: dict) -> None:
 def _approved_record_only(tmp_path: Path, rtype: str, rid: str = "rev_x") -> None:
     _write(tmp_path, "approved", rid, {
         "type": rtype, "status": "approved", "decided_by": "human", "decided_at": "t0",
-        "subject": {"source_id": "src_0123456789abcdef"}, "proposal": {}, "context": {}})
+        # A purge proposal's subject is its scope (the review family's schema, ADR-0074 slice 3b).
+        "subject": ({"scope": "llm_cache"} if rtype == "purge_response_cache"
+                    else {"source_id": "src_0123456789abcdef"}),
+        "proposal": {}, "context": {}})
 
 
 def _graph(tmp_path: Path):

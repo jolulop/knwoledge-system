@@ -457,7 +457,8 @@ def test_a_failure_deleting_the_review_keeps_its_audit_and_is_completed(tmp_path
     a, b, _sa, sb = _vault(tmp_path)
     _same_author(tmp_path, sb)
     rid = _rid(a, b)
-    _fail_once(monkeypatch, Path, "unlink", when=lambda self, *a, **k: self.name == f"{rid}.json")
+    # The review is deleted by durable_write.remove (os.unlink, then the directory sync).
+    _fail_once(monkeypatch, os, "unlink", when=lambda path, *a, **k: Path(path).name == f"{rid}.json")
     with pytest.raises(OSError):
         _maintain(tmp_path)
     assert _edge_status(tmp_path, a, b) == ["superseded"] and _pending(tmp_path, rid)
@@ -639,7 +640,7 @@ def _record_persistence(monkeypatch, tmp_path, rid) -> list[str]:
 
     real_write, real_sync, real_fsync = (durable_write._write_temp, durable_write.sync_dir,
                                          durable_write._fsync_path)
-    real_replace, real_unlink, real_set = os.replace, Path.unlink, graph.set_status
+    real_replace, real_unlink, real_set = os.replace, os.unlink, graph.set_status
 
     def ours(path):                                       # the review ledger's files only
         return reviews_dir in Path(path).parents
@@ -665,10 +666,10 @@ def _record_persistence(monkeypatch, tmp_path, rid) -> list[str]:
             events.append(f"rename {where(target)}")
         return out
 
-    def unlink(self, *args, **kwargs):
-        real_unlink(self, *args, **kwargs)
-        if reviews_dir in self.parents:
-            events.append(f"delete {where(self)}")
+    def unlink(path, *args, **kwargs):           # durable_write.remove deletes with os.unlink
+        real_unlink(path, *args, **kwargs)
+        if reviews_dir in Path(path).parents and ".tmp-" not in Path(path).name:
+            events.append(f"delete {where(path)}")
 
     def set_status(conn, edge_id, status, **kwargs):
         real_set(conn, edge_id, status, **kwargs)
@@ -678,7 +679,7 @@ def _record_persistence(monkeypatch, tmp_path, rid) -> list[str]:
     monkeypatch.setattr(durable_write, "sync_dir", sync)
     monkeypatch.setattr(durable_write, "_fsync_path", fsync_path)
     monkeypatch.setattr(os, "replace", replace)
-    monkeypatch.setattr(Path, "unlink", unlink)
+    monkeypatch.setattr(os, "unlink", unlink)
     monkeypatch.setattr(graph, "set_status", set_status)
     return events
 

@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.backend import graph, review_read
+from app.workers import reviews
 
 
 def _write_item(reviews_dir: Path, state: str, item: dict) -> Path:
@@ -30,9 +31,15 @@ def _write_item(reviews_dir: Path, state: str, item: dict) -> Path:
 def _item(rid: str, rtype: str, *, status: str = "pending", priority: str = "low",
           created_at: str | None = None, subject: dict | None = None,
           proposal: dict | None = None, context: dict | None = None) -> dict:
+    if subject is None:
+        # ADR-0074 slice 3b round 2: the read model uses the review family's schema — a supported
+        # type needs its subject fields (placeholders here unless a test names them).
+        subject = {f: f"{f}_x" for f in reviews.SUBJECT_FIELDS.get(rtype, ())}
+        if rtype == "mark_semantic_duplicate":
+            subject = {"node_ids": ["item_a", "item_b"]}
     return {
         "review_id": rid, "type": rtype, "status": status, "priority": priority,
-        "created_at": created_at, "subject": subject or {}, "proposal": proposal or {},
+        "created_at": created_at, "subject": subject, "proposal": proposal or {},
         "context": context or {},
     }
 
@@ -191,7 +198,7 @@ def test_decision_apply_required_classification():
 def test_record_only_type_is_apply_deferred(tmp_path):
     rv = tmp_path / "reviews"
     _write_item(rv, "pending", _item("rev_m", "delete_raw_file",
-                                     subject={"node_id": "ent_1"}))
+                                     subject={"source_id": "src_1", "node_id": "ent_1"}))
     prev = review_read.get_review(rv, "rev_m")["preview"]
     assert prev["apply"]["supported"] is False
     assert prev["apply"]["effect_status"] == review_read.APPLY_DEFERRED
@@ -268,7 +275,7 @@ def test_synthesis_approved_active_node_and_page_is_effected(tmp_path):
     conn.close()
     _write_synthesis_page(tmp_path, syn_id, status="active", review_status="approved")
     _write_item(rv, "approved", _item("rev_s", "propose_synthesis", status="approved",
-                                      subject={"topic_node_id": "cpt_topic"}))
+                                      subject={"topic_node_id": "cpt_topic", "fingerprint": "fp"}))
     prev = review_read.get_review(rv, "rev_s", graph_db=gdb, wiki_dir=tmp_path / "wiki")["preview"]
     assert prev["apply"]["effect_status"] == review_read.EFFECTED
     assert f"Synthesis/{syn_id}.md" in prev["affected_paths"]
@@ -281,7 +288,7 @@ def test_synthesis_node_active_but_page_missing_is_unknown(tmp_path):
     graph.upsert_node(conn, node_id=syn_id, node_type="synthesis", slug="s", status="active")
     conn.close()  # node active, but no Synthesis page written
     _write_item(rv, "approved", _item("rev_s", "propose_synthesis", status="approved",
-                                      subject={"topic_node_id": "cpt_topic"}))
+                                      subject={"topic_node_id": "cpt_topic", "fingerprint": "fp"}))
     prev = review_read.get_review(rv, "rev_s", graph_db=gdb, wiki_dir=tmp_path / "wiki")["preview"]
     assert prev["apply"]["effect_status"] == review_read.UNKNOWN
     assert "synthesis_page_unreadable" in prev["apply"]["warnings"]
@@ -295,7 +302,7 @@ def test_synthesis_node_active_but_page_not_target_is_pending_apply(tmp_path):
     conn.close()
     _write_synthesis_page(tmp_path, syn_id, status="candidate", review_status="pending")
     _write_item(rv, "approved", _item("rev_s", "propose_synthesis", status="approved",
-                                      subject={"topic_node_id": "cpt_topic"}))
+                                      subject={"topic_node_id": "cpt_topic", "fingerprint": "fp"}))
     prev = review_read.get_review(rv, "rev_s", graph_db=gdb, wiki_dir=tmp_path / "wiki")["preview"]
     assert prev["apply"]["effect_status"] == review_read.PENDING_APPLY
 
@@ -309,7 +316,7 @@ def test_synthesis_rejected_checks_deprecated_state(tmp_path):
     conn.close()
     _write_synthesis_page(tmp_path, syn_id, status="deprecated_candidate", review_status="rejected")
     _write_item(rv, "rejected", _item("rev_s", "propose_synthesis", status="rejected",
-                                      subject={"topic_node_id": "cpt_topic"}))
+                                      subject={"topic_node_id": "cpt_topic", "fingerprint": "fp"}))
     prev = review_read.get_review(rv, "rev_s", graph_db=gdb, wiki_dir=tmp_path / "wiki")["preview"]
     assert prev["apply"]["effect_status"] == review_read.EFFECTED
 

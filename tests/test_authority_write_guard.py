@@ -1,6 +1,6 @@
 """ADR-0074 decision 1, structural guard (static half; the runtime half is `tests/write_guard.py`).
 
-1. **Deny by default.** Every raw file-write primitive in `app/` and `scripts/` — called *or* merely
+1. **Deny by default.** Every raw file-write (or removal — review round 2 of slice 3b) primitive in `app/` and `scripts/` — called *or* merely
    referenced, under any import alias — must be in `ALLOWED` with a reason, or the test fails. So a
    new authority writer cannot bypass `app.backend.durable_write` through a wrapper or an alias: the
    wrapper itself contains a primitive. Stale entries fail too, so the list stays exact.
@@ -19,11 +19,11 @@ from tests import write_guard
 ROOT = Path(__file__).resolve().parents[1]
 
 _ATTR_PRIMITIVES = {"write_text", "write_bytes", "touch", "symlink_to", "hardlink_to", "link_to",
-                    "mkdir"}
+                    "mkdir", "unlink", "rmdir"}
 _MODULE_PRIMITIVES = {
     "os": {"replace", "rename", "renames", "link", "symlink", "open", "write", "truncate",
-           "ftruncate", "fdopen", "mkdir", "makedirs"},
-    "shutil": {"copy", "copy2", "copyfile", "copytree", "move", "copyfileobj"},
+           "ftruncate", "fdopen", "mkdir", "makedirs", "remove", "unlink", "rmdir", "removedirs"},
+    "shutil": {"copy", "copy2", "copyfile", "copytree", "move", "copyfileobj", "rmtree"},
     "json": {"dump"},
     "tempfile": {"NamedTemporaryFile", "TemporaryFile", "SpooledTemporaryFile", "mkstemp",
                  "mkdtemp", "TemporaryDirectory"},
@@ -44,6 +44,22 @@ ALLOWED: dict[tuple[str, str, str], str] = {
     ("app/backend/durable_write.py", "_write_temp", "os.fdopen"): _HELPER,
     ("app/backend/durable_write.py", "_commit", "os.link"): _HELPER,
     ("app/backend/durable_write.py", "_commit", "os.replace"): _HELPER,
+    ("app/backend/durable_write.py", "make_dirs", "os.rmdir"): _HELPER,
+    ("app/backend/durable_write.py", "_commit", ".unlink"): _HELPER,
+    ("app/backend/durable_write.py", "_commit", "os.unlink"): _HELPER,
+    ("app/backend/durable_write.py", "_write", ".unlink"): _HELPER,
+    ("app/backend/durable_write.py", "remove", "os.unlink"): _HELPER,
+    ("app/backend/durable_write.py", "remove_dir", "os.rmdir"): _HELPER,
+    ("app/backend/apply_sandbox.py", "cleanup_sandbox", "shutil.rmtree"): _SANDBOX,
+    ("app/backend/vector_index.py", "_swap_dir", "shutil.rmtree"): _PROJECTION + " (vector index)",
+    ("app/backend/vector_index.py", "_build_full", "shutil.rmtree"): _PROJECTION + " (vector index)",
+    ("app/workers/authors.py", "publish", ".unlink"):
+        _PROJECTION + " (wiki/Authors pages, generated from manifests)",
+    ("app/workers/extract.py", "_stage_outputs", "shutil.rmtree"): _NORMALIZED,
+    ("app/workers/extract.py", "_install_outputs", "shutil.rmtree"): _NORMALIZED,
+    ("app/workers/extract.py", "_extract_one", "shutil.rmtree"): _NORMALIZED,
+    ("app/workers/extract.py", "extract_sources", "shutil.rmtree"): _NORMALIZED,
+    ("scripts/eval_contradictions.py", "evaluate", "shutil.rmtree"): _EVAL,
     ("app/backend/authority_read.py", "read_file", "os.open"):
         "a read-only open (O_RDONLY | O_NONBLOCK) of the shared typed authority reader, ADR-0074 "
         "decisions 2 and 4",
@@ -407,6 +423,37 @@ def test_the_runtime_guard_flags_an_unguarded_authority_directory_creation(tmp_p
     durable_write.make_dirs(tmp_path / "wiki" / "Items")
     assert write_guard.take_violations() == []
     assert [f for f, _p in write_guard.helper_dirs] == ["page", "page"]
+
+
+def test_the_runtime_guard_flags_an_unguarded_authority_removal(tmp_path):
+    """Slice 3b review round 2: an authority file removed outside `durable_write.remove` (whose
+    directory sync makes the removal durable) is a violation; through the helper it is fine."""
+    target = tmp_path / "reviews" / "approved" / "rev_x.json"
+    target.parent.mkdir(parents=True)
+    fake = compile("import os, shutil\nfrom pathlib import Path\n"
+                   "def rogue(p):\n    Path(p).unlink()\n"
+                   "def rogue_tree(p):\n    shutil.rmtree(p)\n",
+                   str(ROOT / "app" / "workers" / "rogue_writer.py"), "exec")
+    ns: dict = {}
+    exec(fake, ns)
+    write_guard.take_violations()
+    target.write_text("{}")
+    ns["rogue"](target)
+    found = write_guard.take_violations()
+    assert len(found) == 1 and found[0].startswith("os.remove of reviews") and "rogue" in found[0]
+    (tmp_path / "policies").mkdir()
+    ns["rogue_tree"](tmp_path / "policies")
+    # The tree itself, and its top-level rmdir (by absolute path), are both flagged.
+    assert [f.split(" ")[0] for f in write_guard.take_violations()] == ["shutil.rmtree", "os.rmdir"]
+    scratch = tmp_path / "normalized" / "x.md"                  # not authority
+    scratch.parent.mkdir()
+    scratch.write_text("x")
+    ns["rogue"](scratch)
+    assert write_guard.take_violations() == []
+    from app.backend import durable_write
+    target.write_text("{}")
+    durable_write.remove(target)
+    assert write_guard.take_violations() == []
 
 
 @pytest.mark.parametrize("path,fam", [

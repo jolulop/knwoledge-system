@@ -148,8 +148,9 @@ def test_mixed_eligibility_duplicates_and_stale_selections(client, queue):  # no
     assert (queue / "reviews" / "rejected" / "rev_promote.json").exists()
     assert (queue / "reviews" / "pending" / "rev_hide.json").exists()    # changed: not recorded
     assert "changed — review again" in html and "no longer open (it is approved)" in html
-    assert _audits(queue, "rev_merge") == ["rev_merge-rejected.json"]   # once, despite duplicate
-    note = json.loads((queue / "reviews" / "audit_log" / "rev_merge-rejected.json").read_text())
+    audits = _audits(queue, "rev_merge")             # once, despite duplicate (one per decision)
+    assert len(audits) == 1 and audits[0].startswith("rev_merge-rejected-")
+    note = json.loads((queue / "reviews" / "audit_log" / audits[0]).read_text())
     assert note["note"] == "bulk <b>cleanup</b>"
     assert "<b>cleanup" not in html                               # result page escapes
     assert "/ui/reviews/rev_merge'" in html and "Nothing was applied" in html
@@ -176,7 +177,8 @@ def test_an_interrupted_batch_keeps_what_it_recorded_and_a_retry_never_duplicate
     html = _record(client, "reject", form).text
     assert "already rejected" in html
     for rid in ("rev_merge", "rev_promote"):
-        assert _audits(queue, rid) == [f"{rid}-rejected.json"]
+        audits = _audits(queue, rid)
+        assert len(audits) == 1 and audits[0].startswith(f"{rid}-rejected-")
 
 
 def test_bulk_defer_then_defer_again_is_already_deferred(client, queue):  # noqa: F811

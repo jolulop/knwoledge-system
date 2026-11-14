@@ -28,17 +28,23 @@ import validate_projection  # noqa: E402
 import validate_wikilinks  # noqa: E402
 
 from app.backend.config import get_settings
-from app.workers import promote, publication
+from app.workers import promote, publication, reviews
 
 
 def main(argv: list[str]) -> int:
     settings = get_settings()
-    summary = promote.promote_candidates(
-        settings.root,
-        manifests_dir=settings.manifests_dir,
-        wiki_dir=settings.wiki_dir,
-        jobs_db=settings.jobs_db_path,
-    )
+    try:
+        summary = promote.promote_candidates(
+            settings.root,
+            manifests_dir=settings.manifests_dir,
+            wiki_dir=settings.wiki_dir,
+            jobs_db=settings.jobs_db_path,
+        )
+    except reviews.ReviewRecordsUnavailable as exc:      # ADR-0074: refused before any change
+        print(f"Promotion refused: {exc}")
+        for d in exc.scan.damaged:
+            print(f"  {d['path']}: {d['state']} ({d['error']})")
+        return 1
     print("Promotion pass complete.")
     print(f"Candidates considered: {summary['candidates_considered']}")
     print(f"Promoted to active: {summary['promoted']}")

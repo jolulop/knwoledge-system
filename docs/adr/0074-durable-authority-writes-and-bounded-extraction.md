@@ -5,7 +5,13 @@
   `tests/test_authority_write_guard.py`. **Slice 2 (decision 2) implemented 2026-11-12** — typed
   manifest read states in `app/backend/manifests.py`. **Slice 3a (decision 4: Item / Claim /
   Synthesis pages) implemented 2026-11-12** — shared reader `app/backend/authority_read.py`.
-  Slices 3b–3c, 4–6 and changes 7a–7c per decision 9 not yet.
+  **Slice 3b (review records) implemented 2026-11-12** (review round 2, 2026-11-14: durable removal,
+  decision transitions, per-decision audit entries, typed review read model, symlinks refused).
+  Slice 3c, 4–6 and changes 7a–7c per decision 9 not yet.
+- **Operational acceptance** (user decision 2026-11-14): ADR-0074 is **not operationally accepted
+  until change 7a lands**. Slices continue in decision 9's order, but until 7a no document, release
+  note or review answer may claim that visibility fails closed: a stale keyword / vector index can
+  still admit a hidden or archived document's evidence after a failed publication.
 - **Date:** 2026-11-11
 - **Drivers:** external review of `06f3d56` (2026-11-11), blocking findings 1 and 3. Finding 2
   (item descriptions corrupted across re-renders) was fixed separately in `dfda610`.
@@ -412,6 +418,85 @@ records.
   legitimate creation, legacy pages, run-level reporting. Each refusal reverted fails its tests.
 - **Not in 3a:** review and audit records (3b); policies, journals and the `db/*.json` records
   (3c). Read-only display paths (e.g. `review_read._family_page_meta`) keep their tolerant reads.
+
+**As implemented (slice 3b — review and audit records).**
+
+- **Typed record read** (`reviews.read_review_record`, on `authority_read`): a record is usable only
+  as a JSON object whose `review_id` equals its file name, with a string `type` and an object
+  `subject`; anything else is `corrupt` (`invalid_utf8`, `invalid_json`, `not_an_object`,
+  `missing_review_id`, `id_mismatch`, `missing_type`, `missing_subject`). An **unsupported type is
+  not damage**: it stays a readable record no executor handles. `reviews.scan_review_dir` lists a
+  directory with damaged files by safely rendered relative path and category, never their contents,
+  and an unlistable directory is an error, never an empty listing.
+- **Single-record actions:** resolve, defer, reopen and decide-again refuse a damaged record (or a
+  damaged terminal record with the same id) with `ReviewRecordUnavailable` → HTTP 409
+  `review_<state>`; decision routes no longer answer 404 for damage. `withdraw_review_item` never
+  withdraws (deletes) a damaged record — it used to substitute `{"review_id": …}` and delete it;
+  `refresh_pending_proposal` never rewrites one; `create_review_item` treats any entry that is not a
+  verified absence (a damaged file, a dangling link) as present and never re-files over it.
+- **Apply refuses as a whole** (user decision 2026-11-12): a damaged approved record's subject is
+  unknown, so no other approval can be shown independent of it (decision 4.4). One shared
+  preflight, `reviews.approved_preflight`, runs under the write lock before anything is copied,
+  authorized or executed: the dry run returns a `blocked` preview (`review_records_unavailable`,
+  with `problems`) and no token; live Apply raises `ApplyRefused("review_records_unavailable")`
+  (409) before the token is consumed; `run_apply` checks again as the backstop before its first
+  write. `approved/` that can't be listed refuses the same way. The UI and `scripts/apply_reviews.py`
+  list the damaged files (exit code 10). Every other path that executes approved decisions shares
+  the preflight: `promote_candidates` refuses; synthesis generation skips its approval step only
+  (`review_records_unavailable` in its result, status `partial`) and still generates proposals.
+  Read-only diagnostics and backup stay available.
+- **Schema** (review round 1): beyond identity, a record needs a non-empty `status`, `proposal` /
+  `context` objects when present, and — for a supported type — its required subject fields as
+  non-empty strings (`reviews.SUBJECT_FIELDS`; a semantic duplicate's two `node_ids`). A bad shape
+  is `corrupt` (`invalid_proposal`, `invalid_context`, `invalid_subject`, `missing_status`), so it
+  is refused by the preflight instead of crashing an executor after the publication intent.
+- **Audit records** (review round 1): append-only evidence. A retry that would rely on an existing
+  keyed entry (`withdraw_review_item` with `audit_key`, `refresh_pending_proposal`) validates it
+  first (`reviews.read_audit_record`: a readable object for this review id and this operation);
+  a damaged or foreign entry is preserved and the operation refused (`ReviewRecordUnavailable`),
+  nothing deleted. `decide_again` refuses instead of overwriting an existing entry that isn't
+  exactly this replacement's (with atomic writes, slice 1, an invalid entry is damage, not a torn
+  write). Reopen entries are created create-only, never over an existing one. The other readers
+  (promote's executor-record verification, supersede's rollback evidence) already failed closed.
+- **Reopen checks its destination** (review round 1): a pending slot that holds a damaged record,
+  or a different item under the same id, refuses the reopen before anything moves; only an
+  interrupted reopen of the same decision (its pending copy written, the terminal file not yet
+  removed) is finished.
+- **Decision routes read typed** (review round 1): approve / reject / defer / decide-again and the UI
+  supersede actions look the review up with `reviews.lookup_review` — every slot read non-blocking
+  and typed, any damaged slot (a dangling link, a FIFO, a directory) 409 with its category, never a
+  404.
+- **Review round 2** (2026-11-14, external review of `90c48e0` + the uncommitted slice):
+  - **Durable removal.** `durable_write.remove` / `remove_dir` unlink (or rmdir), then fsync the
+    directory; a failed sync after the removal is `UncertainCompletion`. Every authority removal
+    uses them (review transitions, identity journals, Item pages, tag-link resolving and deletion
+    intents); the write guard covers removals too (`os.remove` / `os.rmdir` / `shutil.rmtree` at
+    run time, `unlink` / `rmdir` / `rmtree` statically).
+  - **Decision transitions.** Approve / reject and reopen move a record in one order: (1) the
+    audit entry, create-only; (2) the destination record; (3) the source removed durably. So no
+    change is without its audit. An interruption after (2) leaves the id in `pending/` and a
+    terminal directory: a reopen's pending copy names the decision it reopened (`reopened_from`:
+    status + generation), which tells an interrupted reopen (the decision is removed — a revoked
+    approval never executes) from an interrupted decision (the pending copy is removed).
+    `reviews.finish_interrupted` settles it on the next human action on that review (decide,
+    defer, reopen, decide again, withdraw); until then **Apply's preflight refuses** (`interrupted`
+    in its problems, with the advice to repeat the action — not to restore from backup). An
+    interruption between (1) and (2) leaves an audit entry for an attempt that changed no record;
+    it stays as evidence (its generation matches no record).
+  - **Per-decision audit entries.** Every terminal decision carries a `decision_id` (an approval's
+    is also its `approval_id`); its audit entry is `<rid>-<decision>-<decision_id>.json`, created
+    create-only, so approve → reopen → approve keeps every entry. A decision's *generation* is its
+    `decision_id`, else its `approval_id`, else a digest of the record (older decisions). Reopen
+    entries stay sequence-numbered (ADR-0045), carry `prior_generation`, and a retry reuses the
+    entry for its generation. Existing `<rid>-approved.json` / `-rejected.json` entries are kept.
+  - **One review read model.** `review_read` reads every record through `reviews.read_review_record`
+    (non-blocking, one schema): the queue counts damage as `parse_errors` / `schema_errors`;
+    `GET /reviews/{id}`, `/ui/reviews/{id}` and reopen answer a damaged record with a categorical
+    409 (never 404); bulk reject / defer skip it with its category.
+  - **Symbolic links refused.** `authority_read.read_file` opens with `O_NOFOLLOW`: an authority
+    file that is a link is `unreadable` (`symlink` / `dangling_symlink`) in every family, whatever
+    its target. Linked directories on the way are still followed.
+- **Tests:** `tests/test_review_record_states.py`.
 
 ## Part B — bounded extraction (finding 3)
 

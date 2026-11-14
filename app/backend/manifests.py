@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 from collections import Counter
 from dataclasses import dataclass, field
@@ -119,11 +118,7 @@ class IncompleteManifestInventory(Exception):
 def safe_display(name: str, *, limit: int = 120) -> str:
     """`raw/manifests/<name>` with every non-printable or non-ASCII character escaped and the name
     truncated — a file name is untrusted input, so reports render it, never echo it raw."""
-    shown = _UNSAFE.sub(lambda m: f"\\x{ord(m.group()):02x}" if ord(m.group()) < 256
-                        else f"\\u{ord(m.group()):04x}", name)
-    if len(shown) > limit:
-        shown = shown[:limit] + "…"
-    return f"raw/manifests/{shown}"
+    return f"raw/manifests/{authority_read.safe_name(name, limit=limit)}"
 
 
 _lexists = authority_read.lexists
@@ -249,17 +244,7 @@ def manifest_files(manifests_dir: Path) -> tuple[list[Path], str | None]:
     """`(the *.json entries of raw/manifests, sorted; enumeration error or None)`. A missing directory
     is a verified empty inventory; a directory that cannot be listed (permission, not a directory,
     a dangling link) is an error — never an empty inventory."""
-    manifests_dir = Path(manifests_dir)
-    try:
-        names = os.listdir(manifests_dir)
-    except FileNotFoundError:
-        here = _lexists(manifests_dir)
-        if here is False:
-            return [], None
-        return [], "dangling_symlink" if here else "unknown"
-    except OSError as exc:
-        return [], type(exc).__name__
-    return [manifests_dir / n for n in sorted(names) if n.endswith(".json")], None
+    return authority_read.list_entries(manifests_dir, ".json")
 
 
 def scan_manifests(manifests_dir: Path) -> ManifestInventory:

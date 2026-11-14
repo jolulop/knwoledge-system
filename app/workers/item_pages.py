@@ -122,4 +122,4 @@ def remove_page(wiki_dir: Path, node_id: str, slug: str) -> None:
     """Delete the item's own page (absent is fine), or raise without deleting."""
     if (problem := delete_problem(wiki_dir, node_id, slug)) is not None:
         raise PageOwnershipError(problem)
-    page_path(wiki_dir, slug).unlink(missing_ok=True)
+    durable_write.remove(page_path(wiki_dir, slug), missing_ok=True)

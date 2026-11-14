@@ -734,9 +734,9 @@ def _write_resolving(reviews_dir: Path, record: dict[str, Any]) -> None:
 
 def _end_resolving(reviews_dir: Path, source_id: str, node_id: str) -> None:
     path = _resolving_path(reviews_dir, source_id, node_id)
-    path.unlink(missing_ok=True)
+    durable_write.remove(path, missing_ok=True)
     with contextlib.suppress(OSError):
-        path.parent.rmdir()                               # only when it was the document's last
+        durable_write.remove_dir(path.parent)             # only when it was the document's last
 
 
 def _audited(reviews_dir: Path, subject_id: str, event: str, op_id: str) -> bool:
@@ -918,7 +918,7 @@ def deletion_intents(reviews_dir: Path) -> dict[str, dict[str, Any]]:
 
 
 def _end_deletion(reviews_dir: Path, node_id: str) -> None:
-    _deletion_path(reviews_dir, node_id).unlink(missing_ok=True)
+    durable_write.remove(_deletion_path(reviews_dir, node_id), missing_ok=True)
 
 
 def deletion_blocker(gconn, wiki_dir: Path, reviews_dir: Path, node_id: str) -> str | None:

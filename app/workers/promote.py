@@ -233,6 +233,9 @@ def promote_candidates(
     from app.workers import tag_links                    # lazy: tag_links imports this module
     lock_dir = Path(reviews_dir) if reviews_dir else Path(root).resolve() / "reviews"
     with tag_links.ledger_lock(lock_dir):
+        # ADR-0074 decision 4 (slice 3b): it executes approved decisions, so it shares Apply's
+        # preflight — a damaged approved record refuses the run (ReviewRecordsUnavailable).
+        reviews.approved_preflight(lock_dir)
         return _promote_candidates(root, manifests_dir=manifests_dir, graph_db=graph_db,
                                    wiki_dir=wiki_dir, reviews_dir=reviews_dir, jobs_db=jobs_db,
                                    rebuild_index=rebuild_index, record_job=record_job)

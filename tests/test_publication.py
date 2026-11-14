@@ -318,8 +318,15 @@ def test_an_apply_refused_before_its_first_write_leaves_no_intent(client, tmp_pa
     approved = tmp_path / "reviews" / "approved"
     approved.mkdir(parents=True)
     (approved / "rev_0000000000000001.json").write_text(
-        json.dumps({"review_id": "rev_0000000000000001", "type": "merge_items"}), encoding="utf-8")
+        json.dumps({"review_id": "rev_0000000000000001", "type": "merge_items",
+                    "status": "approved", "subject": {"survivor_node_id": "itm_00000000000000aa",
+                                                      "absorbed_node_id": "itm_00000000000000bb"}}),
+        encoding="utf-8")
     assert fixtures.apply(client).status_code == 503          # graph-required, no graph
+    assert _queue(tmp_path) == []
+    # ADR-0074 slice 3b: the damaged-approval preflight refuses before the first write too.
+    (approved / "rev_0000000000000002.json").write_text("{", encoding="utf-8")
+    assert fixtures.apply(client).status_code == 409
     assert _queue(tmp_path) == []
 
 

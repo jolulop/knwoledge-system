@@ -1,6 +1,6 @@
 # REANCHOR — session status
 
-_Last updated: 2026-11-08. **Reanchor command:** "read REANCHOR.md and reanchor". Read this
+_Last updated: 2026-11-13. **Reanchor command:** "read REANCHOR.md and reanchor". Read this
 first after an app restart, then `wiki/index.md` if working in the vault._
 
 > [!warning] This is a periodically-refreshed snapshot and can lag the live state. The authoritative
@@ -12,12 +12,53 @@ first after an app restart, then `wiki/index.md` if working in the vault._
 
 Local-first **LLM Wiki** knowledge-system. Immutable `raw/` → derived `normalized/` →
 generated `wiki/` (gitignored, regenerable) → `db/` SQLite (graph, jobs, llm_cache) →
-`reviews/`, `policies/`. ADR-driven (`docs/adr/0001–0073`). See `CLAUDE.md` for the
+`reviews/`, `policies/`. ADR-driven (`docs/adr/0001–0074`). See `CLAUDE.md` for the
 critical rules and `CONTEXT.md` for the glossary.
 
 ## Where we are
 
-- **2026-11-08 — ADR-0073 complete (slices 1–3); tip `06f3d56`, pushed, in sync with
+- **2026-11-13 — ADR-0074 in progress (durable authority writes and bounded extraction); tip
+  `90c48e0`, NOT pushed (`main` 6 ahead of `origin/main`).** The tree holds **slice 3b
+  uncommitted** (17 files + `tests/test_review_record_states.py`) plus the user's `.vscode/`.
+  Since `06f3d56`:
+  - `dfda610` — item descriptions survive frontmatter round trips (external review finding 2).
+    `4d9d1e6` — the previous refresh of this file.
+  - `84823d9` — **ADR-0074** design lock (grill Q1–Q9): decisions 1–4 authority writes and read
+    states, 5–8 the extraction child process / attempt records / locks / install journal, 9 the
+    slice order (1 helper → 2 manifests → 3 other families → 4 `repair_manifest.py` → 5 install
+    journal → 6 extraction child; then 7a visibility fail-closed, 7b docs, 7c preview benchmark).
+  - `96c2ccd` — **slice 1**: `app/backend/durable_write.py` (temp file + fsync + replace or
+    create-only link + directory fsync; `make_dirs` / `_establish` make new and existing
+    directory chains durable; permissions preserved; `UncertainCompletion`). Every authority
+    writer uses it; `tests/write_guard.py` (runtime audit hook, whole suite) and
+    `tests/test_authority_write_guard.py` (static scan) fail on any other write.
+  - `a8105be` — **slice 2**: typed manifest reads (`absent` / `unreadable` / `corrupt` / `ok`;
+    `read_manifest`, `get_manifest`, `scan_manifests` → `ManifestInventory`, `manifests.lookup`,
+    `manifests.recheck`); the old lenient readers are gone. Only a verified absence creates a
+    manifest; damaged or identity-quarantined manifests make the inventory incomplete (no
+    absence-based retraction / pruning / retirement); search admits only identity-validated
+    manifests; per-document API 409 for damage, 404 only for a verified absence.
+  - `90c48e0` — **slice 3a, pages**: shared reader `app/backend/authority_read.py`; Item / Claim /
+    Synthesis pages are never re-rendered from defaults when damaged, and a missing page is
+    re-created only when nothing human-owned can have been on it (else `lost_authority`). Every
+    synthesis writer checks `synthesis.page_refusal` (backstop `SynthesisPageRefused` in
+    `_render_page`); split recovery validates the spin-off page first.
+  - **Slice 3b (review records) — UNCOMMITTED, reviewed twice, gate green (2947 passed, 2
+    skipped, ruff, 16 validators).** Awaiting the user's approval to commit. User decision: a
+    damaged approved record (or an unlistable `approved/`) **refuses the whole Apply, dry run
+    included** — one preflight (`reviews.approved_preflight`) under the write lock, a `blocked`
+    preview with no token, live Apply 409 `review_records_unavailable` with the token kept,
+    `run_apply` backstop; promote refuses; synthesis generation skips only its approval step.
+    Typed record read with schema (`reviews.read_review_record`, `SUBJECT_FIELDS`); audit
+    entries validated before a retry relies on them; reopen checks its destination; decision
+    routes use `reviews.lookup_review` (409 by category, never 404).
+  - **Open validation concern (keep tracked):** one full-gate run on 2026-11-11 had 67
+    order-dependent failures (incl. `tests/test_unhide.py`) that never reproduced; gates now save
+    `-rfE --tb=short` output so a recurrence shows its cause.
+  - **UAT clone `/tmp/ks-uat`** (at `06f3d56`, API on 18000) was up before the 2026-11-13 reboot;
+    its ADR-0073 look-through is paused. After the reboot check whether it survived (`/tmp`) before
+    relying on it.
+- **2026-11-08 (historical; superseded by the entry above) — ADR-0073 complete (slices 1–3); tip `06f3d56`, pushed, in sync with
   `origin/main`**, tree clean except the user's `.vscode/`. ADR-0073 settles ADR-0072's executor
   follow-ups: items 4, 5 and 8 fixed; 2, 3, 6 and 7 dormant with written reopening triggers.
   Since `42534df`:
@@ -648,6 +689,7 @@ critical rules and `CONTEXT.md` for the glossary.
 | **ADR-0071 item page filenames (B1b)** | **Complete + pushed** (`d59ef84` design · `661b877` B1b + review rounds 1–2) |
 | **ADR-0072 B2 (Apply outcomes, tagging history, bulk decisions)** | **Complete + pushed** (`878d375` design · `33a39e1` B2a + rounds 1–4 · `f32ce67` B2c + round 1 · `94a05c8` B2b + round 1); look-through of B1b–B5 passed 2026-11-06 |
 | **ADR-0073 executor follow-ups** (synthesis version binding · guarded supersede · supersede repair) | **Complete + pushed** (`c5db004` design · `dea4c38` slice 1 · `6ef0d06` + `dbc6a71` slice 2 + rounds 1–2 · `5b46280` + `06f3d56` slice 3); validators 15→16; a hand look-through needs a fresh UAT clone |
+| **ADR-0074 durable authority writes + bounded extraction** | **In progress** (`84823d9` design · `96c2ccd` slice 1 · `a8105be` slice 2 · `90c48e0` slice 3a; **slice 3b uncommitted, gate green**; next 3c, then 4–6, 7a–7c) — none pushed |
 
 ## Next step
 
@@ -664,6 +706,11 @@ critical rules and `CONTEXT.md` for the glossary.
   — set `ENRICH_LOCAL_BASE_URL` + add `local:<model>` to a tier chain (start with
   `ENRICH_MODEL_LIGHT`). No-cost resolve-check snippet in that doc.
 - **NEXT (each step on the user's go; each new design starts with a `grill-phase`):**
+  0. **ADR-0074 (current):** user reviews slice 3b → commit it (one commit, `.vscode/` excluded,
+     unpushed) → slice **3c** (policies, journals, `db/*.json` authority records; read discipline
+     per decision 4, behavioural tests per family) → 4 `scripts/repair_manifest.py` → 5 extraction
+     install journal → 6 extraction child process → 7a / 7b / 7c (each with its own short grill).
+     Each slice starts on the user's "implement now"; push only on request.
   1. **After ADR-0073** (complete; Slice B look-through passed 2026-11-06):
      a. a fresh UAT clone to look through ADR-0073 by hand: approve / reject a synthesis (the
         version is recorded; a regenerated text is refused); a pre-existing approved synthesis

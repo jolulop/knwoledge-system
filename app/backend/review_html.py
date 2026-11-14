@@ -911,7 +911,31 @@ def render_apply_dry_run(scope: dict[str, Any], dry: dict[str, Any]) -> str:
         "<h1>Apply approved reviews — preview</h1>",
         "<p>Nothing has been changed yet: this is what Apply would do.</p>",
     ]
-    if dry.get("reason"):
+    if dry.get("reason") == "review_records_unavailable":
+        # ADR-0074 decision 4 (slice 3b): safely rendered relative paths + categories only.
+        problems = dry.get("problems") or {}
+        rows = "".join(f"<li><code>{_h(d.get('path'))}</code> — {_h(d.get('state'))} "
+                       f"({_h(d.get('error'))})</li>" for d in problems.get("damaged") or [])
+        listing = (f"<p><code>{_h(problems.get('directory'))}</code> can't be listed "
+                   f"({_h(problems.get('enumeration_error'))}).</p>"
+                   if problems.get("enumeration_error") else "")
+        if rows or listing:
+            body.append("<p class='banner'>Apply is refused: an approved review record can't be "
+                        "read, so no other decision can be shown independent of it. Restore the "
+                        "records below from backup (<code>scripts/backup.py</code>), then preview "
+                        "again.</p>" + listing + (f"<ul>{rows}</ul>" if rows else ""))
+        # Slice 3b review round 2: a decision or reopen interrupted half-way (the review is in two
+        # folders). Repeating the action on the review finishes it; Apply waits until then.
+        cut = "".join(f"<li><a href='/ui/reviews/{_h(str(d.get('path') or '').rsplit('/', 1)[-1].removesuffix('.json'))}'>"
+                      f"<code>{_h(d.get('path'))}</code></a> is also in "
+                      f"<code>{_h(d.get('also'))}</code></li>"
+                      for d in problems.get("interrupted") or [])
+        if cut:
+            body.append("<p class='banner'>Apply is refused: a decision or a reopen was "
+                        "interrupted before it finished, so it isn't settled whether it stands. "
+                        "Open each review below and repeat the action (decide, defer or reopen); "
+                        "that finishes it. Then preview again.</p>" + f"<ul>{cut}</ul>")
+    elif dry.get("reason"):
         body.append(f"<p class='banner'>The preview couldn't run: {_h(dry.get('reason'))} "
                     f"{_h(dry.get('error') or '')}</p>")
     if ran:

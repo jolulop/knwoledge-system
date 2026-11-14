@@ -24,7 +24,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from app.backend import durable_write, graph, taxonomy
+from app.backend import authority_read, durable_write, graph, taxonomy
 from app.backend.manifests import iso_now
 from app.workers import apply_outcomes as oc
 from app.workers import item_pages, items, reviews
@@ -56,7 +56,7 @@ def _approved_retypes(reviews_dir: Path) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for path in sorted(d.glob("*.json")) if d.exists() else []:
         try:
-            item = json.loads(path.read_text(encoding="utf-8"))
+            item = authority_read.load_json(path)
         except (OSError, ValueError):            # unreadable, invalid UTF-8 or JSON
             continue
         if (isinstance(item, dict) and item.get("type") == "change_item_type"
@@ -90,7 +90,7 @@ def _settled(reviews_dir: Path, item: dict[str, Any]) -> dict[str, str | None]:
     found: dict[str, list[str]] = {EXECUTED: [], VERIFIED: []}
     for path, kind in _settlement_files(reviews_dir, rid) if rid else []:
         try:
-            rec = json.loads(path.read_text(encoding="utf-8"))
+            rec = authority_read.load_json(path)
         except (OSError, ValueError):
             continue
         if _owns(item, rid, rec):
@@ -156,7 +156,7 @@ def _review_node(reviews_dir: Path, rid: str) -> str | None:
     for state in ("approved", "pending", "rejected"):
         path = Path(reviews_dir) / state / f"{rid}.json"
         try:
-            item = json.loads(path.read_text(encoding="utf-8"))
+            item = authority_read.load_json(path)
         except (OSError, ValueError):
             continue
         if isinstance(item, dict):
@@ -181,7 +181,7 @@ def execution_history(reviews_dir: Path) -> dict[str, Any]:
     for path, kind in _settlement_files(reviews_dir):
         rid = path.name.rsplit(f"-{kind}-", 1)[0]
         try:
-            rec = json.loads(path.read_text(encoding="utf-8"))
+            rec = authority_read.load_json(path)
         except (OSError, ValueError):
             rec = None
         nid = rec.get("node_id") if isinstance(rec, dict) else None
@@ -209,7 +209,7 @@ def retype_index(reviews_dir: Path) -> dict[str, list[dict[str, Any]]]:
         d = Path(reviews_dir) / state
         for path in sorted(d.glob("*.json")) if d.exists() else []:
             try:
-                item = json.loads(path.read_text(encoding="utf-8"))
+                item = authority_read.load_json(path)
             except (OSError, ValueError):        # unreadable, invalid UTF-8 or JSON
                 continue
             if (isinstance(item, dict) and item.get("type") == "change_item_type"
@@ -262,7 +262,7 @@ def _withdraw_competing_retypes(reviews_dir: Path, node_id: str, keep_rid: str, 
     pend = Path(reviews_dir) / "pending"
     for path in sorted(pend.glob("*.json")) if pend.exists() else []:
         try:
-            item = json.loads(path.read_text(encoding="utf-8"))
+            item = authority_read.load_json(path)
         except (OSError, ValueError):            # unreadable, invalid UTF-8 or JSON
             continue
         if not isinstance(item, dict) or item.get("type") != "change_item_type":

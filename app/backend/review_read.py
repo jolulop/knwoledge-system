@@ -33,7 +33,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from app.backend import graph, manifests, taxonomy
+from app.backend import authority_read, graph, manifests, taxonomy
+from app.workers import reviews as review_records
 from app.workers.reviews import PRIORITIES, REVIEW_STATUSES
 from app.workers.wiki_render import NODE_DIR, frontmatter_string, parse_frontmatter
 
@@ -151,52 +152,50 @@ def _synthesis_id(topic_node_id: str) -> str:
 # --- low-level item loading (malformed-robust) -----------------------------
 
 
-_REQUIRED_STR_FIELDS = ("review_id", "type", "status")
-_DICT_FIELDS = ("subject", "proposal", "context")
+
+
+# ADR-0074 slice 3b, review round 2: every read here goes through the review family's typed,
+# non-blocking reader (`reviews.read_review_record`) — one contract for what a usable record is, and
+# a FIFO, a device or a link is never opened as a stream (a read under the write lock can't hang).
+# A damaged record is reported by category: `parse` (unreadable bytes, bad UTF-8 / JSON, not an
+# object) vs `schema` (a JSON object that is not a usable ReviewItem).
+_PARSE_ERRORS = frozenset({"invalid_utf8", "invalid_json", "not_an_object"})
+
+
+def _damage_kind(read: review_records.ReviewRead) -> str:
+    if read.state == authority_read.UNREADABLE or read.error in _PARSE_ERRORS:
+        return "parse"
+    return "schema"
 
 
 def _load_item(path: Path) -> dict[str, Any] | None:
-    """Parse one review JSON, returning ``None`` on any read/parse error (a *parse* error)."""
+    """Parse one JSON object (an audit entry), non-blocking; ``None`` on any read/parse error."""
+    read = authority_read.read_file(path)
+    if read.state != authority_read.OK:
+        return None
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, ValueError):
+        data = json.loads(read.data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError):
         return None
     return data if isinstance(data, dict) else None
-
-
-def _is_valid_item(item: dict[str, Any]) -> bool:
-    """A parseable JSON object that is actually a usable ReviewItem shape (a *schema* check).
-
-    Required: non-empty string ``review_id``/``type``/``status``. ``subject``/``proposal``/``context``
-    must be objects when present. A valid-JSON-but-wrong-shape record would otherwise blow up the
-    response model (a 500); here it is skipped + counted as a ``schema_error`` instead.
-    """
-    if not all(isinstance(item.get(f), str) and item.get(f) for f in _REQUIRED_STR_FIELDS):
-        return False
-    return all(isinstance(item[f], dict) for f in _DICT_FIELDS if f in item)
 
 
 def _scan_dir(reviews_dir: Path, dir_name: str) -> tuple[list[dict[str, Any]], int, int]:
     """Load every ``*.json`` under ``reviews/<dir_name>/``; return (items, parse_errors, schema_errors).
 
-    ``parse_errors`` = unreadable / invalid / non-object JSON; ``schema_errors`` = a JSON object that
-    is not a usable ReviewItem. Both are skipped from ``items``, never crashing the queue.
+    Through the typed reader (``reviews.scan_review_dir``): ``parse_errors`` = unreadable / invalid /
+    non-object JSON (a directory that can't be listed counts as one); ``schema_errors`` = a JSON
+    object that is not a usable ReviewItem. Both are skipped from ``items``, never crashing the queue.
     """
-    d = Path(reviews_dir) / dir_name
-    if not d.exists():
-        return [], 0, 0
-    items: list[dict[str, Any]] = []
-    parse_errors = schema_errors = 0
-    for path in sorted(d.glob("*.json")):
-        item = _load_item(path)
-        if item is None:
+    scan = review_records.scan_review_dir(reviews_dir, dir_name)
+    parse_errors = 1 if scan.enumeration_error else 0
+    schema_errors = 0
+    for d in scan.damaged:
+        if d["state"] == authority_read.UNREADABLE or d["error"] in _PARSE_ERRORS:
             parse_errors += 1
-            continue
-        if not _is_valid_item(item):
+        else:
             schema_errors += 1
-            continue
-        items.append(item)
-    return items, parse_errors, schema_errors
+    return scan.records, parse_errors, schema_errors
 
 
 def _sort_key(item: dict[str, Any]) -> tuple[int, int, str, str]:
@@ -266,8 +265,8 @@ def _executor_times(reviews_dir: Path, rid: str, decision: str) -> list[str]:
     times = []
     for path in sorted((Path(reviews_dir) / "audit_log").glob(f"{rid}-{decision}-*.json")):
         try:
-            rec = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            rec = authority_read.load_json(path)         # non-blocking (slice 3b round 2)
+        except (OSError, ValueError):
             continue
         at = rec.get("decided_at") if isinstance(rec, dict) else None
         if isinstance(at, str):
@@ -1388,27 +1387,31 @@ def project_review(item: dict[str, Any], *, gconn: Any, wiki_dir: Path | None,
     return projector(item, gconn=gconn, wiki_dir=wiki_dir)
 
 
+def find_review_read(reviews_dir: Path, review_id: str
+                     ) -> tuple[dict[str, Any] | None, review_records.ReviewRead | None]:
+    """Locate one item across pending/approved/rejected through the typed reader. Returns
+    ``(item, None)`` when found and usable, ``(None, None)`` when no slot holds an entry, and
+    ``(None, read)`` with the damaged slot's typed read otherwise (state + categorical error)."""
+    reviews_dir = Path(reviews_dir)
+    damaged: review_records.ReviewRead | None = None
+    for dir_name in ("pending", "approved", "rejected"):
+        read = review_records.read_review_record(reviews_dir / dir_name / f"{review_id}.json")
+        if read.state == authority_read.OK:
+            return read.record, None
+        if read.state != authority_read.ABSENT and damaged is None:
+            damaged = read
+    return None, damaged
+
+
 def find_review(reviews_dir: Path, review_id: str) -> tuple[dict[str, Any] | None, str | None]:
     """Locate one item across pending/approved/rejected. Returns (item, error_kind).
 
     ``(item, None)`` -> found and usable; ``(None, None)`` -> not found; ``(None, "parse")`` -> the
-    file exists but is corrupt JSON; ``(None, "schema")`` -> valid JSON but not a usable ReviewItem.
+    entry can't be read or is corrupt JSON; ``(None, "schema")`` -> valid JSON but not a usable
+    ReviewItem (see :func:`find_review_read` for the typed state).
     """
-    reviews_dir = Path(reviews_dir)
-    error: str | None = None
-    for dir_name in ("pending", "approved", "rejected"):
-        path = reviews_dir / dir_name / f"{review_id}.json"
-        if not path.exists():
-            continue
-        item = _load_item(path)
-        if item is None:
-            error = "parse"
-            continue
-        if not _is_valid_item(item):
-            error = "schema"
-            continue
-        return item, None
-    return None, error
+    item, damaged = find_review_read(reviews_dir, review_id)
+    return item, (_damage_kind(damaged) if damaged is not None else None)
 
 
 def get_review(
@@ -1427,16 +1430,17 @@ def get_review(
     ``version_digest`` (which every decision path must send back), or the artifact problem.
 
     Read-only: opens the graph only if it already exists with a matching schema, and reads wiki
-    pages without mutating them. A corrupt or schema-invalid review file is reported via a
-    ``parse_error`` / ``schema_error`` marker (the endpoint maps both to 404) rather than crashing.
+    pages without mutating them. A damaged review file is reported via a ``parse_error`` /
+    ``schema_error`` marker plus its typed ``damage`` (the endpoints map it to a categorical 409,
+    ADR-0074 slice 3b) rather than crashing.
     """
-    item, error = find_review(reviews_dir, review_id)
+    item, damaged = find_review_read(reviews_dir, review_id)
     if item is None:
-        if error == "parse":
-            return {"item": None, "preview": None, "parse_error": True, "review_id": review_id}
-        if error == "schema":
-            return {"item": None, "preview": None, "schema_error": True, "review_id": review_id}
-        return None
+        if damaged is None:
+            return None
+        marker = "parse_error" if _damage_kind(damaged) == "parse" else "schema_error"
+        return {"item": None, "preview": None, marker: True, "review_id": review_id,
+                "damage": {"state": damaged.state, "error": damaged.error}}
     conn = _open_graph_readonly(graph_db)
     try:
         preview = project_review(item, gconn=conn, wiki_dir=wiki_dir, manifests_dir=manifests_dir)

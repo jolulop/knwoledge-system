@@ -26,6 +26,9 @@ the installation: the new content is in place but may not survive a power loss. 
 doing so — and the caller must handle it safely (its journal, retry or re-sync barrier), never as
 success and never as "nothing happened".
 
+Removals of authority go through :func:`remove` / :func:`remove_dir` (unlink or rmdir, then the
+directory sync), so a removal reported as done is as durable as a write.
+
 What this module does **not** do: it does not lock (the write lock, ADR-0068), it does not make
 several files change together (the multi-file journals do), and it does not decide whether a write
 is allowed (creation and ownership checks stay with the caller). It keeps a replaced file's
@@ -290,3 +293,47 @@ def write_stream(path: Path, src: IO[bytes], *, create_only: bool = False,
         while chunk := src.read(_COPY_CHUNK):
             fh.write(chunk)
     _write(path, copy, create_only=create_only, mkdir=mkdir)
+
+
+def remove(path: Path, *, missing_ok: bool = False) -> bool:
+    """Durably remove the authority file `path` (ADR-0074 slice 3b, review round 2): unlink it, then
+    fsync its directory, so a removal a caller reports as done survives a power loss. Returns True
+    when this call removed an entry, False when it was already absent (with `missing_ok`; else
+    ``FileNotFoundError``). An absent entry's directory is synced all the same: an earlier run may
+    have removed it and failed before its sync, so the absence proves nothing durable. A failed sync
+    after the unlink is :class:`UncertainCompletion` (the entry is gone but may come back)."""
+    path = Path(path)
+    with _operation():
+        try:
+            os.unlink(path)
+            removed = True
+        except FileNotFoundError:
+            if not missing_ok:
+                raise
+            removed = False
+        try:
+            sync_dir(path.parent)
+        except FileNotFoundError:
+            if removed or os.path.lexists(path.parent):
+                raise
+            return False                              # no directory at all: nothing was there
+        except OSError as exc:
+            if removed:
+                raise UncertainCompletion(path, exc, "removed") from exc
+            raise
+        return removed
+
+
+def remove_dir(directory: Path) -> None:
+    """Durably remove the empty authority directory `directory`: rmdir, then fsync its parent. A
+    failed sync after the rmdir is :class:`UncertainCompletion`."""
+    directory = Path(directory)
+    with _operation():
+        st = os.stat(directory)
+        os.rmdir(directory)
+        with _established_lock:
+            _established.discard((st.st_dev, st.st_ino))
+        try:
+            sync_dir(directory.parent)
+        except OSError as exc:
+            raise UncertainCompletion(directory, exc, "removed") from exc
