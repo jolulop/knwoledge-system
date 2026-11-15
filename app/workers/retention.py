@@ -25,7 +25,7 @@ from typing import Any
 
 from app.backend import db, durable_write, graph, keyword_index, manifests, write_lock
 from app.backend.manifests import OK, get_manifest, iso_now, read_manifest, scan_manifests
-from app.backend.policy import load_yaml
+from app.backend.policy import check_retention, read_policy
 from app.llm import cache as llm_cache
 from app.workers import apply_outcomes, reviews, wiki
 from app.workers.wiki_render import parse_frontmatter
@@ -96,7 +96,10 @@ def run_stale_check(
     now_dt = datetime.fromisoformat(now)
     job_id = f"job_{uuid.uuid4().hex[:16]}"
 
-    policy = load_yaml(policy_path.read_text(encoding="utf-8")) if policy_path.exists() else {}
+    # ADR-0074 slice 3c: absent → defaults; a damaged policy (or a present value of the wrong type
+    # or range, review round 1) raises PolicyUnavailable before any job is recorded or anything is
+    # filed.
+    policy = read_policy(policy_path, check_retention) or {}
     raw_pol = policy.get("raw_files") or {}
     eph_pol = policy.get("ephemeral") or {}
     cache_pol = policy.get("response_cache") or {}

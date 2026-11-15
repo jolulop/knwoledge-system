@@ -40,6 +40,7 @@ from typing import Any
 
 from app.backend import authority_read, db, durable_write, graph, taxonomy
 from app.backend import producer_journal as journal
+from app.backend.policy import PolicyUnavailable
 from app.backend.manifests import (
     ABSENT, OK, get_status, iso_now, read_reason, recheck, scan_manifests)
 from app.llm import prompts
@@ -1098,7 +1099,11 @@ def extract_items(
                 except tag_links.LedgerCorrupt as exc:
                     errors.append({"source_id": sid, "error": f"ledger_corrupt: {exc.problem}"})
                     continue
-                blocked_keys = set(tag_links.load_blocked(policies_dir))
+                try:
+                    blocked_keys = set(tag_links.load_blocked(policies_dir))
+                except PolicyUnavailable as exc:      # ADR-0074 slice 3c: never an empty list
+                    errors.append({"source_id": sid, "error": f"policy_{exc.state}: {exc.name}"})
+                    continue
                 vocab = _resolution_index(gconn, wiki_dir)
                 plan = plan_suggestions(
                     result["items"], md=md, gconn=gconn, vocab=vocab, rejected_pairs=rejected_pairs,

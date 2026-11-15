@@ -47,7 +47,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from app.backend import durable_write, graph, taxonomy, write_lock
+from app.backend import authority_read, durable_write, graph, taxonomy, write_lock
 from app.backend.manifests import is_source_id, iso_now
 from app.workers import identity_journal, item_pages, items, merge_candidates, merges, promote
 from app.workers import tag_history
@@ -172,13 +172,17 @@ def _ledger_problem(data: Any, source_id: str) -> str | None:
 
 def load_ledger(reviews_dir: Path, source_id: str) -> dict[str, Any]:
     """`{source_id, kept: {node_id: {at, by[, amendments]}}, drops: [{key, keys, name, item_id, at}]}`
-    (empty if absent). Raises :class:`LedgerCorrupt` when the file exists but is not a valid ledger."""
-    path = ledger_path(reviews_dir, source_id)
-    if not path.exists():
+    (empty if absent). Raises :class:`LedgerCorrupt` when the file exists but is not a valid ledger.
+    ADR-0074 slice 3c: only a verified absence is empty — a dangling link, a FIFO or a file that
+    can't be opened is ``unreadable (<category>)`` (non-blocking, links never followed)."""
+    read = authority_read.read_file(ledger_path(reviews_dir, source_id))
+    if read.state == authority_read.ABSENT:
         return {"source_id": source_id, "kept": {}, "drops": []}
+    if read.state != authority_read.OK:
+        raise LedgerCorrupt(source_id, f"unreadable ({read.error})")
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        data = json.loads(read.data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise LedgerCorrupt(source_id, f"unreadable ({type(exc).__name__})") from exc
     problem = _ledger_problem(data, source_id)
     if problem:
@@ -239,7 +243,7 @@ def migrate_tagging(reviews_dir: Path, *, apply: bool, now: str | None = None) -
     Returns `{backfilled: [{source_id, tagging}], tracking_written, skipped_damaged}`."""
     now = now or iso_now()
     reviews_dir = Path(reviews_dir)
-    tracking_absent = not tag_history.tracking_path(reviews_dir).exists()
+    tracking_absent = not tag_history._tracking_present(reviews_dir)
     if apply:
         tag_history.ensure_migration_record(reviews_dir, now)
     tracking = tag_history.load_tracking(reviews_dir)
@@ -280,9 +284,23 @@ def drop_filter(reviews_dir: Path, source_id: str) -> tuple[set[str], set[str]]:
     return keys, ids
 
 
+# The "source id" a ledger directory that can't be listed is reported under (ADR-0074 slice 3c):
+# every document's decisions are then unknown, so nothing that needs the whole inventory runs.
+UNLISTED_LEDGERS = f"reviews/{LEDGER_DIR}"
+
+
+def _ledger_listing(reviews_dir: Path) -> tuple[list[str], str | None]:
+    paths, error = authority_read.list_entries(Path(reviews_dir) / LEDGER_DIR, ".json")
+    return [p.stem for p in paths if is_source_id(p.stem)], error
+
+
 def _ledger_ids(reviews_dir: Path) -> list[str]:
-    d = Path(reviews_dir) / LEDGER_DIR
-    return [p.stem for p in sorted(d.glob("*.json")) if is_source_id(p.stem)] if d.is_dir() else []
+    """Every ledger's source id. Raises :class:`LedgerCorrupt` (:data:`UNLISTED_LEDGERS`) when the
+    directory can't be listed — never an empty inventory."""
+    ids, error = _ledger_listing(reviews_dir)
+    if error is not None:
+        raise LedgerCorrupt(UNLISTED_LEDGERS, f"the ledger directory can't be listed ({error})")
+    return ids
 
 
 def all_ledgers(reviews_dir: Path) -> list[dict[str, Any]]:
@@ -292,9 +310,14 @@ def all_ledgers(reviews_dir: Path) -> list[dict[str, Any]]:
 
 
 def corrupt_ledgers(reviews_dir: Path) -> list[dict[str, str]]:
-    """`[{source_id, problem}]` for every ledger file that exists but does not parse."""
+    """`[{source_id, problem}]` for every ledger file that exists but does not parse — or the one
+    entry :data:`UNLISTED_LEDGERS` when the directory can't be listed."""
     out: list[dict[str, str]] = []
-    for sid in _ledger_ids(reviews_dir):
+    ids, error = _ledger_listing(reviews_dir)
+    if error is not None:
+        return [{"source_id": UNLISTED_LEDGERS,
+                 "problem": f"the ledger directory can't be listed ({error})"}]
+    for sid in ids:
         try:
             load_ledger(reviews_dir, sid)
         except LedgerCorrupt as exc:
@@ -315,13 +338,21 @@ def blocklist_path(policies_dir: Path) -> Path:
     return Path(policies_dir) / BLOCKLIST_NAME
 
 
+def _blocklist_text(policies_dir: Path) -> str | None:
+    """The blocked-tag list's text; None for a verified absence. Raises
+    :class:`app.backend.policy.PolicyUnavailable` for a damaged list (ADR-0074 slice 3c): a list
+    that can't be read is never an empty one — re-extraction would re-suggest every blocked name,
+    and the next block would overwrite the list with a single entry."""
+    from app.backend import policy
+    return policy.read_policy_text(blocklist_path(policies_dir))
+
+
 def load_blocked(policies_dir: Path) -> dict[str, str]:
-    """`{key: name}` for every blocked name (first spelling wins)."""
-    path = blocklist_path(policies_dir)
+    """`{key: name}` for every blocked name (first spelling wins). Raises
+    :class:`app.backend.policy.PolicyUnavailable` for a damaged list."""
     out: dict[str, str] = {}
-    if not path.exists():
-        return out
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+    text = _blocklist_text(policies_dir)
+    for line in (text or "").splitlines():
         name = line.split("#", 1)[0].strip()
         key = tag_key(name)
         if key and key not in out:
@@ -337,8 +368,8 @@ def _add_blocked(policies_dir: Path, name: str) -> bool:
     key = tag_key(name)
     if not key or key in load_blocked(policies_dir):
         return False
-    path = blocklist_path(policies_dir)
-    lines = (path.read_text(encoding="utf-8").splitlines() if path.exists()
+    text = _blocklist_text(policies_dir)
+    lines = (text.splitlines() if text is not None
              else _BLOCKLIST_HEADER.rstrip("\n").splitlines())
     _write_blocklist(policies_dir, [*lines, items._WS.sub(" ", name).strip()])
     return True
@@ -404,8 +435,12 @@ def ledger_keeps(reviews_dir: Path) -> tuple[dict[str, set[str]], set[str]]:
 
 
 def _deletion_audited(reviews_dir: Path, node_id: str) -> bool:
-    d = Path(reviews_dir) / "audit_log"
-    return d.is_dir() and any(d.glob(f"{node_id}-tag-deleted-*.json"))
+    """Whether the audit log records this tag's deletion. A log that can't be listed raises
+    ``OSError`` (ADR-0074 slice 3c): an unseen log proves neither a deletion nor its absence."""
+    paths, error = authority_read.list_entries(Path(reviews_dir) / "audit_log", ".json")
+    if error is not None:
+        raise OSError(f"reviews/audit_log can't be listed ({error})")
+    return any(p.name.startswith(f"{node_id}-tag-deleted-") for p in paths)
 
 
 def project_page(gconn, *, node_id: str, wiki_dir: Path, reviews_dir: Path,
@@ -707,19 +742,34 @@ def pending_resolutions(reviews_dir: Path, source_id: str | None = None) -> list
     """The unfinished "use X" operations (part-2 review): `[{source_id, node_id, name, chosen,
     chosen_title, op_id, at}]`, for one document or all. An unreadable record comes back with
     `chosen: None` (it can only be cancelled). Nothing resumes them — the document screen shows
-    them until the user retries or cancels."""
+    them until the user retries or cancels.
+
+    ADR-0074 slice 3c: records are read non-blocking and never through a link; a directory that
+    can't be listed — a document's folder replaced by a file included — raises
+    :class:`LedgerCorrupt` (an unseen operation is never taken for none). Entries not named by a
+    canonical document id are not ours and are ignored."""
     base = Path(reviews_dir) / LEDGER_DIR / RESOLVING_DIR
-    dirs = [base / source_id] if source_id else (sorted(base.iterdir()) if base.is_dir() else [])
+    if source_id:
+        dirs = [base / source_id]
+    else:
+        listed, error = authority_read.list_entries(base, "")
+        if error is not None:
+            raise LedgerCorrupt(f"{UNLISTED_LEDGERS}/{RESOLVING_DIR}",
+                                f"unfinished \"use X\" records can't be listed ({error})")
+        dirs = [d for d in listed if is_source_id(d.name)]
     out: list[dict[str, Any]] = []
     for d in dirs:
-        if not d.is_dir() or not is_source_id(d.name):
-            continue
-        for path in sorted(d.glob("*.json")):
+        paths, error = authority_read.list_entries(d, ".json")
+        if error is not None:      # a file in place of a document's folder too (review round 1)
+            raise LedgerCorrupt(d.name, f"unfinished \"use X\" records can't be listed ({error})")
+        for path in paths:
             if not _ITEM_ID_RE.fullmatch(path.stem):
                 continue
             try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                data = authority_read.load_json(path)
+            except FileNotFoundError:
+                continue                                  # finished between listing and read
+            except (OSError, ValueError):
                 data = None
             ok = isinstance(data, dict) and _ITEM_ID_RE.fullmatch(str(data.get("chosen") or ""))
             out.append({**(data if ok else {}), "source_id": d.name, "node_id": path.stem,
@@ -740,12 +790,19 @@ def _end_resolving(reviews_dir: Path, source_id: str, node_id: str) -> None:
 
 
 def _audited(reviews_dir: Path, subject_id: str, event: str, op_id: str) -> bool:
-    d = Path(reviews_dir) / "audit_log"
-    for path in sorted(d.glob(f"{subject_id}-{event}-*.json")) if d.is_dir() else []:
+    """Whether a readable audit entry records this step (ADR-0074 slice 3c: non-blocking reads; an
+    audit directory that can't be listed raises ``OSError`` — a step is never re-done, and never
+    taken as done, on an unseen log)."""
+    paths, error = authority_read.list_entries(Path(reviews_dir) / "audit_log", ".json")
+    if error is not None:
+        raise OSError(f"reviews/audit_log can't be listed ({error})")
+    for path in paths:
+        if not path.name.startswith(f"{subject_id}-{event}-"):
+            continue
         try:
-            if json.loads(path.read_text(encoding="utf-8")).get("op_id") == op_id:
+            if authority_read.load_json(path).get("op_id") == op_id:
                 return True
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+        except (OSError, ValueError, AttributeError):
             continue
     return False
 
@@ -903,15 +960,22 @@ def _deletion_path(reviews_dir: Path, node_id: str) -> Path:
 
 def deletion_intents(reviews_dir: Path) -> dict[str, dict[str, Any]]:
     """The deletion-intent records of deletions that started and did not finish (review round 7):
-    `{node_id: {node_id, reason, slug, at}}`. An unreadable record is returned with `reason: None`."""
-    d = Path(reviews_dir) / LEDGER_DIR / DELETION_DIR
+    `{node_id: {node_id, reason, slug, at}}`. An unreadable record is returned with `reason: None`.
+    ADR-0074 slice 3c: non-blocking reads, links never followed; a directory that can't be listed
+    raises :class:`LedgerCorrupt` (an unfinished deletion is never taken for none)."""
+    paths, error = authority_read.list_entries(Path(reviews_dir) / LEDGER_DIR / DELETION_DIR, ".json")
+    if error is not None:
+        raise LedgerCorrupt(f"{UNLISTED_LEDGERS}/{DELETION_DIR}",
+                            f"unfinished deletion records can't be listed ({error})")
     out: dict[str, dict[str, Any]] = {}
-    for path in sorted(d.glob("*.json")) if d.is_dir() else []:
+    for path in paths:
         if not _ITEM_ID_RE.fullmatch(path.stem):
             continue
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            data = authority_read.load_json(path)
+        except FileNotFoundError:
+            continue                                      # finished between listing and read
+        except (OSError, ValueError):
             data = None
         out[path.stem] = data if isinstance(data, dict) else {"node_id": path.stem, "reason": None}
     return out
@@ -1093,8 +1157,7 @@ def unblock(*, key: str, policies_dir: Path, enrichment_dir: Path, reviews_dir: 
     blocked = load_blocked(policies_dir)
     if key not in blocked:
         return _blocked("not_blocked", key=key)
-    path = blocklist_path(policies_dir)
-    kept_lines = [line for line in path.read_text(encoding="utf-8").splitlines()
+    kept_lines = [line for line in (_blocklist_text(policies_dir) or "").splitlines()
                   if tag_key(line.split("#", 1)[0].strip()) != key]
     _write_blocklist(policies_dir, kept_lines)
     resuggest = suggesting_sources(enrichment_dir, key)
@@ -1398,8 +1461,11 @@ def _plan_derived_state(gconn, plan: dict[str, Any], ledgers: dict[str, Any], da
 def consistency_errors(gconn, reviews_dir: Path, *, wiki_dir: Path | None = None,
                        policies_dir: Path | None = None) -> list[str]:
     """Reasons the tag-decision ledgers and the graph disagree (empty == consistent)."""
+    corrupt = corrupt_ledgers(reviews_dir)
     errors = [f"{c['source_id']}: tag ledger is damaged ({c['problem']}) — restore it from backup; "
-              "its links are left untouched" for c in corrupt_ledgers(reviews_dir)]
+              "its links are left untouched" for c in corrupt]
+    if any(c["source_id"] == UNLISTED_LEDGERS for c in corrupt):
+        return errors                                     # no ledger inventory: nothing to compare
     plan = _plan_repair(gconn, reviews_dir, wiki_dir, policies_dir)
     errors += [f"merge/split {rid} is in flight — run /reviews/apply to finish it before repairing"
                for rid in plan["deferred"]]
@@ -1431,6 +1497,23 @@ def consistency_errors(gconn, reviews_dir: Path, *, wiki_dir: Path | None = None
     errors += [f"{x['source_id']}: Source page tag list is stale ({hint})"
                for x in plan["stale_source_pages"]]
     return errors
+
+
+def repair_preflight(reviews_dir: Path, policies_dir: Path) -> None:
+    """The shared inputs the tag-link repair and the tagging migration depend on, checked before
+    either writes anything (ADR-0074 slice 3c, review round 1). Raises
+    :class:`app.backend.policy.PolicyUnavailable` for a damaged blocked-tag list and
+    :class:`LedgerCorrupt` when the ledger folder, the folders of unfinished "use X" choices or
+    deletions, or the audit log can't be listed. The caller holds the write lock with
+    ``changes=False`` across this check and the writes that follow, so a refusal leaves authority
+    — and the vault revision — untouched."""
+    load_blocked(policies_dir)
+    _ledger_ids(reviews_dir)
+    pending_resolutions(reviews_dir)
+    deletion_intents(reviews_dir)
+    _paths, error = authority_read.list_entries(Path(reviews_dir) / "audit_log", ".json")
+    if error is not None:
+        raise LedgerCorrupt("reviews/audit_log", f"the audit log can't be listed ({error})")
 
 
 def repair(gconn, *, reviews_dir: Path, wiki_dir: Path, policies_dir: Path | None = None,

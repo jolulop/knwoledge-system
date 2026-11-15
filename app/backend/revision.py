@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from app.backend import durable_write
+from app.backend import authority_read, durable_write
 
 REVISION_NAME = "revision.json"
 SCHEMA_VERSION = 1
@@ -78,14 +78,16 @@ def _fresh() -> dict[str, Any]:
 def current(root: Path) -> dict[str, Any]:
     """The revision `{"epoch", "counter"}`, initializing or recovering the file first if needed."""
     path = revision_path(root)
-    try:
-        data = path.read_bytes()
-    except FileNotFoundError:
+    # ADR-0074 slice 3c: only a verified absence initializes; an entry that can't be read (a link,
+    # a FIFO, a permission error — non-blocking, never followed) refuses, it is never replaced.
+    read = authority_read.read_file(path)
+    if read.state == authority_read.ABSENT:
         rev = _fresh()
         _save(root, rev)
         return rev
-    except OSError as exc:
-        raise RevisionUnavailable("read", exc) from exc
+    if read.state != authority_read.OK:
+        raise RevisionUnavailable("read", OSError(read.error))
+    data = read.data
     rev = _parse(data)
     if rev is not None:
         return rev

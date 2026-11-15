@@ -7,6 +7,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import pytest
+
 from app.backend import policy
 
 
@@ -62,9 +64,15 @@ def test_load_retrieval_policy_missing_file_uses_defaults(tmp_path):
     assert p.default_mode_set == ["keyword"]
 
 
-def test_invalid_policy_modes_are_filtered(tmp_path):
-    # A typo in a rule must not yield a retrieval_path that runs no channel: a rule emptied by
-    # filtering is dropped (falls back to default), and an all-bogus default falls back to keyword.
+def _refused(f, field):
+    with pytest.raises(policy.PolicyUnavailable) as exc:
+        policy.load_retrieval_policy(f)
+    assert exc.value.state == "corrupt" and exc.value.error == f"invalid_field:{field}"
+
+
+def test_invalid_policy_modes_refuse(tmp_path):
+    # ADR-0074 slice 3c review round 1: a typo in a rule refuses the policy (it was filtered out,
+    # which silently changed routing); never a retrieval_path that runs no channel either.
     f = tmp_path / "retrieval.yaml"
     f.write_text(
         "router:\n"
@@ -78,24 +86,25 @@ def test_invalid_policy_modes_are_filtered(tmp_path):
         "      - typo\n",
         encoding="utf-8",
     )
-    p = policy.load_retrieval_policy(f)
-    assert p.modes_for_shape("discovery") == ["navigation"]   # bogus dropped, valid kept
-    assert p.modes_for_shape("exact") == p.default_mode_set    # all-bogus rule -> default
-    assert p.default_mode_set == ["keyword"]                   # all-bogus default -> keyword fallback
+    _refused(f, "router.default_mode_set")
+    f.write_text("router:\n  rules:\n    exact:\n      - typo\n", encoding="utf-8")
+    _refused(f, "router.rules.exact")
+    f.write_text("router:\n  rules:\n    exact:\n", encoding="utf-8")   # an empty rule
+    _refused(f, "router.rules.exact")
 
 
-def test_invalid_rrf_k_falls_back_to_default(tmp_path):
+def test_invalid_rrf_k_refuses(tmp_path):
     f = tmp_path / "retrieval.yaml"
-    f.write_text("caps:\n  rrf_k: -1\n", encoding="utf-8")
-    assert policy.load_retrieval_policy(f).cap("rrf_k") == 60  # <1 -> default, never a divisor of 0
+    f.write_text("caps:\n  rrf_k: 0\n", encoding="utf-8")
+    _refused(f, "caps.rrf_k")                                  # never a divisor of 0, never defaulted
 
 
-def test_item_type_boost_default_and_negative_clamp(tmp_path):
-    # The shipped default is the ceiling at default k/prefusion; a negative value falls back to it.
+def test_item_type_boost_default_and_negative_refuses(tmp_path):
+    # The shipped default is the ceiling at default k/prefusion; a negative value refuses.
     assert policy.load_retrieval_policy(ROOT / "policies" / "retrieval.yaml").weight("item_type_boost") == 0.005
     f = tmp_path / "retrieval.yaml"
     f.write_text("weights:\n  item_type_boost: -0.5\n", encoding="utf-8")
-    assert policy.load_retrieval_policy(f).weight("item_type_boost") == 0.005
+    _refused(f, "weights.item_type_boost")
 
 
 def test_item_type_boost_is_hard_capped_to_the_rrf_derived_bound(tmp_path):
@@ -130,16 +139,28 @@ def test_item_type_boost_never_lifts_tail_on_type_above_rank1_off_type(tmp_path)
     assert out[0]["source_id"] == SRC_OFF     # rank-1 off-type still wins under the capped boost
 
 
-def test_negative_escalation_threshold_falls_back(tmp_path):
+def test_negative_escalation_threshold_refuses(tmp_path):
     f = tmp_path / "retrieval.yaml"
     f.write_text("caps:\n  escalation_primary_below_k: -2\n", encoding="utf-8")
-    assert policy.load_retrieval_policy(f).cap("escalation_primary_below_k") == 3  # negative -> default
+    _refused(f, "caps.escalation_primary_below_k")
+    f.write_text("router:\n  escalation_primary_below_k: -2\n", encoding="utf-8")
+    _refused(f, "router.escalation_primary_below_k")
 
 
-def test_malformed_policy_values_do_not_crash(tmp_path):
+def test_malformed_policy_values_refuse_instead_of_defaulting(tmp_path):
     f = tmp_path / "retrieval.yaml"
-    f.write_text("router: not-a-mapping\ncaps:\n  max_graph_nodes: not-an-int\n", encoding="utf-8")
+    f.write_text("router: not-a-mapping\n", encoding="utf-8")
+    _refused(f, "router")
+    f.write_text("caps:\n  max_graph_nodes: not-an-int\n", encoding="utf-8")
+    _refused(f, "caps.max_graph_nodes")
+    f.write_text("caps:\n  max_graph_nodes: true\n", encoding="utf-8")   # a bool is not an int
+    _refused(f, "caps.max_graph_nodes")
+
+
+def test_missing_fields_keep_defaults_and_unknown_keys_load(tmp_path):
+    f = tmp_path / "retrieval.yaml"
+    f.write_text("caps:\n  max_graph_nodes: 7\n  future_cap: 3\nfuture_section:\n  x: y\n",
+                 encoding="utf-8")
     p = policy.load_retrieval_policy(f)
-    # Non-dict router and non-int cap are ignored; defaults stand.
-    assert p.modes_for_shape("discovery") == ["navigation", "graph"]
-    assert p.cap("max_graph_nodes") == 50
+    assert p.cap("max_graph_nodes") == 7 and p.cap("max_graph_edges") == 100
+    assert p.caps["future_cap"] == 3

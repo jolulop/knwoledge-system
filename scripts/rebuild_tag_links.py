@@ -41,10 +41,10 @@ from app.workers import tag_history, tag_links
 
 
 def _tagging(root: Path, *, apply: bool) -> int:
-    """The tagging-history migration (graph-independent; under the write lock when applying)."""
+    """The tagging-history migration (graph-independent). With `apply` the caller holds the write
+    lock, has run the preflight and has advanced the revision."""
     if apply:
-        with write_lock.hold(root / "reviews"):
-            out = tag_links.migrate_tagging(root / "reviews", apply=True, now=iso_now())
+        out = tag_links.migrate_tagging(root / "reviews", apply=True, now=iso_now())
     else:
         out = tag_links.migrate_tagging(root / "reviews", apply=False)
     print(f"Tagging history ({'applied' if apply else 'dry run'}):")
@@ -60,8 +60,10 @@ def _tagging(root: Path, *, apply: bool) -> int:
 
 
 def _init_fresh(root: Path) -> int:
-    with write_lock.hold(root / "reviews"):
-        out = tag_history.init_fresh(root / "reviews", iso_now())
+    # ADR-0074 slice 3c review round 1: checked under a hold that changes nothing; the revision
+    # advances only right before the tracking record is written.
+    with write_lock.hold(root / "reviews", changes=False):
+        out = tag_history.init_fresh(root / "reviews", iso_now(), before_write=write_lock.invalidate)
     if out["outcome"] == "initialized":
         print("Tagging history: this vault is recorded as fresh (from_start: true) — every document "
               "without a decision now shows as not yet tagged.")
@@ -72,20 +74,44 @@ def _init_fresh(root: Path) -> int:
 
 
 def main(argv: list[str]) -> int:
+    """ADR-0074 slice 3c: a damaged blocked-tag list, or a ledger, resolving, deletion or audit
+    folder that can't be listed, refuses the whole repair with its category — never a traceback,
+    and (review round 1) before ANY write: the preflight runs first, under the same write lock as
+    the migration and the repair."""
+    from app.backend.policy import PolicyUnavailable
+    try:
+        return _main(argv)
+    except (PolicyUnavailable, tag_links.LedgerCorrupt) as exc:
+        print(f"Refused: {exc}", file=sys.stderr)
+        return 1
+
+
+def _main(argv: list[str]) -> int:
     apply = "--apply" in argv
     positional = [a for a in argv if not a.startswith("-")]
     root = Path(positional[0]).resolve() if positional else Path.cwd()
     if "--init-fresh-tracking" in argv:
         return _init_fresh(root)
-    tagging_rc = _tagging(root, apply=apply)
-    if not (root / "db" / "graph.sqlite").exists():
-        print("No graph database — nothing to repair.")
-        return tagging_rc
+    has_graph = (root / "db" / "graph.sqlite").exists()
     if not apply:
+        tag_links.repair_preflight(root / "reviews", root / "policies")
+        tagging_rc = _tagging(root, apply=False)
+        if not has_graph:
+            print("No graph database — nothing to repair.")
+            return tagging_rc
         return _repair(root, apply=False, intent=None) or tagging_rc
-    # ADR-0068: one commit phase; its publication intent is recorded first (a crash mid-repair
-    # republishes from authority).
-    with write_lock.hold(root / "reviews"):
+    # One hold for the preflight, the migration and the repair (review round 1): the inputs can't
+    # change between the check and the writes, and a refusal neither writes nor advances the vault
+    # revision (`changes=False`; invalidated right before the first write). ADR-0068: the repair is
+    # one commit phase whose publication intent is recorded first (a crash mid-repair republishes
+    # from authority).
+    with write_lock.hold(root / "reviews", changes=False):
+        tag_links.repair_preflight(root / "reviews", root / "policies")
+        write_lock.invalidate()
+        tagging_rc = _tagging(root, apply=True)
+        if not has_graph:
+            print("No graph database — nothing to repair.")
+            return tagging_rc
         intent = publication_queue.record(root, origin="tag_repair", full=True)
         return _repair(root, apply=True, intent=intent) or tagging_rc
 

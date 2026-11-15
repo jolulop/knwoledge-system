@@ -68,7 +68,8 @@ from app.backend.models import (
     WikiPageDetail,
     WikiPagesResponse,
 )
-from app.backend.policy import load_retrieval_policy, load_yaml
+from app.backend.policy import (PolicyUnavailable, check_citation, load_retrieval_policy,
+                                read_policy)
 from app.llm.adapters import AdapterError
 from app.llm.cache import ResponseCache
 from app.llm.client import ConfigError, ParseError, build_client
@@ -244,6 +245,16 @@ async def _review_records_unavailable(request: Request, exc: reviews.ReviewRecor
 async def _review_record_unavailable(request: Request, exc: reviews.ReviewRecordUnavailable) -> Any:
     """A human action on a damaged review record (ADR-0074 decision 4): 409, nothing recorded."""
     detail = {"reason": f"review_{exc.state}", "review_id": exc.review_id, "detail": str(exc)}
+    if request.url.path.startswith("/ui/"):
+        return HTMLResponse(review_html.render_error(409, str(exc)), status_code=409)
+    return JSONResponse(status_code=409, content={"detail": detail})
+
+
+@app.exception_handler(PolicyUnavailable)
+async def _policy_unavailable(request: Request, exc: PolicyUnavailable) -> Any:
+    """A damaged policy file (ADR-0074 slice 3c) is never replaced by defaults: the operation that
+    reads it is refused with a 409 naming the file and its state, never its contents."""
+    detail = {"reason": f"policy_{exc.state}", "policy": exc.name, "detail": str(exc)}
     if request.url.path.startswith("/ui/"):
         return HTMLResponse(review_html.render_error(409, str(exc)), status_code=409)
     return JSONResponse(status_code=409, content={"detail": detail})
@@ -3278,13 +3289,8 @@ def _append_wiki_log(message: str) -> None:
 
 def _no_source_text() -> str:
     """The abstention text, sourced from policies/citation.yaml so it can't drift (ADR-0034)."""
-    path = settings.root / "policies" / "citation.yaml"
-    if path.exists():
-        loaded = load_yaml(path.read_text(encoding="utf-8"))
-        text = loaded.get("when_no_source_found")
-        if isinstance(text, str) and text.strip():
-            return text
-    return query.NO_SOURCE_FOUND
+    loaded = read_policy(settings.root / "policies" / "citation.yaml", check_citation) or {}
+    return loaded.get("when_no_source_found", query.NO_SOURCE_FOUND)      # damaged → 409
 
 
 # /query answers from citable chunk evidence; graph/navigation are discovery surfaces that can't cite.

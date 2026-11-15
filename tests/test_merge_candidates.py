@@ -11,11 +11,14 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.backend import graph
+from app.backend.policy import PolicyUnavailable
 from app.workers import items, lint, merge_candidates, merges, reviews
 from app.workers.merge_candidates import merge_key
 from app.workers.wiki_render import render_item_page
@@ -375,7 +378,8 @@ def test_key_budget_reads_policy(tmp_path):
     assert lint._merge_key_budget(tmp_path / "missing.yaml") == 5
     (tmp_path / "policies" / "review.yaml").write_text(
         "merge_candidates:\n  max_items_per_key: 1\n", encoding="utf-8")
-    assert lint._merge_key_budget(tmp_path / "policies" / "review.yaml") == 5   # < 2 -> default
+    with pytest.raises(PolicyUnavailable, match="invalid_field:merge_candidates.max_items_per_key"):
+        lint._merge_key_budget(tmp_path / "policies" / "review.yaml")    # < 2 refuses (slice 3c)
 
 
 def test_repo_policy_carries_the_budget():

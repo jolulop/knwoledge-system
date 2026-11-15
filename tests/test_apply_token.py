@@ -28,7 +28,7 @@ import apply_reviews  # noqa: E402
 import backup  # noqa: E402
 import validate_revision  # noqa: E402
 from app.backend import (  # noqa: E402
-    apply_authorization, apply_gate, apply_sandbox, durable_write, revision, write_lock,
+    apply_authorization, apply_gate, authority_read, apply_sandbox, durable_write, revision, write_lock,
 )
 from app.backend import main as main_module  # noqa: E402
 from app.backend.config import get_settings  # noqa: E402
@@ -389,13 +389,14 @@ def test_a_malformed_store_refuses_outstanding_tokens_as_unknown(vault):
 
 def test_an_unreadable_store_is_unavailable_not_unknown(client, vault, monkeypatch):
     token = _preview(vault)["preview_token"]
-    real = Path.read_bytes
+    real = authority_read.read_file
 
-    def denied(self):
-        if self.name == apply_authorization.STORE_NAME:
-            raise PermissionError(13, "Permission denied")
-        return real(self)
-    monkeypatch.setattr(Path, "read_bytes", denied)
+    def denied(path):                                     # ADR-0074 slice 3c: the typed read
+        if Path(path).name == apply_authorization.STORE_NAME:
+            return authority_read.FileRead(authority_read.UNREADABLE, Path(path),
+                                           error="PermissionError")
+        return real(path)
+    monkeypatch.setattr(authority_read, "read_file", denied)
     resp = client.post("/reviews/apply", json={"preview_token": token})
     assert resp.status_code == 503
     assert resp.json()["detail"]["reason"] == "authorization_store_unavailable"

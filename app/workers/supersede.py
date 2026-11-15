@@ -35,7 +35,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from app.backend import durable_write, graph
+from app.backend import authority_read, durable_write, graph
 from app.backend.manifests import iso_now
 from app.workers import apply_outcomes as ao
 from app.workers import claim_marker, claims, identity_journal
@@ -131,12 +131,14 @@ def read_audit(path: Path, *, event: str, bind: dict[str, Any],
                edge_id: str | None = None) -> tuple[str, dict[str, Any] | None]:
     """`("absent", None)`, `("valid", record)` or `("invalid", None)` — unreadable, or a record whose
     identity (`review_id`, `approval_id`) or payload (`event`, `winner`, `loser`, edge id) disagree."""
-    path = Path(path)
-    if not path.exists():
+    read = authority_read.read_file(Path(path))   # ADR-0074 slice 3c: non-blocking, never a link
+    if read.state == authority_read.ABSENT:
         return "absent", None
+    if read.state != authority_read.OK:
+        return "invalid", None
     try:
-        rec = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        rec = json.loads(read.data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
         return "invalid", None
     ok = (isinstance(rec, dict) and rec.get("event") == event
           and rec.get("review_id") == bind["review_id"]
@@ -299,10 +301,10 @@ def scan_review_audits(reviews_dir: Path, review_id: str) -> list[tuple[str, byt
     for name in sorted(names):
         if not name.startswith(f"{review_id}-"):
             continue
-        try:
-            out.append((name, (d / name).read_bytes()))
-        except OSError:
-            out.append((name, None))
+        read = authority_read.read_file(d / name)          # non-blocking, never a link (3c)
+        if read.state == authority_read.ABSENT:
+            continue                                          # removed between listing and read
+        out.append((name, read.data if read.state == authority_read.OK else None))
     return out
 
 
@@ -640,10 +642,11 @@ def _ensure_repair_audit(reviews_dir: Path, bind: dict[str, Any], repair: dict[s
         raise Blocked("supersede_journal_invalid", {"repair": "invalid"})
     path = repair_audit_path(reviews_dir, bind["review_id"], repair["repair_id"])
     want = _repair_record(bind, repair, edge_id)
-    if path.exists():
+    read = authority_read.read_file(path)        # ADR-0074 slice 3c: a damaged entry is present
+    if read.state != authority_read.ABSENT:
         try:
-            have = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            have = json.loads(read.data.decode("utf-8")) if read.state == authority_read.OK else None
+        except (UnicodeDecodeError, json.JSONDecodeError):
             have = None
         if have != want:
             raise Blocked("repair_audit_conflict", {"audit": path.name})

@@ -157,9 +157,11 @@ def snapshot_path(root: Path) -> Path:
 
 def load_published(root: Path) -> dict[str, str] | None:
     """The mapping the Source pages were last fully published with, or None when unknown (missing,
-    unreadable or malformed: the caller then refreshes every Source page)."""
+    unreadable or malformed: the caller then refreshes every Source page — a written recovery
+    contract, ADR-0074 decision 4.5, conforming). Non-blocking, links never followed (slice 3c)."""
+    from app.backend import authority_read
     try:
-        data = json.loads(snapshot_path(root).read_text(encoding="utf-8"))
+        data = authority_read.load_json(snapshot_path(root))
     except (OSError, ValueError):
         return None
     labels = data.get("labels") if isinstance(data, dict) else None

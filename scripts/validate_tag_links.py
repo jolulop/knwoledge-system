@@ -33,12 +33,15 @@ def _check(root: Path) -> list[str]:
     if not db_path.exists():
         return [f"{c['source_id']}: tag ledger is damaged ({c['problem']}) — restore it from backup"
                 for c in tag_links.corrupt_ledgers(reviews_dir)]
+    from app.backend.policy import PolicyUnavailable
     conn = graph.connect(db_path)
     try:
         if graph.schema_version(conn) != graph.SCHEMA_VERSION:
             return []                                    # validate_graph reports the stale schema
         return tag_links.consistency_errors(conn, reviews_dir, wiki_dir=root / "wiki",
                                             policies_dir=root / "policies")
+    except (PolicyUnavailable, tag_links.LedgerCorrupt) as exc:   # ADR-0074 slice 3c
+        return [f"tag links can't be checked: {exc}"]
     finally:
         conn.close()
 
@@ -51,7 +54,8 @@ def _tagging_notes(root: Path) -> tuple[list[str], list[str]]:
     if (problem := tag_history.tracking_problem(reviews_dir)) is not None:
         errors.append(f"reviews/tag_links/{tag_history.TRACKING_NAME} is malformed ({problem})")
     unmarked = []
-    for sid in tag_links._ledger_ids(reviews_dir):
+    sids, _error = tag_links._ledger_listing(reviews_dir)   # an unlisted directory: reported by _check
+    for sid in sids:
         try:
             if "tagging" not in tag_links.load_ledger(reviews_dir, sid):
                 unmarked.append(sid)

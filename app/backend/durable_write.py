@@ -337,3 +337,20 @@ def remove_dir(directory: Path) -> None:
             sync_dir(directory.parent)
         except OSError as exc:
             raise UncertainCompletion(directory, exc, "removed") from exc
+
+
+def preserve_entry(path: Path, target: Path) -> None:
+    """Durably keep the directory entry `path` under the new name `target` as well, without reading
+    it (ADR-0074 slice 3c): a hard link to the entry itself — a symbolic link stays a link, an
+    unreadable file keeps its bytes and mode — so repair can set aside a damaged record it can't
+    copy, while `path` stays in place (a crash before the replacement still finds it damaged).
+    Never replaces an existing `target`; a directory can't be preserved this way (``OSError``).
+    A failed directory sync after the link is :class:`UncertainCompletion`."""
+    path, target = Path(path), Path(target)
+    with _operation():
+        _establish(target.parent)
+        os.link(path, target, follow_symlinks=False)
+        try:
+            sync_dir(target.parent)
+        except OSError as exc:
+            raise UncertainCompletion(target, exc, "linked") from exc

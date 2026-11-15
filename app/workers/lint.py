@@ -39,7 +39,7 @@ from typing import Any
 from app.backend import db, durable_write, graph, taxonomy, write_lock
 from app.backend.manifests import get_provenance, is_source_id, iso_now, scan_manifests
 from app.backend.paths import safe_child, safe_under
-from app.backend.policy import load_yaml
+from app.backend.policy import PolicyUnavailable, check_review, read_policy
 from app.llm.client import ConfigError, parse_chain
 from app.workers import (citations, enrichment_artifact, item_names, items, labels, merge_candidates,
                          reviews, synthesis, tag_links)
@@ -321,16 +321,12 @@ def _check_item_filenames(gconn, wiki_dir: Path) -> list[dict[str, Any]]:
 
 def _merge_key_budget(policy_path: Path) -> int:
     """`merge_candidates.max_items_per_key` from policies/review.yaml (ADR-0064 review round); the
-    code default when the file/key is absent or not an integer ≥ 2."""
-    try:
-        policy = load_yaml(policy_path.read_text(encoding="utf-8")) if policy_path.exists() else {}
-    except (OSError, ValueError):
-        policy = {}
-    section = policy.get("merge_candidates") if isinstance(policy, dict) else None
-    value = section.get("max_items_per_key") if isinstance(section, dict) else None
-    if isinstance(value, int) and not isinstance(value, bool) and value >= 2:
-        return value
-    return merge_candidates.DEFAULT_MAX_ITEMS_PER_KEY
+    code default when the file or key is absent. A damaged file, or a present value that isn't an
+    integer ≥ 2, raises :class:`PolicyUnavailable` (ADR-0074 slice 3c: never defaults over a
+    damaged policy)."""
+    policy = read_policy(policy_path, check_review) or {}
+    section = policy.get("merge_candidates") or {}
+    return section.get("max_items_per_key", merge_candidates.DEFAULT_MAX_ITEMS_PER_KEY)
 
 
 def _check_merge_candidates(gconn, wiki_dir: Path, reviews_dir: Path, *, policy_path: Path,
@@ -339,11 +335,19 @@ def _check_merge_candidates(gconn, wiki_dir: Path, reviews_dir: Path, *, policy_
     """Merge candidates (ADR-0064) → `merge_items` proposals; severity low (never `failing`).
 
     New star proposals are filed; still-unresolved machine proposals are re-reported as findings and
-    counted as existing (the in-flight freeze keeps them out of the recomputation)."""
+    counted as existing (the in-flight freeze keeps them out of the recomputation). A damaged
+    `review.yaml` or blocked-tag list skips the check with a high finding (ADR-0074 slice 3c): the
+    budget and the blocked names are shared inputs, so no proposal is computed without them."""
+    try:
+        budget = _merge_key_budget(policy_path)
+        blocked = frozenset(tag_links.load_blocked(policy_path.parent))
+    except PolicyUnavailable as exc:
+        return [{"check": f"policy_{exc.state}", "severity": "high",
+                 "subject": f"policies/{exc.name}",
+                 "detail": f"{exc}; merge candidates were not computed"}]
     found = merge_candidates.find_merge_candidates(
         gconn, wiki_dir=wiki_dir, reviews_dir=reviews_dir,
-        max_items_per_key=_merge_key_budget(policy_path),
-        blocked_keys=frozenset(tag_links.load_blocked(policy_path.parent)))
+        max_items_per_key=budget, blocked_keys=blocked)
     findings: list[dict[str, Any]] = []
     for prop in found["proposals"]:
         subj = prop["subject"]

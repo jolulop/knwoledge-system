@@ -32,7 +32,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from app.backend import manifests
+from app.backend import authority_read, manifests
 from app.backend import durable_write
 
 JOURNAL_NAME = "producer_journal.json"
@@ -97,13 +97,17 @@ def _record_problem(r: Any) -> str | None:
 
 def load(root: Path) -> list[dict[str, Any]]:
     """Every record, oldest first. No file means no unfinished commit; a file that is unreadable,
-    not this schema, holds an invalid record or the same subject twice raises :class:`JournalCorrupt`."""
-    path = journal_path(root)
-    if not path.exists():
+    not this schema, holds an invalid record or the same subject twice raises :class:`JournalCorrupt`.
+    ADR-0074 slice 3c: only a verified absence is "no file" — a dangling link, a FIFO, a directory or
+    a file that can't be opened is ``unreadable:<category>`` (non-blocking, links never followed)."""
+    read = authority_read.read_file(journal_path(root))
+    if read.state == authority_read.ABSENT:
         return []
+    if read.state != authority_read.OK:
+        raise JournalCorrupt(f"unreadable:{read.error}")
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        data = json.loads(read.data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
         raise JournalCorrupt("unparseable") from None
     if not isinstance(data, dict) or data.get("schema_version") != SCHEMA_VERSION:
         raise JournalCorrupt("schema_version")
@@ -198,13 +202,18 @@ def status(root: Path) -> dict[str, Any]:
 def preserve_damaged(root: Path, now: str | None = None) -> Path | None:
     """Copy the damaged journal's bytes beside it, flushed, and return the copy's path. The damaged
     file stays in place until :func:`rebuild` replaces it, so a crash in between leaves the
-    producers refusing, never treating the journal as empty."""
+    producers refusing, never treating the journal as empty. An entry that can't be read (a link,
+    a FIFO, a permission error) is kept as a hard link to itself (ADR-0074 slice 3c)."""
     path = journal_path(root)
-    if not path.exists():
+    read = authority_read.read_file(path)
+    if read.state == authority_read.ABSENT:
         return None
     stamp = (now or _iso_now()).replace(":", "").replace("-", "")
     target = path.with_name(f"producer_journal.damaged-{stamp}-{uuid.uuid4().hex[:6]}.json")
-    durable_write.write_bytes(target, path.read_bytes(), create_only=True)
+    if read.state == authority_read.OK:
+        durable_write.write_bytes(target, read.data, create_only=True)
+    else:
+        durable_write.preserve_entry(path, target)
     return target
 
 
@@ -268,8 +277,9 @@ def rebuild(root: Path, *, now: str | None = None) -> list[dict[str, Any]]:
         topics = _glob(".synthesis.json")
         pages = root / "wiki" / "Synthesis"
         for page in sorted(pages.glob("*.md")) if pages.exists() else []:
-            m = re.search(r"^topic_node:\s*\"?(itm_[0-9a-f]{16})", page.read_text(encoding="utf-8",
-                                                                            errors="replace"), re.M)
+            read = authority_read.read_file(page)         # non-blocking (slice 3c); a damaged page's
+            text = (read.data or b"").decode("utf-8", errors="replace")   # topic is still covered
+            m = re.search(r"^topic_node:\s*\"?(itm_[0-9a-f]{16})", text, re.M)  # by the graph scan
             if m:
                 topics.add(m.group(1))
         if gconn is not None:

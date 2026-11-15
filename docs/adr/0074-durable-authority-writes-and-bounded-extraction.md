@@ -7,7 +7,8 @@
   Synthesis pages) implemented 2026-11-12** — shared reader `app/backend/authority_read.py`.
   **Slice 3b (review records) implemented 2026-11-12** (review round 2, 2026-11-14: durable removal,
   decision transitions, per-decision audit entries, typed review read model, symlinks refused).
-  Slice 3c, 4–6 and changes 7a–7c per decision 9 not yet.
+  **Slice 3c (policies, journals, `db/*.json`) implemented 2026-11-14.** Slices 4–6 and changes
+  7a–7c per decision 9 not yet.
 - **Operational acceptance** (user decision 2026-11-14): ADR-0074 is **not operationally accepted
   until change 7a lands**. Slices continue in decision 9's order, but until 7a no document, release
   note or review answer may claim that visibility fails closed: a stale keyword / vector index can
@@ -497,6 +498,109 @@ records.
     file that is a link is `unreadable` (`symlink` / `dangling_symlink`) in every family, whatever
     its target. Linked directories on the way are still followed.
 - **Tests:** `tests/test_review_record_states.py`.
+
+**As implemented (slice 3c — policies, journals and the `db/*.json` records).** Every remaining
+family reads through `authority_read` (non-blocking — a FIFO can't hang a reader holding the write
+lock — and never through a link at the file itself). The gaps closed were the same in every family:
+`path.exists()` took a dangling link for absence, a blocking `read_text` could hang on a FIFO, and
+`is_dir()` + `glob` turned a directory that can't be listed into an empty inventory.
+
+- **Policies** (`app/backend/policy.py`: `read_policy`, `read_policy_text`,
+  `PolicyUnavailable`):
+  - **Absence means defaults** (the domain allows it).
+  - A policy that exists but is unreadable, invalid UTF-8, unparseable or not a mapping raises
+    `PolicyUnavailable`, and the operation that depends on it refuses (decision 4.4: a policy is a
+    shared input). The API answers 409 `policy_<state>` with the file name, never its contents.
+  - **Review round 1: strict parsing and field validation.** Policies parse with
+    `load_yaml(..., strict=True)`, which refuses (`corrupt` / `invalid_yaml`) instead of guessing:
+    a tab in the indentation, a line deeper than its block or dedented to no open block, a mapping
+    line without `key:`, an empty or duplicate key, a sequence item in a mapping (or the reverse),
+    a flow value (`[...]`, `{...}`), an unterminated quote, or content after the top-level block.
+    The golden eval files keep the lenient parse. Each family then validates the **present**
+    fields it consumes (`check_retrieval`, `check_retention`, `check_review`, `check_citation`;
+    `corrupt` / `invalid_field:<dotted.name>`): integers are never booleans, thresholds are ≥ 0
+    (`rrf_k` ≥ 1, `merge_candidates.max_items_per_key` ≥ 2), retention's switches are booleans,
+    route rules are non-empty lists of known modes, the abstention text is a non-empty string. A
+    missing field keeps its default and unknown keys are kept. This **reverses** the earlier
+    silent fallbacks: an unknown route mode is no longer filtered out, and a negative cap, `rrf_k`
+    < 1 or a negative `item_type_boost` no longer becomes the default. Clamping `item_type_boost`
+    to its RRF-derived ceiling (ADR-0062) is unchanged — it bounds a valid value.
+  - Covered:
+    - `retrieval.yaml`: `/search` and `/query` refuse;
+    - `retention.yaml`: the stale check refuses before recording a job;
+    - `review.yaml`: lint skips merge candidates with a high `policy_<state>` finding;
+    - `citation.yaml`: the abstention text;
+    - the blocked-tag list `blocked_tags.txt`: block and unblock refuse before their first write;
+      extraction skips each document with `policy_<state>`; lint and tag-link repair or
+      validation refuse with the category.
+  - Invalid UTF-8 in the blocked-tag list is now `corrupt`. It used to be decoded with
+    replacement characters, and the next block rewrote the list from those.
+- **Identity journal** (`reviews/in_flight/`):
+  - `read` and `is_open` treat only a verified absence as closed: a dangling link or an entry
+    that can't be confirmed is an open, unreadable operation (`JournalUnreadable` now carries
+    `state` / `error`).
+  - A journal directory that can't be listed is one unknown operation, `UNLISTED`
+    (`"reviews/in_flight"`), touching every node, so every competing tag action and every
+    extraction of a linked document is refused. No path is ever built from it.
+- **Producer journal and publication queue** (`db/producer_journal.json`,
+  `db/publication_pending.json`):
+  - An entry that can't be read is `JournalCorrupt` / `QueueCorrupt` with reason
+    `unreadable:<category>`, never an empty journal or queue.
+  - Repair can't copy what it can't read. It keeps the entry itself under the `*.damaged-*` name
+    as a hard link (`durable_write.preserve_entry`: create-only, directory fsynced, the original
+    left in place until the replacement), so a link stays a link and an unreadable file keeps
+    its bytes.
+- **Explicit recovery contracts (decision 4.5), conforming.** Each keeps its written behaviour for
+  bad contents, but none replaces an entry it can't read:
+  - the vault revision: malformed contents get a new epoch; an entry that can't be read raises
+    `RevisionUnavailable`;
+  - Apply authorizations: malformed contents are preserved and emptied; an entry that can't be
+    read raises `StoreUnavailable`;
+  - contradiction estimates: losing an estimate only refuses a run;
+  - the published tag-label snapshot `db/tag_labels.json`: unknown means every Source page is
+    refreshed;
+  - tagging-history provenance `_tracking.json`: unknown only lowers certainty. The fresh-vault
+    initialization and the migration now write it only over a verified absence, never over a
+    damaged entry.
+- **Tag ledgers** (`reviews/tag_links/`):
+  - A ledger that can't be read is `LedgerCorrupt` (`unreadable (<category>)`).
+  - A ledger directory that can't be listed is reported as one damaged ledger, `UNLISTED_LEDGERS`:
+    - `kept_anywhere` answers "unknown", so no tag counts as deletable;
+    - merge preflights refuse;
+    - `ledger_keeps` raises, so publication leaves every tag page pending (`ledger_corrupt`);
+    - tag-link validation reports it, and repair refuses.
+  - Unfinished "use X" records (`resolving/`) and deletion intents (`deleting/`) whose directory
+    can't be listed raise `LedgerCorrupt` — including (review round 1) a file in place of a
+    document's `resolving/<source_id>/` folder, in the whole-vault and the per-document scan.
+    Entries not named by a canonical id are not ours and are ignored. A damaged record still
+    counts (`chosen: None` / `reason: None`).
+  - **Tag-link repair checks before it writes** (review round 1, `tag_links.repair_preflight`):
+    the blocked-tag list, the ledger, resolving and deletion folders and the audit log are checked
+    under the **same** write-lock hold as the tagging migration and the repair. The hold is
+    `changes=False`, and the revision advances only after the check passes, so a refusal writes
+    nothing — no tracking record, no migrated ledger, no publication intent — and doesn't advance
+    the revision. `--init-fresh-tracking` advances the revision only right before its write.
+- **Audit scans** that prove a step done or a deletion recorded (`tag_links._audited`,
+  `_deletion_audited`, and supersede's `read_audit`, `scan_review_audits` and repair audit)
+  read non-blocking:
+  - a log that can't be listed raises, so a step is never redone or taken as done on a log no one
+    could see;
+  - a damaged entry is present, never absent: a repair audit is never written over it.
+  - Tagging-history evidence stays lenient — it only lowers certainty — and (review round 1)
+    carries **whether the scan was complete** (`tag_history.AuditEvidence`). A verified absent
+    log is complete (a fresh vault has none). A log that can't be listed, or a tag audit entry that
+    can't be read or isn't a record, makes the evidence incomplete, and that reaches
+    `classify`, `backfill` and `mark_decision`: no document is shown "never tagged", and no
+    first-decision time is inferred, from a scan that missed events.
+- **Not changed:** SQLite and lock files (decision 1 "not covered"); projections (vector-index
+  metadata, eval reports). `security.yaml` is not read by code.
+- **Tests:** `tests/test_authority_family_states.py`:
+  - every damage class per family, the recovery contracts, and the unlistable directories;
+  - repair keeping an unreadable entry;
+  - review round 1: text outside the subset and wrong-typed fields per family, a file in place of
+    a resolving folder, repair and fresh-tracking refusals that leave authority and the revision
+    unchanged, and incomplete audit evidence under `from_start: true`;
+  - a FIFO probe in a subprocess with a deadline, covering every reader.
 
 ## Part B — bounded extraction (finding 3)
 

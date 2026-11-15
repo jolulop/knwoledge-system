@@ -50,6 +50,7 @@ ALLOWED: dict[tuple[str, str, str], str] = {
     ("app/backend/durable_write.py", "_write", ".unlink"): _HELPER,
     ("app/backend/durable_write.py", "remove", "os.unlink"): _HELPER,
     ("app/backend/durable_write.py", "remove_dir", "os.rmdir"): _HELPER,
+    ("app/backend/durable_write.py", "preserve_entry", "os.link"): _HELPER,
     ("app/backend/apply_sandbox.py", "cleanup_sandbox", "shutil.rmtree"): _SANDBOX,
     ("app/backend/vector_index.py", "_swap_dir", "shutil.rmtree"): _PROJECTION + " (vector index)",
     ("app/backend/vector_index.py", "_build_full", "shutil.rmtree"): _PROJECTION + " (vector index)",

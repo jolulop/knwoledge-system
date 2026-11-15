@@ -1723,7 +1723,11 @@ def _source_flow(reviews_dir: Path, *, gconn: Any, wiki_dir: Path | None,
         # suggestion row while that is still shown, else in the unfinished list.
         rows_by_id = {r["node_id"]: r for r in suggestions}
         unfinished: list[dict[str, Any]] = []
-        for rec in tag_links.pending_resolutions(reviews_dir, sid):
+        try:
+            resolutions = tag_links.pending_resolutions(reviews_dir, sid)
+        except tag_links.LedgerCorrupt as exc:           # ADR-0074 slice 3c: shown, never "none"
+            resolutions, ledger_error = [], ledger_error or exc.problem
+        for rec in resolutions:
             pending = {"chosen": rec.get("chosen"), "at": rec.get("at"),
                        "chosen_title": (pages.get(rec.get("chosen") or "") or {}).get("title")
                        or rec.get("chosen_title") or rec.get("chosen")}

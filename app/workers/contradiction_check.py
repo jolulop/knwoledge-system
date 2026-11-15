@@ -61,7 +61,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from app.backend import db, durable_write, graph, write_lock
+from app.backend import authority_read, db, durable_write, graph, write_lock
 from app.backend.manifests import (
     confirmed_details,
     get_provenance,
@@ -393,9 +393,10 @@ def store_path(root: Path) -> Path:
 
 def _load(root: Path) -> list[dict[str, Any]]:
     """Every saved estimate. Missing or malformed contents are empty: losing a record can only
-    refuse a run."""
+    refuse a run (a written recovery contract, ADR-0074 decision 4.5 — conforming). The read is
+    non-blocking and never follows a link (slice 3c)."""
     try:
-        body = json.loads(store_path(root).read_text(encoding="utf-8"))
+        body = authority_read.load_json(store_path(root))
     except (OSError, ValueError):
         return []
     if not isinstance(body, dict) or body.get("schema_version") != SCHEMA_VERSION \

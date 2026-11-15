@@ -20,6 +20,12 @@ ADR-0073 decision 10: every write is durable (the temp file fsynced, renamed, th
 `set_stage` raises :class:`JournalUnreadable` instead of silently returning on a damaged entry, and a
 caller records a stage only AFTER the page and graph changes it certifies are durable. A supersede
 entry (`op: "supersede"`) also carries its binding: `winner`, `loser` and `approval_id`.
+
+ADR-0074 slice 3c: entries are read through :mod:`app.backend.authority_read` — non-blocking (a
+FIFO can't hang a reader holding the write lock), never through a symbolic link, and only a
+**verified absence** means "no entry": a dangling link or an entry whose existence can't be
+confirmed is an open, unreadable operation. A journal directory that can't be listed is one
+unknown operation touching everything (:data:`UNLISTED`), never an empty listing.
 """
 from __future__ import annotations
 
@@ -29,7 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from app.backend.manifests import iso_now
-from app.backend import durable_write
+from app.backend import authority_read, durable_write
 
 JOURNAL_DIR = "in_flight"
 _RID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
@@ -41,13 +47,19 @@ def _path(reviews_dir: Path, review_id: str) -> Path:
     return Path(reviews_dir) / JOURNAL_DIR / f"{review_id}.json"
 
 
+# The review id reported for an in-flight directory that can't be listed: not a canonical id (so no
+# path is ever built from it), touching every node.
+UNLISTED = "reviews/in_flight"
+
+
 class JournalUnreadable(Exception):
     """An in-flight entry exists but can't be read or parsed: its operation's state is unknown, so the
-    caller stops writing (ADR-0073 decision 10)."""
+    caller stops writing (ADR-0073 decision 10). `state` / `error` are categorical (ADR-0074)."""
 
-    def __init__(self, review_id: str) -> None:
-        super().__init__(f"in-flight journal for {review_id} is unreadable")
-        self.review_id = review_id
+    def __init__(self, review_id: str, state: str = authority_read.CORRUPT,
+                 error: str | None = None) -> None:
+        self.review_id, self.state, self.error = review_id, state, error or state
+        super().__init__(f"in-flight journal for {review_id} is {state} ({self.error})")
 
 
 def _write(path: Path, data: dict[str, Any]) -> None:
@@ -68,14 +80,12 @@ def begin(reviews_dir: Path, review_id: str, *, op: str, nodes: list[str],
 def read(reviews_dir: Path, review_id: str) -> dict[str, Any] | None:
     """The entry, None when there is none; raises :class:`JournalUnreadable` when it exists but can't
     be read or isn't a JSON object."""
-    path = _path(reviews_dir, review_id)
-    if not path.exists():
+    read = authority_read.read_file(_path(reviews_dir, review_id))
+    if read.state == authority_read.ABSENT:
         return None
-    try:
-        raw = path.read_bytes()
-    except OSError as exc:
-        raise JournalUnreadable(review_id) from exc
-    return parse(raw, review_id)
+    if read.state != authority_read.OK:
+        raise JournalUnreadable(review_id, read.state, read.error)
+    return parse(read.data, review_id)
 
 
 def parse(raw: bytes, review_id: str) -> dict[str, Any]:
@@ -83,10 +93,12 @@ def parse(raw: bytes, review_id: str) -> dict[str, Any]:
     raises :class:`JournalUnreadable` when they aren't a JSON object."""
     try:
         data = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise JournalUnreadable(review_id) from exc
+    except UnicodeDecodeError as exc:
+        raise JournalUnreadable(review_id, error="invalid_utf8") from exc
+    except json.JSONDecodeError as exc:
+        raise JournalUnreadable(review_id, error="invalid_json") from exc
     if not isinstance(data, dict):
-        raise JournalUnreadable(review_id)
+        raise JournalUnreadable(review_id, error="not_an_object")
     return data
 
 
@@ -117,10 +129,13 @@ def set_stage(reviews_dir: Path, review_id: str, stage: str, *,
 
 
 def is_open(reviews_dir: Path, review_id: str) -> bool:
+    """Whether an entry is present — a damaged one included (a dangling link, an entry whose
+    existence can't be confirmed): only a verified absence is closed."""
     try:
-        return _path(reviews_dir, review_id).exists()
+        path = _path(reviews_dir, review_id)
     except ValueError:
         return False
+    return authority_read.read_file(path).state != authority_read.ABSENT
 
 
 def end(reviews_dir: Path, review_id: str) -> None:
@@ -130,16 +145,23 @@ def end(reviews_dir: Path, review_id: str) -> None:
 
 def open_operations(reviews_dir: Path) -> list[dict[str, Any]]:
     """Every in-flight operation; an unreadable entry still counts (its nodes unknown → `nodes: None`,
-    which callers treat as "everything is in flight")."""
-    d = Path(reviews_dir) / JOURNAL_DIR
+    which callers treat as "everything is in flight"), and so does a journal directory that can't
+    be listed (one :data:`UNLISTED` operation, ADR-0074 slice 3c)."""
+    paths, error = authority_read.list_entries(Path(reviews_dir) / JOURNAL_DIR, ".json")
+    if error is not None:
+        return [{"review_id": UNLISTED, "op": None, "nodes": None}]
     out: list[dict[str, Any]] = []
-    for path in sorted(d.glob("*.json")) if d.is_dir() else []:
+    for path in paths:
+        read = authority_read.read_file(path)
+        if read.state == authority_read.ABSENT:            # ended between listing and read
+            continue
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            nodes = data.get("nodes") if isinstance(data, dict) else None
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            data, nodes = {}, None
-        out.append({"review_id": path.stem, "op": (data or {}).get("op"),
+            data = json.loads(read.data.decode("utf-8")) if read.state == authority_read.OK else None
+        except ValueError:
+            data = None
+        data = data if isinstance(data, dict) else {}
+        nodes = data.get("nodes")
+        out.append({"review_id": path.stem, "op": data.get("op"),
                     "nodes": nodes if isinstance(nodes, list) else None})
     return out
 

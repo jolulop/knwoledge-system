@@ -374,7 +374,11 @@ def _render_syntheses(gconn, sids: list[str], *, wiki_dir: Path, root: Path, now
 def _render_items(gconn, nids: list[str], *, wiki_dir: Path, root: Path, now: str,
                   failed: dict[str, str]) -> None:
     from app.workers import tag_links
-    keeps, damaged = tag_links.ledger_keeps(root / "reviews")
+    try:
+        keeps, damaged = tag_links.ledger_keeps(root / "reviews")
+    except tag_links.LedgerCorrupt:               # ADR-0074 slice 3c: no ledger inventory —
+        failed.update({nid: "ledger_corrupt" for nid in nids})   # every tag page stays pending
+        return
     for nid in nids:
         try:
             outcome = tag_links.project_page(gconn, node_id=nid, wiki_dir=wiki_dir,

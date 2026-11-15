@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from app.backend import durable_write
+from app.backend import authority_read, durable_write
 
 STORE_NAME = "apply_authorizations.json"
 SCHEMA_VERSION = 1
@@ -90,12 +90,14 @@ def _save(root: Path, records: list[dict[str, Any]]) -> None:
 def load(root: Path) -> list[dict[str, Any]]:
     """Every record. A missing file is empty; malformed contents are preserved and replaced."""
     path = store_path(root)
-    try:
-        data = path.read_bytes()
-    except FileNotFoundError:
+    # ADR-0074 slice 3c: only a verified absence is empty; an entry that can't be read (a link, a
+    # FIFO, a permission error — non-blocking, never followed) refuses, it is never replaced.
+    read = authority_read.read_file(path)
+    if read.state == authority_read.ABSENT:
         return []
-    except OSError as exc:
-        raise StoreUnavailable("read", exc) from exc
+    if read.state != authority_read.OK:
+        raise StoreUnavailable("read", OSError(read.error))
+    data = read.data
     records = _parse(data)
     if records is not None:
         return records

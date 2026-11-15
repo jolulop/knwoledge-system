@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from app.backend import durable_write, manifests
+from app.backend import authority_read, durable_write, manifests
 
 QUEUE_NAME = "publication_pending.json"
 SCHEMA_VERSION = 1
@@ -90,13 +90,17 @@ def _entry_problem(e: Any) -> str | None:
 
 def load(root: Path) -> list[dict[str, Any]]:
     """The pending entries, oldest first. No file means an empty queue; a file that is unreadable,
-    not this schema or holds an invalid entry raises :class:`QueueCorrupt`."""
-    path = queue_path(root)
-    if not path.exists():
+    not this schema or holds an invalid entry raises :class:`QueueCorrupt`. ADR-0074 slice 3c: only
+    a verified absence is an empty queue — a dangling link, a FIFO, a directory or a file that
+    can't be opened is ``unreadable:<category>`` (non-blocking, links never followed)."""
+    read = authority_read.read_file(queue_path(root))
+    if read.state == authority_read.ABSENT:
         return []
+    if read.state != authority_read.OK:
+        raise QueueCorrupt(f"unreadable:{read.error}")
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        data = json.loads(read.data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
         raise QueueCorrupt("unparseable") from None
     if not isinstance(data, dict) or data.get("schema_version") != SCHEMA_VERSION:
         raise QueueCorrupt("schema_version")
@@ -228,13 +232,19 @@ def status(root: Path) -> dict[str, Any]:
 def preserve_damaged(root: Path, now: str | None = None) -> Path | None:
     """Copy the damaged queue file's bytes beside it, flushed to disk, and return the copy's path.
     The damaged file itself stays in place, so writes stay refused until :func:`replace_with_recovery`
-    swaps it: a crash between the two leaves the vault blocked, never unguarded."""
+    swaps it: a crash between the two leaves the vault blocked, never unguarded. An entry that
+    can't be read (a link, a FIFO, a permission error) is kept as a hard link to itself (ADR-0074
+    slice 3c)."""
     path = queue_path(root)
-    if not path.exists():
+    read = authority_read.read_file(path)
+    if read.state == authority_read.ABSENT:
         return None
     stamp = (now or _iso_now()).replace(":", "").replace("-", "")
     target = path.with_name(f"publication_pending.damaged-{stamp}-{uuid.uuid4().hex[:6]}.json")
-    durable_write.write_bytes(target, path.read_bytes(), create_only=True)
+    if read.state == authority_read.OK:
+        durable_write.write_bytes(target, read.data, create_only=True)
+    else:
+        durable_write.preserve_entry(path, target)
     return target
 
 

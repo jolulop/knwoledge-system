@@ -19,15 +19,22 @@ clears it. **Evidence** for older ledgers: the ledger's kept/drop timestamps and
 audit entries (tag events that carry the `source_id`). An evidence timestamp gives
 `earliest_known_decision_at`; it becomes `first_decision_at` only when tracking completeness
 establishes nothing earlier was missed. **Display is read-only** (:func:`classify`).
+
+ADR-0074 slice 3c: the tracking record and the audit entries are read non-blocking and never
+through a link. Its written contract stands (a missing or damaged record only reduces certainty —
+conforming to decision 4.5), but a damaged record is never **replaced**: the fresh-vault
+initialization and the migration write one only over a verified absence.
 """
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from app.backend import durable_write
+from app.backend import authority_read, durable_write
 
 TRACKING_NAME = "_tracking.json"
 TAGGED, UNKNOWN = "tagged", "unknown"
@@ -56,31 +63,43 @@ def _parse_time(value: Any) -> datetime | None:
     return dt if dt.tzinfo is not None else None
 
 
+def _read_tracking(reviews_dir: Path) -> tuple[str | None, dict[str, Any] | None]:
+    """`(problem, record)`: `(None, None)` for a verified absence, `(None, record)` when well formed,
+    `(problem, None)` when an entry exists but can't be used."""
+    read = authority_read.read_file(tracking_path(reviews_dir))
+    if read.state == authority_read.ABSENT:
+        return None, None
+    if read.state != authority_read.OK:
+        return f"unreadable ({read.error})", None
+    try:
+        data = json.loads(read.data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return f"unreadable ({type(exc).__name__})", None
+    if not isinstance(data, dict) or set(data) != {"since", "from_start"}:
+        return "not a {since, from_start} object", None
+    if _parse_time(data["since"]) is None:
+        return "`since` is not an ISO timestamp with a time zone", None
+    if not isinstance(data["from_start"], bool):
+        return "`from_start` is not true/false", None
+    return None, data
+
+
 def tracking_problem(reviews_dir: Path) -> str | None:
     """Why an EXISTING `_tracking.json` is malformed (for `validate_tag_links`), or None (absent or
     well formed). An unreadable file counts as malformed here; display treats both as no record."""
-    path = tracking_path(reviews_dir)
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        return f"unreadable ({type(exc).__name__})"
-    if not isinstance(data, dict) or set(data) != {"since", "from_start"}:
-        return "not a {since, from_start} object"
-    if _parse_time(data["since"]) is None:
-        return "`since` is not an ISO timestamp with a time zone"
-    if not isinstance(data["from_start"], bool):
-        return "`from_start` is not true/false"
-    return None
+    return _read_tracking(reviews_dir)[0]
 
 
 def load_tracking(reviews_dir: Path) -> dict[str, Any] | None:
     """The tracking record, or None when absent, unreadable or malformed (provenance only: no record
     means less certainty, never a refusal)."""
-    if tracking_problem(reviews_dir) is not None or not tracking_path(reviews_dir).exists():
-        return None
-    return json.loads(tracking_path(reviews_dir).read_text(encoding="utf-8"))
+    return _read_tracking(reviews_dir)[1]
+
+
+def _tracking_present(reviews_dir: Path) -> bool:
+    """Whether any entry is at the tracking path — a damaged one included (only a verified absence
+    may be written over)."""
+    return authority_read.read_file(tracking_path(reviews_dir)).state != authority_read.ABSENT
 
 
 def _write_tracking(reviews_dir: Path, record: dict[str, Any]) -> None:
@@ -88,30 +107,36 @@ def _write_tracking(reviews_dir: Path, record: dict[str, Any]) -> None:
 
 
 def _tag_audit_exists(reviews_dir: Path) -> bool:
-    audit = Path(reviews_dir) / "audit_log"
-    return audit.is_dir() and any(audit.glob("*-tag-*.json"))
+    """Whether a tag audit entry exists — True as well when the log can't be listed (unknown)."""
+    paths, error = authority_read.list_entries(Path(reviews_dir) / "audit_log", ".json")
+    return error is not None or any("-tag-" in p.name for p in paths)
 
 
-def init_fresh(reviews_dir: Path, now: str) -> dict[str, Any]:
+def init_fresh(reviews_dir: Path, now: str, *,
+               before_write: Callable[[], None] | None = None) -> dict[str, Any]:
     """Explicit fresh-vault initialization (ADR-0072 decision 5): record `from_start: true`. Refused
     when a tracking record, any ledger or any tag audit entry already exists — the human running it
     certifies the vault is fresh; this check only catches an obvious mistake. The caller holds the
-    write lock. Returns `{"outcome": "initialized" | "refused", "reason"?}`."""
-    if tracking_path(reviews_dir).exists():
+    write lock; `before_write` (the CLI's revision advance) runs only once every check passed, so a
+    refusal changes nothing. Returns `{"outcome": "initialized" | "refused", "reason"?}`."""
+    if _tracking_present(reviews_dir):
         return {"outcome": "refused", "reason": "tracking_record_exists"}
-    ledgers = _dir(reviews_dir)
-    if ledgers.is_dir() and any(p.name != TRACKING_NAME for p in ledgers.glob("*.json")):
+    ledgers, error = authority_read.list_entries(_dir(reviews_dir), ".json")
+    if error is not None or any(p.name != TRACKING_NAME for p in ledgers):
         return {"outcome": "refused", "reason": "ledgers_exist"}
     if _tag_audit_exists(reviews_dir):
         return {"outcome": "refused", "reason": "tag_audit_exists"}
+    if before_write is not None:
+        before_write()
     _write_tracking(reviews_dir, {"since": now, "from_start": True})
     return {"outcome": "initialized"}
 
 
 def ensure_migration_record(reviews_dir: Path, now: str) -> bool:
     """The repair migration's tracking record: `from_start: false` from `now`, written ONLY when no
-    record exists (an existing one is preserved: never advanced, never downgraded). True if written."""
-    if tracking_path(reviews_dir).exists():
+    record exists (an existing one is preserved: never advanced, never downgraded — nor a damaged one
+    replaced, ADR-0074 slice 3c). True if written."""
+    if _tracking_present(reviews_dir):
         return False
     _write_tracking(reviews_dir, {"since": now, "from_start": False})
     return True
@@ -128,21 +153,50 @@ def complete_for(tracking: dict[str, Any] | None, discovered_at: Any) -> bool:
     return since is not None and found is not None and found > since
 
 
-NO_EVIDENCE: dict[str, Any] = {"times": [], "untimed": 0}
+NO_EVIDENCE: dict[str, Any] = {"times": [], "untimed": 0, "complete": True}
 
 
-def audit_evidence(reviews_dir: Path) -> dict[str, dict[str, Any]]:
-    """`{source_id: {times: [usable timestamps], untimed: <count>}}` of attributable tag audit events
-    (B2c review round 1: an attributable event is evidence of a decision whether or not its
-    timestamp is usable — existence and timing are tracked apart). Unreadable files are skipped."""
+@dataclass(frozen=True)
+class AuditEvidence:
+    """The attributable tag audit events by document, plus whether the scan saw all of them.
+
+    `complete` is False when the audit log exists but can't be listed, or a tag audit entry in it
+    can't be read or isn't a record (ADR-0074 slice 3c, review round 1). A verified ABSENT log is
+    complete — a fresh vault has none. Incomplete evidence only lowers certainty: it reaches
+    :func:`classify`, :func:`backfill` and :func:`mark_decision` through :meth:`get`, so no document
+    is shown never tagged, and no first-decision time is inferred, from a scan that missed events."""
+
+    by_source: dict[str, dict[str, Any]]
+    complete: bool
+
+    def get(self, source_id: str) -> dict[str, Any]:
+        """One document's evidence `{times, untimed, complete}` (never None)."""
+        ev = self.by_source.get(source_id) or {"times": [], "untimed": 0}
+        return {**ev, "complete": self.complete}
+
+
+def audit_evidence(reviews_dir: Path) -> AuditEvidence:
+    """The attributable tag audit events (B2c review round 1: an attributable event is evidence of a
+    decision whether or not its timestamp is usable — existence and timing are tracked apart).
+    Lenient for display, but never more certain than the scan: a log that can't be listed, or a tag
+    entry that can't be read, makes the evidence incomplete (:class:`AuditEvidence`)."""
     out: dict[str, dict[str, Any]] = {}
-    audit = Path(reviews_dir) / "audit_log"
-    for path in sorted(audit.glob("*-tag-*.json")) if audit.is_dir() else []:
-        try:
-            rec = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+    paths, error = authority_read.list_entries(Path(reviews_dir) / "audit_log", ".json")
+    complete = error is None
+    for path in paths:
+        if "-tag-" not in path.name:
             continue
-        if not isinstance(rec, dict) or rec.get("event") not in TAG_EVENTS:
+        try:
+            rec = authority_read.load_json(path)
+        except FileNotFoundError:
+            continue                                          # removed between listing and read
+        except (OSError, ValueError):
+            complete = False                                  # an unseen event: less certainty
+            continue
+        if not isinstance(rec, dict):
+            complete = False
+            continue
+        if rec.get("event") not in TAG_EVENTS:
             continue
         sid, at = rec.get("source_id"), rec.get("at")
         if not isinstance(sid, str) or not sid:
@@ -152,7 +206,7 @@ def audit_evidence(reviews_dir: Path) -> dict[str, dict[str, Any]]:
             ev["times"].append(at)
         else:
             ev["untimed"] += 1
-    return out
+    return AuditEvidence(out, complete)
 
 
 def tagging_problem(value: Any) -> str | None:
@@ -185,7 +239,8 @@ def _ledger_evidence(ledger: dict[str, Any]) -> dict[str, Any]:
 def _combined(*evidence: dict[str, Any] | None) -> dict[str, Any]:
     evs = [e for e in evidence if e]
     return {"times": [t for e in evs for t in e.get("times") or []],
-            "untimed": sum(int(e.get("untimed") or 0) for e in evs)}
+            "untimed": sum(int(e.get("untimed") or 0) for e in evs),
+            "complete": all(e.get("complete", True) is not False for e in evs)}
 
 
 def _exists(ev: dict[str, Any]) -> bool:
@@ -214,7 +269,7 @@ def backfill(ledger: dict[str, Any], *, complete: bool,
     ev = _combined(_ledger_evidence(ledger), audit)
     if not _exists(ev):
         return {"state": UNKNOWN, "first_decision_at": None, "earliest_known_decision_at": None}
-    return _from_evidence(ev, complete=complete)
+    return _from_evidence(ev, complete=complete and ev["complete"])
 
 
 def mark_decision(ledger: dict[str, Any], *, ledger_existed: bool, complete: bool,
@@ -233,6 +288,7 @@ def mark_decision(ledger: dict[str, Any], *, ledger_existed: bool, complete: boo
     if isinstance(current, dict):                            # stored unknown
         return {"state": TAGGED, "first_decision_at": None, "earliest_known_decision_at": now}
     audit = audit or NO_EVIDENCE
+    complete = complete and _combined(audit)["complete"]   # a scan that missed events never dates
     if not ledger_existed and not _exists(_combined(audit)) and complete:
         return {"state": TAGGED, "first_decision_at": now, "earliest_known_decision_at": now}
     found = backfill(ledger, complete=complete, audit=audit)
@@ -255,6 +311,7 @@ def classify(*, ledger: dict[str, Any] | None, complete: bool,
     - no ledger, no evidence, tracking complete for it → known never tagged;
     - anything else → tagging history unknown."""
     audit = audit or NO_EVIDENCE
+    complete = complete and _combined(audit)["complete"]   # incomplete evidence: never more certain
     if ledger is not None:
         tagging = ledger.get("tagging")
         if not isinstance(tagging, dict):
