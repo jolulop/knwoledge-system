@@ -14,6 +14,8 @@ Apply's sandbox copies both count):
 - `reviews/**` except lock files                 reviews (records, ledgers, audit, journals)
 - `policies/**`                                  policies
 - `db/*.json`                                    db_json
+- `normalized/markdown|chunks|extraction_logs/*`, `normalized/tables/<id>/*`, and everything under
+  `normalized/.install/` and `normalized/.staging/`   extraction (ADR-0074 decision 8, slice 5a)
 
 Lock files (`*.lock`) are never authority. Directory creation is checked too (`os.mkdir`, which
 `Path.mkdir` and `os.makedirs` go through): an authority directory — `raw/`, `raw/manifests/`,
@@ -86,7 +88,18 @@ def family(path: str | os.PathLike | bytes) -> str | None:
             return "policies"
         if head == "db" and len(rest) == 1:
             return "db_json" if name.endswith(".json") or ".json.tmp-" in name else None
+        if i > 0 and parts[i - 1] == "normalized":
+            if head in _EXTRACTION_FILES and len(rest) == 1:
+                return "extraction"
+            if head == "tables" and len(rest) == 2:
+                return "extraction"
+            if head in _EXTRACTION_TREES and rest:
+                return "extraction"
     return None
+
+
+_EXTRACTION_FILES = ("markdown", "chunks", "extraction_logs")
+_EXTRACTION_TREES = (".install", ".staging")
 
 
 _VAULT_DIRS = {"raw": "manifest", "wiki": "page", "reviews": "reviews", "policies": "policies",
@@ -111,6 +124,11 @@ def directory_family(path: str | os.PathLike | bytes) -> str | None:
     for anc in parts[:-1]:
         if anc in ("reviews", "policies"):
             return anc
+    if parent == "normalized" and name in (*_EXTRACTION_FILES, "tables", *_EXTRACTION_TREES):
+        return "extraction"
+    for i, anc in enumerate(parts[:-1]):
+        if i > 0 and parts[i - 1] == "normalized" and anc in ("tables", *_EXTRACTION_TREES):
+            return "extraction"
     return None
 
 

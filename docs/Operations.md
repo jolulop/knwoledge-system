@@ -344,6 +344,24 @@ operator recovers it.
 Exit codes as for supersede recovery: 0, 1 refused or failed, 2 usage, 3 busy, 4 publication queue
 unreadable, 6 state changed, 9 vault revision unavailable.
 
+**Interrupted extraction install (ADR-0074 decision 8).** Extraction installs each document's new
+outputs through an install journal (`normalized/.install/<source_id>.json`). A crash, kill or I/O
+failure mid-install leaves the journal open; **the next extraction run completes it first** (`uv run
+python scripts/extract_sources.py`, or `POST /jobs/extract`) — no manual step. The run summary's
+`install_recovery` lists what it completed, closed, found unrecoverable or blocked, and
+`staging_cleanup` what leftover staging it removed. While a journal is open, `validate_normalized`
+and lint report "extraction install <state> — run extraction".
+
+- **Unrecoverable** (the staged generation is missing or changed, or the extraction configuration
+  changed since): the journal, staging and holding directories are kept as they are and the document
+  has no usable extraction; the next extraction of that document (any normal run, or with `--force`)
+  installs a complete new generation over it and retires the old artifacts.
+- **Damaged journal** (unreadable or corrupt): the document is not extracted and no staging is
+  cleaned up anywhere until it is resolved; restore `normalized/.install/` from a backup (dedicated
+  repair tooling is deferred until such damage is first observed).
+- **Damaged manifest:** the install stays open until the manifest is recovered
+  (`scripts/repair_manifest.py`); the next run then completes it.
+
 ### Executor-backed review types (`POST /reviews/apply`)
 
 Every review type below has a deterministic, key-free executor (the canonical set is `_APPLY_TYPES` in

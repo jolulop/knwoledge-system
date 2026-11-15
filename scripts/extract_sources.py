@@ -47,6 +47,15 @@ def main(argv: list[str]) -> int:
     print(f"Errors: {summary['errors']}")
     print(f"Skipped (unchanged): {summary['skipped_unchanged']}")
     print(f"Skipped (unsupported): {summary['skipped_unsupported']}")
+    rec = summary["install_recovery"]
+    if rec["completed"] or rec["unrecoverable"] or rec["blocked"] or rec["problems"]:
+        print(f"Interrupted installs completed: {len(rec['completed'])}")
+        for sid, why in sorted({**rec["unrecoverable"], **rec["blocked"]}.items()):
+            print(f"  - {sid}: no usable extraction (interrupted install: {why})")
+        for problem in rec["problems"]:
+            print(f"  - install journals: {problem}")
+    if summary["staging_cleanup"]["blocked"]:
+        print(f"Staging cleanup skipped: {summary['staging_cleanup']['blocked']}")
     if summary["error_details"]:
         for err in summary["error_details"]:
             print(f"  - {err['source_id']}: {err['error']}")

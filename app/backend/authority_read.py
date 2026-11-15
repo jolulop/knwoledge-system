@@ -138,6 +138,7 @@ class FileHash:
     path: Path
     sha256: str | None = None
     error: str | None = None
+    size: int | None = None
 
 
 def hash_file(path: Path) -> FileHash:
@@ -148,14 +149,16 @@ def hash_file(path: Path) -> FileHash:
     if failed is not None:
         return FileHash(failed.state, path, error=failed.error)
     h = hashlib.sha256()
+    size = 0
     try:
         while chunk := os.read(fd, _CHUNK):
             h.update(chunk)
+            size += len(chunk)
     except OSError as exc:
         return FileHash(UNREADABLE, path, error=type(exc).__name__)
     finally:
         os.close(fd)
-    return FileHash(OK, path, sha256=h.hexdigest())
+    return FileHash(OK, path, sha256=h.hexdigest(), size=size)
 
 
 def read_text(path: Path) -> TextRead:

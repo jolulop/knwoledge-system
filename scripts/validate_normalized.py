@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from app.backend import extraction_install as xi
 from app.backend.manifests import (
     OK,
     is_source_id,
@@ -188,6 +189,17 @@ def main(argv: list[str]) -> int:
     errors: list[str] = []
     checked = 0
     status_by_id: dict[str, str] = {}
+    # ADR-0074 decision 8: fails while any extraction install is incomplete (installing,
+    # unrecoverable or a damaged journal) or the journals can't all be read.
+    journals = xi.inventory(xi.Layout(root / "normalized"))
+    blocked = journals.blocking()
+    for sid, read in sorted(blocked.items()):
+        why = (read.entry or {}).get("reason") or read.error
+        errors.append(f"{sid}: extraction install {read.state}" + (f" ({why})" if why else "")
+                      + " — run extraction")
+    for problem in journals.problems:
+        if not any(problem.startswith(f"install journal {sid}.json") for sid in blocked):
+            errors.append(f"normalized/.install: {problem}")
     paths, listing_error = manifest_files(manifests_dir)
     if listing_error is not None:
         errors.append(f"raw/manifests: could not be listed ({listing_error})")
@@ -207,6 +219,8 @@ def main(argv: list[str]) -> int:
             status_by_id[sid] = manifest.get("ingestion_status")
         if manifest.get("ingestion_status") not in _EXTRACTED:
             continue
+        if sid in blocked:
+            continue                                   # its outputs are a mixed generation
         checked += 1
         errors.extend(_check_source(root, manifest))
 

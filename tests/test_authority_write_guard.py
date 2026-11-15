@@ -34,7 +34,7 @@ _HELPER = "the durable-write helper itself"
 _LOCK = "a lock file (never authority)"
 _SANDBOX = "the throwaway Apply-preview sandbox (ADR-0040), not live authority"
 _PROJECTION = "a projection, rebuildable by definition (ADR-0068 §1)"
-_NORMALIZED = "normalized/ derived state; extraction install is ADR-0074 slice 5"
+_NORMALIZED = "normalized/ derived state outside the extraction install (ADR-0074 decision 8)"
 _EVAL = "an evaluation report / scratch vault outside the live vault"
 _INDEX = "an index / model-cache directory, rebuildable (not an authority directory)"
 ALLOWED: dict[tuple[str, str, str], str] = {
@@ -51,15 +51,13 @@ ALLOWED: dict[tuple[str, str, str], str] = {
     ("app/backend/durable_write.py", "remove", "os.unlink"): _HELPER,
     ("app/backend/durable_write.py", "remove_dir", "os.rmdir"): _HELPER,
     ("app/backend/durable_write.py", "preserve_entry", "os.link"): _HELPER,
+    ("app/backend/durable_write.py", "move", "os.replace"): _HELPER,
+    ("app/backend/durable_write.py", "remove_tree", "shutil.rmtree"): _HELPER,
     ("app/backend/apply_sandbox.py", "cleanup_sandbox", "shutil.rmtree"): _SANDBOX,
     ("app/backend/vector_index.py", "_swap_dir", "shutil.rmtree"): _PROJECTION + " (vector index)",
     ("app/backend/vector_index.py", "_build_full", "shutil.rmtree"): _PROJECTION + " (vector index)",
     ("app/workers/authors.py", "publish", ".unlink"):
         _PROJECTION + " (wiki/Authors pages, generated from manifests)",
-    ("app/workers/extract.py", "_stage_outputs", "shutil.rmtree"): _NORMALIZED,
-    ("app/workers/extract.py", "_install_outputs", "shutil.rmtree"): _NORMALIZED,
-    ("app/workers/extract.py", "_extract_one", "shutil.rmtree"): _NORMALIZED,
-    ("app/workers/extract.py", "extract_sources", "shutil.rmtree"): _NORMALIZED,
     ("scripts/eval_contradictions.py", "evaluate", "shutil.rmtree"): _EVAL,
     ("app/backend/authority_read.py", "_open_regular", "os.open"):
         "a read-only open (O_RDONLY | O_NONBLOCK) of the shared typed authority reader, ADR-0074 "
@@ -82,8 +80,6 @@ ALLOWED: dict[tuple[str, str, str], str] = {
     ("app/backend/main.py", "run_eval_endpoint", ".mkdir"): _EVAL,
     ("app/workers/claims.py", "_write_source_artifact", ".mkdir"): _NORMALIZED,
     ("app/workers/enrich.py", "enrich_sources", ".mkdir"): _NORMALIZED,
-    ("app/workers/extract.py", "_stage_outputs", ".mkdir"): _NORMALIZED,
-    ("app/workers/extract.py", "extract_sources", ".mkdir"): _NORMALIZED,
     ("app/workers/items.py", "_write_artifact", ".mkdir"): _NORMALIZED,
     ("app/workers/synthesis.py", "generate_syntheses", ".mkdir"): _NORMALIZED,
     ("scripts/backup.py", "_create_backup_report", ".mkdir"):
@@ -102,9 +98,6 @@ ALLOWED: dict[tuple[str, str, str], str] = {
     ("app/workers/enrich.py", "enrich_sources", ".write_text"): _NORMALIZED,
     ("app/workers/items.py", "_write_artifact", ".write_text"): _NORMALIZED,
     ("app/workers/synthesis.py", "generate_syntheses", ".write_text"): _NORMALIZED,
-    ("app/workers/extract.py", "_stage_outputs", ".write_text"): _NORMALIZED,
-    ("app/workers/extract.py", "_install_outputs", "os.replace"): _NORMALIZED,
-    ("app/workers/extract.py", "_write_log", ".write_text"): _NORMALIZED,
     ("app/workers/lint.py", "_append_log", "open(a)"): _PROJECTION + " (wiki/log.md)",
     ("app/workers/retention.py", "_append_log", "open(a)"): _PROJECTION + " (wiki/log.md)",
     ("app/workers/wiki.py", "_append_log", ".write_text"): _PROJECTION + " (wiki/log.md)",
@@ -397,7 +390,13 @@ def test_the_runtime_guard_flags_an_unguarded_authority_write_from_project_code(
     ("v/reviews/pending/rev.json", "reviews"), ("v/reviews/tag_links/.lock", None),
     ("v/reviews/audit_log/x.json", "reviews"), ("v/policies/blocked_tags.txt", "policies"),
     ("v/db/revision.json", "db_json"), ("v/db/.vault.lock", None), ("v/db/graph.sqlite", None),
-    ("v/normalized/markdown/src_x.md", None), ("v/wiki/index.md", None),
+    ("v/normalized/markdown/src_x.md", "extraction"), ("v/wiki/index.md", None),
+    ("v/normalized/chunks/src_x.jsonl", "extraction"),
+    ("v/normalized/tables/src_x/0.csv", "extraction"), ("v/normalized/tables/x.csv", None),
+    ("v/normalized/extraction_logs/src_x.json", "extraction"),
+    ("v/normalized/.install/src_x.json", "extraction"),
+    ("v/normalized/.staging/src_x-att_0/tables/0.csv", "extraction"),
+    ("v/normalized/enrichment/src_x.json", None), ("v/normalized/claims/src_x.json", None),
 ])
 def test_family_classification(path, fam):
     assert write_guard.family(path) == fam
@@ -417,8 +416,11 @@ def test_the_runtime_guard_flags_an_unguarded_authority_directory_creation(tmp_p
     found = write_guard.take_violations()
     assert all("reviews directory" in f for f in found)
     assert {f.split(" by ")[0].rsplit("/", 1)[-1] for f in found} == {"reviews", "audit_log"}
-    ns["rogue"](tmp_path / "normalized" / "markdown")                         # not authority
+    ns["rogue"](tmp_path / "normalized" / "enrichment")                       # not authority
     assert write_guard.take_violations() == []
+    ns["rogue"](tmp_path / "normalized" / "markdown")              # extraction (slice 5a)
+    assert [f.split(" by ")[0].rsplit("/", 1)[-1] for f in write_guard.take_violations()] == [
+        "markdown"]
     from app.backend import durable_write
     write_guard.helper_dirs.clear()
     durable_write.make_dirs(tmp_path / "wiki" / "Items")
@@ -462,8 +464,9 @@ def test_the_runtime_guard_flags_an_unguarded_authority_removal(tmp_path):
     ("v/wiki", "page"), ("v/wiki/Items", "page"), ("v/wiki/Claims", "page"),
     ("v/wiki/Synthesis", "page"), ("v/wiki/Sources", None), ("v/reviews", "reviews"),
     ("v/reviews/audit_log", "reviews"), ("v/reviews/tag_links/x", "reviews"),
-    ("v/policies", "policies"), ("v/db", "db_json"), ("v/normalized/markdown", None),
-    ("v/indexes/keyword", None),
+    ("v/policies", "policies"), ("v/db", "db_json"), ("v/normalized/markdown", "extraction"),
+    ("v/normalized/tables/src_x", "extraction"), ("v/normalized/.staging/a/tables", "extraction"),
+    ("v/normalized", None), ("v/normalized/enrichment", None), ("v/indexes/keyword", None),
 ])
 def test_directory_family_classification(path, fam):
     assert write_guard.directory_family(path) == fam

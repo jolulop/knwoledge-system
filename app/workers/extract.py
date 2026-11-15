@@ -17,8 +17,6 @@ the keyword index (`app/workers/publication.py`).
 from __future__ import annotations
 
 import json
-import os
-import shutil
 import importlib
 import signal
 import threading
@@ -29,7 +27,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from app.backend import db, write_lock
+from app.backend import db, durable_write, write_lock
+from app.backend import extraction_install as xi
 from app.backend.manifests import (
     EXTRACTION_FIELDS,
     apply_extraction_state,
@@ -161,44 +160,23 @@ def is_supported(extension: str) -> bool:
 
 
 def _stage_outputs(
-    dirs: dict[str, Path], source_id: str, markdown_text: str, chunks: list[Any],
+    dirs: dict[str, Path], source_id: str, attempt_id: str, markdown_text: str, chunks: list[Any],
     table_files: list[tuple[str, str]],
-) -> None:
-    """Write one source's outputs to `normalized/.staging/<source_id>/`, outside the write lock
-    (ADR-0068); :func:`_install_outputs` moves them into place under it."""
-    stage = dirs["staging"] / source_id
-    if stage.exists():
-        shutil.rmtree(stage)
-    try:
-        (stage / "tables").mkdir(parents=True)
-        (stage / "markdown.md").write_text(markdown_text, encoding="utf-8")
-        chunk_lines = [json.dumps(c.to_dict(), ensure_ascii=False) for c in chunks]
-        body = "\n".join(chunk_lines) + ("\n" if chunk_lines else "")
-        (stage / "chunks.jsonl").write_text(body, encoding="utf-8")
-        # Per-source tables dir is always present (even empty).
-        for filename, content in table_files:
-            (stage / "tables" / filename).write_text(content, encoding="utf-8")
-    except BaseException:
-        shutil.rmtree(stage, ignore_errors=True)
-        raise
-
-
-def _install_outputs(dirs: dict[str, Path], source_id: str) -> None:
-    """Move staged outputs into place by rename (call under the write lock): readers holding the
-    lock see the old Markdown, chunks and tables or the new ones, never a mix."""
-    stage = dirs["staging"] / source_id
-    os.replace(stage / "markdown.md", dirs["markdown"] / f"{source_id}.md")
-    os.replace(stage / "chunks.jsonl", dirs["chunks"] / f"{source_id}.jsonl")
-    table_dir = dirs["tables"] / source_id
-    if table_dir.exists():
-        os.replace(table_dir, stage / "old_tables")
-    os.replace(stage / "tables", table_dir)
-    shutil.rmtree(stage)
+) -> dict[str, Any]:
+    """Write one attempt's complete generation durably to its own staging directory, outside the
+    write lock (ADR-0068); return its output inventory for the install journal (ADR-0074
+    decision 8). The per-source tables directory is always installed, even empty."""
+    chunk_lines = [json.dumps(c.to_dict(), ensure_ascii=False) for c in chunks]
+    body = "\n".join(chunk_lines) + ("\n" if chunk_lines else "")
+    return xi.stage_generation(
+        dirs["layout"], source_id, attempt_id, markdown=markdown_text.encode("utf-8"),
+        chunks=body.encode("utf-8"),
+        tables=[(name, content.encode("utf-8")) for name, content in table_files])
 
 
 def _write_log(dirs: dict[str, Path], source_id: str, log: dict[str, Any]) -> None:
-    path = dirs["extraction_logs"] / f"{source_id}.json"
-    path.write_text(json.dumps(log, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    """The extraction log of an attempt that installs no outputs (a first-time failure)."""
+    durable_write.write_bytes(dirs["extraction_logs"] / f"{source_id}.json", xi.log_bytes(log))
 
 
 # --- single source ----------------------------------------------------------
@@ -223,13 +201,15 @@ def _extract_one(
     timeout_s: int,
     target_chars: int,
     max_chars: int,
-) -> tuple[dict[str, Any], bool, bool]:
+    attempt_id: str,
+) -> tuple[dict[str, Any], bool, dict[str, Any] | None]:
     """Extract one source, outside the write lock: nothing it produces is visible yet.
 
     Returns ``(log, persisted, staged)``. ``persisted`` is False when a failed re-extraction
     left a prior successful result untouched (last-good preserved), so the caller must
-    not rewrite the manifest or the log. ``staged`` says outputs wait in the staging dir for
-    :func:`_install_outputs`. ``log['status']`` drives the run summary either way.
+    not rewrite the manifest or the log. ``staged`` is the output inventory of the generation
+    waiting in the attempt's staging directory for the journaled install, or None.
+    ``log['status']`` drives the run summary either way.
     """
     source_id = manifest["source_id"]
     started = iso_now()
@@ -240,7 +220,7 @@ def _extract_one(
         and (dirs["markdown"] / f"{source_id}.md").exists()
     )
 
-    staged = False
+    staged: dict[str, Any] | None = None
     log: dict[str, Any] = {
         "source_id": source_id,
         "status": "error",
@@ -287,8 +267,8 @@ def _extract_one(
         markdown_text, chunks = assemble(
             source_id, extraction.elements, target_chars=target_chars, max_chars=max_chars
         )
-        _stage_outputs(dirs, source_id, markdown_text, chunks, extraction.tables)
-        staged = True
+        staged = _stage_outputs(dirs, source_id, attempt_id, markdown_text, chunks,
+                                extraction.tables)
 
         log.update(
             status=extraction.status,
@@ -334,11 +314,11 @@ def _extract_one(
     # and log untouched — the failure is surfaced in the run/job summary, not by
     # destroying usable evidence (last-good wins). Only flip to error when there is no
     # good prior state to protect.
-    if staged:                                            # failed after staging: discard it
-        shutil.rmtree(dirs["staging"] / source_id, ignore_errors=True)
+    if staged is not None:                                # failed after staging: discard it
+        xi.discard_stage(dirs["layout"], source_id, attempt_id)
     if prior_success:
         log["preserved_prior"] = True
-        return log, False, False
+        return log, False, None
 
     apply_extraction_state(
         manifest,
@@ -350,7 +330,7 @@ def _extract_one(
         chunk_count=log["chunk_count"],
         page_count=log["page_count"],
     )
-    return log, True, False
+    return log, True, None
 
 
 # --- run --------------------------------------------------------------------
@@ -360,8 +340,10 @@ def _iso_mtime(path: Path) -> str:
     return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat(timespec="seconds")
 
 
-def _already_extracted(manifest: dict[str, Any], root: Path, markdown_dir: Path) -> bool:
-    """True only when a prior extraction is on disk AND the raw file has not drifted.
+def _already_extracted(manifest: dict[str, Any], root: Path, markdown_dir: Path,
+                       journal: xi.JournalRead | None = None) -> bool:
+    """True only when a prior extraction is on disk AND the raw file has not drifted, and no install
+    journal blocks the outputs (an unrecoverable install is retried: decision 8).
 
     The skip stays cheap (no re-hash) but is gated on the raw file's size/mtime still
     matching the manifest. A drifted (or missing) raw file is NOT skipped, so
@@ -369,6 +351,8 @@ def _already_extracted(manifest: dict[str, Any], root: Path, markdown_dir: Path)
     generating from stale normalized evidence (ADR-0024).
     """
     if manifest.get("ingestion_status") not in {"extracted", "partial"}:
+        return False
+    if journal is not None and not journal.usable:
         return False
     if not (markdown_dir / f"{manifest['source_id']}.md").exists():
         return False
@@ -387,6 +371,69 @@ def _already_extracted(manifest: dict[str, Any], root: Path, markdown_dir: Path)
     except OSError:
         return False
     return True
+
+
+def _published(run: publication.Run, source_id: str, intent: str | None) -> bool:
+    """Publish one document's Source page from its install's intent (under the write lock) and say
+    whether it is published, so its install journal may close."""
+    out = run.publish(intent, sources=[source_id], refresh=True) if intent else None
+    if out is None:
+        out = publication.publish(run.root, sources=[source_id], origin=run.origin)
+    return out["status"] == publication.PUBLISHED
+
+
+def _commit(root: Path, run: publication.Run, dirs: dict[str, Any], manifests_dir: Path,
+            manifest: dict[str, Any], log: dict[str, Any], staged: dict[str, Any] | None,
+            attempt_id: str, config: dict[str, int]) -> str | None:
+    """Commit one attempt under the write lock; None, or the error reason (nothing installed, or an
+    install left to recovery). With outputs: intent -> journal -> verified renames, log, manifest
+    fields -> `installed` -> publication -> journal closed (ADR-0074 decision 8)."""
+    layout: xi.Layout = dirs["layout"]
+    source_id = manifest["source_id"]
+    with write_lock.hold(root / "reviews"):
+        now_read = read_manifest(manifests_dir, source_id)
+        if now_read.state != OK:
+            # ADR-0074 decision 2: gone or damaged since the scan — never recreated or overwritten
+            # from the scan's copy; nothing is installed.
+            if staged is not None:
+                xi.discard_stage(layout, source_id, attempt_id)
+            return f"manifest_{now_read.state}"
+        previous = xi.read_journal(layout, source_id)
+        if staged is None:
+            if not previous.usable:
+                return xi.INCOMPLETE if previous.state == xi.INSTALLING else None
+            intent = run.intent(sources=[source_id])
+            _write_log(dirs, source_id, log)
+            current = now_read.record
+            for key in EXTRACTION_FIELDS:
+                current[key] = manifest.get(key)
+            save_manifest(manifests_dir, current)
+            run.publish(intent, sources=[source_id])
+            return None
+        intent = run.intent(sources=[source_id])
+        entry = xi.new_journal(
+            source_id, attempt_id, source_sha256=now_read.record["sha256"], config=config,
+            intent=intent, outputs=staged,
+            obsolete_tables=xi.obsolete_tables(layout, source_id, staged["tables"]), log=log,
+            manifest_fields={k: manifest.get(k) for k in EXTRACTION_FIELDS},
+            supersedes=xi.supersedes_for(previous), now=iso_now())
+        try:
+            xi.begin(layout, entry, previous)
+        except xi.InstallBlocked as exc:
+            xi.discard_stage(layout, source_id, attempt_id)
+            return exc.reason
+        try:
+            entry = xi.install(layout, manifests_dir, entry, now=iso_now())
+        except xi.InstallBlocked as exc:
+            return exc.reason
+        except OSError as exc:                    # the journal stays `installing` for recovery
+            return f"{xi.INCOMPLETE}:{type(exc).__name__}"
+        if entry["state"] != xi.INSTALLED:
+            return f"{xi.INCOMPLETE}:{entry['reason']}"
+        out = run.publish(intent, sources=[source_id])
+        if out is not None and out["status"] == publication.PUBLISHED:
+            xi.close(layout, source_id)
+    return None
 
 
 def extract_sources(
@@ -415,8 +462,11 @@ def extract_sources(
         "extraction_logs": normalized / "extraction_logs",
     }
     for path in dirs.values():
-        path.mkdir(parents=True, exist_ok=True)
-    dirs["staging"] = normalized / ".staging"             # created per source, removed on install
+        durable_write.make_dirs(path)
+    layout = xi.Layout(normalized)
+    dirs["layout"] = layout                               # staging, holding and install journals
+    config = {"extract_code_version": EXTRACT_CODE_VERSION, "target_chars": target_chars,
+              "max_chars": max_chars}
 
     now = iso_now()
     job_id = f"job_{uuid.uuid4().hex[:16]}"
@@ -431,6 +481,12 @@ def extract_sources(
 
     run = publication.Run(root, "extract")
     try:
+        # ADR-0074 decision 8 / 7.4: complete every open install journal, then remove only the
+        # staging no journal refers to — before any new attempt, under vault lock -> write lock.
+        with write_lock.hold(root / "reviews"):
+            recovery = xi.recover(layout, manifests_dir, config, now=now,
+                                  publish=lambda sid, intent: _published(run, sid, intent))
+            cleanup = xi.cleanup_staging(layout)
         inventory = scan_manifests(manifests_dir)
         manifests = inventory.valid
         if source_ids is not None:
@@ -451,41 +507,37 @@ def extract_sources(
                 counts["skipped_unsupported"] += 1
                 continue
             considered += 1
-            if not force and _already_extracted(manifest, root, dirs["markdown"]):
+            journal = xi.read_journal(layout, source_id)
+            if journal.state in (xi.UNREADABLE, xi.CORRUPT, xi.INSTALLING):
+                # A damaged journal is unknown recovery state; an install recovery could not
+                # complete stays as it is. Never extracted over (decision 8).
+                reason = (xi.INCOMPLETE if journal.state == xi.INSTALLING
+                          else f"install_journal_{journal.state}")
+                counts["errors"] += 1
+                errors.append({"source_id": source_id, "error": reason, "skip_reason": reason,
+                               "preserved_prior": True})
+                continue
+            if not force and _already_extracted(manifest, root, dirs["markdown"], journal):
                 counts["skipped_unchanged"] += 1
                 continue
 
+            attempt_id = xi.new_attempt_id()
             log, persisted, staged = _extract_one(
                 manifest, root, dirs,
                 max_file_mb=max_file_mb, timeout_s=timeout_s,
-                target_chars=target_chars, max_chars=max_chars,
+                target_chars=target_chars, max_chars=max_chars, attempt_id=attempt_id,
             )
             if persisted:
                 # ADR-0068: install the outputs, the log and the manifest fields together under the
                 # write lock, onto the manifest as it is now (a status changed meanwhile is kept),
                 # then publish the document's Source page before releasing it (decision 5).
-                with write_lock.hold(root / "reviews"):
-                    now_read = read_manifest(manifests_dir, source_id)
-                    if now_read.state != OK:
-                        # ADR-0074 decision 2: gone or damaged since the scan — never recreated
-                        # or overwritten from the scan's copy; nothing is installed.
-                        if staged:
-                            shutil.rmtree(dirs["staging"] / source_id, ignore_errors=True)
-                        counts["errors"] += 1
-                        errors.append({"source_id": source_id,
-                                       "error": f"manifest_{now_read.state}",
-                                       "skip_reason": f"manifest_{now_read.state}",
-                                       "preserved_prior": True})
-                        continue
-                    intent = run.intent(sources=[source_id])
-                    if staged:
-                        _install_outputs(dirs, source_id)
-                    _write_log(dirs, source_id, log)
-                    current = now_read.record
-                    for key in EXTRACTION_FIELDS:
-                        current[key] = manifest.get(key)
-                    save_manifest(manifests_dir, current)
-                    run.publish(intent, sources=[source_id])
+                failure = _commit(root, run, dirs, manifests_dir, manifest, log, staged,
+                                  attempt_id, config)
+                if failure is not None:
+                    counts["errors"] += 1
+                    errors.append({"source_id": source_id, "error": failure,
+                                   "skip_reason": failure, "preserved_prior": True})
+                    continue
 
             status = log["status"]
             if status == "extracted":
@@ -512,6 +564,8 @@ def extract_sources(
             "skipped_unchanged": counts["skipped_unchanged"],
             "skipped_unsupported": counts["skipped_unsupported"],
             **inventory.report(),
+            "install_recovery": recovery,
+            "staging_cleanup": cleanup,
             "error_details": errors,
             "warnings": warnings,
             "forced": force,

@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import stat
 import threading
 import uuid
@@ -354,3 +355,53 @@ def preserve_entry(path: Path, target: Path) -> None:
             sync_dir(target.parent)
         except OSError as exc:
             raise UncertainCompletion(target, exc, "linked") from exc
+
+
+def move(src: Path, dst: Path) -> None:
+    """Durably rename the file `src` to `dst`, replacing `dst` (ADR-0074 decision 8: an extraction
+    install moves a staged, already fsynced file into place, and an obsolete table into holding).
+    `dst`'s directory is established first; after the rename both directories are fsynced (the
+    entry left one and joined the other). A failed sync after the rename is
+    :class:`UncertainCompletion` — the file has moved but the move may not survive a power loss."""
+    src, dst = Path(src), Path(dst)
+    with _operation():
+        _establish(dst.parent)
+        os.replace(src, dst)
+        try:
+            sync_dir(dst.parent)
+            if src.parent != dst.parent:
+                sync_dir(src.parent)
+        except OSError as exc:
+            raise UncertainCompletion(dst, exc, "moved") from exc
+
+
+def remove_tree(directory: Path) -> bool:
+    """Durably remove the directory tree `directory` (derived extraction state: a staging or holding
+    directory): delete it, then fsync its parent. Returns False when it was already absent (its
+    parent is synced all the same: an earlier run may have removed it and failed before the sync).
+    A link is refused (``OSError``), never followed. A failed sync after the removal is
+    :class:`UncertainCompletion`."""
+    directory = Path(directory)
+    with _operation():
+        try:
+            st = os.lstat(directory)
+        except FileNotFoundError:
+            removed = False
+        else:
+            if not stat.S_ISDIR(st.st_mode):
+                raise NotADirectoryError(f"{directory.name} is not a directory")
+            shutil.rmtree(directory)
+            with _established_lock:
+                _established.discard((st.st_dev, st.st_ino))
+            removed = True
+        try:
+            sync_dir(directory.parent)
+        except FileNotFoundError:
+            if removed:
+                raise
+            return False
+        except OSError as exc:
+            if removed:
+                raise UncertainCompletion(directory, exc, "removed") from exc
+            raise
+        return removed

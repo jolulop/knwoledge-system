@@ -9,7 +9,9 @@
   decision transitions, per-decision audit entries, typed review read model, symlinks refused).
   **Slice 3c (policies, journals, `db/*.json`) implemented 2026-11-14.** **Slice 4 (decision 3:
   `scripts/repair_manifest.py`) implemented 2026-11-15**, with Details history auditing (user
-  decision 2026-11-15). Slices 5–6 and changes 7a–7c per decision 9 not yet.
+  decision 2026-11-15). **Slice 5a (decision 8 install journal and recovery, 7.4 staging
+  cleanup) implemented 2026-11-15** — `app/backend/extraction_install.py`; slice 5b (consistent
+  consumer reads), slice 6 and changes 7a–7c per decision 9 not yet.
 - **Operational acceptance** (user decision 2026-11-14): ADR-0074 is **not operationally accepted
   until change 7a lands**. Slices continue in decision 9's order, but until 7a no document, release
   note or review answer may claim that visibility fails closed: a stale keyword / vector index can
@@ -881,6 +883,65 @@ extraction").
 failure after each one, **recovery interrupted again**, **directory-sync failures**, empty and
 table-changing generations (tables added, removed, set emptied), incompatible and damaged journals,
 the unrecoverable transition superseded by a fresh attempt, and **consumer reads racing an install**.
+
+**Sub-slices.** Slice 5 is split (decision 9): **5a** — the journal, install, recovery, the
+unrecoverable transition and its supersession, staging cleanup (7.4), and `validate_normalized` /
+lint reporting; **5b** — consistent consumer reads (enrich, claims, items, synthesis inputs, keyword
+and vector reindex, search and `/query` exclusion, the document screen's two failure situations)
+with the race tests. Until 5b, a consumer can still read a document whose journal is open — the
+pre-slice exposure, now visible to `validate_normalized` and lint.
+
+**As implemented (slice 5a — `app/backend/extraction_install.py`, `app/workers/extract.py`).**
+
+- **Layout.** Staging per attempt, `normalized/.staging/<id>-<attempt_id>/` (`att_<12 hex>`; a new
+  attempt never collides with a preserved one); the journal `normalized/.install/<id>.json`; holding
+  `normalized/.install/<id>-<attempt_id>.holding/`. No path is read from a journal: every path
+  derives from the validated id, attempt id and table names (`[0-9A-Za-z][0-9A-Za-z._-]*`).
+- **Staging** writes every file through `durable_write` (create-only, fsynced, directories
+  established) and returns the inventory (size + sha256 per file, the table set possibly empty).
+- **Journal** (version 1): attempt id, stage, the unrecoverable reason, `source_sha256` (agreeing
+  with the id), the configuration it is bound to (`extract_code_version`, `target_chars`,
+  `max_chars`), the publication intent, the inventory, the obsolete tables, the log and its sha256,
+  the extraction-owned manifest fields, the superseded attempts, times. Exactly these fields; any
+  other content reads as `corrupt` (`invalid_field:<name>`).
+- **Install order**, under the write lock after the intent: journal (create-only, or replacing an
+  `unrecoverable` / `installed` one it supersedes) → **verify every output first** (the staged
+  file's bytes, or the installed bytes when it already moved) so a generation that can't complete is
+  refused with nothing moved → table entries outside the inventory into holding → verified renames
+  (`durable_write.move`: replace, then fsync both directories) → every affected directory fsynced
+  again → the log (written, or its barrier repeated) → the manifest's extraction fields (onto the
+  current manifest; governance and provenance kept) → full verification (bytes, the exact table set,
+  log, manifest fields) → `installed` → holding and staging (own and superseded) retired →
+  publication → journal closed only when the document's publication succeeded (else it stays
+  `installed`, usable, closed by the next run's recovery).
+- **Recovery** at every extraction run start, under the write lock, before any attempt: `installing`
+  journals are completed (another configuration → `unrecoverable: incompatible_configuration`;
+  another checksum → `incompatible_source`; a damaged manifest → left as it is, reported
+  `manifest_<state>`; an I/O failure → left for the next run), `installed` ones retired, published
+  and closed; `unrecoverable` and damaged ones reported. The run summary carries
+  `install_recovery` and `staging_cleanup`.
+- **Per document** in the run: a damaged or still-`installing` journal is never extracted over (an
+  error `install_journal_<state>` / `extraction_install_incomplete`, prior state preserved); an
+  `unrecoverable` one is not skipped as unchanged — the fresh attempt supersedes it.
+- **Staging cleanup** after recovery removes staging entries and holding directories no journal
+  names (the pre-journal `normalized/.staging/<id>/` layout included), and nothing at all while the
+  journal inventory is incomplete or any journal damaged.
+- **Reporting:** `validate_normalized` fails per blocked document ("extraction install <state> —
+  run extraction") and for an unreadable inventory; lint files a high `extraction_install_incomplete`
+  finding with that remediation.
+- **Write guard:** the runtime guard gained an `extraction` family (`normalized/markdown`, `chunks`,
+  `extraction_logs`, `tables/<id>/`, `.install/`, `.staging/`), so every install write is proved to go
+  through `durable_write` (new helpers `move` and `remove_tree`).
+- **Tests** (`tests/test_extraction_install.py`): a crash before **every** durable write of a
+  re-extraction (old generation if the journal was never written, the new one once it was — never
+  a mix; nothing left open or staged; `validate_normalized` passes), every second install crash
+  with the recovery crashed again at each of its own writes, emptied / added / changed table sets,
+  a failed directory sync after the last rename whose recovery repeats the barrier, an `installed`
+  journal kept open across failed publications, incompatible configuration and staged-file mismatch
+  or loss (`unrecoverable`, every artifact byte-identical), supersession by a fresh attempt
+  (superseded artifacts retired), damaged journals blocking the document and all cleanup (never
+  re-parsed), cleanup removing only unreferenced entries, a final-verification failure, governance
+  kept across recovery, and a damaged manifest blocking recovery until repaired.
 
 ## Part C — order of work and deferrals
 

@@ -616,6 +616,29 @@ def _check_awaiting_reconciliation(manifests_dir: Path | None,
     return out
 
 
+def _check_install_journals(normalized_dir: Path) -> list[dict[str, Any]]:
+    """`extraction_install_incomplete` (high): a document whose extraction install journal is
+    `installing`, `unrecoverable` or damaged, or a journal inventory that can't be read completely
+    (ADR-0074 decision 8). Its normalized outputs must not be used until extraction completes it."""
+    from app.backend import extraction_install as xi
+    inv = xi.inventory(xi.Layout(normalized_dir))
+    out = []
+    for sid, read in sorted(inv.blocking().items()):
+        why = (read.entry or {}).get("reason") or read.error
+        state = read.state + (f" ({why})" if why else "")
+        out.append({"check": xi.INCOMPLETE, "severity": "high", "subject": sid,
+                    "detail": f"extraction install {state}: no usable extraction until it "
+                              "completes — run extraction",
+                    "data": {"source_id": sid, "state": read.state, "reason": why,
+                             "remediation": "run extraction (scripts/extract_sources.py)"}})
+    for problem in inv.problems:
+        if not any(problem.startswith(f"install journal {sid}.json") for sid in inv.journals):
+            out.append({"check": xi.INCOMPLETE, "severity": "high", "subject": None,
+                        "detail": f"extraction install journals: {problem}",
+                        "data": {"remediation": "restore normalized/.install from a backup"}})
+    return out
+
+
 def _check_contradiction_maintenance(gconn, *, reviews_dir: Path, claims_dir: Path,
                                      markdown_dir: Path, manifests_dir: Path) -> list[dict[str, Any]]:
     """ADR-0069 slice 2(a): proposed contradictions that maintenance would retire
@@ -828,6 +851,9 @@ def run_lint(
 
             # ADR-0070 B5: possible author/publisher name variants. Report-only (low), graph-free.
             findings += _check_name_variants(manifests_dir)
+
+            # ADR-0074 decision 8: an extraction install that did not complete blocks its document.
+            findings += _check_install_journals(markdown_dir.parent)
 
             # display_alias_rot reads wiki pages only — runs always (ADR-0060, report-only).
             findings += _check_display_alias_rot(wiki_dir)
