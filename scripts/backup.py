@@ -64,6 +64,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from app.backend import durable_write  # noqa: E402
+from app.backend.manifests import DETAILS_HISTORY_VERSION  # noqa: E402
 from app.backend.paths import safe_under  # noqa: E402
 
 # Gitignored runtime state whose only durability is this backup (ADR-0014): raw manifests, the
@@ -243,10 +244,12 @@ def _catalogued_raw_index(root: Path) -> dict[str, str]:
     manifests = root / "raw" / "manifests"
     if not manifests.exists():
         return index
-    for mpath in sorted(manifests.rglob("*.json")):
+    for mpath in sorted(manifests.glob("*.json")):   # top level: quarantine/ is never a manifest
         try:
             data = json.loads(mpath.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(data, dict):
             continue
         sha = data.get("sha256")
         if not isinstance(sha, str):
@@ -392,6 +395,9 @@ def _create_backup_report(root: Path) -> BackupReport:
             "llm_cache_included": llm_cache_included,
             "included_domains": included_domains,
             "raw_files": raw_entries,
+            # ADR-0074 slice 4: this code records every Details change in the audit log, so a
+            # Details change after this backup can't go unrecorded (repair_manifest.py restore).
+            "details_history": DETAILS_HISTORY_VERSION,
         }
         zf.writestr(_BACKUP_MANIFEST_NAME, json.dumps(sidecar, indent=2, sort_keys=True))
 

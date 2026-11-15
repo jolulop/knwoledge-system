@@ -61,7 +61,7 @@ ALLOWED: dict[tuple[str, str, str], str] = {
     ("app/workers/extract.py", "_extract_one", "shutil.rmtree"): _NORMALIZED,
     ("app/workers/extract.py", "extract_sources", "shutil.rmtree"): _NORMALIZED,
     ("scripts/eval_contradictions.py", "evaluate", "shutil.rmtree"): _EVAL,
-    ("app/backend/authority_read.py", "read_file", "os.open"):
+    ("app/backend/authority_read.py", "_open_regular", "os.open"):
         "a read-only open (O_RDONLY | O_NONBLOCK) of the shared typed authority reader, ADR-0074 "
         "decisions 2 and 4",
     ("app/backend/run_guard.py", "guard", "open(a)"): _LOCK,

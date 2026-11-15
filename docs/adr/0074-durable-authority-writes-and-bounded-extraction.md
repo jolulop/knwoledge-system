@@ -7,8 +7,9 @@
   Synthesis pages) implemented 2026-11-12** — shared reader `app/backend/authority_read.py`.
   **Slice 3b (review records) implemented 2026-11-12** (review round 2, 2026-11-14: durable removal,
   decision transitions, per-decision audit entries, typed review read model, symlinks refused).
-  **Slice 3c (policies, journals, `db/*.json`) implemented 2026-11-14.** Slices 4–6 and changes
-  7a–7c per decision 9 not yet.
+  **Slice 3c (policies, journals, `db/*.json`) implemented 2026-11-14.** **Slice 4 (decision 3:
+  `scripts/repair_manifest.py`) implemented 2026-11-15**, with Details history auditing (user
+  decision 2026-11-15). Slices 5–6 and changes 7a–7c per decision 9 not yet.
 - **Operational acceptance** (user decision 2026-11-14): ADR-0074 is **not operationally accepted
   until change 7a lands**. Slices continue in decision 9's order, but until 7a no document, release
   note or review answer may claim that visibility fails closed: a stale keyword / vector index can
@@ -319,6 +320,92 @@ an invalid invocation or a failure of the inspection itself.
 log is lossy (occurrences, modification times, unconfirmed fields) and is not built now. **Reopening
 trigger:** a damaged manifest with **no compatible backup** — including the case where every backup
 is too old to preserve later human decisions.
+
+**Details history (user decision 2026-11-15, found implementing slice 4).** Confirming or clearing
+Details used to write only the manifest — no audit record — so a Details change newer than a backup
+was undetectable. Decided: **audit from now, strict.**
+
+- Every write of a Details field (`manifests.set_provenance`: confirm, clear, any other Details
+  write) records `reviews/audit_log/<source_id>-details-<confirmed|cleared|changed>-<id>.json`
+  (`event`, `at`, `details_history`) **durably, create-only, before the manifest changes**, under the
+  caller's write lock. A damaged manifest writes no record (the change is refused first).
+- Backups made by this code carry **`details_history: 1`** in their sidecar
+  (`BACKUP_MANIFEST.json`). The marker, not the timestamp, proves that no later Details change
+  could go unrecorded.
+- Restore **refuses** an unmarked backup (Details history unknown) and an incomplete or unreadable
+  audit history.
+- An interrupted audit-first attempt (record written, manifest change never made) is treated
+  conservatively: it may block a restore.
+
+**As implemented (slice 4 — `app/workers/manifest_repair.py`, `scripts/repair_manifest.py`).**
+
+- **One snapshot** feeds the report, the offered command and the fingerprint
+  (`manifest-recovery-v1`): the live manifest's bytes and typed state, other manifest files claiming
+  the id, an open recovery journal, the audit records bearing on the document, its published graph
+  status, every archive's copy in `<root>/backups` (`--backups DIR` otherwise), and the raw hashes.
+  `inspect` takes no lock and writes nothing; it reports byte size and sha256 (never contents), the
+  raw path only when a copy's sha256 is verified against the raw bytes, each copy's status,
+  confirmed Details and compatibility verdict.
+- **Archive copy validation:** exactly one `raw/manifests/<id>.json` member (and sidecar), at most
+  4 MiB, unencrypted, read alone; parses with the identity checks; full 64-hex `sha256` agreeing
+  with the id and, when the raw file is a readable regular file, with its bytes; a `status` outside
+  the lifecycle statuses (which would read as `active`) and malformed provenance are rejected. Raw
+  bytes and archives are read non-blocking and never through a link (`authority_read.hash_file`).
+- **Compatibility** — any reason refuses: no `details_history` marker; unknown creation time; an
+  incomplete audit history (log unlistable; a relevant record unreadable, unparseable, untimed, or
+  naming the document in an unknown form); a Details record **at or after** the backup's time; an
+  archive / hide / unhide decision (approved, decided again, reopened — not rejected, withdrawn,
+  deferred or refreshed) at or after it; **the copy's status disagreeing with the published graph
+  status**, or that status unreadable. The last check goes beyond the decision's text: a governance
+  approval made before a backup but applied after it leaves no apply-time record, and restoring the
+  pre-apply status would resurrect visibility until the next Apply. **Availability tradeoff
+  (review round 1, kept):** an approval that was never applied, followed by damage, also makes every
+  copy disagree with nothing to reconcile it — and Apply may itself refuse the damaged manifest, so
+  "apply the approval first" is no remedy. Restore then stays blocked until a compatible backup
+  exists, or a separately designed reconciliation procedure (not part of this slice) settles the
+  status. Damaged audit records named for other subjects (tags, claims, other documents) don't
+  block.
+- **Write path** (`restore`, a corrupt manifest only, no stray claimant, no open journal): run
+  guards (apply, intake, extract, republish), then `write_lock.hold(changes=False)` (vault lock →
+  write lock), a fresh snapshot whose fingerprint must equal `--expected-state` (exit 6
+  otherwise), the archive must be one of the offered compatible copies; then the revision advances
+  and: (1) quarantine copy `raw/manifests/quarantine/<id>-<stamp>.json`, create-only;
+  (2) publication intent, then `db/manifest_recovery/<id>.json`; (3) atomic replacement with the
+  copy's exact bytes; (4) publication, the audit record
+  `<id>-manifest-restored-<recovery_id>.json` (create-only, reused on retry), the journal removed.
+- **The recovery journal is validated and bound** (review round 1): exactly the fields restore
+  writes; `source_id` equal to the requested document (the journal's file name); `recovery_id`
+  recomputed from document, archive and expected state; a bare `.zip` archive name; well-formed and
+  distinct hashes; the quarantine name `<id>-<stamp>.json`, and that file read through the typed
+  reader holding exactly `damaged_sha256`; the `pub_` intent id, actor, a reason, parseable times.
+  Anything else is `invalid (invalid_field:<name>)` / `invalid (quarantine_unverified:…)` with no
+  write path. Completion takes the requested id, never the journal's. An existing recovery audit
+  record is reused only when every field equals the expected record except `at`, which must still
+  be a valid timestamp.
+- **`finish`** rolls a valid journal forward. **Copy already live:** it completes. **Copy not
+  installed yet:** `inspect` offers `finish` only when the identity checks pass and the journal's
+  archive copy is still present, the same bytes and **compatible** under the rules above, against
+  the current snapshot — so a human decision recorded after the journal blocks `finish` exactly as
+  it blocks `restore`; `finish` re-evaluates under the locks. Every refusal (invalid journal,
+  incompatible or missing copy) precedes the revision advance and every write. Before publishing it
+  **repeats the durability barriers** (`durable_write.sync_existing`) of the journal, the
+  quarantine copy and — when the copy is already live — the installed manifest, since the earlier
+  run may have failed after the rename, during its directory sync.
+- **Uncertain writes** (`UncertainCompletion` or another `OSError` part-way): exit 1 with a message
+  naming only what that stage established — no journal yet (quarantine / intent), a journal that
+  may or may not be durable, a recorded journal with an uncertain replacement — and "inspect
+  again", which offers `finish` only when that path is safe.
+- **Quarantine copies are ignored by every manifest inventory**: the manifest scans list only the
+  top level of `raw/manifests/`, and the two raw catalogues that used `rglob` (backup's raw index,
+  the Apply sandbox) now do too.
+- **Tests:** `tests/test_manifest_repair.py` — Details audit order and interruption, the backup
+  marker, every rejection and incompatibility, unknown audit history, crash before and after the
+  replacement finished by `finish`, refusals that change nothing (no revision advance), FIFOs;
+  round 1: later decisions / strays / a vanished archive blocking a pending `finish`, a journal
+  naming another document (that document's journal untouched), every invalid journal field and
+  quarantine mismatch, recovery-audit binding, stage-specific uncertain-write messages, and a
+  directory-sync failure after the replacement whose `finish` completes every barrier before
+  publication and the journal's removal (call order asserted).
 
 ### Decision 4 — the read discipline covers all file-backed authority (grill Q4)
 

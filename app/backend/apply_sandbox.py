@@ -51,7 +51,7 @@ def _catalogued_raw_rels(manifests_dir: Path) -> set[str]:
     rels: set[str] = set()
     if not manifests_dir.exists():
         return rels
-    for mpath in sorted(manifests_dir.rglob("*.json")):
+    for mpath in sorted(manifests_dir.glob("*.json")):   # top level: quarantine/ is never a manifest
         try:
             data = json.loads(mpath.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):

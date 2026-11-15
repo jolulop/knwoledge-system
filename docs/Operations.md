@@ -306,6 +306,44 @@ Exit codes: 0 report produced / rollback recorded, 1 refused or failed (a failur
 says what Apply must finish), 2 usage, 3 a guarded run is busy, 4 publication queue unreadable,
 6 state changed, 9 vault revision unavailable.
 
+**Damaged manifest recovery (ADR-0074 decision 3).** A manifest that exists but can't be used is
+never treated as absent, recreated or overwritten: the document is excluded and reported until an
+operator recovers it.
+
+1. **Inspect first:** `uv run python scripts/repair_manifest.py inspect <source_id>` (`--json` for
+   the facts, `--backups DIR` when the archives aren't in `<root>/backups`). Read-only, exit 0
+   whenever it produced its report. It shows the state and error category, the damaged file's size
+   and sha256 (never its contents), the raw file only when a backup copy's sha256 was verified
+   against it, each backup copy with its status, confirmed Details and compatibility, and the state
+   fingerprint.
+2. **Unreadable** (a permission or I/O problem, a link or a non-file in its place): there is no
+   write path — fix the cause and inspect again.
+3. **Corrupt:** `uv run python scripts/repair_manifest.py restore <source_id> --archive <zip>
+   --expected-state <fingerprint> --reason "<why>"`, offered only for a compatible copy. A copy is
+   compatible when it validates, the backup was made by code that records Details history (its
+   sidecar's `details_history` marker — older backups never qualify), the audit history is
+   complete and readable, no Details change and no archive / hide / unhide decision is recorded at
+   or after the backup, and the copy's status matches the published status (an approval recorded but
+   never applied before the damage therefore blocks restore until a compatible backup exists or a
+   separate reconciliation procedure settles it — Apply may refuse the damaged manifest, so applying
+   first is not a remedy). There is no override:
+   take a newer backup next time; rebuilding without a backup is deferred. Restore keeps the damaged
+   bytes in `raw/manifests/quarantine/` (never deleted, never read as a manifest), records its
+   intent, replaces the manifest atomically, publishes and writes an audit record. It refuses
+   (exit 3) while Apply, intake, extraction or republish runs, and writes nothing if the state
+   changed since inspection (exit 6).
+4. **Interrupted** (a crash after the intent was recorded): `inspect` offers
+   `scripts/repair_manifest.py finish <source_id> --expected-state <fingerprint>`, which completes
+   the recovery from `db/manifest_recovery/<source_id>.json`. It is offered only for a journal that
+   validates against this document and whose quarantine copy holds the damaged bytes, and — when the
+   copy isn't installed yet — only while that backup copy is still present and compatible (a
+   decision recorded since blocks it). `finish` repeats the durability barriers before publishing.
+   A write that fails or can't be confirmed durable stops with exit 1 and says what is known; run
+   `inspect` again and follow only what it offers.
+
+Exit codes as for supersede recovery: 0, 1 refused or failed, 2 usage, 3 busy, 4 publication queue
+unreadable, 6 state changed, 9 vault revision unavailable.
+
 ### Executor-backed review types (`POST /reviews/apply`)
 
 Every review type below has a deterministic, key-free executor (the canonical set is `_APPLY_TYPES` in

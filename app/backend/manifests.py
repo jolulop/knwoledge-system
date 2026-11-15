@@ -129,15 +129,23 @@ def read_manifest_file(path: Path) -> ManifestRead:
     read = authority_read.read_file(path)
     if read.state != OK:
         return ManifestRead(read.state, read.path, error=read.error)
+    return manifest_from_bytes(read.path, read.data)
+
+
+def manifest_from_bytes(path: Path, data: bytes, source_id: str | None = None) -> ManifestRead:
+    """The typed state of manifest bytes already read (`ok` or `corrupt`). With `source_id`, a
+    record naming another id is `corrupt` (`id_mismatch`), as :func:`read_manifest` reports it."""
     try:
-        record = json.loads(read.data.decode("utf-8"))
+        record = json.loads(data.decode("utf-8"))
     except UnicodeDecodeError:
-        return ManifestRead(CORRUPT, read.path, error="invalid_utf8")
+        return ManifestRead(CORRUPT, path, error="invalid_utf8")
     except (ValueError, RecursionError):
-        return ManifestRead(CORRUPT, read.path, error="invalid_json")
+        return ManifestRead(CORRUPT, path, error="invalid_json")
     if not isinstance(record, dict):
-        return ManifestRead(CORRUPT, read.path, error="not_an_object")
-    return ManifestRead(OK, read.path, record=record)
+        return ManifestRead(CORRUPT, path, error="not_an_object")
+    if source_id is not None and record.get("source_id") != source_id:
+        return ManifestRead(CORRUPT, path, error="id_mismatch")
+    return ManifestRead(OK, path, record=record)
 
 
 def read_manifest(manifests_dir: Path, source_id: str) -> ManifestRead:
@@ -565,12 +573,45 @@ def provenance_problem(prov: dict[str, Any]) -> str | None:
     return None
 
 
+# ADR-0074 slice 4: Details history. Every Details change (confirm, clear, or any other write of a
+# Details field) writes a `reviews/audit_log/<source_id>-details-<kind>-<id>.json` record durably
+# BEFORE the manifest changes, under the caller's write lock. Backups made by code that does this
+# carry `details_history: DETAILS_HISTORY_VERSION` in their sidecar: only such a backup can prove
+# that no Details change after it went unrecorded (`scripts/repair_manifest.py` restore). An
+# interrupted attempt leaves a record without the change — conservative: it may block a restore.
+DETAILS_HISTORY_VERSION = 1
+DETAILS_AUDIT_INFIX = "-details-"
+
+
+def details_audit_dir(manifests_dir: Path) -> Path:
+    """`reviews/audit_log` of the vault whose manifests live in `manifests_dir` (vault layout)."""
+    return Path(manifests_dir).parent.parent / "reviews" / "audit_log"
+
+
+def _record_details_change(manifests_dir: Path, source_id: str, kind: str, now: str) -> None:
+    import uuid
+    name = f"{source_id}{DETAILS_AUDIT_INFIX}{kind}-{uuid.uuid4().hex[:8]}.json"
+    durable_write.write_json(details_audit_dir(manifests_dir) / name, {
+        "source_id": source_id, "event": f"details_{kind}", "at": now, "actor": "human",
+        "details_history": DETAILS_HISTORY_VERSION}, create_only=True)
+
+
+def _details_kind(fields: dict[str, Any]) -> str | None:
+    touched = set(fields) & set(DETAILS_FIELDS)
+    if not touched:
+        return None
+    if all(fields[k] is None for k in touched):
+        return "cleared"
+    return "confirmed" if fields.get("confirmed_at") is not None else "changed"
+
+
 def set_provenance(manifests_dir: Path, source_id: str, **fields: Any) -> dict[str, Any] | None:
     """Set provenance fields on a manifest (the single write path); returns it or None.
 
     Values are validated and cleaned (`_check_field`); malformed input raises ValueError and
     writes nothing. An explicit None clears a field back to unknown, which is distinct from
-    malformed input. The caller holds the write lock (a screen action's commit phase)."""
+    malformed input. The caller holds the write lock (a screen action's commit phase). A write that
+    touches a Details field records its Details audit entry first (ADR-0074 slice 4)."""
     _require_source_id(source_id)  # write path: a non-canonical id raises
     unknown = set(fields) - set(PROVENANCE_FIELDS)
     if unknown:
@@ -579,6 +620,10 @@ def set_provenance(manifests_dir: Path, source_id: str, **fields: Any) -> dict[s
     manifest = get_manifest(manifests_dir, source_id)    # damaged: raises, never overwritten
     if manifest is None:
         return None
+    kind = _details_kind(fields)
+    if kind is not None:                                  # audit first, durably (slice 4)
+        _record_details_change(manifests_dir, source_id, kind,
+                               str(fields.get("confirmed_at") or iso_now()))
     prov = dict(manifest.get("provenance") or {})
     for key, value in checked.items():
         if value is None:

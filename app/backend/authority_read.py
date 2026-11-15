@@ -81,30 +81,45 @@ def lexists(path: Path) -> bool | None:
         return None
 
 
-def read_file(path: Path) -> FileRead:
-    """Read one authority file's bytes. Never raises for the file's state. The open is non-blocking
-    (a FIFO can't hang it), never follows a symbolic link at the path itself, and only a regular
-    file is read."""
-    path = Path(path)
+def _open_regular(path: Path) -> tuple[int | None, FileRead | None]:
+    """`(descriptor, None)` for an open regular file, or `(None, the typed failure)`. The open is
+    non-blocking (a FIFO can't hang it) and never follows a symbolic link at the path itself."""
     try:
         fd = os.open(path, _O_READ)
     except FileNotFoundError:
         here = lexists(path)
         if here is not False:                            # a dangling symlink, or can't confirm
-            return FileRead(UNREADABLE, path,
-                            error="dangling_symlink" if here else "unknown")
+            return None, FileRead(UNREADABLE, path,
+                                  error="dangling_symlink" if here else "unknown")
         parent = lexists(path.parent)
         if parent is None or (parent and not path.parent.is_dir()):
-            return FileRead(UNREADABLE, path, error="directory_unavailable")
-        return FileRead(ABSENT, path)
+            return None, FileRead(UNREADABLE, path, error="directory_unavailable")
+        return None, FileRead(ABSENT, path)
     except OSError as exc:
         if os.path.islink(path):                         # O_NOFOLLOW refused the final link
-            return FileRead(UNREADABLE, path,
-                            error="symlink" if os.path.exists(path) else "dangling_symlink")
-        return FileRead(UNREADABLE, path, error=type(exc).__name__)
+            return None, FileRead(UNREADABLE, path,
+                                  error="symlink" if os.path.exists(path) else "dangling_symlink")
+        return None, FileRead(UNREADABLE, path, error=type(exc).__name__)
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return FileRead(UNREADABLE, path, error="not_a_regular_file")
+        regular = stat.S_ISREG(os.fstat(fd).st_mode)
+    except OSError as exc:
+        os.close(fd)
+        return None, FileRead(UNREADABLE, path, error=type(exc).__name__)
+    if not regular:
+        os.close(fd)
+        return None, FileRead(UNREADABLE, path, error="not_a_regular_file")
+    return fd, None
+
+
+def read_file(path: Path) -> FileRead:
+    """Read one authority file's bytes. Never raises for the file's state. The open is non-blocking
+    (a FIFO can't hang it), never follows a symbolic link at the path itself, and only a regular
+    file is read."""
+    path = Path(path)
+    fd, failed = _open_regular(path)
+    if failed is not None:
+        return failed
+    try:
         chunks = []
         while chunk := os.read(fd, _CHUNK):
             chunks.append(chunk)
@@ -113,6 +128,34 @@ def read_file(path: Path) -> FileRead:
     finally:
         os.close(fd)
     return FileRead(OK, path, data=b"".join(chunks))
+
+
+@dataclass(frozen=True)
+class FileHash:
+    """A streamed SHA-256 of one file with :func:`read_file`'s discipline (`sha256` only when
+    `ok`): for files too large to hold, such as raw sources (ADR-0074 slice 4)."""
+    state: str
+    path: Path
+    sha256: str | None = None
+    error: str | None = None
+
+
+def hash_file(path: Path) -> FileHash:
+    """The SHA-256 of a regular file, streamed; never raises for the file's state."""
+    import hashlib
+    path = Path(path)
+    fd, failed = _open_regular(path)
+    if failed is not None:
+        return FileHash(failed.state, path, error=failed.error)
+    h = hashlib.sha256()
+    try:
+        while chunk := os.read(fd, _CHUNK):
+            h.update(chunk)
+    except OSError as exc:
+        return FileHash(UNREADABLE, path, error=type(exc).__name__)
+    finally:
+        os.close(fd)
+    return FileHash(OK, path, sha256=h.hexdigest())
 
 
 def read_text(path: Path) -> TextRead:
