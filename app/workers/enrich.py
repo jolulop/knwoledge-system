@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from app.backend import db, taxonomy, write_lock
+from app.backend import extraction_install as xi
 from app.backend.manifests import iso_now, scan_manifests
 from app.llm import prompts
 from app.llm.client import LLMClient, ParseError
@@ -50,6 +51,7 @@ def enrich_sources(
     jobs_db = Path(jobs_db) if jobs_db else root / "db" / "jobs.sqlite"
     markdown_dir = Path(markdown_dir) if markdown_dir else root / "normalized" / "markdown"
     logs_dir = markdown_dir.parent / "extraction_logs"   # the PDF metadata hint (ADR-0066 part 3)
+    normalized_dir = markdown_dir.parent
     enrichment_dir = (
         Path(enrichment_dir) if enrichment_dir else root / "normalized" / "enrichment"
     )
@@ -80,6 +82,7 @@ def enrich_sources(
         skipped_empty = 0
         skipped_no_key = 0
         input_changed = 0
+        install_incomplete: list[str] = []     # ADR-0074 decision 8: no usable extraction to read
         errors: list[dict[str, str]] = []
 
         # ADR-0063: the tier value is an ordered model chain; resolve once per run to the first
@@ -101,18 +104,24 @@ def enrich_sources(
                 continue
 
             md_path = markdown_dir / f"{source_id}.md"
-            normalized_markdown = (
-                md_path.read_text(encoding="utf-8") if md_path.exists() else ""
-            )
+            # ADR-0066 part 3: the file title and the extraction log's PDF hint are prompt inputs.
+            # Captured once: the messages and the fingerprint are built from the same inputs, and
+            # the commit checks them again under the lock. ADR-0074 decision 8: the text and the
+            # hint are read under the write lock together with the install journal's state, so an
+            # install can't land between the check and the read.
+            with xi.consistent_read(normalized_dir, source_id, reviews_dir=root / "reviews") as journal:
+                if not journal.usable:
+                    install_incomplete.append(source_id)
+                    continue
+                normalized_markdown = (
+                    md_path.read_text(encoding="utf-8") if md_path.exists() else ""
+                )
+                hint = titles.read_metadata_hint(logs_dir, source_id)
             if not normalized_markdown.strip():
                 skipped_empty += 1
                 continue
 
-            # ADR-0066 part 3: the file title and the extraction log's PDF hint are prompt inputs.
-            # Captured once: the messages and the fingerprint are built from the same inputs, and
-            # the commit checks them again under the lock.
             file_title = title_from_filename(manifest.get("original_filename", source_id))
-            hint = titles.read_metadata_hint(logs_dir, source_id)
             prompt_input = art.enrich_prompt_input(file_title, hint)
             artifact_path = art.artifact_path(enrichment_dir, source_id)
             if not force and artifact_path.exists():
@@ -156,6 +165,10 @@ def enrich_sources(
             # writes nothing if a re-extraction installed new text meanwhile (the next run enriches it).
             # Then it publishes the document's Source page before releasing the lock (decision 5).
             with write_lock.hold(root / "reviews"):
+                # ADR-0074 decision 8: an install interrupted meanwhile leaves the text unusable.
+                if not xi.usable(normalized_dir, source_id):
+                    install_incomplete.append(source_id)
+                    continue
                 # The result is valid only for the inputs the model saw: the text, and (ADR-0066
                 # part 3) the file title and the PDF hint (a re-extraction may record a new hint).
                 if ((md_path.read_text(encoding="utf-8") if md_path.exists() else "")
@@ -181,13 +194,15 @@ def enrich_sources(
             "skipped_empty": skipped_empty,
             "skipped_no_key": skipped_no_key,
             "skipped_input_changed": input_changed,
+            "skipped_install_incomplete": len(install_incomplete),
+            "install_incomplete": install_incomplete,
             **inventory.report(),
             "errors": len(errors),
             "error_details": errors,
             "enriched_at": now,
         }
 
-        if errors:
+        if errors or install_incomplete:
             status = "partial"
         elif not has_key and considered > 0:
             # Whole run gated on a missing provider credential — a config gap an operator

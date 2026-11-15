@@ -10,8 +10,9 @@
   **Slice 3c (policies, journals, `db/*.json`) implemented 2026-11-14.** **Slice 4 (decision 3:
   `scripts/repair_manifest.py`) implemented 2026-11-15**, with Details history auditing (user
   decision 2026-11-15). **Slice 5a (decision 8 install journal and recovery, 7.4 staging
-  cleanup) implemented 2026-11-15** — `app/backend/extraction_install.py`; slice 5b (consistent
-  consumer reads), slice 6 and changes 7a–7c per decision 9 not yet.
+  cleanup) implemented 2026-11-15** — `app/backend/extraction_install.py`. **Slice 5b (consistent
+  consumer reads) implemented 2026-11-15** — `extraction_install.consistent_read` and every
+  consumer; slice 6 and changes 7a–7c per decision 9 not yet.
 - **Operational acceptance** (user decision 2026-11-14): ADR-0074 is **not operationally accepted
   until change 7a lands**. Slices continue in decision 9's order, but until 7a no document, release
   note or review answer may claim that visibility fails closed: a stale keyword / vector index can
@@ -888,8 +889,8 @@ the unrecoverable transition superseded by a fresh attempt, and **consumer reads
 unrecoverable transition and its supersession, staging cleanup (7.4), and `validate_normalized` /
 lint reporting; **5b** — consistent consumer reads (enrich, claims, items, synthesis inputs, keyword
 and vector reindex, search and `/query` exclusion, the document screen's two failure situations)
-with the race tests. Until 5b, a consumer can still read a document whose journal is open — the
-pre-slice exposure, now visible to `validate_normalized` and lint.
+with the race tests. (Between 5a and 5b a consumer could still read a document whose journal was
+open — the pre-slice exposure, visible to `validate_normalized` and lint; 5b closed it.)
 
 **As implemented (slice 5a — `app/backend/extraction_install.py`, `app/workers/extract.py`).**
 
@@ -942,6 +943,71 @@ pre-slice exposure, now visible to `validate_normalized` and lint.
   (superseded artifacts retired), damaged journals blocking the document and all cleanup (never
   re-parsed), cleanup removing only unreferenced entries, a final-verification failure, governance
   kept across recovery, and a damaged manifest blocking recovery until repaired.
+
+**As implemented (slice 5b — `extraction_install.consistent_read` / `read_text` / `usable`).**
+
+- **The read.** `consistent_read(normalized_dir, source_id)` holds the write lock (re-entrant;
+  `authority=False, changes=False`: a read neither checks the publication queue nor advances the
+  vault revision) and yields the document's journal state; the caller reads the bytes it needs
+  inside it, and only when the state is usable (`absent` / `installed`). `read_text` is the
+  one-file form (None when blocked, "" when the file is absent). Model calls stay outside.
+- **Producers** (enrich, claims, items) capture the Markdown, the chunks and the extraction log's
+  PDF hint (the prompt title) in one consistent read; a blocked document is skipped before any
+  model call (`install_incomplete` in the run summary, the run `partial`). Each commit re-checks
+  the journal under its write lock, next to the existing input re-check, so an install that crashed
+  during the model call stops it with nothing written — the empty-Markdown commits included (they
+  now also re-check the text).
+- **Synthesis and contradiction inputs.** A claim context does not read a blocked document: its
+  citation keeps the anchor with no quote, and the context lists the document under
+  `install_incomplete`. Eligibility and the synthesis fingerprint (anchors) are unchanged, so no
+  synthesis is retracted or reported stale for it; a topic carrying the flag is never generated
+  (no model call — also when the document became usable after the topic was built), and the commit
+  re-checks the topic under the lock. Contradiction maintenance reports such a proposal
+  `unverifiable: extraction_install_incomplete` and never retires it (unknown evidence is not
+  changed evidence); a contradiction check refuses a blocked document (`Refused`) and its filing
+  revalidation refuses a window whose document became blocked.
+- **Indexes.** The keyword reindex captures each document's chunk bytes under the write lock before
+  any index write (lock order: write lock, then SQLite) and parses the captured bytes — the
+  fingerprint and the rows come from one read; an incremental pass neither indexes nor removes a
+  blocked document (its rows stay; search excludes it) and `consistency_errors` reports it once
+  ("extraction install incomplete (run extraction)"). **A full rebuild** (`--force`, or a schema
+  change) starts from empty tables and can't keep its rows: it leaves the document out — the
+  same exception for both indexes, reported in `install_incomplete` (every journal-named document
+  is checked, so one whose chunk file is gone is reported too); search keeps excluding it either
+  way. The vector reindex reads the same way; `status` doesn't count a blocked document's rows as
+  removed and notes it. `reindex_keyword.py` prints the skipped documents.
+- **Search and `/query`.** The ADR-0074 decision 2 gate also excludes a document whose journal is
+  unusable (a note says so); it reads the journal without the lock — the hits come from the index,
+  not the normalized files. The `/query` evidence pack reads each document's Markdown with
+  `read_text`, so a hit is cited only from a usable extraction.
+- **API and screen.** `GET /sources/{id}/normalized` and `/chunks` answer 409
+  `extraction_install_incomplete` (with the journal state). The document screen shows a banner —
+  "No usable extraction (interrupted install)" — with the fix per state (run extraction to complete
+  or replace it; restore a damaged journal from backup first); the Details form derives no
+  suggestion or PDF hint from a blocked extraction.
+- **Report-only readers.** Lint's summary-rot check skips a blocked document (coverage degraded)
+  and its stale-claim check treats it as unverifiable; the install-journal finding names the fix.
+- **Source pages** (review round 1, 2026-11-15). The one Source page renderer
+  (`wiki.generate_wiki`, which publication calls) reads the text and the extraction log in a
+  consistent read; a blocked document's page is not rendered — it keeps its previous version, the
+  render reports `extraction_install_incomplete`, and publication leaves the document pending
+  (`sources_failed`, queued). An `installed` journal renders (the publication-cycle rule above: only
+  installing, unrecoverable and damaged block).
+- **Claim pages** (review round 1). The claim renderer reads each cited document with `read_text`:
+  a blocked document's citation keeps its anchor and shows no quote, and the page renders — hide,
+  supersede and deprecation proceed without reading blocked text (the synthesis-input approach).
+  The quote returns at the claim's next render after extraction completes the document.
+- **Tests** (`tests/test_consistent_reads.py`): every consumer skipping a document in each blocked
+  state (`installing` with mixed files, `unrecoverable`, corrupt), producers reading it again once
+  extraction completed it, a consistent read and a keyword reindex racing a paused install (held
+  off, then one complete generation), commits racing a crashed install (enrich, claims, items,
+  synthesis, the empty-Markdown commits), a topic built while blocked not generated after it
+  unblocks, contradiction maintenance never retiring on unreadable evidence, a contradiction check
+  and its revalidation refused, search / `/query` / API / screen / Details, the vector index;
+  review round 1: publication keeping a blocked document's Source page and leaving it pending in
+  every blocked state (and a direct wiki run reporting it), publication rendering under an
+  `installed` journal, hide / deprecation / guarded supersede of a claim citing a blocked document
+  (anchor kept, no quote), and a full keyword rebuild leaving a blocked document out, reported.
 
 ## Part C — order of work and deferrals
 

@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from app.backend import authority_read, graph, manifests, taxonomy
+from app.backend import extraction_install as xi
 from app.workers import reviews as review_records
 from app.workers.reviews import PRIORITIES, REVIEW_STATUSES
 from app.workers.wiki_render import NODE_DIR, frontmatter_string, parse_frontmatter
@@ -1887,7 +1888,19 @@ def source_review_view(reviews_dir: Path, source_id: str, *, graph_db: Path | No
     if manifests_dir is not None:
         view.update(details_section(reviews_dir, source_id, manifests_dir=Path(manifests_dir),
                                     enrichment_dir=_enrichment_dir(wiki_dir, enrichment_dir)))
+    view["extraction_install"] = extraction_install_state(reviews_dir, source_id)
     return view
+
+
+def extraction_install_state(reviews_dir: Path, source_id: str) -> dict[str, str] | None:
+    """ADR-0074 decision 8: `{state, reason}` when the document has no usable extraction because
+    its install journal is `installing`, `unrecoverable` or damaged (the screen's banner), else
+    None."""
+    read = xi.read_journal(xi.Layout(Path(reviews_dir).parent / "normalized"), source_id)
+    if read.usable:
+        return None
+    reason = (read.entry or {}).get("reason") if read.state == xi.UNRECOVERABLE else read.error
+    return {"state": read.state, "reason": str(reason or "")}
 
 
 def details_section(reviews_dir: Path, source_id: str, *, manifests_dir: Path,
@@ -1902,10 +1915,17 @@ def details_section(reviews_dir: Path, source_id: str, *, manifests_dir: Path,
     manifest = read.record
     root = Path(reviews_dir).parent
     md_path = root / "normalized" / "markdown" / f"{source_id}.md"
-    markdown = md_path.read_text(encoding="utf-8") if md_path.exists() else ""
     known, paged = details_mod.vault_names(manifests_dir)
-    shown = details_mod.view(manifest, markdown=markdown, enrichment_dir=enrichment_dir,
-                             logs_dir=root / "normalized" / "extraction_logs", paged=paged)
+    # ADR-0074 decision 8: the text and the extraction log are read under the write lock together
+    # with the install journal's state; with no usable extraction, nothing is derived from them.
+    with xi.consistent_read(root / "normalized", source_id, reviews_dir=reviews_dir) as installed:
+        if installed.usable:
+            markdown = md_path.read_text(encoding="utf-8") if md_path.exists() else ""
+            shown = details_mod.view(manifest, markdown=markdown, enrichment_dir=enrichment_dir,
+                                     logs_dir=root / "normalized" / "extraction_logs", paged=paged)
+        else:
+            shown = details_mod.view(manifest, markdown="", enrichment_dir=enrichment_dir,
+                                     logs_dir=None, paged=paged)
     try:
         ledger = tag_links.load_ledger(reviews_dir, source_id)
     except tag_links.LedgerCorrupt as exc:

@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+from app.backend import extraction_install as xi
 from app.workers import citations
 
 logger = logging.getLogger(__name__)
@@ -137,22 +138,25 @@ _CITATION_FIELDS = ("source_id", "char_start", "char_end", "page", "page_end", "
                     "table_reference", "sheet_reference", "chunk_id")
 
 
-def _load_markdown(markdown_dir: Path, source_id: str, cache: dict[str, str]) -> str:
+def _load_markdown(markdown_dir: Path, source_id: str, cache: dict[str, str | None]) -> str | None:
     """Read a source's normalized Markdown. The caller MUST have validated ``source_id`` as canonical
     first; we still assert the resolved path stays under ``markdown_dir`` as defence in depth before any
-    read (no path traversal into unintended local files, ADR-0034 B2)."""
+    read (no path traversal into unintended local files, ADR-0034 B2).
+
+    ADR-0074 decision 8: the read is consistent with the document's install journal (both under the
+    write lock); None when its extraction install is incomplete — its hits are not citable."""
     if source_id not in cache:
         root = Path(markdown_dir).resolve()
         path = (root / f"{source_id}.md").resolve()
-        if path.parent != root or not path.is_file():
-            cache[source_id] = ""  # escaped the markdown dir or absent -> treat as empty
+        if path.parent != root:
+            cache[source_id] = ""  # escaped the markdown dir -> treat as empty
         else:
-            cache[source_id] = path.read_text(encoding="utf-8")
+            cache[source_id] = xi.read_text(root.parent, source_id, "markdown")
     return cache[source_id]
 
 
 def build_evidence_pack(evidence_hits: list[dict[str, Any]], markdown_dir: Path,
-                        markdown_cache: dict[str, str]) -> list[dict[str, Any]]:
+                        markdown_cache: dict[str, str | None]) -> list[dict[str, Any]]:
     """Assign **compact** stable evidence_ids (e1..eN over the kept hits) and attach the verbatim
     source quote (the source's text, not the model's). A hit is dropped — not citable — when its
     ``source_id`` is not the canonical ``src_<16 hex>`` shape (validated *before* any filesystem
@@ -165,6 +169,8 @@ def build_evidence_pack(evidence_hits: list[dict[str, Any]], markdown_dir: Path,
         if not isinstance(start, int) or isinstance(start, bool) or not isinstance(end, int) or isinstance(end, bool):
             continue
         md = _load_markdown(markdown_dir, sid, markdown_cache)
+        if md is None:
+            continue  # no usable extraction (install incomplete): fail closed, never cited
         if not (0 <= start < end <= len(md)):
             continue  # stale/out-of-bounds anchor: not citable
         entry = {"evidence_id": f"e{len(pack) + 1}", "quote": md[start:end]}
@@ -202,7 +208,7 @@ def answer_query(
 ) -> QueryAnswer:
     """Synthesize a grounded cited answer (ADR-0034). The caller supplies retrieved chunk evidence and
     a configured/fake parser; this never calls retrieval, the endpoint, or save."""
-    markdown_cache: dict[str, str] = {}
+    markdown_cache: dict[str, str | None] = {}
     pack = build_evidence_pack(evidence_hits, Path(markdown_dir), markdown_cache)
     if not pack:
         return QueryAnswer(question=question, answer=fallback_text, abstained=True, evidence_count=0)
@@ -234,7 +240,7 @@ def answer_query(
             if ev is None:
                 continue  # references evidence not in the pack -> not a real citation
             citation = _citation_from_evidence(ev)
-            md = markdown_cache.get(ev["source_id"], "")
+            md = markdown_cache.get(ev["source_id"]) or ""
             if citations.ground_citation(citation, md, require_quote=True):
                 continue  # anchor/quote did not resolve -> drop this citation
             key = (citation["source_id"], citation["char_start"], citation["char_end"])

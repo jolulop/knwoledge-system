@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Any
 
 from app.backend import authority_read, db, durable_write, graph, write_lock
+from app.backend import extraction_install as xi
 from app.backend import producer_journal as journal
 from app.backend.manifests import (
     ABSENT, OK, get_status, iso_now, read_reason, recheck, scan_manifests)
@@ -103,8 +104,12 @@ def _chunk_records(chunk_path: Path) -> list[dict[str, Any]]:
     posture as the keyword indexer's parser)."""
     if not chunk_path.exists():
         return []
+    return _parse_chunk_records(chunk_path.read_text(encoding="utf-8", errors="replace"))
+
+
+def _parse_chunk_records(text: str) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
-    for line in chunk_path.read_text(encoding="utf-8", errors="replace").splitlines():
+    for line in text.splitlines():
         line = line.strip()
         if not line:
             continue
@@ -324,8 +329,9 @@ def recompose_claim(gconn, *, cid, claims_dir, reviews_dir, now, markdown_dir, t
     cites = []
     for e in edges:
         src, start, end = e["dst_id"], e["evidence_char_start"], e["evidence_char_end"]
-        md_path = markdown_dir / f"{src}.md"
-        md = md_path.read_text(encoding="utf-8") if md_path.exists() else ""
+        # ADR-0074 decision 8: a document with no usable extraction is not read — the citation
+        # keeps its anchor and shows no quote, so governance (hide, supersede, deprecate) proceeds.
+        md = xi.read_text(markdown_dir.parent, src, "markdown") or ""
         quote = md[start:end] if start is not None and end is not None and end <= len(md) else ""
         cites.append({"source_id": src, "char_start": start, "char_end": end, "quote": quote})
     cites.sort(key=lambda c: (c["source_id"], c["char_start"] if c["char_start"] is not None else -1))
@@ -439,6 +445,7 @@ def extract_claims(
     claim_windows = claim_window_over_budget = 0
     replacement_not_applied = stale_claim_layer_preserved = input_changed = 0
     errors: list[dict[str, Any]] = []
+    install_incomplete: list[str] = []   # ADR-0074 decision 8: no usable extraction to read
     page_outcomes: dict[str, str] = {}   # cid -> the last page outcome this run
     journal_reconciled: list[str] = []   # unfinished commits finished from authority
     # ADR-0069 slice 2(a): targeted contradiction maintenance after each document's commit.
@@ -528,12 +535,20 @@ def extract_claims(
             attempted.add(sid)
 
             md_path = markdown_dir / f"{sid}.md"
-            md = md_path.read_text(encoding="utf-8") if md_path.exists() else ""
             apath = art.claims_artifact_path(enrichment_dir, sid)
-            # ADR-0066 part 3: the prompt title (Enrich title, else the filtered PDF title, else the
-            # filename; never the confirmed one) is a prompt input, so it is part of freshness.
-            title = titles.prompt_title_for(manifest, md, enrichment_dir=enrichment_dir,
-                                            logs_dir=markdown_dir.parent / "extraction_logs")
+            # ADR-0074 decision 8: the text, the chunks and the extraction log (the title's PDF
+            # hint) are read under the write lock together with the install journal's state.
+            with xi.consistent_read(markdown_dir.parent, sid, reviews_dir=reviews_dir) as installed:
+                if not installed.usable:
+                    install_incomplete.append(sid)
+                    continue
+                md = md_path.read_text(encoding="utf-8") if md_path.exists() else ""
+                # ADR-0066 part 3: the prompt title (Enrich title, else the filtered PDF title,
+                # else the filename; never the confirmed one) is a prompt input, so it is part of
+                # freshness.
+                title = titles.prompt_title_for(manifest, md, enrichment_dir=enrichment_dir,
+                                                logs_dir=markdown_dir.parent / "extraction_logs")
+                chunk_records = _chunk_records(chunks_dir / f"{sid}.jsonl")
             # An unfinished commit is never fresh: the artifact predates it (written last).
             if not force and apath.exists() and sid not in unfinished:
                 try:
@@ -563,6 +578,14 @@ def extract_claims(
             if not md.strip():
                 # Empty Markdown IS a deterministic complete replacement (ADR-0056).
                 with write_lock.hold(reviews_dir):
+                    # ADR-0074 decision 8: the empty text must still be the installed one.
+                    if not xi.usable(markdown_dir.parent, sid):
+                        install_incomplete.append(sid)
+                        continue
+                    if (md_path.read_text(encoding="utf-8") if md_path.exists() else "") != md:
+                        input_changed += 1
+                        replacement_not_applied += 1
+                        continue
                     # ADR-0074 decision 2: re-read under the lock — a manifest damaged or gone
                     # since the scan stops this document before any evidence is retired.
                     now_read = recheck(manifests_dir, sid, inventory)
@@ -586,7 +609,7 @@ def extract_claims(
             # md<->chunks invariant broken on disk) — FAIL CLOSED (review round 2): no model
             # call, no supersede; the old layer stays visible and validators surface the
             # drift. Never paper over it with an unwindowed whole-document call.
-            windows = plan_windows(_chunk_records(chunks_dir / f"{sid}.jsonl"), window_chars)
+            windows = plan_windows(chunk_records, window_chars)
             if not windows:
                 errors.append({"source_id": sid, "error":
                                "window_planning_failed: no anchored chunk records for "
@@ -632,6 +655,12 @@ def extract_claims(
             # pages, then the artifact last (an interrupted commit leaves the document stale, so the
             # next run redoes it), and publishes the Source page before releasing the lock.
             with write_lock.hold(reviews_dir):
+                # ADR-0074 decision 8: an install interrupted during the model calls leaves the
+                # text unusable — write nothing (the document stays blocked until extraction).
+                if not xi.usable(markdown_dir.parent, sid):
+                    install_incomplete.append(sid)
+                    replacement_not_applied += 1
+                    continue
                 # The claims are grounded in the text the model read; a re-extraction installed
                 # meanwhile makes them stale — write nothing, the next run extracts the new text.
                 # ADR-0066 part 3: likewise the prompt title (an Enrich run may change it meanwhile).
@@ -728,7 +757,7 @@ def extract_claims(
         # ADR-0069 slice 2(a): a failed contradiction maintenance keeps the claims but leaves the
         # run incomplete (lint reports the proposals until `detect_contradictions.py maintain`).
         if (errors or left_attempted or maintenance["errors"] or marker_unreadable
-                or identity_mismatch or pages_refused):
+                or identity_mismatch or pages_refused or install_incomplete):
             status = "partial"
         elif not has_key and considered > 0:
             status = "skipped"
@@ -753,6 +782,8 @@ def extract_claims(
             "claim_window_over_budget": claim_window_over_budget,
             "replacement_not_applied": replacement_not_applied,
             "skipped_input_changed": input_changed,
+            "skipped_install_incomplete": len(install_incomplete),
+            "install_incomplete": install_incomplete,
             "stale_claim_layer_preserved": stale_claim_layer_preserved,
             "skipped_fresh": skipped_fresh, "skipped_not_extracted": skipped_not_extracted,
             "skipped_empty": skipped_empty, "skipped_no_key": skipped_no_key,

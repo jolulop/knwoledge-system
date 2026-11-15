@@ -1326,6 +1326,25 @@ def _details_section(data: dict[str, Any], draft: dict[str, Any] | None) -> str:
     return "".join(parts)
 
 
+def _install_banner(install: dict[str, str] | None) -> str:
+    """ADR-0074 decision 8: the document has no usable extraction because its install was
+    interrupted (`installing`), could not be completed (`unrecoverable`) or its install journal is
+    damaged (unreadable / corrupt)."""
+    if not install:
+        return ""
+    state, reason = install.get("state") or "", install.get("reason") or ""
+    what, fix = {
+        "installing": ("an extraction install was interrupted", "Run extraction to complete it"),
+        "unrecoverable": ("an extraction install could not be completed",
+                          "Run extraction to replace it with a fresh one"),
+    }.get(state, (f"its install journal is {state}",
+                  "Restore the journal (normalized/.install/) from a backup, then run extraction"))
+    return (f"<p class='banner'><strong>No usable extraction (interrupted install)</strong>: "
+            f"{_h(what)}" + (f" (<code>{_h(reason)}</code>)" if reason else "")
+            + f". {_h(fix)}. Until then enrichment, claims, tags, synthesis and search skip this "
+              "document.</p>")
+
+
 def render_source_screen(data: dict[str, Any], *, draft: dict[str, Any] | None = None,
                          errors: list[str] | None = None, notices: list[str] | None = None,
                          warnings: list[str] | None = None,
@@ -1366,6 +1385,7 @@ def render_source_screen(data: dict[str, Any], *, draft: dict[str, Any] | None =
          f"(<code>reviews/tag_links/{sid}.json</code>: {_h(data['ledger_error'])}). Tag decisions "
          "are refused until it is restored from backup, so no earlier keep or drop is lost.</p>"
          if data.get("ledger_error") else ""),
+        _install_banner(data.get("extraction_install")),
         (f"<p class='banner'><strong>A merge/split touching this document is unfinished</strong> "
          f"(<code>{_h(data['in_flight_review_id'])}</code>). Tag decisions on its tags are refused until "
          "you run <a href='/ui/reviews/apply'>Apply</a> again, which finishes it.</p>"

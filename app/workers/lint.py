@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from app.backend import db, durable_write, graph, taxonomy, write_lock
+from app.backend import extraction_install as xi
 from app.backend.manifests import get_provenance, is_source_id, iso_now, scan_manifests
 from app.backend.paths import safe_child, safe_under
 from app.backend.policy import PolicyUnavailable, check_review, read_policy
@@ -432,6 +433,11 @@ def _check_summary_rot(enrichment_dir: Path, markdown_dir: Path, wiki_dir: Path,
                 continue
             if art.get("generation_status") != "enriched":
                 continue
+            if not xi.usable(markdown_dir.parent, sid):
+                # ADR-0074 decision 8: no usable extraction — reported by the install-journal check
+                # (`extraction_install_incomplete`); the summary can't be judged meanwhile.
+                degraded = True
+                continue
             md_path = markdown_dir / f"{sid}.md"  # sid is canonical-validated
             if not md_path.exists():  # can't recompute the fingerprint -> unverifiable, not rot
                 findings.append({"check": "summary_unverifiable", "severity": "low", "subject": sid,
@@ -552,7 +558,10 @@ def _check_stale_claims(gconn, enrichment_dir: Path,
     def _md(sid: str) -> str | None:
         if sid not in md_cache:
             mp = markdown_dir / f"{sid}.md"
-            md_cache[sid] = mp.read_text(encoding="utf-8") if mp.exists() else None
+            # ADR-0074 decision 8: a document with no usable extraction can't be re-grounded
+            # (unverifiable; the install-journal check names the fix).
+            md_cache[sid] = (mp.read_text(encoding="utf-8")
+                             if xi.usable(markdown_dir.parent, sid) and mp.exists() else None)
         return md_cache[sid]
 
     def _unverifiable(cid, detail, data):
@@ -620,7 +629,6 @@ def _check_install_journals(normalized_dir: Path) -> list[dict[str, Any]]:
     """`extraction_install_incomplete` (high): a document whose extraction install journal is
     `installing`, `unrecoverable` or damaged, or a journal inventory that can't be read completely
     (ADR-0074 decision 8). Its normalized outputs must not be used until extraction completes it."""
-    from app.backend import extraction_install as xi
     inv = xi.inventory(xi.Layout(normalized_dir))
     out = []
     for sid, read in sorted(inv.blocking().items()):

@@ -29,9 +29,15 @@ configuration — as ``unrecoverable``), retires and publishes every ``installed
 ``unrecoverable`` and damaged journals in place. Staging cleanup (:func:`cleanup_staging`) then
 removes a staging or holding directory only when a complete, readable journal inventory proves no
 journal refers to it; any damaged journal blocks all cleanup.
+
+Consumers (slice 5b) read a document's normalized outputs through :func:`consistent_read` (or
+:func:`read_text`): the journal check and the read happen under the write lock together, so they
+can't interleave with an install; a document whose journal is not usable is skipped as
+:data:`INCOMPLETE`. Exclusion gates over bytes read elsewhere use :func:`usable`.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -41,9 +47,10 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from collections.abc import Iterator
 from typing import Any, Callable
 
-from app.backend import authority_read, durable_write, manifests
+from app.backend import authority_read, durable_write, manifests, write_lock
 
 JOURNAL_VERSION = 1
 INSTALLING, INSTALLED, UNRECOVERABLE = "installing", "installed", "unrecoverable"
@@ -330,6 +337,60 @@ def inventory(layout: Layout) -> Inventory:
         if read.state in (UNREADABLE, CORRUPT):
             inv.problems.append(f"install journal {path.name} is {read.state} ({read.error})")
     return inv
+
+
+# --------------------------------------------------------------------------- consistent reads
+
+
+def _reviews_dir(layout: Layout) -> Path:
+    """The write lock's directory: the vault's `reviews/`, beside `normalized/`."""
+    return layout.normalized.parent / "reviews"
+
+
+@contextlib.contextmanager
+def consistent_read(normalized_dir: Path, source_id: str, *,
+                    reviews_dir: Path | None = None) -> Iterator[JournalRead]:
+    """Decision 8 consistent reads: hold the write lock while the caller checks the yielded journal
+    state and reads the document's normalized bytes (Markdown, chunks, tables, extraction log), so
+    an install can't run between the check and the read. Unusable journal (`installing`,
+    `unrecoverable`, damaged) → the caller reads nothing and skips the document with
+    :data:`INCOMPLETE`. The hold changes no authority and no preview input, so it neither checks the
+    publication queue nor advances the vault revision; it is re-entrant, so a commit phase that
+    already holds the lock re-checks for free. Model calls stay outside it (ADR-0068)."""
+    layout = Layout(Path(normalized_dir))
+    with write_lock.hold(Path(reviews_dir) if reviews_dir else _reviews_dir(layout),
+                         authority=False, changes=False):
+        yield read_journal(layout, source_id)
+
+
+def _output_text(path: Path, errors: str) -> str:
+    """A normalized output's text; "" for an absent file (the pre-journal convention)."""
+    try:
+        return path.read_bytes().decode("utf-8", errors=errors)
+    except FileNotFoundError:
+        return ""
+
+
+def read_text(normalized_dir: Path, source_id: str, kind: str, *, errors: str = "strict",
+              reviews_dir: Path | None = None) -> str | None:
+    """One normalized output (`kind`: ``markdown`` or ``chunks``) read consistently with the
+    document's journal: None when its install is incomplete, "" when the file is absent. A
+    non-canonical id names no extraction output (extraction writes canonical ids only, and no path
+    is built from it): "", as an absent file."""
+    if not manifests.is_source_id(source_id):
+        return ""
+    with consistent_read(normalized_dir, source_id, reviews_dir=reviews_dir) as journal:
+        if not journal.usable:
+            return None
+        return _output_text(Layout(Path(normalized_dir)).outputs(source_id)[kind], errors)
+
+
+def usable(normalized_dir: Path, source_id: str) -> bool:
+    """Whether the document's journal allows reading its outputs. Takes no lock itself: for a
+    commit phase's re-check under the write lock it already holds, for exclusion gates over bytes
+    read elsewhere (search hits from the index), and for report-only checks. A reader of the
+    normalized files themselves uses :func:`consistent_read`."""
+    return read_journal(Layout(Path(normalized_dir)), source_id).usable
 
 
 def new_journal(source_id: str, attempt_id: str, *, source_sha256: str, config: dict[str, int],

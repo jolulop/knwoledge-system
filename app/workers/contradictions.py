@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from app.backend import db, durable_write, graph, write_lock
+from app.backend import extraction_install as xi
 from app.backend.manifests import get_provenance, independent_sources, iso_now, scan_manifests
 from app.workers import apply_outcomes, claims, identity_journal, reviews, supersede
 
@@ -56,21 +57,31 @@ def _read_claim_text(page_path: Path) -> str | None:
 
 def _claim_context(gconn, cid: str, *, claims_dir: Path, markdown_dir: Path) -> dict[str, Any] | None:
     """A claim's review-facing context: durable text + citations reconstructed from its active
-    `derived_from` edges (quotes read back from the source spans). None if it has no wording."""
+    `derived_from` edges (quotes read back from the source spans). None if it has no wording.
+
+    ADR-0074 decision 8: a document with no usable extraction (install incomplete) is not read —
+    its citation has no quote and the document is listed under `install_incomplete`, which makes
+    the claim's evidence unknown (never "changed": no proposal is retired on that basis)."""
     claim_text = _read_claim_text(claims_dir / f"{cid}.md")
     if claim_text is None:
         return None
     cites: list[dict[str, Any]] = []
+    blocked: set[str] = set()
     for e in graph.outgoing_active(gconn, cid):
         if e["edge_type"] != "derived_from":
             continue
         src, start, end = e["dst_id"], e["evidence_char_start"], e["evidence_char_end"]
-        md_path = markdown_dir / f"{src}.md"
-        md = md_path.read_text(encoding="utf-8") if md_path.exists() else ""
+        md = xi.read_text(markdown_dir.parent, src, "markdown")
+        if md is None:
+            blocked.add(src)
+            md = ""
         quote = md[start:end] if start is not None and end is not None and end <= len(md) else ""
         cites.append({"source_id": src, "char_start": start, "char_end": end, "quote": quote})
     cites.sort(key=lambda c: (c["source_id"], c["char_start"] if c["char_start"] is not None else -1))
-    return {"claim_id": cid, "claim_text": claim_text, "citations": cites}
+    ctx = {"claim_id": cid, "claim_text": claim_text, "citations": cites}
+    if blocked:
+        ctx["install_incomplete"] = sorted(blocked)
+    return ctx
 
 
 def scoped_claim_context(gconn, cid: str, source_id: str, *, claims_dir: Path,
@@ -81,7 +92,11 @@ def scoped_claim_context(gconn, cid: str, source_id: str, *, claims_dir: Path,
     ctx = _claim_context(gconn, cid, claims_dir=claims_dir, markdown_dir=markdown_dir)
     if ctx is None:
         return None
-    return ctx | {"citations": [c for c in ctx["citations"] if c["source_id"] == source_id]}
+    scoped = {k: v for k, v in ctx.items() if k != "install_incomplete"}
+    scoped["citations"] = [c for c in ctx["citations"] if c["source_id"] == source_id]
+    if source_id in ctx.get("install_incomplete", ()):
+        scoped["install_incomplete"] = [source_id]
+    return scoped
 
 
 # --- resolution application (deterministic effect of human decisions) ------
@@ -325,6 +340,10 @@ UNVERIFIABLE_REASONS = {
     "review_unreadable": "its pending review item is unreadable",
     "no_judged_evidence": "its review item doesn't record the evidence that was judged",
     "judged_evidence_incomplete": "its review item doesn't record the judged evidence of both claims",
+    "manifest_inventory_incomplete": "a document's manifest can't be read, so its independence "
+                                     "is unknown",
+    "extraction_install_incomplete": "a cited document has no usable extraction (interrupted "
+                                     "install) — run extraction",
 }
 MAINTENANCE_COMMAND = "uv run python scripts/detect_contradictions.py maintain"
 NOTICE_NAME = "Contradiction maintenance"
@@ -454,6 +473,10 @@ def check_assertions(gconn, *, reviews_dir: Path, claims_dir: Path, markdown_dir
             ctx = (scoped_claim_context(gconn, cid, scope[cid], claims_dir=claims_dir,
                                         markdown_dir=markdown_dir) if scope else
                    _claim_context(gconn, cid, claims_dir=claims_dir, markdown_dir=markdown_dir))
+            if ctx is not None and ctx.get("install_incomplete"):
+                # ADR-0074 decision 8: evidence that can't be read is unknown, not changed.
+                out["unverifiable"].append(entry | {"reason": xi.INCOMPLETE})
+                break
             if ctx is None or judged[cid] != evidence_fingerprint(ctx):
                 out["stale"].append(entry | {"reason": "evidence_changed"})
                 break

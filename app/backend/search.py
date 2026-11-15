@@ -31,6 +31,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Callable
 
+from app.backend import extraction_install as xi
 from app.backend import graph, graph_read, manifests
 from app.backend.policy import RetrievalPolicy
 
@@ -540,21 +541,34 @@ class _ManifestGate:
     equal to it, no duplicate claiming it). Unreadable, corrupt, quarantined and absent manifests
     (a removed manifests folder included) all exclude the document. The inventory is scanned once
     per search, only when a hit needs it. This is the unavailable-authority exclusion only;
-    visibility suppression of valid manifests (hide / archive status filtering) is change 7a."""
+    visibility suppression of valid manifests (hide / archive status filtering) is change 7a.
 
-    def __init__(self, manifests_dir: Path) -> None:
+    ADR-0074 decision 8 (slice 5b): a document whose install journal makes its normalized outputs
+    unusable (`installing`, `unrecoverable`, damaged) is excluded the same way (`install_blocked`):
+    its indexed rows may be another generation than its current files."""
+
+    def __init__(self, manifests_dir: Path, normalized_dir: Path | None = None) -> None:
         self.manifests_dir = Path(manifests_dir)
+        self.normalized_dir = (Path(normalized_dir) if normalized_dir is not None
+                               else self.manifests_dir.parent.parent / "normalized")
         self.blocked: set[str] = set()
+        self.install_blocked: set[str] = set()
         self._usable: set[str] | None = None
+        self._installed: dict[str, bool] = {}
 
     def allows(self, source_id: Any) -> bool:
         sid = str(source_id or "")
         if self._usable is None:
             self._usable = manifests.scan_manifests(self.manifests_dir).valid_ids
-        if sid in self._usable:
-            return True
-        self.blocked.add(sid)
-        return False
+        if sid not in self._usable:
+            self.blocked.add(sid)
+            return False
+        if sid not in self._installed:              # valid ids are canonical: a journal name
+            self._installed[sid] = xi.usable(self.normalized_dir, sid)
+        if not self._installed[sid]:
+            self.install_blocked.add(sid)
+            return False
+        return True
 
     def evidence(self, hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return [h for h in hits if self.allows(h.get("source_id"))]
@@ -568,6 +582,7 @@ def run_search(
     q: str,
     mode: str,
     manifests_dir: Path,
+    normalized_dir: Path | None = None,
     keyword_conn: sqlite3.Connection | None,
     graph_conn: sqlite3.Connection | None,
     policy: RetrievalPolicy,
@@ -586,8 +601,9 @@ def run_search(
     vector_unavailable_reason: str | None = None,
 ) -> dict[str, Any]:
     """Run the routed channels and assemble the grouped ``/search`` response. `manifests_dir` is
-    required: every evidence and Source navigation hit passes the damaged-manifest gate."""
-    gate = _ManifestGate(manifests_dir)
+    required: every evidence and Source navigation hit passes the damaged-manifest gate, and the
+    install-journal gate over `normalized_dir` (default: the vault's `normalized/` beside `raw/`)."""
+    gate = _ManifestGate(manifests_dir, normalized_dir)
     modes, shape = route(mode, q, policy)
     prefusion = policy.cap("per_channel_prefusion_limit")
     ev_limit = evidence_limit or policy.cap("max_evidence_hits")
@@ -699,6 +715,9 @@ def run_search(
         notes.append(f"{len(gate.blocked)} document(s) excluded: manifest unreadable, corrupt, "
                      "quarantined or missing (ADR-0074) — recover it to make the document "
                      "searchable again")
+    if gate.install_blocked:
+        notes.append(f"{len(gate.install_blocked)} document(s) excluded: extraction install "
+                     "incomplete (ADR-0074) — run extraction to make the document searchable again")
 
     counts = {
         "evidence": len(evidence),

@@ -45,6 +45,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     for warning in stats.warnings:
         print(f"  warning: {warning}", file=sys.stderr)
+    if stats.install_incomplete:                     # ADR-0074 decision 8: kept as they were
+        print(f"  skipped (extraction install incomplete — run extraction): "
+              f"{', '.join(stats.install_incomplete)}", file=sys.stderr)
     return 0
 
 

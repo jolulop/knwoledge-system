@@ -36,7 +36,8 @@ from typing import Any
 
 # Answer-eligibility is shared retrieval policy, not a keyword-index detail — it lives in a
 # neutral module (ADR-0032 decision 2). Re-exported here for backward compatibility.
-from app.backend import taxonomy
+from app.backend import extraction_install as xi
+from app.backend import manifests, taxonomy
 from app.backend.eligibility import ANSWER_ELIGIBLE_TYPES
 
 # Bump when the index schema or row shape changes; recorded via PRAGMA user_version so a stale
@@ -105,6 +106,9 @@ class ReindexStats:
     navigation_pages_removed: int = 0
     skipped: int = 0  # unchanged sources + pages left untouched
     warnings: list[str] = field(default_factory=list)
+    # ADR-0074 decision 8: documents with no usable extraction — not indexed; an incremental pass
+    # keeps their rows, a full rebuild leaves them out.
+    install_incomplete: list[str] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- parsing helpers
@@ -183,8 +187,9 @@ def _fingerprint(data: bytes) -> str:
 # --------------------------------------------------------------------------- row builders
 
 
-def _evidence_rows(chunk_path: Path) -> tuple[list[tuple], int, list[str]]:
-    """Parse one ``normalized/chunks/<source_id>.jsonl`` into evidence insert tuples.
+def _evidence_rows(chunk_path: Path, data: bytes | None = None) -> tuple[list[tuple], int, list[str]]:
+    """Parse one ``normalized/chunks/<source_id>.jsonl`` (or its captured bytes) into evidence
+    insert tuples.
 
     Returns ``(rows, chunk_count, warnings)``. Records missing the citation anchor fields
     (``source_id`` / ``char_start`` / ``char_end``) are skipped — they are not citable evidence
@@ -192,7 +197,8 @@ def _evidence_rows(chunk_path: Path) -> tuple[list[tuple], int, list[str]]:
     """
     rows: list[tuple] = []
     warnings: list[str] = []
-    for lineno, line in enumerate(chunk_path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+    text = (chunk_path.read_bytes() if data is None else data).decode("utf-8", errors="replace")
+    for lineno, line in enumerate(text.splitlines(), 1):
         line = line.strip()
         if not line:
             continue
@@ -439,8 +445,15 @@ def _freshness(label: str, live: dict[str, Path], stored: dict[str, str], indexe
     return errors
 
 
+def install_incomplete(root: Path, source_ids: Any) -> set[str]:
+    """The canonical ids among `source_ids` whose install journal makes their normalized outputs
+    unusable (ADR-0074 decision 8). Other names are left to `validate_normalized`."""
+    normalized = Path(root) / "normalized"
+    return {s for s in source_ids if manifests.is_source_id(s) and not xi.usable(normalized, s)}
+
+
 def _evidence_freshness(live: dict[str, Path], stored: dict[str, str], indexed: set[str],
-                        *, reindex_hint: str) -> list[str]:
+                        *, reindex_hint: str, blocked: set[str] = frozenset()) -> list[str]:
     """Evidence freshness with a zero-citable-row allowance.
 
     A partial/OCR-needed source can have a valid ``src_*.jsonl`` chunk file that parses to zero citable
@@ -448,6 +461,13 @@ def _evidence_freshness(live: dict[str, Path], stored: dict[str, str], indexed: 
     but the FTS table correctly has no evidence row for that source.
     """
     errors: list[str] = []
+    # ADR-0074 decision 8: a document with no usable extraction is reported once, as that — its
+    # rows are kept as they were (search excludes it) until extraction completes it.
+    for key in sorted(blocked):
+        errors.append(f"evidence {key}: extraction install incomplete (run extraction)")
+    live = {k: v for k, v in live.items() if k not in blocked}
+    stored = {k: v for k, v in stored.items() if k not in blocked}
+    indexed = set(indexed) - set(blocked)
     extra_rows = set(indexed) - set(stored)
     if extra_rows:
         errors.append(
@@ -487,8 +507,9 @@ def consistency_errors(root: Path, conn: sqlite3.Connection, *, reindex_hint: st
     missing = [t for t in _REQUIRED_TABLES if t not in _tables(conn)]
     if missing:
         return [f"keyword index missing core table(s) {missing} ({reindex_hint})"]
-    return (_evidence_freshness(chunk_files(root), stored_source_fingerprints(conn),
-                                indexed_source_ids(conn), reindex_hint=reindex_hint)
+    live, stored = chunk_files(root), stored_source_fingerprints(conn)
+    return (_evidence_freshness(live, stored, indexed_source_ids(conn), reindex_hint=reindex_hint,
+                                blocked=install_incomplete(root, set(live) | set(stored)))
             + _freshness("navigation", navigation_pages(root), stored_nav_fingerprints(conn),
                          indexed_navigation_paths(conn), reindex_hint=reindex_hint))
 
@@ -496,8 +517,45 @@ def consistency_errors(root: Path, conn: sqlite3.Connection, *, reindex_hint: st
 # --------------------------------------------------------------------------- reindex
 
 
+def _capture_chunks(root: Path, files: dict[str, Path], stored: dict[str, str]
+                    ) -> tuple[dict[str, tuple[str, bytes]], set[str]]:
+    """ADR-0074 decision 8 consistent reads: each document's chunk bytes, captured under the write
+    lock with its install journal's state and before any index write (lock order: the write lock
+    before SQLite). Returns `({source_id: (fingerprint, bytes)}` for the changed documents, the
+    documents with no usable extraction)."""
+    normalized, reviews = root / "normalized", root / "reviews"
+    captured: dict[str, tuple[str, bytes]] = {}
+    blocked: set[str] = set()
+    # Every journal-named document is checked too, so a full rebuild (nothing stored) still reports
+    # a blocked document whose rows it can't keep, and one whose chunk file is gone.
+    journals = set(xi.inventory(xi.Layout(normalized)).journals)
+    for source_id in sorted(set(files) | set(stored) | journals):
+        if not manifests.is_source_id(source_id):     # not a journal name: validate_normalized's
+            if source_id in files:
+                data = files[source_id].read_bytes()
+                if stored.get(source_id) != _fingerprint(data):
+                    captured[source_id] = (_fingerprint(data), data)
+            continue
+        with xi.consistent_read(normalized, source_id, reviews_dir=reviews) as journal:
+            if not journal.usable:
+                blocked.add(source_id)
+                continue
+            if source_id not in files:
+                continue
+            data = files[source_id].read_bytes()
+        fp = _fingerprint(data)
+        if stored.get(source_id) != fp:
+            captured[source_id] = (fp, data)
+    return captured, blocked
+
+
 def reindex(root: Path, *, force: bool = False) -> ReindexStats:
-    """Incrementally (re)build the keyword index under ``<root>/indexes/keyword/``."""
+    """Incrementally (re)build the keyword index under ``<root>/indexes/keyword/``.
+
+    ADR-0074 decision 8: a document with no usable extraction is neither indexed nor removed by an
+    incremental pass (its rows stay; search excludes it). A full rebuild (`force`, or a schema
+    change) starts from empty tables and can't keep them: it leaves the document out. Both report it
+    in `install_incomplete`; the next reindex after extraction completes it indexes it."""
     root = Path(root).resolve()
     conn = connect(root / DB_RELPATH)
     stats = ReindexStats()
@@ -515,16 +573,20 @@ def reindex(root: Path, *, force: bool = False) -> ReindexStats:
         stored_sources = {
             r[0]: r[1] for r in conn.execute("SELECT source_id, fingerprint FROM source_fingerprints")
         }
-        for source_id in sorted(set(stored_sources) - set(source_files)):
+        captured, blocked = _capture_chunks(root, source_files, stored_sources)
+        stats.install_incomplete = sorted(blocked)
+        for source_id in sorted(set(stored_sources) - set(source_files) - blocked):
             conn.execute("DELETE FROM evidence WHERE source_id = ?", (source_id,))
             conn.execute("DELETE FROM source_fingerprints WHERE source_id = ?", (source_id,))
             stats.evidence_sources_removed += 1
         for source_id, chunk_path in source_files.items():
-            fp = _fingerprint(chunk_path.read_bytes())
-            if stored_sources.get(source_id) == fp:
+            if source_id in blocked:
+                continue
+            if source_id not in captured:
                 stats.skipped += 1
                 continue
-            rows, count, warnings = _evidence_rows(chunk_path)
+            fp, data = captured[source_id]
+            rows, count, warnings = _evidence_rows(chunk_path, data)
             stats.warnings.extend(warnings)
             conn.execute("DELETE FROM evidence WHERE source_id = ?", (source_id,))
             conn.executemany(

@@ -28,7 +28,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from app.backend import keyword_index
+from app.backend import extraction_install as xi
+from app.backend import keyword_index, manifests
 from app.backend.embeddings import Embedder
 
 VECTOR_RELDIR = Path("indexes") / "vector"
@@ -107,14 +108,34 @@ def _chunk_fingerprint(line: str) -> str:
 
 
 def disk_chunks(root: Path) -> dict[str, dict[str, Any]]:
-    """Map ``chunk_id`` -> {citation fields + text + chunk_fingerprint} for all per-source chunks.
+    """Map ``chunk_id`` -> {citation fields + text + chunk_fingerprint} for all per-source chunks
+    of documents with a usable extraction (see :func:`read_disk_chunks`)."""
+    return read_disk_chunks(root)[0]
+
+
+def read_disk_chunks(root: Path, also: Any = ()) -> tuple[dict[str, dict[str, Any]], set[str]]:
+    """`(chunks, install_incomplete)`: :func:`disk_chunks`' map, and the documents skipped because
+    their install journal makes their outputs unusable (ADR-0074 decision 8) — among the chunk files
+    and the source ids in `also` (indexed documents whose file is gone). Each document's bytes are
+    read under the write lock together with its journal's state.
 
     Records missing the citation anchor (`source_id`/`char_start`/`char_end`) are skipped — they are
     not citable evidence (mirrors the keyword evidence index).
     """
     out: dict[str, dict[str, Any]] = {}
-    for source_id, path in keyword_index.chunk_files(Path(root)).items():
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+    root = Path(root)
+    files = keyword_index.chunk_files(root)
+    blocked = keyword_index.install_incomplete(root, set(also) - set(files))
+    for source_id, path in files.items():
+        if manifests.is_source_id(source_id):
+            text = xi.read_text(root / "normalized", source_id, "chunks", errors="replace",
+                                reviews_dir=root / "reviews")
+            if text is None:
+                blocked.add(source_id)
+                continue
+        else:                                  # not a journal name: validate_normalized's concern
+            text = path.read_text(encoding="utf-8", errors="replace")
+        for line in text.splitlines():
             line = line.strip()
             if not line:
                 continue
@@ -141,7 +162,7 @@ def disk_chunks(root: Path) -> dict[str, dict[str, Any]]:
                 "text": rec.get("text", ""),
                 "chunk_fingerprint": _chunk_fingerprint(line),
             }
-    return out
+    return out, blocked
 
 
 def disk_chunk_fingerprints(root: Path) -> dict[str, str]:
@@ -231,6 +252,9 @@ class ReindexStats:
     chunks_embedded: int = 0
     chunks_deleted: int = 0
     chunks_total: int = 0
+    # ADR-0074 decision 8: documents with no usable extraction — not embedded; an incremental pass
+    # keeps their rows (search excludes them), a full rebuild leaves them out.
+    install_incomplete: list[str] = field(default_factory=list)
 
 
 def reindex(
@@ -270,7 +294,9 @@ def _build_full(root: Path, embedder: Embedder, meta: VectorMeta) -> ReindexStat
     import lancedb
     import pyarrow as pa
 
-    chunks = disk_chunks(root)
+    # Every journal-named document is checked, so one whose chunk file is gone is reported too.
+    journals = xi.inventory(xi.Layout(root / "normalized")).journals
+    chunks, blocked = read_disk_chunks(root, set(journals))
     ordered = [chunks[cid] for cid in sorted(chunks)]
     vectors = _embed_texts(embedder, [r["text"] for r in ordered])  # embed all BEFORE any write
     rows = [_row(r, v, meta.embedding_model_ref) for r, v in zip(ordered, vectors)]
@@ -291,6 +317,7 @@ def _build_full(root: Path, embedder: Embedder, meta: VectorMeta) -> ReindexStat
         sources_indexed=len({r["source_id"] for r in rows}),
         chunks_embedded=len(rows),
         chunks_total=len(rows),
+        install_incomplete=sorted(blocked),
     )
 
 
@@ -300,14 +327,12 @@ def _incremental(root: Path, embedder: Embedder, meta: VectorMeta) -> ReindexSta
     live = root / VECTOR_RELDIR
     db = lancedb.connect(str(live))
     tbl = db.open_table(TABLE_NAME)
-    on_disk = disk_chunks(root)
-    n = tbl.count_rows()
-    indexed = {
-        r["chunk_id"]: r["chunk_fingerprint"]
-        for r in tbl.search().select(["chunk_id", "chunk_fingerprint"]).limit(max(1, n)).to_list()
-    }
+    rows_now = _indexed_rows(tbl)
+    on_disk, blocked = read_disk_chunks(root, {sid for _fp, sid in rows_now.values()})
+    indexed = {cid: fp for cid, (fp, _sid) in rows_now.items()}
     to_upsert = [cid for cid in sorted(on_disk) if indexed.get(cid) != on_disk[cid]["chunk_fingerprint"]]
-    to_delete = [cid for cid in sorted(indexed) if cid not in on_disk]
+    to_delete = [cid for cid in sorted(indexed)
+                 if cid not in on_disk and rows_now[cid][1] not in blocked]
 
     rows: list[dict[str, Any]] = []
     if to_upsert:  # embed BEFORE deleting old rows
@@ -327,7 +352,18 @@ def _incremental(root: Path, embedder: Embedder, meta: VectorMeta) -> ReindexSta
         chunks_embedded=len(rows),
         chunks_deleted=len(to_delete),
         chunks_total=tbl.count_rows(),
+        install_incomplete=sorted(blocked),
     )
+
+
+def _indexed_rows(tbl: Any) -> dict[str, tuple[str, str]]:
+    """``chunk_id`` -> (stored ``chunk_fingerprint``, ``source_id``) from a table."""
+    n = tbl.count_rows()
+    return {
+        r["chunk_id"]: (r["chunk_fingerprint"], r["source_id"])
+        for r in tbl.search().select(["chunk_id", "chunk_fingerprint", "source_id"])
+        .limit(max(1, n)).to_list()
+    }
 
 
 # --------------------------------------------------------------------------- read (validator / 4d-3)
@@ -467,8 +503,15 @@ def status(root: Path, *, expected: VectorMeta | None = None) -> VectorStatus:
         return st
 
     st.inspected = True
-    on_disk = disk_chunk_fingerprints(root)
-    indexed = indexed_chunk_fingerprints(root)
-    st.stale_or_missing_chunks = sum(1 for cid, fp in on_disk.items() if indexed.get(cid) != fp)
-    st.removed_chunks = sum(1 for cid in indexed if cid not in on_disk)
+    import lancedb
+    rows_now = _indexed_rows(lancedb.connect(str(root / VECTOR_RELDIR)).open_table(TABLE_NAME))
+    chunks, blocked = read_disk_chunks(root, {sid for _fp, sid in rows_now.values()})
+    on_disk = {cid: rec["chunk_fingerprint"] for cid, rec in chunks.items()}
+    st.stale_or_missing_chunks = sum(1 for cid, fp in on_disk.items()
+                                     if rows_now.get(cid, (None,))[0] != fp)
+    st.removed_chunks = sum(1 for cid, (_fp, sid) in rows_now.items()
+                            if cid not in on_disk and sid not in blocked)
+    if blocked:
+        st.notes.append(f"{len(blocked)} document(s) not checked: extraction install incomplete "
+                        "(run extraction) — " + ", ".join(sorted(blocked)))
     return st

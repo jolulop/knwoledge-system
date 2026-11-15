@@ -31,6 +31,7 @@ from app.backend import (
     publication_queue, revision,
     review_html, review_read, run_guard, search, taxonomy, vault_lock, vector_index, write_lock,
 )
+from app.backend import extraction_install as xi
 from app.backend.config import get_settings
 from app.workers import details as details_mod
 from app.backend.paths import safe_under
@@ -483,14 +484,29 @@ def _require_extracted(source_id: str) -> None:
         raise HTTPException(status_code=404, detail=f"source not extracted: {source_id}")
 
 
+def _read_output(source_id: str, path: Path) -> str:
+    """One normalized output of an extracted source, read under the write lock together with its
+    install journal's state (ADR-0074 decision 8): 409 `extraction_install_incomplete` while the
+    install is interrupted, unrecoverable or its journal damaged; 404 when the file is absent."""
+    _require_extracted(source_id)
+    with xi.consistent_read(settings.normalized_dir, source_id,
+                            reviews_dir=settings.reviews_dir) as installed:
+        if not installed.usable:
+            raise HTTPException(status_code=409, detail={
+                "reason": xi.INCOMPLETE, "journal_state": installed.state,
+                "detail": "no usable extraction (interrupted install) — run extraction"})
+        try:
+            return path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            raise HTTPException(status_code=404,
+                                detail=f"source not extracted: {source_id}") from None
+
+
 @app.get("/sources/{source_id}/chunks", response_model=ChunksResponse)
 def get_source_chunks(source_id: str) -> dict[str, Any]:
-    _require_extracted(source_id)
-    path = settings.chunks_dir / f"{source_id}.jsonl"
-    if not path.exists():
-        raise HTTPException(status_code=404, detail=f"source not extracted: {source_id}")
+    text = _read_output(source_id, settings.chunks_dir / f"{source_id}.jsonl")
     chunks: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         line = line.strip()
         if line:
             chunks.append(json.loads(line))
@@ -499,14 +515,11 @@ def get_source_chunks(source_id: str) -> dict[str, Any]:
 
 @app.get("/sources/{source_id}/normalized", response_model=NormalizedResponse)
 def get_source_normalized(source_id: str) -> dict[str, Any]:
-    _require_extracted(source_id)
-    path = settings.markdown_dir / f"{source_id}.md"
-    if not path.exists():
-        raise HTTPException(status_code=404, detail=f"source not extracted: {source_id}")
+    content = _read_output(source_id, settings.markdown_dir / f"{source_id}.md")
     return {
         "source_id": source_id,
         "markdown_path": f"normalized/markdown/{source_id}.md",
-        "content": path.read_text(encoding="utf-8"),
+        "content": content,
     }
 
 
@@ -3254,6 +3267,7 @@ def _run_search(
 
         result = search.run_search(
             q=q, mode=mode, manifests_dir=settings.manifests_dir,
+            normalized_dir=settings.normalized_dir,
             keyword_conn=keyword_conn, graph_conn=graph_conn, policy=policy,
             source_id=source_id, page_type=page_type, node_type=node_type, item_types=item_types,
             language=language,

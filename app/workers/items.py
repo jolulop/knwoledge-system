@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from app.backend import authority_read, db, durable_write, graph, taxonomy
+from app.backend import extraction_install as xi
 from app.backend import producer_journal as journal
 from app.backend.policy import PolicyUnavailable
 from app.backend.manifests import (
@@ -805,6 +806,7 @@ def extract_items(
     cache_miss_sources: list[str] = []
     in_flight_sources: list[dict[str, str]] = []
     input_changed_sources: list[str] = []
+    install_incomplete: list[str] = []         # ADR-0074 decision 8: no usable extraction to read
     # ADR-0070 B1 review: suggestions not written because their page name is taken or unowned.
     slug_skips: list[dict[str, Any]] = []
     texts: dict[str, dict[str, Any]] = {}     # one document's page hints, by node id
@@ -954,7 +956,21 @@ def extract_items(
             attempted.add(sid)
 
             md_path = markdown_dir / f"{sid}.md"
-            md = md_path.read_text(encoding="utf-8") if md_path.exists() else ""
+            logs_dir = markdown_dir.parent / "extraction_logs"
+            # ADR-0074 decision 8: the text and the extraction log (the title's PDF hint) are read
+            # under the write lock together with the install journal's state.
+            with xi.consistent_read(markdown_dir.parent, sid, reviews_dir=reviews_dir) as installed:
+                if not installed.usable:
+                    install_incomplete.append(sid)
+                    continue
+                md = md_path.read_text(encoding="utf-8") if md_path.exists() else ""
+                # ADR-0066 part 3: the prompt title is a prompt input, so it is part of freshness;
+                # the fresh Enrich artifact's typed tags are the merge input (slice 2), part of
+                # plan freshness only.
+                title = titles.prompt_title_for(manifest, md, enrichment_dir=enrichment_dir,
+                                                logs_dir=logs_dir)
+                enrich_tags = titles.enrich_tags_for(manifest, md, enrichment_dir=enrichment_dir,
+                                                     logs_dir=logs_dir)
             apath = art.items_artifact_path(enrichment_dir, sid)
             existing: dict[str, Any] = {}
             if apath.exists():
@@ -964,14 +980,6 @@ def extract_items(
                     existing = {}
                 if not isinstance(existing, dict):
                     existing = {}
-            # ADR-0066 part 3: the prompt title is a prompt input, so it is part of freshness; the
-            # fresh Enrich artifact's typed tags are the merge input (slice 2), part of plan
-            # freshness only.
-            logs_dir = markdown_dir.parent / "extraction_logs"
-            title = titles.prompt_title_for(manifest, md, enrichment_dir=enrichment_dir,
-                                            logs_dir=logs_dir)
-            enrich_tags = titles.enrich_tags_for(manifest, md, enrichment_dir=enrichment_dir,
-                                                 logs_dir=logs_dir)
             plan_input = merge_input(enrich_tags)
             # ADR-0063 sticky-to-chain: fresh iff the recorded model is still a chain member and
             # its own-model fingerprint matches — an availability flip alone never restales.
@@ -1032,6 +1040,13 @@ def extract_items(
                 continue
             if not md.strip():
                 with tag_links.ledger_lock(reviews_dir):
+                    # ADR-0074 decision 8: the empty text must still be the installed one.
+                    if not xi.usable(markdown_dir.parent, sid):
+                        install_incomplete.append(sid)
+                        continue
+                    if (md_path.read_text(encoding="utf-8") if md_path.exists() else "") != md:
+                        input_changed_sources.append(sid)
+                        continue
                     # ADR-0074 decision 2: re-read under the lock — a manifest damaged or gone
                     # since the scan stops this document before any mention is retired.
                     now_read = recheck(manifests_dir, sid, inventory)
@@ -1080,6 +1095,11 @@ def extract_items(
             # made meanwhile must win — re-read both under the lock, then write this document's links
             # and artifact before releasing it.
             with tag_links.ledger_lock(reviews_dir):
+                # ADR-0074 decision 8: an install interrupted during the model call leaves the text
+                # unusable — write nothing (the document stays blocked until extraction).
+                if not xi.usable(markdown_dir.parent, sid):
+                    install_incomplete.append(sid)
+                    continue
                 # ADR-0068: the suggestions are valid only for the text the model read; a
                 # re-extraction installed meanwhile makes them stale — write nothing, the next run
                 # extracts the new text.
@@ -1187,7 +1207,7 @@ def extract_items(
         left_attempted = sorted(set(left) & attempted)
 
         if (errors or cache_miss_sources or in_flight_sources or left_attempted or replan_unavailable
-                or slug_skips or pages_refused):
+                or slug_skips or pages_refused or install_incomplete):
             status = "partial"
         elif not has_key and not cache_only and considered > 0 and not replanned_sources:
             # Derived from the work done (slice 2 review round 1): a provider-free run that re-planned
@@ -1241,6 +1261,8 @@ def extract_items(
             # next run that reaches them), and the ones finished here from authority.
             "unfinished_commits": sorted(left), "journal_reconciled": journal_reconciled,
             "input_changed_sources": input_changed_sources,
+            "skipped_install_incomplete": len(install_incomplete),
+            "install_incomplete": install_incomplete,
             # ADR-0066 part 3 slice 2: re-planned from the stored model output (no model call), and
             # documents whose plan changed but which have no stored raw list (regenerate them).
             "replanned_sources": replanned_sources,

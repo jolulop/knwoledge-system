@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from app.backend import authority_read, db, durable_write, graph, write_lock
+from app.backend import extraction_install as xi
 from app.backend import producer_journal as journal
 from app.backend.manifests import get_provenance, independent_sources, iso_now, scan_manifests
 from app.backend.paths import safe_child
@@ -153,7 +154,11 @@ def _evidence_hidden(gconn, syn_id: str) -> bool:
 
 def _claim_context(gconn, cid: str, *, claims_dir: Path, markdown_dir: Path) -> dict[str, Any] | None:
     """A contributing claim's durable text + citations reconstructed from its active edges; None
-    if its page/wording is missing. A claim with no citations is not usable (caller drops it)."""
+    if its page/wording is missing. A claim with no citations is not usable (caller drops it).
+
+    ADR-0074 decision 8: a citation whose document has no usable extraction (install incomplete)
+    keeps its anchor but no quote — eligibility and the fingerprint (anchors) stay as they were —
+    and the document is listed under `install_incomplete`; nothing is generated from such a topic."""
     page = safe_child(claims_dir, f"{cid}.md")  # cid is graph-derived (untrusted), ADR-0009
     if page is None or not page.exists():
         return None
@@ -162,6 +167,7 @@ def _claim_context(gconn, cid: str, *, claims_dir: Path, markdown_dir: Path) -> 
         return None
     claim_text = re.sub(r"\\(.)", r"\1", m.group(1))
     cites: list[dict[str, Any]] = []
+    blocked: set[str] = set()
     for e in graph.outgoing_active(gconn, cid):
         if e["edge_type"] != "derived_from":
             continue
@@ -169,11 +175,18 @@ def _claim_context(gconn, cid: str, *, claims_dir: Path, markdown_dir: Path) -> 
         md_path = safe_child(markdown_dir, f"{src}.md")
         if md_path is None:
             continue  # non-canonical/path-like source id -> drop this citation, never read outside
-        md = md_path.read_text(encoding="utf-8") if md_path.exists() else ""
+        md = xi.read_text(markdown_dir.parent, src, "markdown")
+        if md is None:
+            blocked.add(src)
+            md = ""
         quote = md[start:end] if start is not None and end is not None and end <= len(md) else ""
         cites.append({"source_id": src, "char_start": start, "char_end": end, "quote": quote})
     cites.sort(key=lambda c: (c["source_id"], c["char_start"] if c["char_start"] is not None else -1))
-    return {"claim_id": cid, "claim_text": claim_text, "citations": cites, "sources": [c["source_id"] for c in cites]}
+    ctx = {"claim_id": cid, "claim_text": claim_text, "citations": cites,
+           "sources": [c["source_id"] for c in cites]}
+    if blocked:
+        ctx["install_incomplete"] = sorted(blocked)
+    return ctx
 
 
 def _disagreement_pairs(gconn, claim_ids: set[str]) -> list[tuple[str, str]]:
@@ -232,21 +245,24 @@ def topic_for(gconn, nid: str, prov, *, claims_dir: Path, markdown_dir: Path) ->
         return None
     node_dir = claims_dir.parent / NODE_DIR[node_type]
     topic_page = safe_child(node_dir, f"{node['slug']}.md")  # slug is graph-derived
-    return {
+    topic = {
         "node_id": nid, "node_type": node_type, "slug": node["slug"],
         "title": (_read_fm_title(topic_page) if topic_page else None) or node["slug"],
         "claims": ctxs,
         "disagreements": _disagreement_pairs(gconn, {c["claim_id"] for c in ctxs}),
     }
+    blocked = sorted({s for c in ctxs for s in c.get("install_incomplete", ())})
+    if blocked:
+        topic["install_incomplete"] = blocked    # ADR-0074 decision 8: never generated from
+    return topic
 
 
-def _current_fingerprint(gconn, topic_id: str, model_ref: str, *, manifests_dir: Path,
-                         claims_dir: Path, markdown_dir: Path) -> str | None:
-    """The evidence fingerprint `topic_id` has now, or None when it is no longer an eligible topic
-    (ADR-0068: compared under the write lock with the one the model was given)."""
+def _current_topic(gconn, topic_id: str, *, manifests_dir: Path, claims_dir: Path,
+                   markdown_dir: Path) -> dict[str, Any] | None:
+    """`topic_id`'s topic now, or None when it is no longer an eligible topic (ADR-0068: its
+    fingerprint is compared under the write lock with the one the model was given)."""
     prov = {m["source_id"]: get_provenance(m) for m in scan_manifests(manifests_dir).valid}
-    topic = topic_for(gconn, topic_id, prov, claims_dir=claims_dir, markdown_dir=markdown_dir)
-    return _fingerprint(topic, model_ref) if topic is not None else None
+    return topic_for(gconn, topic_id, prov, claims_dir=claims_dir, markdown_dir=markdown_dir)
 
 def _fingerprint(topic: dict[str, Any], model_ref: str) -> str:
     h = hashlib.sha256()
@@ -1048,6 +1064,7 @@ def generate_syntheses(
 
         considered = len(topics)
         written = skipped_fresh = skipped_reviewed = stale_active = changed_during_call = 0
+        install_incomplete: list[dict[str, Any]] = []   # ADR-0074 decision 8: inputs unusable
         errors: list[dict[str, str]] = []
 
         if has_key:
@@ -1116,12 +1133,27 @@ def generate_syntheses(
                     skipped_fresh += 1                 # candidate already generated for this evidence
                     continue
 
+                # ADR-0074 decision 8: a contributing document with no usable extraction makes
+                # the topic's inputs incomplete — no model call, nothing written; the topic is
+                # generated once extraction completes the document. The topic's own flag decides
+                # (its claims' quotes were read while the document was blocked, even if it has
+                # become usable since), and so does a document blocked since (its text re-read
+                # consistently with its journal below).
+                if t.get("install_incomplete"):
+                    install_incomplete.append({"topic": tid, "sources": t["install_incomplete"]})
+                    continue
                 src_texts = []
+                texts_blocked: list[str] = []
                 for c in t["claims"]:
-                    for s in {cite["source_id"] for cite in c["citations"]}:
-                        p = markdown_dir / f"{s}.md"
-                        if p.exists():
-                            src_texts.append(p.read_text(encoding="utf-8"))
+                    for s in sorted({cite["source_id"] for cite in c["citations"]}):
+                        text = xi.read_text(markdown_dir.parent, s, "markdown")
+                        if text is None:
+                            texts_blocked.append(s)
+                        elif text:
+                            src_texts.append(text)
+                if texts_blocked:
+                    install_incomplete.append({"topic": tid, "sources": sorted(set(texts_blocked))})
+                    continue
                 try:
                     result = client.parse(
                         prompts.build_synthesis_messages(t["title"], t["claims"], _disagreement_notes(t)),
@@ -1161,8 +1193,13 @@ def generate_syntheses(
                     # The result is valid only for the evidence the model saw: the topic must still
                     # be eligible with the same claims, wording and anchors (a tag link dropped, a
                     # claim hidden or the topic hidden/merged meanwhile changes or removes it).
-                    if _current_fingerprint(gconn, tid, model_ref, manifests_dir=manifests_dir,
-                                            claims_dir=claims_dir, markdown_dir=markdown_dir) != fp:
+                    now_topic = _current_topic(gconn, tid, manifests_dir=manifests_dir,
+                                               claims_dir=claims_dir, markdown_dir=markdown_dir)
+                    if now_topic is not None and now_topic.get("install_incomplete"):
+                        install_incomplete.append({"topic": tid,
+                                                   "sources": now_topic["install_incomplete"]})
+                        continue
+                    if (_fingerprint(now_topic, model_ref) if now_topic is not None else None) != fp:
                         changed_during_call += 1
                         continue
                     # A decision on the current proposal recorded while the model ran wins: an
@@ -1235,7 +1272,8 @@ def generate_syntheses(
         # A topic this run attempted whose commit is still unfinished is never a clean success.
         left_attempted = sorted(set(left) & {t["node_id"] for t in topics}) if has_key else []
 
-        if errors or left_attempted or pages_refused or review_records_problems:
+        if (errors or left_attempted or pages_refused or review_records_problems
+                or install_incomplete):
             status = "partial"
         elif not has_key and considered > 0:
             status = "skipped"
@@ -1252,6 +1290,8 @@ def generate_syntheses(
             "eligible_topics": considered, "syntheses_written": written,
             "skipped_fresh": skipped_fresh, "skipped_reviewed": skipped_reviewed,
             "skipped_changed_during_call": changed_during_call,
+            "skipped_install_incomplete": len(install_incomplete),
+            "install_incomplete": install_incomplete,
             "stale_active": stale_active, "retracted": retracted,
             "promoted": resolution["promoted"], "rejected": resolution["rejected"],
             **inventory.report(), "retraction_blocked": retraction_blocked,

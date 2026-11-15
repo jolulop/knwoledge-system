@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from app.backend import db, durable_write, graph, write_lock
+from app.backend import extraction_install as xi
 from app.backend.config import get_settings
 from app.backend.manifests import OK, iso_now, read_manifest, scan_manifests
 from app.backend.search import RETENTION_DEFAULT_STATUSES
@@ -227,13 +228,23 @@ def generate_wiki(
                     return {"source_id": source_id, "reason": authors.UNAVAILABLE,
                             "error": f"{authors.UNAVAILABLE}: Authors/{', Authors/'.join(missing)}"}
                 md_path = markdown_dir / f"{source_id}.md"
-                normalized_markdown = (
-                    md_path.read_text(encoding="utf-8") if md_path.exists() else ""
-                )
+                # ADR-0074 decision 8: the page is rendered only from a usable extraction — the
+                # text and the extraction log read under the write lock with the install journal's
+                # state. Installing, unrecoverable or damaged: the page keeps its previous version
+                # and the document stays queued for publication (an `installed` journal renders).
+                with xi.consistent_read(markdown_dir.parent, source_id,
+                                        reviews_dir=root / "reviews") as installed:
+                    if not installed.usable:
+                        return {"source_id": source_id, "reason": xi.INCOMPLETE,
+                                "error": f"{xi.INCOMPLETE}: install journal {installed.state}"}
+                    normalized_markdown = (
+                        md_path.read_text(encoding="utf-8") if md_path.exists() else ""
+                    )
+                    prompt_input = enrichment_artifact.enrich_prompt_input_for(manifest, logs_dir)
+                    hint = titles.read_metadata_hint(logs_dir, source_id)
                 # Compose a *fresh* enrichment artifact, if any; stale or absent -> stub.
                 enrichment = enrichment_artifact.load_fresh(
-                    enrichment_dir, source_id, normalized_markdown,
-                    prompt_input=enrichment_artifact.enrich_prompt_input_for(manifest, logs_dir),
+                    enrichment_dir, source_id, normalized_markdown, prompt_input=prompt_input,
                 )
                 # Project the source's active claims (3b) and concept/entity mentions
                 # (slice 4) from the graph; resolve labels worker-side, pass plain data to
@@ -278,8 +289,7 @@ def generate_wiki(
                     enrichment=enrichment, claims=claims, items=items,
                     suggested_items=suggested_items, raw_url=raw_base + source_id,
                     title=titles.effective_title(   # ADR-0066 part 3
-                        manifest, enrichment=enrichment,
-                        hint=titles.read_metadata_hint(logs_dir, source_id)),
+                        manifest, enrichment=enrichment, hint=hint),
                     keywords=keywords,
                     names=authors.linked_names(manifest),   # ADR-0066 part 3 slice 4
                     tags=tags,

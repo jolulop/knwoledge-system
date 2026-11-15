@@ -50,16 +50,18 @@ def vault_names(manifests_dir: Path) -> tuple[list[str], set[str]]:
     return sorted(names.values(), key=str.casefold), paged
 
 
-def view(manifest: dict[str, Any], *, markdown: str, enrichment_dir: Path, logs_dir: Path,
+def view(manifest: dict[str, Any], *, markdown: str, enrichment_dir: Path, logs_dir: Path | None,
          paged: set[str]) -> dict[str, Any]:
-    """What the Details section shows for one document."""
+    """What the Details section shows for one document. `logs_dir` None: the document has no usable
+    extraction (ADR-0074 decision 8) — no suggestion or PDF hint is derived from its outputs."""
     prov = manifest.get("provenance") or {}
     confirmed = manifests.confirmed_details(prov)
     is_confirmed = bool(prov.get("confirmed_at") or confirmed["title"] or confirmed["authors"]
                         or confirmed["publisher"])
-    enrichment = titles.fresh_enrichment(manifest, markdown, enrichment_dir=enrichment_dir,
-                                         logs_dir=logs_dir)
-    hint = titles.read_metadata_hint(Path(logs_dir), manifest["source_id"])
+    enrichment = (titles.fresh_enrichment(manifest, markdown, enrichment_dir=enrichment_dir,
+                                          logs_dir=logs_dir) if logs_dir is not None else None)
+    hint = (titles.read_metadata_hint(Path(logs_dir), manifest["source_id"])
+            if logs_dir is not None else {})
     fallback_title = titles.prompt_title(manifest, enrichment=None, hint=hint)
     filename = manifest.get("original_filename") or manifest["source_id"]
     fallback = "pdf" if titles.filter_pdf_title(hint.get("title"), filename) else "filename"

@@ -62,6 +62,7 @@ from pathlib import Path
 from typing import Any
 
 from app.backend import authority_read, db, durable_write, graph, write_lock
+from app.backend import extraction_install as xi
 from app.backend.manifests import (
     confirmed_details,
     get_provenance,
@@ -256,6 +257,12 @@ def build_plan(settings: Any, gconn, source_ids: list[str], model_ref: str, *,
     docs = _documents(settings.manifests_dir, source_ids)
     prov = {s: get_provenance(m) for s, m in docs.items()}
     claims_dir, markdown_dir = settings.wiki_dir / "Claims", settings.markdown_dir
+    # ADR-0074 decision 8: a document with no usable extraction can't be judged — its claims'
+    # quotes would be read from an incomplete install.
+    blocked = [s for s in docs if not xi.usable(markdown_dir.parent, s)]
+    if blocked:
+        raise Refused(xi.INCOMPLETE, "a document has no usable extraction (interrupted install) — "
+                                     "run extraction first: " + ", ".join(blocked))
     judged = {s: _judged_claims(gconn, s, claims_dir=claims_dir, markdown_dir=markdown_dir)
               for s in docs}
     limit = settings.contradiction_max_output_tokens
@@ -625,6 +632,8 @@ def _revalidate(gconn, settings: Any, plan: dict[str, Any], window: dict[str, An
             ctx = contradictions.scoped_claim_context(
                 gconn, cid, sid, claims_dir=settings.wiki_dir / "Claims",
                 markdown_dir=settings.markdown_dir)
+            if ctx is not None and ctx.get("install_incomplete"):
+                return f"{sid} has no usable extraction (interrupted install)"
             if ctx is None or contradictions.evidence_fingerprint(ctx) != \
                     plan["fingerprints"][sid][cid]:
                 return f"claim {cid}'s wording or evidence changed"

@@ -350,7 +350,16 @@ failure mid-install leaves the journal open; **the next extraction run completes
 python scripts/extract_sources.py`, or `POST /jobs/extract`) — no manual step. The run summary's
 `install_recovery` lists what it completed, closed, found unrecoverable or blocked, and
 `staging_cleanup` what leftover staging it removed. While a journal is open, `validate_normalized`
-and lint report "extraction install <state> — run extraction".
+and lint report "extraction install <state> — run extraction", and the document has **no usable
+extraction**: enrich, claims, items, synthesis and contradiction checks skip it
+(`install_incomplete` in their run summaries, the run `partial`), the keyword and vector reindex
+keep its old rows and report it (a full rebuild — `--force` — leaves them out, also reported),
+search and `/query` exclude it (a note says so), the `/sources/{id}/normalized` and `/chunks`
+endpoints answer 409, its Source page keeps its previous version and stays pending for publication,
+its claims' pages show the citation without a quote (hide, supersede and deprecation still work),
+and the document screen shows a "No usable extraction (interrupted install)" banner. Proposed
+contradictions citing it are reported unverifiable, never retired. An `installed` journal (only its
+publication pending) is usable and publishes normally.
 
 - **Unrecoverable** (the staged generation is missing or changed, or the extraction configuration
   changed since): the journal, staging and holding directories are kept as they are and the document
