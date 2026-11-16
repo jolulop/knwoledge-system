@@ -15,6 +15,11 @@ gate), `scripts/validate_citations.py::_check_query` (already validates `wiki/Qu
 golden_questions.yaml` (the answer-shaped eval seed). This ADR fixes the load-bearing decisions; the
 slicing lives in `docs/Phase 5 Plan.md`.
 
+**Amended by ADR-0074 change 7a (planned, grilled 2026-11-16):** `answer_query` re-checks the evidence
+pack's documents' visibility immediately before the model call, and `save: true` re-checks every cited
+document under the write lock and refuses the whole save (`save_refused`) if any is no longer eligible.
+Query pages saved before a hide are not retracted (deferred).
+
 ## The load-bearing decisions
 
 **1. The answer is a set of mechanically-grounded claims; the LLM never emits or computes a citation

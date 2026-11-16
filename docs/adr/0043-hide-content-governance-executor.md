@@ -6,6 +6,10 @@
 also delegates to) in `app/workers/retention.py`; wired into `run_apply` (+ `_APPLY_TYPES`, NOT
 `_GRAPH_REQUIRED_TYPES`) + summary; `EXECUTOR_BY_TYPE` + `preview_hide_content` projector; covered by
 `tests/test_hide_content.py`.
+**Amended by ADR-0074 change 7a (planned, grilled 2026-11-16):** `/search` and `/query` enforce a
+source's hide / archive at read time from its manifest, so a failed reindex no longer lets its evidence
+through; the strict reindex posture below stays, but its warning `hide_retrieval_suppression_not_guaranteed`
+becomes `hide_index_refresh_pending` (index lag, not unsuppressed retrieval).
 The second non-rekeying governance executor (after ADR-0041 `mark_semantic_duplicate`): make the
 record-only `hide_content` review type executor-backed for **sources**, suppressing a source from
 default retrieval + navigation via a new reversible `hidden` lifecycle status — **no id rewrite, no

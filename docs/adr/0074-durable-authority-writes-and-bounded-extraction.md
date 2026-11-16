@@ -17,7 +17,7 @@
   **Slice 6b (decision 6: attempt records and retry classification) implemented 2026-11-16** —
   `app/workers/extract_attempts.py`. **Slice 6c (decisions 7.3, 7.5: stale extraction jobs and
   cancellation) implemented 2026-11-16** — `db.reconcile_interrupted`, `extract.cancel`; slice 6
-  complete. Changes 7a–7c per decision 9 not yet.
+  complete. Changes 7a–7c per decision 9 not yet; **7a grilled 2026-11-16** (see "Change 7a" in Part C).
 - **Operational acceptance** (user decision 2026-11-14): ADR-0074 is **not operationally accepted
   until change 7a lands**. Slices continue in decision 9's order, but until 7a no document, release
   note or review answer may claim that visibility fails closed: a stale keyword / vector index can
@@ -1249,6 +1249,81 @@ its own short grill:
   concurrent tagging — **measured with copies first**; **results precede any storage optimization**,
   and reflinks are preferred over hardlinks if one is needed.
 
+### Change 7a — manifest visibility enforcement (grill 2026-11-16)
+
+Planned; not implemented. Closes the **status-copy failure**: retrieval filters a document by the
+status copied into the keyword index's `navigation` table (from its Source page), so a hide or
+archive whose reindex failed left the document's evidence reaching the model. The manifest's
+`status` is the authority (ADR-0036 decision 13, ADR-0043).
+
+1. **Both must allow it (Q1).** The index status filter stays in SQL as a cheap **pre-filter**;
+   `_ManifestGate` additionally requires the **valid** manifest's status to belong to the request's
+   **effective** status set — the default retention set or an explicit `source_status=` filter.
+   Applies to keyword evidence, vector evidence and Source navigation hits. A **malformed** status
+   (present, but not one of `SOURCE_STATUSES`) refuses the document — `get_status` must not turn it
+   into `active` here; only a genuinely **absent** legacy status keeps its documented default
+   `active`. **Intentional, temporary recall loss:** after an unhide, or for an explicit status
+   search, whose reindex failed, the stale index can still exclude a document the manifest allows,
+   until a reindex. That errs toward suppression; exact recall waits for reindexing. A hide or
+   archive takes effect despite a failed publication.
+2. **The graph group's Source nodes too (Q2).** `/search` is a discovery surface: each `source` node
+   in the graph group needs both the graph's status filter and the manifest's status to allow it,
+   against the effective `node_statuses`; edges incident to a dropped node are removed. Item /
+   claim / synthesis nodes (page / graph authority) and the raw `/graph/*` inspection API
+   (ADR-0043 decision 1: hidden nodes visible with their status) are unchanged. The gate's
+   **status-independent** checks (inventory validity, install journal) stay shared, but the
+   allowed status set is **passed explicitly** — evidence uses `source_statuses`, graph nodes
+   `node_statuses` — and a decision cached for one set is never reused for the other.
+3. **A final check before the model call (Q3).** `answer_query` takes a visibility check and runs it
+   **fresh** (a new inventory read, not the search's cached gate) **after the evidence pack is built
+   and immediately before the provider request is prepared**, so `/query` and its eval runner behave
+   identically. Same effective `source_statuses` as retrieval; a failed or damaged manifest read
+   excludes; the prompt pack and its citation lookup are filtered together; if nothing remains, the
+   ordinary abstention, with **no model call**; a note counts the evidence items this check removed.
+   **Guarantee:** a hide or archive whose manifest write completed before the final check began
+   excludes that document from the call. The window between the check and the send is **accepted**
+   and has no strict time bound; a request already sent cannot be withdrawn. Closing it would need
+   the **exclusive** write lock (or another exclusion) held across the call — the shared vault lock
+   does not exclude Apply, whose writers hold it shared too — contrary to the model-call contract.
+4. **Saving an answer (Q4).** `save: true` re-checks **every document the final answer cites**
+   against the request's effective `source_statuses` under `write_lock.hold(..., changes=False)`,
+   with a fresh read — current eligibility, not "status unchanged". All allowed: the lock
+   invalidates (advances the revision) immediately before the page and `wiki/log.md` writes. Any
+   citation failing, a damaged manifest included: the **whole save is refused** — no page, no log
+   line, no revision advance; citations are never trimmed from an otherwise unchanged answer. The
+   response is still HTTP 200 with the answer, plus `query_id: null`, `navigation_stale: false` and
+   `save_refused: {reason: "citation_visibility_changed", count: N}` beside a readable note.
+   **Limitation (deferred, see the table):** 7a suppresses source evidence and prevents newly
+   ineligible saves; it does **not** remove quotations in Query pages saved before a hide from
+   discovery.
+5. **Apply's source-hide warning renamed (Q5).** With read-time enforcement,
+   `hide_retrieval_suppression_not_guaranteed` misnames the remaining problem. It becomes
+   **`hide_index_refresh_pending`** — "Source retrieval is suppressed by the manifest gate. Index
+   refresh is incomplete; retry publication to restore index consistency and discovery recall." The
+   strict posture stays (`validation_failed`, the dry-run's non-clean verdict). Archive's
+   warning-only posture and the semantic / claim / synthesis hide and unhide warnings are unchanged.
+   API vocabulary, UI, tests and the ADR-0043 note change together, within 7a.
+6. **Silent exclusion (Q6).** A status exclusion adds **no** count, flag or query-specific
+   index-lag note — any would reveal that a hidden document matches the query. Result counts
+   describe surviving results only; no pre-filter totals. A valid manifest whose status disallows
+   the document stops the gate **before its install journal is checked**, so an "install
+   incomplete" note cannot reveal it indirectly. Surviving Source results report the
+   **manifest's** status wherever they expose one — evidence, navigation, graph Source nodes;
+   semantic-node statuses are untouched. Q3's final-check count and Q4's `save_refused` count stay:
+   they explain a change affecting evidence already admitted during that request, and give only a
+   count and a reason, never the excluded documents' identities. Damaged-manifest and
+   install-journal notes are unchanged for documents the status check admits.
+
+**Tests (written at implementation).** Stale-index combinations (hide / archive with a failed
+reindex; unhide with a failed reindex; an explicit status search against a stale index); explicit
+filters; malformed statuses; stale graph mirrors, explicit hidden-status graph searches,
+incident-edge removal and unchanged raw `/graph/*` inspection; a hide / archive during pack
+construction, partial and complete exclusion, damaged manifests, explicit filters and the shared
+eval path; hide-before-save, save-before-hide, damaged manifests, mixed allowed / disallowed
+citations, a refusal leaving page, log and revision unchanged; responses compared with and without
+a matching hidden document — including one with a broken install journal — showing no added
+diagnostic signal.
+
 ### Deferred items and reopening triggers
 
 | Item | Deferred because | Reopening trigger |
@@ -1258,4 +1333,5 @@ its own short grill:
 | Dedicated repair tooling for pages, review / audit records, policies and journals (decision 4) | Backup recovery under the agreed preservation, locking and publication rules suffices | The **first damage observed** in that family, or a backup recovery that cannot safely preserve later human decisions |
 | Stale-`running` job reconciliation for producers other than extraction (decision 7.3) | Needs an audit of guard ownership and job-type mappings first | A hard-killed run of another producer observed left `running`, or the audit being scheduled |
 | Bounded backoff for repeatedly timing-out documents (decision 6) | Timeouts are ambiguous and always retried; no evidence of cost yet | Repeated timeouts becoming operationally costly (run time dominated by retried timeouts) |
+| Retracting or re-checking Query pages saved before a hide (change 7a, Q4) | 7a suppresses source evidence and refuses newly ineligible saves; earlier saved quotations stay discoverable | A hide that must also retract saved answers |
 | Preview storage optimization (change 7c) | Benchmark results come first | The 7c benchmark exceeding the agreed latency / storage limits |
