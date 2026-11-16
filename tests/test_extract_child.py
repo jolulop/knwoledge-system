@@ -346,6 +346,32 @@ def test_a_parent_exception_still_cleans_up(tmp_path, md, monkeypatch):
     assert _children(os.getpid(), "extract_watchdog") == []
 
 
+def test_an_interrupt_during_termination_never_stands_the_watchdog_down(tmp_path, md,
+                                                                         monkeypatch):
+    # Slice 6c: a second Ctrl-C lands in the termination grace of a child that ignores SIGTERM.
+    # The interrupt propagates at once, the group is killed, and the watchdog is not stood down
+    # (its pipe closes without the stand-down byte), so nothing survives even if this process
+    # exits now.
+    calls = []
+    real = runner._exited
+
+    def interrupted(pid):
+        calls.append(pid)
+        if len(calls) == 1:
+            raise KeyboardInterrupt
+        return real(pid)
+    monkeypatch.setattr(runner, "_exited", interrupted)
+    started = time.monotonic()
+    with pytest.raises(KeyboardInterrupt):
+        _parse(md, mode="stall_ignore_term", out=tmp_path, timeout_s=1)
+    assert time.monotonic() - started < 1 + 2                        # no grace waited
+    assert _gone(_mark(tmp_path, "stalled"), within=5)
+    end = time.monotonic() + 10
+    while _children(os.getpid(), "extract_watchdog") and time.monotonic() < end:
+        time.sleep(0.05)                     # it saw EOF, found the group gone, and exited
+    assert _children(os.getpid(), "extract_watchdog") == []
+
+
 # --- the watchdog --------------------------------------------------------------------------
 
 

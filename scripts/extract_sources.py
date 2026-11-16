@@ -11,6 +11,7 @@ file is modified; writes go only to normalized/, raw/manifests/, and db/jobs.sql
 """
 from __future__ import annotations
 
+import signal
 import sys
 from pathlib import Path
 
@@ -22,12 +23,48 @@ from app.backend.config import get_settings
 from app.workers import extract, publication
 
 
+EXIT_CANCELLED = 130
+
+
+def _cooperative_signals():
+    """ADR-0074 decision 7.5: the first Ctrl-C (or SIGTERM) stops the run at its next safe point —
+    the parse in progress is abandoned, an install that has begun finishes; a second one aborts at
+    once (an interrupted install is completed by the next run). Returns the restore function."""
+    count = 0
+
+    def handler(signum, frame):
+        nonlocal count
+        count += 1
+        if count > 1:
+            raise KeyboardInterrupt                   # a second signal aborts at once
+        if not extract.cancel(reason=f"interrupted by {signal.Signals(signum).name}"):
+            if not extract.active_runs():
+                raise KeyboardInterrupt               # no run to stop (yet, or any more)
+            # The run is past its settle point: it is only recording its outcome.
+            print("The run is finishing (press Ctrl-C again to abort at once)...",
+                  file=sys.stderr, flush=True)
+            return
+        print("Stopping after the current step (press Ctrl-C again to abort at once)...",
+              file=sys.stderr, flush=True)
+    previous = {sig: signal.signal(sig, handler) for sig in (signal.SIGINT, signal.SIGTERM)}
+    return lambda: [signal.signal(sig, prev) for sig, prev in previous.items()]
+
+
 def main(argv: list[str]) -> int:
     force = "--force" in argv
     source_ids = [a for a in argv if not a.startswith("--")]
 
     settings = get_settings()
-    summary = extract.extract_sources(
+    restore = _cooperative_signals()
+    try:
+        summary = _run(settings, source_ids, force)
+    finally:
+        restore()
+    return _report(summary)
+
+
+def _run(settings, source_ids: list[str], force: bool) -> dict:
+    return extract.extract_sources(
         settings.root,
         source_ids=source_ids or None,
         force=force,
@@ -40,7 +77,13 @@ def main(argv: list[str]) -> int:
         max_chars=settings.chunk_max_chars,
     )
 
-    print("Extraction complete.")
+
+def _report(summary: dict) -> int:
+    if summary.get("cancelled"):
+        print(f"Extraction cancelled ({summary.get('cancel_reason')}): "
+              f"{summary['not_attempted']} document(s) not attempted.")
+    else:
+        print("Extraction complete.")
     print(f"Sources considered: {summary['sources_considered']}")
     print(f"Extracted: {summary['extracted']}")
     print(f"Partial (needs_ocr): {summary['partial']}")
@@ -68,7 +111,12 @@ def main(argv: list[str]) -> int:
             print(f"  - {err['source_id']}: {err['error']}{then}")
     for line in publication.report(summary["publication"]):
         print(line)
+    for job in summary.get("interrupted_jobs") or []:
+        print(f"Earlier run {job['job_id']} (started {job['started_at']}) was interrupted; "
+              "recorded as failed.")
     print(f"Job: {summary['job_id']}")
+    if summary.get("cancelled"):
+        return EXIT_CANCELLED
     published = (summary["publication"] or {}).get("status") != publication.PENDING
     return 1 if summary["errors"] or not published else 0
 

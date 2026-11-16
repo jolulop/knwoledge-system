@@ -369,6 +369,19 @@ the document retries or awaits changed inputs. A document whose re-extraction fa
 on every ordinary run even though its earlier outputs are unchanged. The files are derived state:
 deleting them only makes the next run retry.
 
+**Stopping and interrupted extraction runs (ADR-0074 decisions 7.3 and 7.5).** To stop a running
+extraction, press Ctrl-C once (CLI) or call `POST /jobs/extract/cancel` (API); stopping the server
+does the same. The run stops at its next safe point: the document being parsed is abandoned (its
+parser process is terminated and nothing is recorded for it), and an install that has already
+begun — that holds the write lock — finishes first; a document still waiting for the lock is not
+installed. A stop requested during the last document's install or the final index refresh still
+counts: that work is kept and the run is reported as cancelled with nothing left unattempted. The job is recorded `failed` with `interrupted (<reason>)`, the summary says
+`cancelled` and how many documents were `not_attempted`, and the CLI exits with code 130. A second
+Ctrl-C aborts at once; any install it cuts is completed by the next run. A run that was killed
+outright (SIGKILL, out of memory, a reboot) leaves its job `running`; the next extraction run marks
+it `failed` (`interrupted`) and lists it under `interrupted_jobs`. Only extraction does this so
+far: other producers' stale `running` jobs are left as they are.
+
 **Interrupted extraction install (ADR-0074 decision 8).** Extraction installs each document's new
 outputs through an install journal (`normalized/.install/<source_id>.json`). A crash, kill or I/O
 failure mid-install leaves the journal open; **the next extraction run completes it first** (`uv run

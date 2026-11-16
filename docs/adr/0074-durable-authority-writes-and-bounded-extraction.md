@@ -15,8 +15,9 @@
   consumer. **Slice 6a (decisions 5, 7.1–7.2: the extraction child) implemented 2026-11-16** —
   `app/workers/extract_runner.py`, `extract_child.py`, `extract_watchdog.py`, `extract_parse.py`.
   **Slice 6b (decision 6: attempt records and retry classification) implemented 2026-11-16** —
-  `app/workers/extract_attempts.py`; slice 6c (decisions 7.3, 7.5) and changes 7a–7c per
-  decision 9 not yet.
+  `app/workers/extract_attempts.py`. **Slice 6c (decisions 7.3, 7.5: stale extraction jobs and
+  cancellation) implemented 2026-11-16** — `db.reconcile_interrupted`, `extract.cancel`; slice 6
+  complete. Changes 7a–7c per decision 9 not yet.
 - **Operational acceptance** (user decision 2026-11-14): ADR-0074 is **not operationally accepted
   until change 7a lands**. Slices continue in decision 9's order, but until 7a no document, release
   note or review answer may claim that visibility fails closed: a stale keyword / vector index can
@@ -878,6 +879,71 @@ stale-job reconciliation and cancellation (decisions 7.3 and 7.5).
   whose child ignores SIGTERM: the vault lock and the extract guard re-acquirable while the child is
   still alive, then the child gone within the grace**; the API route timing out a stalled parse on
   its worker thread; process failures on re-extraction keeping the last-good generation.
+
+**As implemented (slice 6c — decisions 7.3 and 7.5).**
+
+- **The guard.** `extract_sources` now takes the extract run guard itself for the whole run
+  (`run_guard` is re-entrant per thread, so the API route and the CLI, which already hold it,
+  keep it; a direct caller — an eval script, a test — now gets it too). A second run refuses with
+  `ProducerBusy` before touching any job row.
+- **Stale jobs (7.3).** Under the guard and before inserting its own job, the run calls
+  `db.reconcile_interrupted(conn, "extract", …)`: every extract job still `running` becomes
+  `failed` with `error_message` "interrupted (the run ended without recording a result: …)",
+  `finished_at` the run's start and `metadata.reconciled = {reason: "interrupted", by_job, at}` —
+  lost execution, never a rollback (decision 8's journal recovery completes any install it left).
+  A job this process still has running (a nested run on this thread, known by its held vault lock)
+  is never touched. The run's summary lists them (`interrupted_jobs`), and the CLI prints them. The
+  helper is reusable; no other producer calls it (deferred, see the table).
+- **Cancellation (7.5).** Each run registers a `CancelToken` (an event plus a non-inheritable
+  self-pipe) under its job id. `extract.cancel(job_id=None, reason=…)` sets it — from any thread, or
+  a signal handler (the registry lock is re-entrant). Honoured: **between documents** (a document
+  not reached, even one that would be skipped, is counted in `not_attempted`); **during a parse**
+  (the self-pipe is polled with the child's descriptors, so the wait wakes at once and raises
+  `Cancelled` after the usual cleanup — the child and its group are gone; nothing is recorded for
+  the document: no log, no attempt record, no manifest change); **before an install starts** —
+  the install boundary is the **write lock's acquisition**: `_commit` checks the token again once
+  it holds the lock, before any publication intent, journal or document write, so a cancel that
+  arrives while the run waits for another writer's lock still installs nothing (the staged
+  generation is discarded, no document failure recorded). **Never inside an install**: one past
+  that boundary (recovery at run start included) finishes, and the run stops afterwards.
+- **The settle point (review round 1).** Whether a run was cancelled is decided once, at its
+  **settle point** — after the end publication refresh (which runs even when cancelled: it
+  completes what the run installed), just before the outcome is recorded — atomically with
+  `cancel` under the registry lock: any cancel acknowledged up to there, including one during the
+  final document's install or the end refresh, makes the run cancelled (what it installed stays;
+  `not_attempted` is then 0); from there on `cancel` refuses the run (it returns no job id) though
+  it is still active and waited for. A cancelled run records its job `failed` with `error_message`
+  "interrupted (<reason>)", and returns `cancelled: true`, `cancel_reason`, `not_attempted`.
+- **Registration and the guard.** A run stays registered until its `finally` — after its child's
+  cleanup and its last install — and only then does its own `with` release the guard; nothing else
+  releases it. `extract.wait_idle(timeout)` waits for no run to be active.
+- **Entry points.** `POST /jobs/extract/cancel` (not a run: no guard) returns
+  `{cancelled: [job ids], status: "cancelling" | "not_running"}`; the running request then answers
+  with its cancelled summary. The CLI's first Ctrl-C or SIGTERM cancels ("Stopping after the
+  current step …"; exit code 130); one while the run is past its settle point only says "The run
+  is finishing …"; a second, or one with no run registered, raises `KeyboardInterrupt` at once (an install it cuts is completed by the next run's recovery).
+  **Server shutdown:** the lifespan chains the server's SIGINT / SIGTERM handlers (main thread
+  only) so a shutdown signal first cancels every run — the in-flight request reaches a safe point
+  instead of being drained for the whole run or cut off — and the lifespan's exit cancels again
+  and waits — for every active run, settled ones included — up to `SHUTDOWN_WAIT_S` (30 s) for each run to finish its cleanup, warning if one is
+  still active.
+- **An interrupted cleanup (a 6a fix).** An interrupt landing *during* the termination grace (the
+  second Ctrl-C) used to stand the watchdog down while a child ignoring SIGTERM still lived. Now
+  the runner kills the group at once and closes the control pipe **without** the stand-down byte —
+  its EOF makes the watchdog finish the kill even if the process exits — and the interrupt
+  propagates without waiting.
+- **Tests** (`tests/test_extraction_cancel.py`; one in `tests/test_extract_child.py`): a stale row
+  reconciled once, other producers' rows and terminal rows untouched, a live nested job never
+  reconciled, nothing reconciled without the guard; a SIGKILLed run reconciled by the next one, its
+  orphaned child terminated by the watchdog and its document extracted; cancelling a parse in
+  progress (child gone, nothing recorded, guard released, a later run extracts both documents); the
+  guard and the registration held through a SIGTERM-ignoring child's grace; a cancel before an
+  install (nothing installed, staging empty); an install that has begun finishing and published
+  while the next document waits; a cancel during start-up recovery reaching no document; the API
+  endpoint; a server shutdown cancelling and waiting; the chained signal handler; the CLI's first
+  Ctrl-C (exit 130, job `interrupted (interrupted by SIGINT)`) and a second one aborting at once
+  with the child still cleaned up; an interrupt during termination never standing the watchdog
+  down.
 
 **As implemented (slice 6b — decision 6).** `app/workers/extract_attempts.py`.
 

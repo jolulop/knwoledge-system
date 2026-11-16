@@ -252,6 +252,46 @@ def update_job(conn: sqlite3.Connection, job_id: str, **fields: Any) -> None:
                 _JOB_STACK.set(tuple(entry for entry in stack if entry[0] != job_id))
 
 
+INTERRUPTED = "interrupted"
+INTERRUPTED_MESSAGE = ("interrupted (the run ended without recording a result: killed, out of "
+                       "memory or a reboot)")
+
+
+def reconcile_interrupted(conn: sqlite3.Connection, job_type: str, *, now: str,
+                          by_job: str) -> list[dict[str, Any]]:
+    """Mark every `job_type` job still `running` as `failed` with reason `interrupted` and return
+    them (ADR-0074 decision 7.3): lost execution, never a successful rollback.
+
+    Reusable, but only sound for a caller holding `job_type`'s **outermost** run guard
+    (`app/backend/run_guard.py`) before it creates its own job — no other run of that producer is
+    alive then. A job this process still has running (a nested run on this thread) is never
+    touched. `by_job` is the reconciling run's job id, recorded on each row."""
+    if job_type not in JOB_TYPES:
+        raise ValueError(f"unknown job_type {job_type!r}")
+    with _JOB_LOCKS_GUARD:
+        live = set(_JOB_LOCKS)
+    rows = conn.execute("SELECT job_id, started_at, metadata_json FROM jobs "
+                        "WHERE job_type = ? AND status = 'running' ORDER BY created_at, job_id",
+                        (job_type,)).fetchall()
+    out: list[dict[str, Any]] = []
+    for job_id, started_at, metadata_json in rows:
+        if job_id in live:
+            continue
+        try:
+            metadata = json.loads(metadata_json or "{}")
+        except ValueError:
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        metadata["reconciled"] = {"reason": INTERRUPTED, "by_job": by_job, "at": now}
+        conn.execute("UPDATE jobs SET status = 'failed', finished_at = ?, error_message = ?, "
+                     "metadata_json = ? WHERE job_id = ? AND status = 'running'",
+                     (now, INTERRUPTED_MESSAGE, json.dumps(metadata), job_id))
+        out.append({"job_id": job_id, "started_at": started_at})
+    conn.commit()
+    return out
+
+
 def _row_to_job(row: sqlite3.Row) -> dict[str, Any]:
     job = dict(row)
     job["warnings"] = json.loads(job.pop("warnings_json") or "[]")

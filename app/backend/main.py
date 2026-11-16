@@ -147,7 +147,21 @@ async def _lifespan(_app: FastAPI):
             "embedding backend ready: %s",
             {k: info.get(k) for k in ("model_ref", "device", "cuda_device_name", "model_loaded")},
         )
-    yield
+    # ADR-0074 decision 7.5: a shutdown signal first cancels any extraction run, so the in-flight
+    # request reaches a safe point (no half-done install, its child gone) instead of being drained
+    # for the whole run or cut off.
+    restore_signals = extract.chain_shutdown_cancel()
+    try:
+        yield
+    finally:
+        restore_signals()
+        # Lifespan cleanup alone can't stop a synchronous worker: ask every run to stop and wait
+        # (bounded) while each finishes its cleanup and releases its run guard itself.
+        # A run past its settle point is not asked but is still waited for.
+        extract.cancel(reason="shutdown")
+        if extract.active_runs():
+            if not await anyio.to_thread.run_sync(extract.wait_idle, extract.SHUTDOWN_WAIT_S):
+                logger.warning("extraction still running at shutdown: %s", extract.active_runs())
 
 
 app = FastAPI(title="Knowledge System", version=settings.app_version, lifespan=_lifespan)
@@ -467,6 +481,15 @@ def run_extract(force: bool = False) -> dict[str, Any]:
         target_chars=settings.chunk_target_chars,
         max_chars=settings.chunk_max_chars,
     )
+
+
+@app.post("/jobs/extract/cancel")
+def cancel_extract() -> dict[str, Any]:
+    """Ask the running extraction to stop at its next safe point (ADR-0074 decision 7.5): before an
+    install starts or between documents; a parse in progress is abandoned, an install that has
+    begun finishes. The run's own response then reports `cancelled`. Not a run itself: no guard."""
+    asked = extract.cancel(reason="cancelled")
+    return {"cancelled": asked, "status": "cancelling" if asked else "not_running"}
 
 
 _EXTRACTED_STATUSES = {"extracted", "partial"}

@@ -25,6 +25,11 @@ job (the former `SIGALRM` limit worked only on the main thread). Per document:
    is terminated (SIGTERM, the grace, SIGKILL; a successful child's leftover helpers included), the
    watchdog stood down and reaped, the pipes closed, the child reaped.
 
+**Cancellation** (decision 7.5): a :class:`CancelToken` passed to `parse` wakes every wait (its
+self-pipe is polled with the child's descriptors) and raises :class:`Cancelled` — after the same
+cleanup, so the child and its group are gone before the call returns. A cancellation is not a
+document failure.
+
 The deadline (`timeout_s`, ``EXTRACT_TIMEOUT_S``) is wall-clock time from launch through complete
 result receipt — start-up, imports, parsing and serialization count; the termination grace is a
 separate, bounded cleanup allowance. Failures raise `ExtractionError`: the child's own reasons are
@@ -41,6 +46,7 @@ import select
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -80,6 +86,54 @@ _EXTRACTION_KEYS = frozenset({"elements", "tool", "tool_version", "page_count", 
 _ELEMENT_KEYS = frozenset({"kind", "text", "level", "page", "table_reference", "sheet_reference"})
 
 
+class Cancelled(Exception):
+    """The run was cancelled while this parse was in progress (ADR-0074 decision 7.5); its child
+    has been cleaned up. Not a document failure: nothing is recorded for the document."""
+
+
+class CancelToken:
+    """A run's cancellation flag, safe to set from any thread or a signal handler. A self-pipe
+    makes a waiting parse wake at once (`fileno`, polled with the child's descriptors)."""
+
+    def __init__(self) -> None:
+        self._event = threading.Event()
+        self._lock = threading.Lock()
+        self.reason: str | None = None
+        self._r, self._w = os.pipe()                  # non-inheritable (PEP 446)
+        os.set_blocking(self._w, False)
+
+    @property
+    def cancelled(self) -> bool:
+        return self._event.is_set()
+
+    def cancel(self, reason: str = "cancelled") -> None:
+        if self._event.is_set():
+            return
+        self.reason = reason
+        self._event.set()
+        # Not under `_lock`: a signal handler may run while this thread holds it. `_w` is only
+        # closed after the run (and its parse) ended, when no wait polls the pipe any more.
+        w = self._w
+        if w is not None:
+            try:
+                os.write(w, b"c")
+            except OSError:
+                pass                                  # full (already woken) or closed
+
+    def fileno(self) -> int | None:
+        return self._r
+
+    def close(self) -> None:
+        with self._lock:
+            for fd in (self._r, self._w):
+                if fd is not None:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+            self._r = self._w = None
+
+
 def child_command() -> list[str]:
     return [sys.executable, "-I", str(CHILD)]
 
@@ -94,13 +148,18 @@ def child_env() -> dict[str, str]:
 
 
 def parse(path: Path | str, source_id: str, *, timeout_s: float, grace_s: float = KILL_GRACE_S,
-          max_result_bytes: int = MAX_RESULT_BYTES, command: list[str] | None = None) -> Extraction:
+          max_result_bytes: int = MAX_RESULT_BYTES, command: list[str] | None = None,
+          cancel: CancelToken | None = None) -> Extraction:
     """Parse one already-confined, size-checked, sha-verified raw file in a child; the
-    `Extraction`, or `ExtractionError`. Nothing of the child outlives the call."""
+    `Extraction`, or `ExtractionError` — or `Cancelled` when `cancel` is set meanwhile. Nothing of
+    the child outlives the call."""
     if not timeout_s > 0:
         raise ValueError(f"the extraction deadline must be positive, not {timeout_s!r}")
+    if cancel is not None and cancel.cancelled:
+        raise Cancelled(cancel.reason or "cancelled")
     child = _Child(timeout_s=timeout_s, grace_s=grace_s,
-                   command=list(command) if command is not None else child_command())
+                   command=list(command) if command is not None else child_command(),
+                   cancel=cancel)
     try:
         return child.run(str(path), source_id, max_result_bytes)
     finally:
@@ -108,7 +167,9 @@ def parse(path: Path | str, source_id: str, *, timeout_s: float, grace_s: float 
 
 
 class _Child:
-    def __init__(self, *, timeout_s: float, grace_s: float, command: list[str]) -> None:
+    def __init__(self, *, timeout_s: float, grace_s: float, command: list[str],
+                 cancel: CancelToken | None = None) -> None:
+        self.cancel = cancel
         self.timeout_s = timeout_s
         self.grace = grace_s
         self.command = command
@@ -149,6 +210,22 @@ class _Child:
                    limit=max_result_bytes + ENVELOPE_BYTES, over=OUTPUT_INVALID)
         return self._decode()
 
+    def _poller(self, fd: int) -> select.poll:
+        poller = select.poll()                     # not select(): fds may be numbered > 1024
+        poller.register(fd, select.POLLIN | select.POLLHUP | select.POLLERR)
+        wake = self.cancel.fileno() if self.cancel is not None else None
+        if wake is not None:
+            poller.register(wake, select.POLLIN)
+        return poller
+
+    def _wait(self, poller: select.poll, fd: int, remaining: float) -> bool:
+        """Wait for `fd` within `remaining` seconds; raise `Cancelled` once the run is cancelled
+        (the self-pipe wakes the wait at once)."""
+        events = poller.poll(max(1, int(remaining * 1000)))
+        if self.cancel is not None and self.cancel.cancelled:
+            raise Cancelled(self.cancel.reason or "cancelled")
+        return any(f == fd for f, _ in events)
+
     def _expired(self) -> ExtractionError:
         return ExtractionError(f"extraction exceeded {self.timeout_s:g}s", TIMEOUT)
 
@@ -156,15 +233,14 @@ class _Child:
         """Drain `stream` into the buffer until a newline (the handshake) or EOF, within the
         deadline and `limit` bytes."""
         fd = stream.fileno()
-        poller = select.poll()                     # not select(): fds may be numbered > 1024
-        poller.register(fd, select.POLLIN | select.POLLHUP | select.POLLERR)
+        poller = self._poller(fd)
         while not (until_newline and b"\n" in self.buf):
             if len(self.buf) > limit:
                 raise ExtractionError(f"extraction child sent more than {limit} bytes", over)
             remaining = self.deadline - time.monotonic()
             if remaining <= 0:
                 raise self._expired()
-            if not poller.poll(max(1, int(remaining * 1000))):
+            if not self._wait(poller, fd, remaining):
                 continue
             chunk = os.read(fd, _READ_BYTES)
             if not chunk:
@@ -201,13 +277,12 @@ class _Child:
             os.close(read_end)
         ready = bytearray()
         fd = self.watchdog.stdout.fileno()
-        poller = select.poll()
-        poller.register(fd, select.POLLIN | select.POLLHUP | select.POLLERR)
+        poller = self._poller(fd)
         while not ready:
             remaining = self.deadline - time.monotonic()
             if remaining <= 0:
                 raise self._expired()
-            if poller.poll(max(1, int(remaining * 1000))):
+            if self._wait(poller, fd, remaining):
                 chunk = os.read(fd, 1)
                 if not chunk:
                     break
@@ -261,7 +336,14 @@ class _Child:
         try:
             if proc is not None:
                 self._terminate(proc)
-        finally:
+        except BaseException:
+            # The termination itself was interrupted (a second Ctrl-C during the grace): the
+            # child may still be alive, so the watchdog must NOT stand down. Kill the group now
+            # and close the control pipe without the stand-down byte — its EOF makes the watchdog
+            # finish the kill even if this process exits at once. No waiting; the interrupt goes on.
+            self._abandon(proc)
+            raise
+        else:
             try:
                 self._stand_down()
             finally:
@@ -296,6 +378,18 @@ class _Child:
         end = time.monotonic() + self.grace
         while not _exited(proc.pid) and time.monotonic() < end:
             time.sleep(0.01)
+
+    def _abandon(self, proc: subprocess.Popen | None) -> None:
+        try:
+            if proc is not None:
+                self._signal(proc.pid, signal.SIGKILL)
+        finally:
+            if self.ctrl_w is not None:
+                try:
+                    os.close(self.ctrl_w)              # EOF: the watchdog terminates the group
+                except OSError:
+                    pass
+                self.ctrl_w = None
 
     def _stand_down(self) -> None:
         if self.ctrl_w is not None:

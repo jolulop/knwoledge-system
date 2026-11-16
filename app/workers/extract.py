@@ -20,12 +20,15 @@ the keyword index (`app/workers/publication.py`).
 from __future__ import annotations
 
 import json
+import signal
+import threading
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from app.backend import db, durable_write, write_lock
+from app.backend import db, durable_write, run_guard, write_lock
 from app.backend import extraction_install as xi
 from app.backend.manifests import (
     EXTRACTION_FIELDS,
@@ -66,6 +69,84 @@ _NON_PAGINATED_MIN_CHARS = 16
 # The untrusted parse runs in an extraction child under a wall-clock deadline (ADR-0074 decision 5;
 # `app/workers/extract_runner.py`), the one path for the CLI and the API. A seam for tests.
 _parse = extract_runner.parse
+
+# ADR-0074 decision 7.5: the extraction runs of this process, by job id, each with its cancel token.
+# A run stays registered until its cleanup (its child's included) is complete; the run guard is
+# released only after that, by the run itself.
+_ACTIVE: dict[str, extract_runner.CancelToken] = {}
+# Runs past their settle point (see `_settle`): their outcome, cancelled or not, is decided, so a
+# cancel no longer reaches them — they are still active (and waited for) until their cleanup ends.
+_SETTLED: set[str] = set()
+_ACTIVE_LOCK = threading.RLock()                 # re-entrant: a signal handler may cancel
+_IDLE = threading.Condition(_ACTIVE_LOCK)
+SHUTDOWN_WAIT_S = 30.0
+
+
+def active_runs() -> list[str]:
+    with _ACTIVE_LOCK:
+        return sorted(_ACTIVE)
+
+
+def cancel(job_id: str | None = None, *, reason: str = "cancelled") -> list[str]:
+    """Ask this process's extraction run (`job_id`, or every one) to stop at its next safe point:
+    a parse in progress is abandoned (its child terminated), an install that has begun finishes.
+    Returns the runs asked; a run past its settle point (its outcome recorded or being recorded)
+    is not asked. Safe from any thread and from a signal handler."""
+    with _ACTIVE_LOCK:
+        tokens = {k: v for k, v in _ACTIVE.items()
+                  if (job_id is None or k == job_id) and k not in _SETTLED}
+        for token in tokens.values():
+            token.cancel(reason)
+    return sorted(tokens)
+
+
+def _settle(job_id: str, token: extract_runner.CancelToken) -> bool:
+    """The run's settle point (decision 7.5): whether a cancel was requested at any time before it
+    — atomically with :func:`cancel`, so a request is either acknowledged here or refused there,
+    never lost. Taken after the end refresh, just before the outcome is recorded."""
+    with _ACTIVE_LOCK:
+        _SETTLED.add(job_id)
+        return token.cancelled
+
+
+def wait_idle(timeout: float) -> bool:
+    """Wait up to `timeout` seconds until no extraction run of this process is active."""
+    with _IDLE:
+        return _IDLE.wait_for(lambda: not _ACTIVE, timeout)
+
+
+def chain_shutdown_cancel(signals: tuple[int, ...] = (signal.SIGINT, signal.SIGTERM),
+                          *, reason: str = "shutdown") -> Callable[[], None]:
+    """Make a shutdown signal cancel this process's extraction runs first, then do what it did
+    before (the server's own handler). Returns the restore function. Only the main thread can
+    install handlers; elsewhere this is a no-op (an embedding host handles its own signals)."""
+    if threading.current_thread() is not threading.main_thread():
+        return lambda: None
+    installed: dict[int, Any] = {}
+
+    def make(sig: int, prev: Any):
+        def handler(signum, frame):
+            cancel(reason=reason)
+            if callable(prev):
+                prev(signum, frame)
+            elif prev == signal.SIG_DFL:
+                signal.signal(signum, signal.SIG_DFL)
+                signal.raise_signal(signum)
+        return handler
+
+    for sig in signals:
+        prev = signal.getsignal(sig)
+        handler = make(sig, prev)
+        signal.signal(sig, handler)
+        installed[sig] = (handler, prev)
+
+    def restore() -> None:
+        if threading.current_thread() is not threading.main_thread():
+            return
+        for sig, (handler, prev) in installed.items():
+            if signal.getsignal(sig) is handler:
+                signal.signal(sig, prev if prev is not None else signal.SIG_DFL)
+    return restore
 
 
 def is_supported(extension: str) -> bool:
@@ -118,6 +199,7 @@ def _extract_one(
     target_chars: int,
     max_chars: int,
     attempt_id: str,
+    cancel: extract_runner.CancelToken | None = None,
 ) -> tuple[dict[str, Any], bool, dict[str, Any] | None]:
     """Extract one source, outside the write lock: nothing it produces is visible yet.
 
@@ -125,7 +207,8 @@ def _extract_one(
     left a prior successful result untouched (last-good preserved), so the caller must
     not rewrite the manifest or the log. ``staged`` is the output inventory of the generation
     waiting in the attempt's staging directory for the journaled install, or None.
-    ``log['status']`` drives the run summary either way.
+    ``log['status']`` drives the run summary either way. A cancellation during the parse raises
+    `extract_runner.Cancelled`: nothing is recorded for the document.
     """
     source_id = manifest["source_id"]
     started = iso_now()
@@ -181,7 +264,7 @@ def _extract_one(
             )
 
         # The parse, its ZIP checks included, in a child under the deadline (decision 5).
-        extraction = _parse(raw_file, source_id, timeout_s=timeout_s)
+        extraction = _parse(raw_file, source_id, timeout_s=timeout_s, cancel=cancel)
 
         markdown_text, chunks = assemble(
             source_id, extraction.elements, target_chars=target_chars, max_chars=max_chars
@@ -201,6 +284,10 @@ def _extract_one(
             warnings=extraction.warnings,
             metadata=dict(extraction.metadata),
         )
+    except extract_runner.Cancelled:
+        if staged is not None:
+            xi.discard_stage(dirs["layout"], source_id, attempt_id)
+        raise
     except ExtractionError as exc:
         log.update(status="error", finished_at=iso_now(), error=str(exc), skip_reason=exc.skip_reason)
     except Exception as exc:  # any extractor/parse failure: log and continue the run
@@ -328,13 +415,22 @@ def _published(run: publication.Run, source_id: str, intent: str | None) -> bool
 
 def _commit(root: Path, run: publication.Run, dirs: dict[str, Any], manifests_dir: Path,
             manifest: dict[str, Any], log: dict[str, Any], staged: dict[str, Any] | None,
-            attempt_id: str, config: dict[str, int]) -> str | None:
+            attempt_id: str, config: dict[str, int],
+            cancel: extract_runner.CancelToken | None = None) -> str | None:
     """Commit one attempt under the write lock; None, or the error reason (nothing installed, or an
     install left to recovery). With outputs: intent -> journal -> verified renames, log, manifest
-    fields -> `installed` -> publication -> journal closed (ADR-0074 decision 8)."""
+    fields -> `installed` -> publication -> journal closed (ADR-0074 decision 8).
+
+    Raises :class:`extract_runner.Cancelled` — the staged attempt discarded, nothing written or
+    recorded — when a cancel arrived before the lock was acquired (decision 7.5: the install
+    boundary is the lock acquisition; past it, the install finishes)."""
     layout: xi.Layout = dirs["layout"]
     source_id = manifest["source_id"]
     with write_lock.hold(root / "reviews"):
+        if cancel is not None and cancel.cancelled:   # it may have come while the lock was awaited
+            if staged is not None:
+                xi.discard_stage(layout, source_id, attempt_id)
+            raise extract_runner.Cancelled(cancel.reason)
         now_read = read_manifest(manifests_dir, source_id)
         if now_read.state != OK:
             # ADR-0074 decision 2: gone or damaged since the scan — never recreated or overwritten
@@ -394,12 +490,30 @@ def extract_sources(
     max_chars: int = 2000,
     record_job: bool = True,
 ) -> dict[str, Any]:
-    """Extract pending (or selected) sources; return a run summary (Phase 2 Plan §9)."""
+    """Extract pending (or selected) sources; return a run summary (Phase 2 Plan §9).
+
+    Holds the extract run guard for the whole run (re-entrant: an entry point already holding it
+    keeps it) — ADR-0074 decision 7.3 reconciles stale jobs only under it. Cancellable through
+    :func:`cancel` (decision 7.5): the summary then says `cancelled`, the job is recorded `failed`
+    (`interrupted`), and the documents not reached are counted as `not_attempted`."""
     if not timeout_s > 0:          # the deadline always applies (ADR-0074 decision 5)
         raise ValueError(f"timeout_s must be positive, not {timeout_s!r}")
     root = Path(root).resolve()
-    manifests_dir = Path(manifests_dir) if manifests_dir else root / "raw" / "manifests"
     jobs_db = Path(jobs_db) if jobs_db else root / "db" / "jobs.sqlite"
+    with run_guard.guard(jobs_db.parent, "extract"):
+        return _extract_run(
+            root, source_ids=source_ids, force=force, manifests_dir=manifests_dir,
+            jobs_db=jobs_db, normalized_dir=normalized_dir, max_file_mb=max_file_mb,
+            timeout_s=timeout_s, target_chars=target_chars, max_chars=max_chars,
+            record_job=record_job)
+
+
+def _extract_run(root: Path, *, source_ids: list[str] | None, force: bool,
+                 manifests_dir: Path | None, jobs_db: Path, normalized_dir: Path | None,
+                 max_file_mb: int, timeout_s: int, target_chars: int, max_chars: int,
+                 record_job: bool) -> dict[str, Any]:
+    """One extraction run, under the extract run guard."""
+    manifests_dir = Path(manifests_dir) if manifests_dir else root / "raw" / "manifests"
     normalized = Path(normalized_dir) if normalized_dir else root / "normalized"
     dirs = {
         "markdown": normalized / "markdown",
@@ -417,14 +531,25 @@ def extract_sources(
     now = iso_now()
     job_id = f"job_{uuid.uuid4().hex[:16]}"
     conn = None
+    interrupted: list[dict[str, Any]] = []
     if record_job:
         db.init_db(jobs_db)
         conn = db.connect(jobs_db)
-        db.insert_job(
-            conn, job_id=job_id, job_type="extract", status="running",
-            created_at=now, started_at=now,
-        )
+        # Decision 7.3: under the outermost extract guard and before this run's job exists, every
+        # extract job still `running` is lost execution — a hard kill, an OOM kill, a reboot.
+        try:
+            interrupted = db.reconcile_interrupted(conn, "extract", now=now, by_job=job_id)
+            db.insert_job(
+                conn, job_id=job_id, job_type="extract", status="running",
+                created_at=now, started_at=now,
+            )
+        except BaseException:
+            conn.close()
+            raise
 
+    token = extract_runner.CancelToken()
+    with _ACTIVE_LOCK:
+        _ACTIVE[job_id] = token
     run = publication.Run(root, "extract")
     try:
         # ADR-0074 decision 8 / 7.4: complete every open install journal, then remove only the
@@ -447,8 +572,13 @@ def extract_sources(
         known: list[dict[str, Any]] = []
         warnings: list[dict[str, Any]] = []
         considered = 0
+        cancelled = False
+        not_attempted = 0
 
-        for manifest in manifests:
+        for index, manifest in enumerate(manifests):
+            if token.cancelled:                       # decision 7.5: between documents
+                cancelled, not_attempted = True, len(manifests) - index
+                break
             source_id = manifest["source_id"]
             if not is_supported(manifest.get("file_extension", "")):
                 counts["skipped_unsupported"] += 1
@@ -488,17 +618,33 @@ def extract_sources(
                     continue
 
             attempt_id = xi.new_attempt_id()
-            log, persisted, staged = _extract_one(
-                manifest, root, dirs,
-                max_file_mb=max_file_mb, timeout_s=timeout_s,
-                target_chars=target_chars, max_chars=max_chars, attempt_id=attempt_id,
-            )
+            try:
+                log, persisted, staged = _extract_one(
+                    manifest, root, dirs,
+                    max_file_mb=max_file_mb, timeout_s=timeout_s,
+                    target_chars=target_chars, max_chars=max_chars, attempt_id=attempt_id,
+                    cancel=token,
+                )
+            except extract_runner.Cancelled:          # the parse in progress was abandoned
+                cancelled, not_attempted = True, len(manifests) - index
+                break
+            if token.cancelled:
+                # Decision 7.5: honoured before an install starts — nothing of this attempt is
+                # installed or recorded. Once an install has begun it finishes (no check inside).
+                if staged is not None:
+                    xi.discard_stage(layout, source_id, attempt_id)
+                cancelled, not_attempted = True, len(manifests) - index
+                break
             if persisted:
                 # ADR-0068: install the outputs, the log and the manifest fields together under the
                 # write lock, onto the manifest as it is now (a status changed meanwhile is kept),
                 # then publish the document's Source page before releasing it (decision 5).
-                failure = _commit(root, run, dirs, manifests_dir, manifest, log, staged,
-                                  attempt_id, config)
+                try:
+                    failure = _commit(root, run, dirs, manifests_dir, manifest, log, staged,
+                                      attempt_id, config, cancel=token)
+                except extract_runner.Cancelled:      # cancelled while awaiting the write lock
+                    cancelled, not_attempted = True, len(manifests) - index
+                    break
                 if failure is not None:
                     counts["errors"] += 1
                     errors.append({"source_id": source_id, "error": failure,
@@ -541,19 +687,33 @@ def extract_sources(
             "warnings": warnings,
             "forced": force,
             "extracted_at": now,
+            "interrupted_jobs": interrupted,
+            "cancelled": cancelled,
+            "not_attempted": not_attempted,
         }
         # The end refresh (ADR-0068 decision 5): extraction changed searchable text, so the keyword
         # index (and index.md) refresh once here; the job succeeds only after it.
+        # It runs even when cancelled: it completes what this run did install.
         pub = run.finish()
         summary["index_rebuilt"] = bool(pub and pub["index_rebuilt"])
         summary["keyword_reindexed"] = bool(pub and pub["keyword_reindexed"])
         summary["publication"] = publication.summary(pub)
         summary["status"] = publication.job_status("succeeded" if not errors else "partial", pub)
+        # Decision 7.5's settle point: a cancel acknowledged at any time up to here — during the
+        # last install, the end refresh, or with no document left to reach — makes the run
+        # cancelled (what it installed stays installed; `not_attempted` counts what it didn't
+        # reach). From here on a cancel is refused (`cancel` returns no run).
+        cancelled = _settle(job_id, token) or cancelled
+        summary["cancelled"] = cancelled
+        if cancelled:
+            summary["status"] = "failed"
+            summary["cancel_reason"] = token.reason
 
         if conn is not None:
             db.update_job(
                 conn, job_id, status=summary["status"],
                 finished_at=iso_now(), metadata=summary, warnings=warnings,
+                **({"error_message": f"{db.INTERRUPTED} ({token.reason})"} if cancelled else {}),
             )
         return summary
     except BaseException as exc:  # incl. Ctrl-C (UAT part 3 #3)
@@ -563,5 +723,11 @@ def extract_sources(
             )
         raise
     finally:
+        # Unregistered only now: the parse's child is cleaned up and nothing installs any more.
+        with _IDLE:
+            _ACTIVE.pop(job_id, None)
+            _SETTLED.discard(job_id)
+            _IDLE.notify_all()
+        token.close()
         if conn is not None:
             conn.close()
