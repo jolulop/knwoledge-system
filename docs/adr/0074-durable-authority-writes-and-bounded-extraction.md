@@ -17,7 +17,9 @@
   **Slice 6b (decision 6: attempt records and retry classification) implemented 2026-11-16** —
   `app/workers/extract_attempts.py`. **Slice 6c (decisions 7.3, 7.5: stale extraction jobs and
   cancellation) implemented 2026-11-16** — `db.reconcile_interrupted`, `extract.cancel`; slice 6
-  complete. Changes 7a–7c per decision 9 not yet; **7a grilled 2026-11-16** (see "Change 7a" in Part C).
+  complete. **Change 7a grilled 2026-11-16** (see "Change 7a" in Part C); **7a-1 (Q1, Q2, Q6:
+  retrieval gating, graph Source nodes, silent exclusion) implemented 2026-11-16**; 7a-2 (Q3–Q5) and
+  changes 7b–7c not yet.
 - **Operational acceptance** (user decision 2026-11-14): ADR-0074 is **not operationally accepted
   until change 7a lands**. Slices continue in decision 9's order, but until 7a no document, release
   note or review answer may claim that visibility fails closed: a stale keyword / vector index can
@@ -1251,7 +1253,9 @@ its own short grill:
 
 ### Change 7a — manifest visibility enforcement (grill 2026-11-16)
 
-Planned; not implemented. Closes the **status-copy failure**: retrieval filters a document by the
+Split into **7a-1** (Q1, Q2, Q6 — implemented 2026-11-16, see below) and **7a-2** (Q3–Q5 — not yet),
+each reviewed and validated independently; operational acceptance waits for both. Closes the
+**status-copy failure**: retrieval filters a document by the
 status copied into the keyword index's `navigation` table (from its Source page), so a hide or
 archive whose reindex failed left the document's evidence reaching the model. The manifest's
 `status` is the authority (ADR-0036 decision 13, ADR-0043).
@@ -1312,7 +1316,32 @@ archive whose reindex failed left the document's evidence reaching the model. Th
    semantic-node statuses are untouched. Q3's final-check count and Q4's `save_refused` count stay:
    they explain a change affecting evidence already admitted during that request, and give only a
    count and a reason, never the excluded documents' identities. Damaged-manifest and
-   install-journal notes are unchanged for documents the status check admits.
+   install-journal notes are unchanged for documents the status check admits. **"Silent" means
+   no explicit exclusion diagnostic, not indistinguishable responses:** a stale hidden candidate
+   still occupies a place in a bounded per-channel candidate pool before the gate drops it, so it
+   can still affect ranking, recall or truncation (the cost of keeping the index pre-filter, Q1).
+
+**As implemented (7a-1 — Q1, Q2, Q6).**
+
+- **The gate** (`search._ManifestGate`) checks, in order: usable authority (decision 2, reported as
+  `blocked`); the manifest's status in the status set passed **on that call** (silent); the install
+  journal (decision 8, reported as `install_blocked`). Only status-independent facts are cached —
+  the inventory's `{valid id: status}` map and each journal verdict — so no decision is reused
+  across status sets. `manifests.visibility_status` reads the status: absent → `active`; present
+  but not one of `SOURCE_STATUSES` (`null`, a wrong type or case) → `None`, refused under any filter.
+- **Status sets.** Keyword and vector evidence pass `source_statuses`; Source navigation hits and
+  graph Source nodes pass `node_statuses` — the same set the index / graph pre-filter used for that
+  channel.
+- **Graph.** `graph_read.search_subgraph` takes an `admit_extra` predicate, applied inside the
+  bounded traversal like every other admission check: a refused Source node is not returned, not
+  expanded (a node reachable only through it is not reached), and no returned edge touches it.
+  `neighborhood` / `node_view` and the `/graph/*` routes don't take it.
+- **Reported status.** Surviving evidence (`source_status`), Source navigation hits and graph
+  Source nodes (`status`) carry the manifest's status; item / claim / synthesis nodes keep theirs.
+- **Tests:** `tests/test_manifest_visibility.py`. The silent-exclusion tests compare the
+  diagnostic surface (notes, counts, flags, surviving hits) with and without a matching hidden
+  document on small vaults; they don't prove full indistinguishability (bounded candidate pools,
+  see Q6).
 
 **Tests (written at implementation).** Stale-index combinations (hide / archive with a failed
 reindex; unhide with a failed reindex; an explicit status search against a stale index); explicit

@@ -42,6 +42,7 @@ reads ``policies/retrieval.yaml`` and may override them per the routing taxonomy
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
 from typing import Any
 
 from app.backend import graph
@@ -545,6 +546,7 @@ def search_subgraph(
     fanout: int = DEFAULT_FANOUT,
     budget: int = NEIGHBORHOOD_QUERY_BUDGET,
     seeds_truncated: bool = False,
+    admit_extra: Callable[[dict[str, Any]], bool] | None = None,
 ) -> dict[str, Any]:
     """Multi-seed bounded BFS returning a flat ``{seeds, nodes, edges, depth, truncated}`` subgraph.
 
@@ -559,6 +561,11 @@ def search_subgraph(
     ``item_types`` (ADR-0062) is a **type predicate, not a layer filter**: an *item* node is
     admitted only if its ``item_type`` is in the set, but non-item nodes (claim/synthesis) always
     pass — the facet narrows the item layer without dropping the rest.
+
+    ``admit_extra`` (ADR-0074 change 7a) is one more admission predicate over a node's metadata —
+    the search layer's manifest visibility gate for Source nodes. Like every admission check it
+    runs inside the traversal: a refused node is not returned, not expanded, and no returned edge
+    touches it.
     """
     require_indexes(conn)
     depth = max(0, min(depth, MAX_DEPTH))
@@ -571,6 +578,8 @@ def search_subgraph(
         if item_types is not None and meta["node_type"] == "item" and meta["item_type"] not in item_types:
             return False
         if node_statuses is not None and meta["status"] not in node_statuses:
+            return False
+        if admit_extra is not None and not admit_extra(meta):
             return False
         return True
 

@@ -423,7 +423,7 @@ honestly under `unapplied` (record-only / raw-touching).
 | `deprecate_wiki_page` | 0035 | Scoped page deprecation → `deprecated_candidate`. |
 | `archive_source` | 0036 | Source `active` → `archive_candidate` (raw bytes untouched; manifest status flips). |
 | `mark_semantic_duplicate` | 0041 | `## Duplicates` annotation edge (no id rewrite). |
-| `hide_content` / `unhide_content` | 0043 / 0047 | Hide / unhide a source. |
+| `hide_content` / `unhide_content` | 0043 / 0047 | Hide / unhide a source. Since ADR-0074 change 7a-1, `/search` and `/query` retrieval also check the manifest's status, so a hide (or an archive) whose reindex failed no longer reaches results; an unhide whose reindex failed keeps the source out of search until the next successful reindex. Not covered yet: a `/query` already past retrieval and a save of its answer (7a-2), and Query pages saved before the hide (deferred). |
 | `hide_semantic_page` / `unhide_semantic_page` | 0046 / 0047 | Hide / unhide an item page. |
 | `hide_claim` / `unhide_claim` | 0048 | Hide / unhide a claim. |
 | `hide_synthesis` / `unhide_synthesis` | 0049 | Hide / unhide a synthesis (`evidence_hidden`). |

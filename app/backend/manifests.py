@@ -664,6 +664,17 @@ def get_status(manifest: dict[str, Any]) -> str:
     return status if status in SOURCE_STATUSES else "active"
 
 
+def visibility_status(manifest: dict[str, Any]) -> str | None:
+    """The manifest's lifecycle status as retrieval visibility reads it (ADR-0074 change 7a): a
+    genuinely **absent** `status` keeps its documented default ``active``; a status that is present
+    but not one of :data:`SOURCE_STATUSES` (``null`` included) is malformed and returns ``None`` —
+    the caller refuses the document instead of reading it as ``active``."""
+    if "status" not in manifest:
+        return "active"
+    status = manifest["status"]
+    return status if isinstance(status, str) and status in SOURCE_STATUSES else None
+
+
 def set_status(manifests_dir: Path, source_id: str, status: str) -> dict[str, Any] | None:
     """Set a manifest's source lifecycle status (the single write path); return it or None.
 

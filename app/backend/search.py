@@ -500,6 +500,7 @@ def graph_group(
     fanout: int = graph_read.DEFAULT_FANOUT,
     budget: int = graph_read.NEIGHBORHOOD_QUERY_BUDGET,
     max_seeds: int = 50,
+    admit_extra: Callable[[dict[str, Any]], bool] | None = None,
 ) -> dict[str, Any]:
     """Flat graph subgraph for /search: multi-seed BFS at ``depth`` over the Phase 4b projection.
 
@@ -527,7 +528,7 @@ def graph_group(
         conn, seeds, depth=depth, edge_statuses=edge_statuses, node_statuses=node_statuses,
         node_types=node_types, item_types=item_types, edge_types=edge_types,
         node_cap=node_cap, edge_cap=edge_cap, fanout=fanout, budget=budget,
-        seeds_truncated=seeds_truncated,
+        seeds_truncated=seeds_truncated, admit_extra=admit_extra,
     )
 
 
@@ -535,17 +536,28 @@ def graph_group(
 
 
 class _ManifestGate:
-    """ADR-0074 decision 2 — fail closed before evidence reaches the model: a document contributes
-    evidence and Source navigation hits only when its manifest is **usable authority** — readable,
-    well-formed, and identity-validated by the manifest inventory (canonical id, filename stem
-    equal to it, no duplicate claiming it). Unreadable, corrupt, quarantined and absent manifests
-    (a removed manifests folder included) all exclude the document. The inventory is scanned once
-    per search, only when a hit needs it. This is the unavailable-authority exclusion only;
-    visibility suppression of valid manifests (hide / archive status filtering) is change 7a.
+    """ADR-0074 — fail closed before evidence reaches the model. A document contributes evidence,
+    Source navigation hits and graph Source nodes only when, in this order:
 
-    ADR-0074 decision 8 (slice 5b): a document whose install journal makes its normalized outputs
-    unusable (`installing`, `unrecoverable`, damaged) is excluded the same way (`install_blocked`):
-    its indexed rows may be another generation than its current files."""
+    1. its manifest is **usable authority** (decision 2) — readable, well-formed, and
+       identity-validated by the manifest inventory (canonical id, filename stem equal to it, no
+       duplicate claiming it). Unreadable, corrupt, quarantined and absent manifests (a removed
+       manifests folder included) exclude the document (`blocked`, reported);
+    2. its manifest's lifecycle **status** belongs to the caller's effective status set (change 7a)
+       — in addition to the index's status copy, which the channels already filtered on: **both
+       must allow it**, so a hide / archive whose reindex failed still suppresses the document. A
+       malformed status refuses it; an absent one reads as `active`. This exclusion is **silent**
+       (Q6): no count, note or flag, and it stops before step 3, so no install note can reveal a
+       document its status disallows;
+    3. its install journal leaves its normalized outputs usable (decision 8, slice 5b) — otherwise
+       its indexed rows may be another generation than its current files (`install_blocked`,
+       reported).
+
+    The inventory is scanned once per search, only when a hit needs it. Only the status-independent
+    facts (the inventory, each manifest's status, each journal's verdict) are cached; the allowed
+    status set is passed on every call (evidence: `source_statuses`; graph nodes: `node_statuses`),
+    so a decision for one set is never reused for the other. Surviving Source results report the
+    manifest's status (:meth:`status_of`), never the index copy."""
 
     def __init__(self, manifests_dir: Path, normalized_dir: Path | None = None) -> None:
         self.manifests_dir = Path(manifests_dir)
@@ -553,15 +565,27 @@ class _ManifestGate:
                                else self.manifests_dir.parent.parent / "normalized")
         self.blocked: set[str] = set()
         self.install_blocked: set[str] = set()
-        self._usable: set[str] | None = None
+        self._status: dict[str, str | None] | None = None     # valid id -> visibility status
         self._installed: dict[str, bool] = {}
 
-    def allows(self, source_id: Any) -> bool:
+    def _statuses(self) -> dict[str, str | None]:
+        if self._status is None:
+            self._status = {m["source_id"]: manifests.visibility_status(m)
+                            for m in manifests.scan_manifests(self.manifests_dir).valid}
+        return self._status
+
+    def status_of(self, source_id: Any) -> str | None:
+        """The authoritative status of a valid manifest (None: not valid, or malformed)."""
+        return self._statuses().get(str(source_id or ""))
+
+    def allows(self, source_id: Any, statuses: tuple[str, ...]) -> bool:
         sid = str(source_id or "")
-        if self._usable is None:
-            self._usable = manifests.scan_manifests(self.manifests_dir).valid_ids
-        if sid not in self._usable:
+        known = self._statuses()
+        if sid not in known:
             self.blocked.add(sid)
+            return False
+        status = known[sid]
+        if status is None or status not in statuses:  # silent, and before the journal (Q6)
             return False
         if sid not in self._installed:              # valid ids are canonical: a journal name
             self._installed[sid] = xi.usable(self.normalized_dir, sid)
@@ -570,11 +594,39 @@ class _ManifestGate:
             return False
         return True
 
-    def evidence(self, hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return [h for h in hits if self.allows(h.get("source_id"))]
+    def evidence(self, hits: list[dict[str, Any]],
+                 statuses: tuple[str, ...]) -> list[dict[str, Any]]:
+        out = []
+        for h in hits:
+            if self.allows(h.get("source_id"), statuses):
+                out.append({**h, "source_status": self.status_of(h.get("source_id"))})
+        return out
 
-    def navigation(self, hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return [h for h in hits if h.get("page_type") != "source" or self.allows(h.get("node_id"))]
+    def navigation(self, hits: list[dict[str, Any]],
+                   statuses: tuple[str, ...]) -> list[dict[str, Any]]:
+        out = []
+        for h in hits:
+            if h.get("page_type") != "source":
+                out.append(h)
+            elif self.allows(h.get("node_id"), statuses):
+                out.append({**h, "status": self.status_of(h.get("node_id"))})
+        return out
+
+    def graph_admit(self, statuses: tuple[str, ...]) -> Callable[[dict[str, Any]], bool]:
+        """The graph group's extra admission (change 7a, Q2): a `source` node also needs the gate
+        (against the graph's `node_statuses`); other node families pass unchanged. Applied inside
+        the traversal, so a refused Source node is neither returned, traversed through, nor an
+        endpoint of a returned edge."""
+        def admit(meta: dict[str, Any]) -> bool:
+            return meta.get("node_type") != "source" or self.allows(meta.get("node_id"), statuses)
+        return admit
+
+    def graph_statuses(self, result: dict[str, Any]) -> dict[str, Any]:
+        """Report each surviving Source node's manifest status (the authority)."""
+        result["nodes"] = [
+            {**n, "status": self.status_of(n.get("node_id"))} if n.get("node_type") == "source"
+            else n for n in result["nodes"]]
+        return result
 
 
 def run_search(
@@ -630,25 +682,26 @@ def run_search(
             channel_hits["keyword"] = gate.evidence(search_evidence(
                 keyword_conn, evidence_match, source_id=source_id, source_statuses=source_statuses,
                 prefusion_limit=prefusion, limit=prefusion,
-            ))
+            ), source_statuses)
         if ("navigation" in modes or "graph" in modes) and nav_match is not None:
             nav_hits = gate.navigation(search_navigation(
                 keyword_conn, nav_match, page_type=page_type, node_statuses=node_statuses,
                 language=language, item_types=item_types, prefusion_limit=prefusion, limit=nav_limit,
-            ))
+            ), node_statuses)
             if "navigation" in modes:
                 navigation = nav_hits
 
     # The graph channel runs even without an FTS topic (disagreement is graph-native).
     if "graph" in modes and graph_conn is not None:
         try:
-            graph_result = graph_group(
+            graph_result = gate.graph_statuses(graph_group(
                 graph_conn, nav_hits, shape=shape, depth=depth, edge_statuses=edge_statuses,
                 node_statuses=node_statuses, node_types=node_types, item_types=item_types,
                 node_cap=node_cap, edge_cap=edge_cap, fanout=policy.cap("max_graph_fanout"),
                 budget=policy.cap("max_graph_queries"),
                 max_seeds=policy.cap("max_disagreement_seeds"),
-            )
+                admit_extra=gate.graph_admit(node_statuses),
+            ))
         except graph.GraphIndexMissing as exc:  # ADR-0068: explicit, never an unbounded fallback
             notes.append(f"graph_index_missing: graph results omitted — {exc}")
 
@@ -667,7 +720,7 @@ def run_search(
             channel_hits["vector"] = gate.evidence(search_vector(
                 vector_search, keyword_conn, source_id=source_id, source_statuses=source_statuses,
                 prefusion_limit=prefusion, limit=prefusion,
-            ))
+            ), source_statuses)
         except VectorUnavailable as exc:  # backend failed: explicit -> 503; auto -> degrade
             if mode != "auto":
                 raise VectorChannelError(str(exc)) from exc
