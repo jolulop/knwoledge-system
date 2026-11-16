@@ -12,7 +12,9 @@
   decision 2026-11-15). **Slice 5a (decision 8 install journal and recovery, 7.4 staging
   cleanup) implemented 2026-11-15** — `app/backend/extraction_install.py`. **Slice 5b (consistent
   consumer reads) implemented 2026-11-15** — `extraction_install.consistent_read` and every
-  consumer; slice 6 and changes 7a–7c per decision 9 not yet.
+  consumer. **Slice 6a (decisions 5, 7.1–7.2: the extraction child) implemented 2026-11-16** —
+  `app/workers/extract_runner.py`, `extract_child.py`, `extract_watchdog.py`, `extract_parse.py`;
+  slices 6b (decision 6), 6c (decisions 7.3, 7.5) and changes 7a–7c per decision 9 not yet.
 - **Operational acceptance** (user decision 2026-11-14): ADR-0074 is **not operationally accepted
   until change 7a lands**. Slices continue in decision 9's order, but until 7a no document, release
   note or review answer may claim that visibility fails closed: a stale keyword / vector index can
@@ -810,6 +812,70 @@ job row `running` forever.
    begun it finishes or leaves journal-recoverable state, still holding the guard. `interrupted` is
    recorded when persistence remains possible; a hard death is reconciled on the next run (point 3)
    and recovered through the install journal (decision 8).
+
+**As implemented (slice 6a — decisions 5, 7.1 and 7.2).** Slice 6 is split: **6a** the process
+boundary (this), **6b** attempt records and retry classification (decision 6), **6c** extraction-only
+stale-job reconciliation and cancellation (decisions 7.3 and 7.5).
+
+- **Modules.** `extract_parse.py` holds the parse (format dispatch, the ZIP checks, the lazily
+  imported extractors), moved out of `extract.py` unchanged; `extract_child.py` is the child's
+  entry point; `extract_watchdog.py` the watchdog; `extract_runner.parse` the parent side, the one
+  parse path for the CLI and the API (`extract._parse`). `_time_limit` / `SIGALRM` are gone.
+- **Spawn.** The child is a fresh interpreter (`python -I extract_child.py`, an exec through
+  `subprocess`, not `multiprocessing` — no re-import of the launching module at all) with
+  `process_group=0`, `close_fds`, working directory `/` and an environment reduced to `PATH`,
+  locale, `TZ` and `TMPDIR` (no API keys, no vault configuration). Its bootstrap imports the
+  standard library, `extract_parse`, `chunking` and the one extractor the format needs (proved by a
+  test listing the child's modules). The venv's `site` start-up still runs (it imports NVIDIA's
+  `cuda` namespace shim, which initialises nothing).
+- **Handshake and request.** The child moves fd 1 to a private result descriptor and points fd 1
+  at stderr (a parser's print can't corrupt the channel), refuses to run unless it leads its own
+  group, and sends `hello {pid, pgid}`. The parent requires `pgid == pid` and never its own group,
+  and until then signals only the child's pid. Then the watchdog is armed (and confirms with one
+  byte), and only then is the request (path, source id, output cap) sent: a child whose parent died
+  earlier reads EOF and exits without parsing.
+- **Watchdog.** `python -I -S extract_watchdog.py <fd> <pgid> <budget> <grace>`, standard library
+  only, inheriting only the control pipe's read end (`pass_fds`; the parent holds the only writer,
+  which is non-inheritable). EOF → it terminates the child's group (SIGTERM, grace, SIGKILL); its
+  budget (the deadline remaining + the grace) is the deadline backstop; `x` stands it down. It
+  refuses its own group, ignores SIGINT / SIGHUP, and a SIGTERM to it terminates the child's group
+  first.
+- **Receipt.** `poll` (not `select`: descriptors may exceed 1024), draining while the child runs,
+  bounded to the cap + 64 KiB. One newline-terminated ASCII JSON message, protocol version 1,
+  schema-checked field by field (element kinds, levels, pages, table names by the install
+  journal's rule, status `extracted` / `partial`, metadata strings); a child-reported reason must
+  be one the child may report. **The fixed output cap is 256 MiB**, enforced exactly by the child
+  (`output_too_large`, a complete result) and with the slack by the parent
+  (`extractor_output_invalid`).
+- **Reasons.** `timeout` (the deadline — `EXTRACT_TIMEOUT_S`, now required positive — passed,
+  start-up included); `extractor_crashed` (exit or signal with no or a truncated result);
+  `extractor_output_invalid` (not JSON — nesting too deep to decode included — more than one
+  message, off-schema, an unknown or non-string reason, over the receipt bound);
+  `extractor_unavailable` (could not start, no or a failed handshake — an undecodable hello
+  included — the watchdog failed to start). Every child-controlled value is type-checked before
+  use, so no malformed message escapes as an unclassified failure. The child's own `missing_dependency`, `decompression_bomb`,
+  `invalid_archive`, `unsupported` are preserved, and an unclassified parse failure keeps its
+  "Type: message" with no reason (its classification is slice 6b's). Every failure goes through
+  the existing paths: last-good kept on a re-extraction, staging discarded.
+- **Cleanup**, on every path (a parent exception included): the group gets SIGTERM, the leader
+  `grace` (5 s) to exit (checked with `waitid(WNOWAIT)`, not reaping), then SIGKILL — on success
+  too, so no helper survives; then the watchdog is stood down and reaped; the child is reaped last,
+  so its pid (the group id) can't be reused while the watchdog could still signal it.
+- **Not claimed:** a helper that leaves the group (`setsid`) escapes the group kill; a process
+  boundary is not a read-only file system.
+- **Tests** (`tests/test_extract_child.py`, `tests/extract_child_stub.py` as the misbehaving
+  child): the real child equal to the in-process parse for every format; the child's modules,
+  environment, working directory, group and descriptors (no lock, guard or database, with all three
+  held by the parent); the deadline off the main thread, start-up counting, escalation to SIGKILL by
+  the parent alone; crash, truncation, invalid output (an unhashable reason and JSON nested past
+  the decoder's limit included, in the result and in the hello; a decoder sweep putting every JSON
+  type in every field), the receipt bound, the child's cap, a result
+  larger than the pipe, handshake failures, a missing interpreter; the child's reasons preserved;
+  no descendant after success or a parent exception; the watchdog's EOF, deadline, stand-down,
+  interrupt and SIGTERM handling and own-group refusal; **a SIGKILLed parent during a stalled parse
+  whose child ignores SIGTERM: the vault lock and the extract guard re-acquirable while the child is
+  still alive, then the child gone within the grace**; the API route timing out a stalled parse on
+  its worker thread; process failures on re-extraction keeping the last-good generation.
 
 ### Decision 8 — roll-forward install journal for extraction (grill Q8)
 

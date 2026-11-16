@@ -344,6 +344,17 @@ operator recovers it.
 Exit codes as for supersede recovery: 0, 1 refused or failed, 2 usage, 3 busy, 4 publication queue
 unreadable, 6 state changed, 9 vault revision unavailable.
 
+**Extraction child (ADR-0074 decision 5).** Each document's parse runs in its own child process,
+under a wall-clock deadline of `EXTRACT_TIMEOUT_S` (default 120; start-up counts) that holds for the
+CLI and for `POST /jobs/extract` alike. A per-child watchdog process terminates the child if the
+extraction process dies, so a killed run never leaves a parser running or a lock held. Besides the
+usual reasons (`oversize`, `invalid_archive`, `decompression_bomb`, `missing_dependency`, …) a
+document's error may be `timeout`, `extractor_crashed` (the child died — e.g. out of memory),
+`extractor_output_invalid` (its result was malformed or over the transfer bound),
+`extractor_unavailable` (the child could not start) or `output_too_large` (the result exceeds the
+fixed 256 MiB cap). A re-extraction that fails keeps the previous extraction. Raise
+`EXTRACT_TIMEOUT_S` for very large documents on a slow machine.
+
 **Interrupted extraction install (ADR-0074 decision 8).** Extraction installs each document's new
 outputs through an install journal (`normalized/.install/<source_id>.json`). A crash, kill or I/O
 failure mid-install leaves the journal open; **the next extraction run completes it first** (`uv run

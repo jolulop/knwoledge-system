@@ -43,12 +43,12 @@ def vault(tmp_path, monkeypatch):
     intake.scan_inbox(tmp_path, jobs_db=tmp_path / "db" / "jobs.sqlite")
     gen = {"current": GEN_A, "parsed": 0}
 
-    def dispatch(path, source_id):
+    def dispatch(path, source_id, **kw):
         gen["parsed"] += 1
         g = gen["current"]
         return Extraction(elements=[Element("prose", g["text"])], tool="fake", tool_version="1",
                           tables=list(g["tables"]))
-    monkeypatch.setattr(extract, "_dispatch", dispatch)
+    monkeypatch.setattr(extract, "_parse", dispatch)
     return tmp_path, gen
 
 
@@ -82,7 +82,7 @@ def _clean_generation(tmp_path, monkeypatch, gen) -> dict:
     fixtures.write_markdown(inbox / "doc.md")
     intake.scan_inbox(tmp_path / "ref", jobs_db=tmp_path / "ref" / "db" / "jobs.sqlite")
     with monkeypatch.context() as m:
-        m.setattr(extract, "_dispatch", lambda p, s: Extraction(
+        m.setattr(extract, "_parse", lambda p, s, **kw: Extraction(
             elements=[Element("prose", gen["text"])], tool="fake", tool_version="1",
             tables=list(gen["tables"])))
         _run(tmp_path / "ref")

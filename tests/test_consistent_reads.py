@@ -57,7 +57,7 @@ def vault(tmp_path, monkeypatch):
     fixtures.write_markdown(inbox / "doc.md")
     intake.scan_inbox(tmp_path, jobs_db=tmp_path / "db" / "jobs.sqlite")
     gen = {"current": GEN_A}
-    monkeypatch.setattr(extract, "_dispatch", lambda path, sid: Extraction(
+    monkeypatch.setattr(extract, "_parse", lambda path, sid, **kw: Extraction(
         elements=[Element("prose", gen["current"]["text"])], tool="fake", tool_version="1",
         tables=list(gen["current"]["tables"])))
     _run(tmp_path)

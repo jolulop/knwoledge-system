@@ -10,7 +10,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.backend import db, manifests
-from app.workers import extract, intake
+from app.workers import extract, extract_parse, extract_runner, intake
 from app.workers.extract import MissingExtractionDependency
 from tests import fixtures
 
@@ -199,10 +199,10 @@ def test_failed_force_reextract_preserves_last_good(tmp_path, monkeypatch):
     good_markdown = md_path.read_text(encoding="utf-8")
 
     # Force a re-extraction, but make the extractor blow up after the checksum passes.
-    def boom(path, source_id):
+    def boom(path, source_id, **kw):
         raise RuntimeError("simulated extractor crash")
 
-    monkeypatch.setattr(extract, "_dispatch", boom)
+    monkeypatch.setattr(extract, "_parse", boom)
     second = _run(tmp_path, force=True)
 
     assert second["errors"] == 1
@@ -215,7 +215,7 @@ def test_failed_force_reextract_preserves_last_good(tmp_path, monkeypatch):
 
 def test_load_extractor_missing_dependency_message():
     with pytest.raises(MissingExtractionDependency) as excinfo:
-        extract._load_extractor("module_that_does_not_exist_xyz")
+        extract_parse._load_extractor("module_that_does_not_exist_xyz")
     assert excinfo.value.skip_reason == "missing_dependency"
     assert "uv sync --extra extraction" in str(excinfo.value)
 
@@ -226,10 +226,10 @@ def test_missing_dependency_surfaces_as_error(tmp_path, monkeypatch):
     fixtures.write_pdf(inbox / "p.pdf", ["some readable text on the page"])
     intake.scan_inbox(tmp_path, jobs_db=tmp_path / "db" / "jobs.sqlite")
 
-    def fail(module_name):
-        raise MissingExtractionDependency("No module named 'pypdf'")
-
-    monkeypatch.setattr(extract, "_load_extractor", fail)
+    # The parse runs in the extraction child: a child whose extractor import fails reports it.
+    stub = ROOT / "tests" / "extract_child_stub.py"
+    monkeypatch.setattr(extract_runner, "child_command",
+                        lambda: [sys.executable, "-I", str(stub), "missing_dep", str(tmp_path)])
     summary = _run(tmp_path)
     assert summary["errors"] == 1
     assert summary["error_details"][0]["skip_reason"] == "missing_dependency"

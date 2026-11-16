@@ -5,7 +5,8 @@ For every extractable source catalogued in ``raw/manifests/`` this worker extrac
 text/tables, writes deterministic per-source artifacts under ``normalized/`` (Markdown,
 chunks, tables, an extraction log), and records extraction state back on the manifest
 (ADR-0011). It runs offline with no API keys, treats every input as untrusted data
-(size/timeout/zip-bomb caps, ADR-0010), and is idempotent: an already-extracted,
+(size/timeout/zip-bomb caps, ADR-0010) — the parse runs in a bounded child process
+(`app/workers/extract_runner.py`, ADR-0074 decision 5) — and is idempotent: an already-extracted,
 unchanged source is skipped unless ``force`` is given. One ``extract`` job records the
 run summary; per-source detail lives on the manifest and in the extraction log.
 
@@ -17,15 +18,10 @@ the keyword index (`app/workers/publication.py`).
 from __future__ import annotations
 
 import json
-import importlib
-import signal
-import threading
 import uuid
-import zipfile
-from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from app.backend import db, durable_write, write_lock
 from app.backend import extraction_install as xi
@@ -40,12 +36,16 @@ from app.backend.manifests import (
     sha256_file,
 )
 from app.backend.paths import safe_under
-from app.workers import publication
+from app.workers import extract_runner, publication
 from app.workers.chunking import assemble
-# Only the lightweight Extraction dataclass is imported eagerly. The per-format
-# extractor modules (pypdf/python-docx/beautifulsoup4/pandas) are imported lazily in
-# _dispatch so the base API and the intake/query workflows boot without the optional
-# extraction extras installed.
+# The parse itself (`extract_parse`) runs only in the extraction child; the per-format extractor
+# modules (pypdf/python-docx/beautifulsoup4/pandas) are imported there lazily, so the base API and
+# the intake/query workflows boot without the optional extraction extras installed.
+from app.workers.extract_parse import (  # noqa: F401  (re-exported for callers)
+    SUPPORTED,
+    ExtractionError,
+    MissingExtractionDependency,
+)
 from app.workers.extractors import Extraction  # noqa: F401  (re-exported for callers)
 
 # Extractor implementation provenance, recorded in every extraction log (ADR-0054 decision 4).
@@ -55,105 +55,18 @@ from app.workers.extractors import Extraction  # noqa: F401  (re-exported for ca
 # title/author hint in the log, ADR-0066 part 3).
 EXTRACT_CODE_VERSION = 2
 
-# Extension -> extractor module name under app.workers.extractors (loaded lazily).
-_TEXT_FORMATS = {
-    ".pdf": "pdf",
-    ".docx": "docx",
-    ".html": "html",
-    ".htm": "html",
-    ".md": "markdown",
-    ".markdown": "markdown",
-}
-_TABLE_EXTENSIONS = {".csv", ".xlsx"}
-_SUPPORTED = set(_TEXT_FORMATS) | _TABLE_EXTENSIONS
-_ZIP_FORMATS = {".docx", ".xlsx"}
-
 # A non-paginated source (HTML/DOCX/Markdown/CSV) yielding less than this much text is
 # essentially empty: reported partial with needs_ocr rather than a clean extraction
 # (Phase 2 Plan §10). The paginated (PDF) floor lives in extractors/pdf.py.
 _NON_PAGINATED_MIN_CHARS = 16
 
-# Decompression-bomb bounds for zipped formats (DOCX/XLSX).
-_MAX_ZIP_ENTRIES = 10_000
-_MAX_ZIP_UNCOMPRESSED = 512 * 1024 * 1024  # 512 MiB
-_MAX_ZIP_RATIO = 200
-
-
-class ExtractionError(Exception):
-    """Recoverable per-source failure carrying a machine-readable skip reason."""
-
-    def __init__(self, message: str, skip_reason: str) -> None:
-        super().__init__(message)
-        self.skip_reason = skip_reason
-
-
-class MissingExtractionDependency(ExtractionError):
-    """The optional extraction extras are not installed for the requested format."""
-
-    def __init__(self, detail: str) -> None:
-        super().__init__(
-            f"{detail}; extraction extras not installed — run "
-            "`uv sync --extra extraction`",
-            "missing_dependency",
-        )
-
-
-def _load_extractor(module_name: str):
-    """Import an extractor module lazily, mapping a missing dep to a clear error."""
-    try:
-        return importlib.import_module(f"app.workers.extractors.{module_name}")
-    except ImportError as exc:  # heavy extra (pypdf/docx/bs4/pandas) not installed
-        raise MissingExtractionDependency(str(exc)) from exc
-
-
-@contextmanager
-def _time_limit(seconds: int) -> Iterator[None]:
-    """Best-effort per-file timeout via SIGALRM (main thread, Unix only)."""
-    if seconds <= 0 or threading.current_thread() is not threading.main_thread():
-        yield
-        return
-
-    def _raise(signum: int, frame: Any) -> None:
-        raise ExtractionError(f"extraction exceeded {seconds}s", "timeout")
-
-    previous = signal.signal(signal.SIGALRM, _raise)
-    signal.alarm(seconds)
-    try:
-        yield
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, previous)
-
-
-def _check_zip_bomb(path: Path) -> None:
-    try:
-        with zipfile.ZipFile(path) as zf:
-            infos = zf.infolist()
-    except zipfile.BadZipFile as exc:
-        raise ExtractionError(f"invalid archive: {exc}", "invalid_archive") from exc
-    if len(infos) > _MAX_ZIP_ENTRIES:
-        raise ExtractionError("too many zip entries", "decompression_bomb")
-    uncompressed = sum(i.file_size for i in infos)
-    compressed = sum(i.compress_size for i in infos)
-    if uncompressed > _MAX_ZIP_UNCOMPRESSED:
-        raise ExtractionError("uncompressed size exceeds cap", "decompression_bomb")
-    if compressed > 0 and uncompressed / compressed > _MAX_ZIP_RATIO:
-        raise ExtractionError("suspicious compression ratio", "decompression_bomb")
-
-
-def _dispatch(path: Path, source_id: str):
-    suffix = path.suffix.lower()
-    if suffix in _ZIP_FORMATS:
-        _check_zip_bomb(path)
-    if suffix in _TEXT_FORMATS:
-        return _load_extractor(_TEXT_FORMATS[suffix]).extract(path)
-    if suffix in _TABLE_EXTENSIONS:
-        return _load_extractor("tables").extract(path, source_id)
-    raise ExtractionError(f"unsupported extension: {suffix}", "unsupported")
+# The untrusted parse runs in an extraction child under a wall-clock deadline (ADR-0074 decision 5;
+# `app/workers/extract_runner.py`), the one path for the CLI and the API. A seam for tests.
+_parse = extract_runner.parse
 
 
 def is_supported(extension: str) -> bool:
-    return extension.lower() in _SUPPORTED
+    return extension.lower() in SUPPORTED
 
 
 # --- output writing ---------------------------------------------------------
@@ -261,8 +174,8 @@ def _extract_one(
                 "raw file checksum does not match manifest", "checksum_mismatch"
             )
 
-        with _time_limit(timeout_s):
-            extraction = _dispatch(raw_file, source_id)
+        # The parse, its ZIP checks included, in a child under the deadline (decision 5).
+        extraction = _parse(raw_file, source_id, timeout_s=timeout_s)
 
         markdown_text, chunks = assemble(
             source_id, extraction.elements, target_chars=target_chars, max_chars=max_chars
@@ -451,6 +364,8 @@ def extract_sources(
     record_job: bool = True,
 ) -> dict[str, Any]:
     """Extract pending (or selected) sources; return a run summary (Phase 2 Plan §9)."""
+    if not timeout_s > 0:          # the deadline always applies (ADR-0074 decision 5)
+        raise ValueError(f"timeout_s must be positive, not {timeout_s!r}")
     root = Path(root).resolve()
     manifests_dir = Path(manifests_dir) if manifests_dir else root / "raw" / "manifests"
     jobs_db = Path(jobs_db) if jobs_db else root / "db" / "jobs.sqlite"

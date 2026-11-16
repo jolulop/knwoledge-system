@@ -34,10 +34,15 @@ _HELPER = "the durable-write helper itself"
 _LOCK = "a lock file (never authority)"
 _SANDBOX = "the throwaway Apply-preview sandbox (ADR-0040), not live authority"
 _PROJECTION = "a projection, rebuildable by definition (ADR-0068 §1)"
+_PIPE = "a pipe descriptor of the extraction child protocol, never a file (ADR-0074 decision 5)"
 _NORMALIZED = "normalized/ derived state outside the extraction install (ADR-0074 decision 8)"
 _EVAL = "an evaluation report / scratch vault outside the live vault"
 _INDEX = "an index / model-cache directory, rebuildable (not an authority directory)"
 ALLOWED: dict[tuple[str, str, str], str] = {
+    ("app/workers/extract_child.py", "_send", "os.write"): _PIPE,
+    ("app/workers/extract_child.py", "run", "os.write"): _PIPE,
+    ("app/workers/extract_runner.py", "_stand_down", "os.write"): _PIPE,
+    ("app/workers/extract_watchdog.py", "main", "os.write"): _PIPE,
     ("app/backend/durable_write.py", "_fsync_path", "os.open"): _HELPER,
     ("app/backend/durable_write.py", "make_dirs", "os.mkdir"): _HELPER,
     ("app/backend/durable_write.py", "_write_temp", "os.open"): _HELPER,
