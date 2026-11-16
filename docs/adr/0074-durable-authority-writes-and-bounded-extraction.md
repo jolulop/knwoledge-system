@@ -20,7 +20,8 @@
   complete. **Change 7a grilled 2026-11-16** (see "Change 7a" in Part C); **7a-1 (Q1, Q2, Q6:
   retrieval gating, graph Source nodes, silent exclusion) implemented 2026-11-16**; **7a-2 (Q3–Q5:
   the final model-call check, the guarded save, the warning rename) implemented 2026-11-16** —
-  change 7a complete. Changes 7b–7c not yet.
+  change 7a complete. **Change 7b grilled 2026-11-16** (see "Change 7b" in Part C; docs only).
+  Change 7c not yet.
 - **Operational acceptance** (user decision 2026-11-14): ADR-0074 was **not operationally accepted
   until change 7a landed**; with 7a-2 it is. Visibility now fails closed for `/search` and `/query`
   retrieval, for the model call (from the final check on) and for saving an answer, despite a
@@ -1382,6 +1383,86 @@ eval path; hide-before-save, save-before-hide, damaged manifests, mixed allowed 
 citations, a refusal leaving page, log and revision unchanged; responses compared with and without
 a matching hidden document — including one with a broken install journal — showing no added
 diagnostic signal.
+
+### Change 7b — documentation reconciliation (grill 2026-11-16)
+
+Docs only: no code, tests or hooks change. The decisions below widen decision 9's 7b line
+(`AGENTS.md`, Build Specification §3.2, the stale producer statement) into one reconciliation of
+every **current-guidance** document, and add one explicit policy, the agent write path (Q4).
+
+**Q1 — scope: every current-guidance document.** In scope: `AGENTS.md`, `CLAUDE.md` (Q5), the
+Build Specification (§3.2, the Current Implementation Snapshot and its workflow diagram, the §7
+note, §10), `README.md`, `REANCHOR.md` (its project summary, not its dated history entries),
+`docs/Workflow.md`, and the `vault-ingest` and `vault-review` skills (Q5). Historical ADRs and Phase
+plans stay as dated records; a supersession pointer is added only where one presents itself as
+current instructions (none found: every Phase plan is labelled complete / historical, and
+`docs/README.md` lists them as historical). `docs/Operations.md` is already correct. The wording:
+- Wiki pages combine **durable, human-owned fields** with **regenerable projections**; rebuilding
+  projections must preserve those fields.
+- Producers refresh `wiki/index.md` and keyword search **at run completion**; failed publication
+  stays pending for retry.
+- Manual reindex commands remain for **diagnosed repair and explicit maintenance**, not as a
+  mandatory step after every producer run.
+
+This also covers the Apply advice in `README.md` and the Workflow cheat sheet ("re-run
+`reindex_keyword.py` only if it warns `keyword_reindex_failed`"): Apply's failed refresh leaves
+publication pending (`publication_pending`), which **Retry publishing** finishes (Q5). A
+keyword-wording check (a deterministic lint) was considered and not chosen: it would flag
+legitimate descriptions of regenerable projections. Validation is a scoped search plus diff review,
+and the existing `tests/test_operational_refs.py` (every referenced script exists).
+
+**Q2 — field lists by audience; the exact list in one place.**
+- **Build Specification §3.2:** the design principle, plus a compact summary per family: Items own
+  names, descriptions, classification, lifecycle / review state and lineage; Claims and Synthesis
+  own `status` (and Claims the completion marker, Q3). "Everything else is projection" is limited to
+  the page content being described.
+- **`AGENTS.md`:** preserve durable fields during regeneration; change them only through the
+  authorized operation that owns them. That permits approved edits and forbids deleting and
+  re-creating a page as a regeneration shortcut.
+- **`README.md`, `REANCHOR.md`, `Workflow.md`:** a one-line rewording.
+- Every pointer names **"ADR-0068 decision 1, as amended"**. No guidance document copies the exact
+  field list, and `CONTEXT.md` stays explanatory, pointing at that ADR.
+
+**Q3 — ADR-0068 decision 1 becomes the complete list.** A dated amendment goes immediately beneath
+its table, the original rows unedited. It records that Claim pages also carry ADR-0073 decision 16's
+**completion marker** (`superseded_by_review`, `superseded_by_approval`, `superseded_by_claim`):
+all three or none; durable historical completion evidence; kept through every render, hidden states
+included; never regenerated from defaults or discarded as projection. It cites ADR-0074 decision
+4's rule that a writer which cannot read the durable fields it must carry forward refuses. While
+drafting, every ADR after ADR-0068 is checked for another durable page field; any found is amended
+there too (the grill's scan found only the marker; ADR-0071's title authority is the existing
+`title` field).
+
+**Q4 — the agent write path (an explicit policy clarification, not wording alone).** Supported
+system operations are the **only** agent write path for wiki content: pipeline producers, review
+decisions and Apply, and the screen / API actions (tagging, hide / unhide, provenance confirmation,
+saving a query). A direct file edit bypasses the write lock, the revision and the publication
+contract, and preserving frontmatter cannot make it safe.
+- **Each operation's actual guarantee is stated**, not a blanket "publishes and refreshes search":
+  a review decision records intent and Apply executes it; producers publish per document and
+  refresh search at run completion; a saved Query stays **navigation-stale** until the next reindex,
+  by design.
+- `AGENTS.md`'s seven "before changing wiki content" steps become the **invariants supported
+  operations preserve**, plus the checks that apply when changing producers, renderers or
+  templates. The citation, summary-callout, backlink and validation requirements are kept.
+- **Hooks** (`.claude/hooks/`, Build Specification §10) are described as **structural checks**,
+  not concurrency or durability protection: they cannot make an ad hoc edit safe or stand in for
+  the write lock, the revision and publication. The hooks themselves are unchanged.
+
+**Q5 — `CLAUDE.md` and the conflicting skills.** In scope, so the Q4 policy holds across the
+instructions agents actually load:
+- **`CLAUDE.md` § Main workflows → Ingest** describes what the pipeline performs, not steps for an
+  agent. The Critical rules and the output discipline are unchanged.
+- **`vault-ingest`** tells the agent which supported operations to invoke, in the current pipeline's
+  stage order (intake, extraction, Source pages, enrichment where applicable, claims, items,
+  promotion, synthesis, then `validate_all`) and with its existing authorization requirements.
+  The rewrite authorizes no automatic semantic decision. A run reporting
+  `saved_publication_pending` is finished by **retrying publication** with the supported operation
+  (`POST /publication/retry`, `scripts/republish.py`); a manual reindex alone may leave unfinished
+  page publication unresolved, so explicit reindexing is kept for diagnosed index repair or
+  maintenance.
+- **`vault-review`:** decisions record intent; Apply executes and publishes them.
+- `vault-maintenance` and `vault-query` are unchanged.
 
 ### Deferred items and reopening triggers
 
