@@ -291,8 +291,9 @@ def test_html_apply_result_shows_hidden_summary(client, tmp_path):
 
 
 def test_hide_with_reindex_failure_is_not_clean(client, tmp_path, monkeypatch):
-    # ADR-0043 stricter posture: a hide applied while the keyword reindex fails is non-clean (the hidden
-    # source may still surface via the stale index), surfaced as validation_failed + a warning.
+    # ADR-0043 stricter posture: a hide applied while the keyword reindex fails is non-clean. Since
+    # ADR-0074 change 7a the manifest gate already suppresses retrieval, so the warning names what is
+    # left — index lag (`hide_index_refresh_pending`, renamed from ..._suppression_not_guaranteed).
     _rendered_source(tmp_path)
     _approve_hide(tmp_path)
 
@@ -302,9 +303,31 @@ def test_hide_with_reindex_failure_is_not_clean(client, tmp_path, monkeypatch):
     body = fixtures.apply(client).json()
     assert body["summary"]["hidden"]["applied"] == 1                 # the mutation still happened
     assert body["status"] == "saved_publication_pending"
-    assert "hide_retrieval_suppression_not_guaranteed" in body["warnings"]
+    assert "hide_index_refresh_pending" in body["warnings"]
+    assert not any("suppression_not_guaranteed" in w for w in body["warnings"])
     assert manifests.get_status(manifests.get_manifest(
         tmp_path / "raw" / "manifests", SID)) == "hidden"            # manifest authority is correct
+
+
+def test_the_renamed_warning_is_explained_on_the_apply_and_preview_screens(
+        client, tmp_path, monkeypatch):
+    # ADR-0074 change 7a (Q5): the code stays the API vocabulary; the screens say what it means.
+    from app.backend import review_html
+    _rendered_source(tmp_path)
+    _approve_hide(tmp_path)
+
+    def boom(root):
+        raise RuntimeError("reindex blew up")
+    monkeypatch.setattr(main_module.publication.keyword_index, "reindex", boom)
+    text = review_html.WARNING_EXPLANATIONS["hide_index_refresh_pending"]
+    assert text.startswith("Source retrieval is suppressed by the manifest gate.")
+    dry = client.post("/reviews/apply/dry-run").json()
+    assert "hide_index_refresh_pending" in dry["warnings"]
+    import html
+    preview = client.post("/ui/reviews/apply/preview").text
+    assert html.escape(text, quote=True) in preview
+    applied = fixtures.apply_ui(client).text
+    assert html.escape(text, quote=True) in applied and "suppression_not_guaranteed" not in applied
 
 
 # --- visibility: search exclusion (full round-trip) ------------------------

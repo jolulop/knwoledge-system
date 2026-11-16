@@ -629,6 +629,18 @@ class _ManifestGate:
         return result
 
 
+def visibility_check(manifests_dir: Path, normalized_dir: Path | None,
+                     statuses: tuple[str, ...]) -> Callable[[set[str]], set[str]]:
+    """ADR-0074 change 7a (Q3, Q4): a check of which documents are still visible, run **fresh** on
+    every call — a new gate, so a new manifest inventory, never a cached search's — against the
+    request's effective `statuses`. It applies the retrieval gate's three checks: a failed or damaged
+    manifest read, a disallowed or malformed status, or an unusable install journal excludes."""
+    def check(source_ids: set[str]) -> set[str]:
+        gate = _ManifestGate(manifests_dir, normalized_dir)
+        return {sid for sid in source_ids if gate.allows(sid, statuses)}
+    return check
+
+
 def run_search(
     *,
     q: str,

@@ -26,6 +26,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any, Protocol
 
 from app.backend import extraction_install as xi
@@ -129,6 +130,8 @@ class QueryAnswer:
     security_rejected_count: int = 0   # claims dropped for path-leak; reason=_SECURITY_REASON, NO text
     abstained: bool = False
     evidence_count: int = 0
+    # ADR-0074 change 7a (Q3): evidence items the final visibility check removed from the pack.
+    visibility_removed: int = 0
 
 
 # --------------------------------------------------------------------------- evidence pack
@@ -205,13 +208,28 @@ def answer_query(
     model_ref: str,
     markdown_dir: Path,
     fallback_text: str = NO_SOURCE_FOUND,
+    visible: Callable[[set[str]], set[str]] | None = None,
 ) -> QueryAnswer:
     """Synthesize a grounded cited answer (ADR-0034). The caller supplies retrieved chunk evidence and
-    a configured/fake parser; this never calls retrieval, the endpoint, or save."""
+    a configured/fake parser; this never calls retrieval, the endpoint, or save.
+
+    `visible` (ADR-0074 change 7a, Q3) is the **final visibility check**: given the pack's document
+    ids it returns those still visible. It runs after the pack is built and immediately before the
+    provider request is prepared; the pack and its citation lookup are filtered together (ids
+    renumbered), and an empty pack abstains with no model call. A hide whose manifest write
+    completed before this check began is excluded; the window from the check to the send is
+    accepted (no strict bound), and a request already sent cannot be withdrawn."""
     markdown_cache: dict[str, str | None] = {}
     pack = build_evidence_pack(evidence_hits, Path(markdown_dir), markdown_cache)
+    removed = 0
+    if visible is not None and pack:
+        allowed = visible({e["source_id"] for e in pack})
+        kept = [e for e in pack if e["source_id"] in allowed]
+        removed = len(pack) - len(kept)
+        pack = [{**e, "evidence_id": f"e{i}"} for i, e in enumerate(kept, 1)]
     if not pack:
-        return QueryAnswer(question=question, answer=fallback_text, abstained=True, evidence_count=0)
+        return QueryAnswer(question=question, answer=fallback_text, abstained=True, evidence_count=0,
+                           visibility_removed=removed)
 
     result = client.parse(
         [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": _render_pack(question, pack)}],
@@ -257,7 +275,7 @@ def answer_query(
     if not grounded_claims:
         return QueryAnswer(question=question, answer=fallback_text, unsourced_claims=unsourced,
                            security_rejected_count=security_rejected, abstained=True,
-                           evidence_count=len(pack))
+                           evidence_count=len(pack), visibility_removed=removed)
 
     ordered = sorted(citations_by_key.values(), key=lambda c: c["_n"])
     return QueryAnswer(
@@ -269,6 +287,7 @@ def answer_query(
         security_rejected_count=security_rejected,
         abstained=False,
         evidence_count=len(pack),
+        visibility_removed=removed,
     )
 
 

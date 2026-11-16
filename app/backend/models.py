@@ -365,6 +365,11 @@ class QueryResponse(BaseModel):
     # True when a page was saved but the nav/index were NOT synchronously rebuilt — the saved query is
     # discoverable only after the next reindex (ADR-0034 Q3). False/None when nothing was saved.
     navigation_stale: bool = False
+    # ADR-0074 change 7a (Q4): set when save=true was refused because a cited document is no longer
+    # eligible under the request's statuses — {"reason": "citation_visibility_changed", "count": N} —
+    # or because the publication queue is unreadable — {"reason": "publication_queue_unavailable"}.
+    # Nothing was written; the answer is still returned. None otherwise.
+    save_refused: dict[str, Any] | None = None
 
 
 # --- Phase 6 review ledger (ADR-0035) --------------------------------------

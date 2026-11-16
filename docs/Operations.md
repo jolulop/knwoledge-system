@@ -423,7 +423,7 @@ honestly under `unapplied` (record-only / raw-touching).
 | `deprecate_wiki_page` | 0035 | Scoped page deprecation → `deprecated_candidate`. |
 | `archive_source` | 0036 | Source `active` → `archive_candidate` (raw bytes untouched; manifest status flips). |
 | `mark_semantic_duplicate` | 0041 | `## Duplicates` annotation edge (no id rewrite). |
-| `hide_content` / `unhide_content` | 0043 / 0047 | Hide / unhide a source. Since ADR-0074 change 7a-1, `/search` and `/query` retrieval also check the manifest's status, so a hide (or an archive) whose reindex failed no longer reaches results; an unhide whose reindex failed keeps the source out of search until the next successful reindex. Not covered yet: a `/query` already past retrieval and a save of its answer (7a-2), and Query pages saved before the hide (deferred). |
+| `hide_content` / `unhide_content` | 0043 / 0047 | Hide / unhide a source. Since ADR-0074 change 7a-1, `/search` and `/query` retrieval also check the manifest's status, so a hide (or an archive) whose reindex failed no longer reaches results; an unhide whose reindex failed keeps the source out of search until the next successful reindex. A `/query` already past retrieval re-checks just before the model call, and `save: true` refuses the whole save (`save_refused`) if a cited document is no longer eligible (7a-2). A failed reindex after a hide reports `hide_index_refresh_pending`: retry publication. Not covered: Query pages saved before the hide stay discoverable (deferred). |
 | `hide_semantic_page` / `unhide_semantic_page` | 0046 / 0047 | Hide / unhide an item page. |
 | `hide_claim` / `unhide_claim` | 0048 | Hide / unhide a claim. |
 | `hide_synthesis` / `unhide_synthesis` | 0049 | Hide / unhide a synthesis (`evidence_hidden`). |
@@ -575,6 +575,12 @@ curl -fsS -X POST http://127.0.0.1:18000/query \
   -H 'content-type: application/json' \
   -d '{"question": "what does the vault say about <topic>?", "mode": "auto"}' | python3 -m json.tool
 ```
+
+With `"save": true` the answer is also written to `wiki/Queries/<query_id>.md` — unless a document it
+cites was hidden, archived or damaged while the query ran: then nothing is written, `query_id` is
+`null` and `save_refused` gives the reason and count (ADR-0074 change 7a); the answer is still returned.
+If the publication queue is unreadable, the save is refused the same way (`save_refused.reason:
+"publication_queue_unavailable"`, HTTP 200 with the answer): repair the queue, then ask again.
 
 ### Real-vault answer-quality eval (ADR-0042)
 

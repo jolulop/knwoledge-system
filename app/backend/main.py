@@ -1600,13 +1600,13 @@ def _run_apply(st: Any, intent: str | None = None) -> dict[str, Any]:
         for rid in supersede_journaled:
             identity_journal.end(reviews_dir, rid)
 
-    # ADR-0043 (stricter than archive): a `hide_content` whose retrieval/nav index did NOT refresh is
-    # NOT a clean apply — the manifest/page are hidden (authority), but the hidden source may still
-    # surface via the stale keyword/navigation index until reindex succeeds. Surface it as non-clean so
-    # an operator hiding sensitive content can't read "applied" and assume suppression took effect.
+    # ADR-0043 (stricter than archive), renamed by ADR-0074 change 7a (Q5): a `hide_content` whose
+    # retrieval/nav index did NOT refresh is NOT a clean apply. Source retrieval is already suppressed
+    # by the manifest gate (/search, /query); what remains is index lag — the index disagrees with
+    # the authority and discovery recall is reduced until publication is retried.
     hide_retrieval_stale = reindex_failed and hidden["applied"] > 0
     if hide_retrieval_stale:
-        warnings.append("hide_retrieval_suppression_not_guaranteed")
+        warnings.append("hide_index_refresh_pending")
 
     # ADR-0046 (mirrors source hide): a semantic-page hide that applied/normalized while the keyword/nav
     # index did NOT refresh is non-clean — page + graph node are hidden (authority), but a stale index
@@ -3381,6 +3381,8 @@ def run_query_endpoint(req: QueryRequest) -> dict[str, Any]:
                 question=q, evidence_hits=result["evidence"], client=client,
                 model_ref=query_model, markdown_dir=settings.markdown_dir,
                 fallback_text=_no_source_text(),
+                visible=search.visibility_check(settings.manifests_dir, settings.normalized_dir,
+                                                source_statuses),
             )
     except HTTPException:
         raise  # already-controlled 4xx/503 (e.g. provider unavailable, explicit-vector unavailable)
@@ -3394,27 +3396,58 @@ def run_query_endpoint(req: QueryRequest) -> dict[str, Any]:
         logger.warning("POST /query: synthesis failed: %s", exc)
         raise HTTPException(status_code=503, detail="query answering is temporarily unavailable") from exc
 
+    notes = list(result.get("notes", []))
+    if answer.visibility_removed:
+        notes.append(f"{answer.visibility_removed} evidence item(s) removed by the final visibility "
+                     "check (ADR-0074): a document's eligibility changed during the query")
     saved_id: str | None = None
     navigation_stale = False
+    save_refused: dict[str, Any] | None = None
     if req.save:  # explicit save -> deterministic wiki/Queries/<id>.md (no graph edges, no review)
-        saved_id = query.query_id(q, mode=req.mode, source_id=req.source_id,
-                                  source_status=req.source_status, language=req.language,
-                                  item_type=req.item_type)
+        page_id = query.query_id(q, mode=req.mode, source_id=req.source_id,
+                                 source_status=req.source_status, language=req.language,
+                                 item_type=req.item_type)
         # ADR-0060: page-local display labels for the citation-table source links.
         link_labels = labels.display_labels(
             settings.wiki_dir, [f"Sources/{c['source_id']}" for c in answer.citations])
         page = render_query_page({
-            "query_id": saved_id, "question": q, "answer": answer.answer,
+            "query_id": page_id, "question": q, "answer": answer.answer,
             "citations": answer.citations, "retrieval_modes": result["retrieval_path"],
             "item_type": req.item_type,  # ADR-0062: record the facet in the saved page
             "unsourced_claims": answer.unsourced_claims,
             "security_rejected_count": answer.security_rejected_count,
         }, labels=link_labels)
-        durable_write.write_text(settings.wiki_dir / "Queries" / f"{saved_id}.md", page)
-        # Audit only (ADR-0034 Q3): the nav/index are NOT synchronously rebuilt — the saved query is
-        # discoverable after the next reindex. Surfaced via navigation_stale so the API stays honest.
-        _append_wiki_log(f"query saved: Queries/{saved_id}.md")
-        navigation_stale = True
+        # ADR-0074 change 7a (Q4): every document the final answer cites is re-checked, fresh and
+        # under the write lock (so against Apply's manifest writes), for current eligibility under
+        # the request's statuses. Any failing refuses the whole save — no page, no log line, no
+        # revision advance; the answer is still returned.
+        try:
+            # The hold stays authority-checked: an unreadable publication queue refuses it on entry,
+            # before anything is written. Only the save is refused — the paid answer is returned.
+            with write_lock.hold(settings.reviews_dir, changes=False):
+                cited = {c["source_id"] for c in answer.citations}
+                ineligible = cited - search.visibility_check(
+                    settings.manifests_dir, settings.normalized_dir, source_statuses)(cited)
+                if ineligible:
+                    save_refused = {"reason": "citation_visibility_changed",
+                                    "count": len(ineligible)}
+                else:
+                    write_lock.invalidate()
+                    durable_write.write_text(settings.wiki_dir / "Queries" / f"{page_id}.md", page)
+                    # Audit only (ADR-0034 Q3): the nav/index are NOT synchronously rebuilt — the
+                    # saved query is discoverable after the next reindex (navigation_stale says so).
+                    _append_wiki_log(f"query saved: Queries/{page_id}.md")
+                    saved_id, navigation_stale = page_id, True
+        except publication_queue.QueueCorrupt as exc:
+            logger.warning("POST /query: save refused, publication queue unreadable: %s", exc.reason)
+            save_refused = {"reason": "publication_queue_unavailable"}
+            notes.append("query not saved: the publication queue is unreadable (ADR-0074) — the "
+                         "answer is returned but nothing was saved; repair the queue "
+                         "(POST /publication/repair or `uv run python scripts/republish.py "
+                         "--repair`) and ask again to save it")
+        if save_refused is not None and save_refused["reason"] == "citation_visibility_changed":
+            notes.append(f"query not saved: {save_refused['count']} cited document(s) no longer "
+                         "eligible (ADR-0074) — the answer is returned but no page was written")
 
     return {
         "query": answer.question,
@@ -3429,10 +3462,11 @@ def run_query_endpoint(req: QueryRequest) -> dict[str, Any]:
         "security_rejected_count": answer.security_rejected_count,
         # Q2: full ungrounded text only under explicit local/debug review; default exposes counts only.
         "unsourced_claims": answer.unsourced_claims if req.include_unsourced else [],
-        "notes": result.get("notes", []),
+        "notes": notes,
         "query_id": saved_id,
         "invocation_id": invocation_id,
         "navigation_stale": navigation_stale,
+        "save_refused": save_refused,
     }
 
 
@@ -3494,7 +3528,9 @@ def _eval_query_fn(client: Any, cache: _CountingCache | None, model_ref: str):
         ans = query.answer_query(
             question=case.question, evidence_hits=result["evidence"], client=client,
             model_ref=model_ref, markdown_dir=settings.markdown_dir,
-            fallback_text=_no_source_text())
+            fallback_text=_no_source_text(),
+            visible=search.visibility_check(settings.manifests_dir, settings.normalized_dir,
+                                            statuses))
         cache_hit: bool | None = None
         if cache is not None:
             if cache.hits > h0:

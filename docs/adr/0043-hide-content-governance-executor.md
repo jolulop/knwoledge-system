@@ -6,10 +6,11 @@
 also delegates to) in `app/workers/retention.py`; wired into `run_apply` (+ `_APPLY_TYPES`, NOT
 `_GRAPH_REQUIRED_TYPES`) + summary; `EXECUTOR_BY_TYPE` + `preview_hide_content` projector; covered by
 `tests/test_hide_content.py`.
-**Amended by ADR-0074 change 7a (planned, grilled 2026-11-16):** `/search` and `/query` enforce a
-source's hide / archive at read time from its manifest, so a failed reindex no longer lets its evidence
-through; the strict reindex posture below stays, but its warning `hide_retrieval_suppression_not_guaranteed`
-becomes `hide_index_refresh_pending` (index lag, not unsuppressed retrieval).
+**Amended by ADR-0074 change 7a (implemented 2026-11-16 — 7a-1 retrieval, 7a-2 the rest):** `/search`
+and `/query` enforce a source's hide / archive at read time from its manifest, so a failed reindex no
+longer lets its evidence through; the strict reindex posture below stays, but its warning
+`hide_retrieval_suppression_not_guaranteed` is now **`hide_index_refresh_pending`** (index lag, not
+unsuppressed retrieval), explained beside the code on the Apply and dry-run screens.
 The second non-rekeying governance executor (after ADR-0041 `mark_semantic_duplicate`): make the
 record-only `hide_content` review type executor-backed for **sources**, suppressing a source from
 default retrieval + navigation via a new reversible `hidden` lifecycle status — **no id rewrite, no
@@ -117,6 +118,7 @@ one-directional like archive. Reversibility is **preserved** (status can be flip
   reindex **failed** is **not a clean apply**: the manifest/page are `hidden` (authority), but the hidden
   source may still surface via the stale index until reindex succeeds. `run_apply` therefore returns
   `status: "validation_failed"` (not `"applied"`) with a `hide_retrieval_suppression_not_guaranteed`
+  (renamed `hide_index_refresh_pending` by ADR-0074 change 7a)
   warning when `hidden.applied > 0` and the reindex failed — and the ADR-0040 dry-run previews it as
   non-clean (it keys cleanliness on `run_apply`'s status, including a sandbox reindex failure). Archive
   keeps its warning-only posture. Re-run `/jobs/reindex` to restore suppression. **Scope:** this strictness

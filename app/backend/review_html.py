@@ -205,6 +205,20 @@ def _page(title: str, body: str) -> str:
             f"<title>{_h(title)}</title>{_STYLE}</head><body>{body}</body></html>")
 
 
+# Apply warnings whose meaning an operator needs spelled out beside the code (the code stays the
+# API vocabulary). ADR-0074 change 7a (Q5): the renamed source-hide reindex warning.
+WARNING_EXPLANATIONS = {
+    "hide_index_refresh_pending": (
+        "Source retrieval is suppressed by the manifest gate. Index refresh is incomplete; retry "
+        "publication to restore index consistency and discovery recall."),
+}
+
+
+def _warning_lines(warnings: list[str] | None) -> str:
+    return "".join(f"<p class='banner'>{_h(code)}: {_h(WARNING_EXPLANATIONS[code])}</p>"
+                   for code in (warnings or []) if code in WARNING_EXPLANATIONS)
+
+
 def _render_value(value: Any) -> str:
     """Recursively render a structured value, escaping every leaf (proves nested markup is safe)."""
     if isinstance(value, dict):
@@ -946,6 +960,7 @@ def render_apply_dry_run(scope: dict[str, Any], dry: dict[str, Any]) -> str:
                                  (dry.get("validators") or {}).get("failures")))
     if dry.get("warnings"):
         body.append(f"<p class='banner'>warnings: {_render_value(dry['warnings'])}</p>")
+        body.append(_warning_lines(dry["warnings"]))
 
     token = dry.get("preview_token")
     if status == "ok" and token:
@@ -1023,6 +1038,7 @@ def render_apply_result(result: dict[str, Any]) -> str:
     body.append(_validators_line(True, result.get("validators_ok"), result.get("failed_validators")))
     if result.get("warnings"):
         body.append(f"<p class='banner'>warnings: {_render_value(result['warnings'])}</p>")
+        body.append(_warning_lines(result["warnings"]))
     summary = {
         "syntheses": s.get("syntheses"), "promotions": s.get("promotions"),
         "contradictions": s.get("contradictions"), "deprecations": s.get("deprecations"),

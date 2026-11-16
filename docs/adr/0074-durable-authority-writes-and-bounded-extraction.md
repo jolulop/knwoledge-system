@@ -18,12 +18,15 @@
   `app/workers/extract_attempts.py`. **Slice 6c (decisions 7.3, 7.5: stale extraction jobs and
   cancellation) implemented 2026-11-16** — `db.reconcile_interrupted`, `extract.cancel`; slice 6
   complete. **Change 7a grilled 2026-11-16** (see "Change 7a" in Part C); **7a-1 (Q1, Q2, Q6:
-  retrieval gating, graph Source nodes, silent exclusion) implemented 2026-11-16**; 7a-2 (Q3–Q5) and
-  changes 7b–7c not yet.
-- **Operational acceptance** (user decision 2026-11-14): ADR-0074 is **not operationally accepted
-  until change 7a lands**. Slices continue in decision 9's order, but until 7a no document, release
-  note or review answer may claim that visibility fails closed: a stale keyword / vector index can
-  still admit a hidden or archived document's evidence after a failed publication.
+  retrieval gating, graph Source nodes, silent exclusion) implemented 2026-11-16**; **7a-2 (Q3–Q5:
+  the final model-call check, the guarded save, the warning rename) implemented 2026-11-16** —
+  change 7a complete. Changes 7b–7c not yet.
+- **Operational acceptance** (user decision 2026-11-14): ADR-0074 was **not operationally accepted
+  until change 7a landed**; with 7a-2 it is. Visibility now fails closed for `/search` and `/query`
+  retrieval, for the model call (from the final check on) and for saving an answer, despite a
+  failed publication. **Retained limitation:** Query pages saved *before* a hide keep their
+  quotations discoverable (deferred, see the table); a request already sent to the provider cannot
+  be withdrawn.
 - **Date:** 2026-11-11
 - **Drivers:** external review of `06f3d56` (2026-11-11), blocking findings 1 and 3. Finding 2
   (item descriptions corrupted across re-renders) was fixed separately in `dfda610`.
@@ -1253,7 +1256,7 @@ its own short grill:
 
 ### Change 7a — manifest visibility enforcement (grill 2026-11-16)
 
-Split into **7a-1** (Q1, Q2, Q6 — implemented 2026-11-16, see below) and **7a-2** (Q3–Q5 — not yet),
+Split into **7a-1** (Q1, Q2, Q6) and **7a-2** (Q3–Q5), both implemented 2026-11-16 (see below),
 each reviewed and validated independently; operational acceptance waits for both. Closes the
 **status-copy failure**: retrieval filters a document by the
 status copied into the keyword index's `navigation` table (from its Source page), so a hide or
@@ -1342,6 +1345,33 @@ archive whose reindex failed left the document's evidence reaching the model. Th
   diagnostic surface (notes, counts, flags, surviving hits) with and without a matching hidden
   document on small vaults; they don't prove full indistinguishability (bounded candidate pools,
   see Q6).
+
+**As implemented (7a-2 — Q3, Q4, Q5).**
+
+- **The fresh check** is `search.visibility_check(manifests_dir, normalized_dir, statuses)`: each
+  call builds a new gate (a new inventory read) and returns the ids that pass all three gate checks.
+- **Final check (Q3).** `query.answer_query(..., visible=...)` applies it to the pack's documents
+  after `build_evidence_pack` and before `_render_pack`; the kept entries are renumbered `e1..eN`
+  and the citation lookup is built from them; an empty pack returns the abstention before
+  `client.parse`. `QueryAnswer.visibility_removed` counts the removed items; `/query` adds the note
+  "N evidence item(s) removed by the final visibility check (ADR-0074): a document's eligibility
+  changed during the query" (eligibility, not status: damage or an incomplete install also
+  excludes). `/query` passes the request's
+  `source_statuses`, the eval runner (`_eval_query_fn`) the default set.
+- **Guarded save (Q4).** `/query` renders the page first, then under
+  `write_lock.hold(settings.reviews_dir, changes=False)` re-checks the cited documents; all
+  eligible → `write_lock.invalidate()`, page, `wiki/log.md` line; otherwise nothing is written and
+  the response carries `save_refused: {reason: "citation_visibility_changed", count}` (new
+  `QueryResponse` field), `query_id: null`, `navigation_stale: false` and a note. The hold stays
+  authority-checked (the default, never `authority=False`), so an unreadable publication queue
+  still blocks the write; `/query` catches that `QueueCorrupt` around the guarded save and returns
+  HTTP 200 with the answer, `save_refused: {reason: "publication_queue_unavailable"}`,
+  `query_id: null`, `navigation_stale: false` and a note that nothing was saved and the queue
+  needs repair. No page, log line or revision advance; the damaged queue is left as found
+  (review round 1).
+- **Rename (Q5).** `run_apply` emits `hide_index_refresh_pending`; `review_html.WARNING_EXPLANATIONS`
+  carries its sentence, shown beside the code on the dry-run preview and the Apply result screens.
+- **Tests:** `tests/test_query_visibility.py`; the rename in `tests/test_hide_content.py`.
 
 **Tests (written at implementation).** Stale-index combinations (hide / archive with a failed
 reindex; unhide with a failed reindex; an explicit status search against a stale index); explicit
