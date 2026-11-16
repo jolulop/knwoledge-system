@@ -21,7 +21,7 @@
   retrieval gating, graph Source nodes, silent exclusion) implemented 2026-11-16**; **7a-2 (Q3–Q5:
   the final model-call check, the guarded save, the warning rename) implemented 2026-11-16** —
   change 7a complete. **Change 7b grilled and implemented 2026-11-16** (see "Change 7b" in Part
-  C; docs only). Change 7c not yet.
+  C; docs only). **Change 7c grilled 2026-11-16** (see "Change 7c"); not yet implemented.
 - **Operational acceptance** (user decision 2026-11-14): ADR-0074 was **not operationally accepted
   until change 7a landed**; with 7a-2 it is. Visibility now fails closed for `/search` and `/query`
   retrieval, for the model call (from the final check on) and for saving an answer, despite a
@@ -1488,6 +1488,127 @@ instructions agents actually load:
 - Validation: scoped search for "regenerable" / "disposable" / post-run reindex wording across the
   current-guidance documents, diff review, `tests/test_operational_refs.py`, `validate_all`.
 
+### Change 7c — Apply preview benchmark (grill 2026-11-16)
+
+Measures the current copy-based preview (ADR-0068 decision 6) at the 600-document target, **with
+copies first**. Results precede any storage optimization; 7c optimizes nothing.
+
+**Context found at the grill.**
+- `apply_sandbox.build_sandbox` copies `db/*.sqlite` (online backup), `reviews/`, `wiki/`,
+  `raw/manifests/`, `normalized/` and `policies/` **under the write lock**. It then copies the code
+  and the catalogued raw bytes after the lock, into `tempfile.mkdtemp` (`ks-dryrun-*`).
+- Nothing serializes two previews.
+- On the development machine `/tmp` is the vault's own ext4 filesystem, which has **no
+  reflinks**. That is input for any later optimization grill, not a 7c decision.
+- No real 600-document vault exists: the UAT clone holds 12 documents.
+
+**Q1 — the workload: a synthetic baseline, with real-corpus confirmation optional.** A
+deterministic, key-free generator builds the benchmark vault; a real 600-document ingestion is not
+a prerequisite and creates no billable work. The fixture:
+- declares its size distribution, total bytes and graph / review counts;
+- is calibrated on UAT **aggregate ratios** only, never copying private content;
+- follows current schemas and renderers, with the consistency checks passing before measurement;
+- exercises the real preview executors with valid synthetic approvals.
+
+Results are labelled **synthetic baseline**, with the generator version, seed, scale and machine /
+storage details. They measure preview and tagging contention **on that workload**; they do not
+prove performance for every 600-document corpus. Real-corpus confirmation is an optional follow-up
+(see the table), and its absence does not block 7c.
+
+**Q2 — acceptance limits, fixed before measuring.**
+
+| Metric | Limit | Statistic |
+|---|---|---|
+| Snapshot write-lock hold | ≤ 2 s | p95 of the warm runs |
+| A keep issued during the snapshot copy (wall time) | ≤ 3 s | p95 of the warm runs |
+| Preview end-to-end | ≤ 60 s | p95 of the warm runs |
+| Temporary storage | ≤ 5 GB **and** ≤ 10 % of the temporary filesystem's free space measured before the run | **maximum observed peak** |
+
+- **Runs and percentile.** 20 measured warm-cache runs follow one untimed warm-up. The p95 is the
+  **nearest-rank** p95: the value at rank ⌈0.95 × n⌉ of the sorted runs, i.e. the 19th of 20.
+- **Storage reporting.** Logical copied bytes and actual allocated temporary storage are reported
+  separately. **Amplification** = maximum observed allocated temporary storage ÷ logical bytes
+  copied.
+- **Cold-cache results** are recorded separately and not judged.
+- **Invalid trials vs breaches.** An **invalid** trial (no proven overlap, an unintended effect, a
+  blocked or incomplete outcome, a non-equivalent start) is reported and excluded; it neither
+  establishes the baseline nor triggers anything. A **valid** trial that exceeds a limit is a
+  breach. Only valid trials establish the baseline (the 20 measured runs are 20 valid ones).
+- **A breach.** Exceeding any limit on valid trials triggers the separate optimization grill (the
+  table). It does not authorize optimization within 7c, and 7c still completes, recording a failed
+  acceptance and the triggered follow-up.
+- **Per preview.** Capacity results are labelled per preview. Concurrent previews multiply demand,
+  and these limits establish no aggregate safety for unrestricted concurrency.
+
+**Q3 — deliverables and provenance.**
+- **Generator** (committed). It builds a disposable vault from a seed and scale into a named
+  destination, refusing the live vault and any **nonempty** destination. It never deletes or
+  overwrites an existing vault.
+- **Runner** (committed). It writes a JSON report to gitignored `evals/reports/bench/`:
+  - the metrics and the percentile method;
+  - a report schema version, the benchmark code revision, and the generator version, seed and
+    scale;
+  - a **fixture-content fingerprint** (over the generated content, not the directory path);
+  - machine and storage details.
+
+  Errors and environment metadata are sanitized like the rest, so no absolute path enters
+  indirectly.
+- **Smoke test** (committed, in the gate). It uses deterministic inputs at a small scale to check
+  fixture validation, report structure, the percentile calculation and threshold classification.
+  It makes no wall-clock assertion.
+- **The 600-document run** is a manual operator step and produces the measured baseline. Its
+  summary is committed in this section: the numbers, pass / fail per limit, any triggered follow-up,
+  the environment, and the **report's digest**, which ties the conclusions to the detailed
+  measurements. It is committed honestly, a breach included.
+
+**Q4 — measurement: instrument the real preview path.** The real preview runs; its orchestration is
+not duplicated.
+- **The lock interval.** It is measured from the real hold: acquisition wait separately from the
+  total time held, which includes everything done before release, not just the copy function. The
+  timestamps are monotonic and comparable with process B's keep-attempt timestamp; a sandbox
+  directory appearing does not by itself prove overlap.
+- **Contention.**
+  - Each trial is a **real keep** from equivalent fixture state on an **unkept** target, issued
+    cross-process through the route the UI uses while the snapshot holds the lock.
+  - A trial whose keep did not provably overlap the hold is invalid, not counted.
+  - An uncontended keep is measured as a baseline.
+  - If the keep invalidates the preview's authorization, that is recorded as an outcome; token
+    checks are never weakened.
+- **Peak storage.** The benchmark-owned temporary storage is observed **during execution across
+  phases**, because sandbox Apply can delete files or create intermediates. The maximum observed
+  allocation is reported with its sampling limitations; a single measurement before cleanup is an
+  end-state size, not a peak.
+- **Overhead.** Lightweight phase timings are additive diagnostics on the preview result (lock wait,
+  lock held, after-lock copy, sandbox run, diff). Recursive byte accounting is **benchmark-only or
+  opt-in**, so ordinary previews gain no filesystem walk, and it never holds the write lock to scan.
+  Measurement overhead is reported separately.
+
+These are diagnostics, not storage optimizations.
+
+**Q5 — the approved review queue: two declared profiles.**
+- **Heavy (judged):** 50 approved items covering every `_APPLY_TYPES` executor at least once, the
+  rest weighted toward cross-page operations (merges, splits and retypes on high-degree tags, and
+  supersede on a standing contradiction). It is labelled a **backlog stress baseline**: there is no
+  evidence it represents a typical Apply.
+- **Light (not judged):** 5 items (one promotion, hide, retype, merge and archive), representing a
+  small interactive batch.
+
+Both profiles share equivalent corpus topology and storage; their **phase timings**, not end-to-end
+totals, attribute snapshot cost against executor work. Required of both:
+- **Declared counts.** The report lists exact counts by executor type. "High-degree" has declared
+  fan-out values, and the affected documents, edges and pages are reported.
+- **Compatible targets.** Approvals remain compatible throughout executor ordering: no competing
+  retypes, no absorbed merge targets, no contradiction invalidated by another queued action.
+- **Intended effects.** Every approval must produce its intended effect. An unexpected skip, an
+  already-in-effect no-op, or a blocked or incomplete outcome invalidates the trial.
+- **Equivalent starts.** Each repetition starts from equivalent fixture state.
+
+The baseline is a declared workload, not a claim about average or worst-case user behaviour.
+
+**Implementation split (user, 2026-11-16).** **7c-1:** generator, runner, diagnostic hooks and smoke
+test, under the normal code gate. **7c-2:** the manual 600-document baseline measurement and the
+committed summary with the report digest in this section. Each starts on explicit authorization.
+
 ### Deferred items and reopening triggers
 
 | Item | Deferred because | Reopening trigger |
@@ -1498,4 +1619,6 @@ instructions agents actually load:
 | Stale-`running` job reconciliation for producers other than extraction (decision 7.3) | Needs an audit of guard ownership and job-type mappings first | A hard-killed run of another producer observed left `running`, or the audit being scheduled |
 | Bounded backoff for repeatedly timing-out documents (decision 6) | Timeouts are ambiguous and always retried; no evidence of cost yet | Repeated timeouts becoming operationally costly (run time dominated by retried timeouts) |
 | Retracting or re-checking Query pages saved before a hide (change 7a, Q4) | 7a suppresses source evidence and refuses newly ineligible saves; earlier saved quotations stay discoverable | A hide that must also retract saved answers |
-| Preview storage optimization (change 7c) | Benchmark results come first | The 7c benchmark exceeding the agreed latency / storage limits |
+| Preview storage optimization (change 7c) | Benchmark results come first | The 7c benchmark exceeding the agreed latency / storage limits (7c Q2; a separate grill — reflinks are unavailable on ext4) |
+| Real-corpus confirmation of the 7c benchmark (Q1) | No real 600-document vault exists; ingesting one would be billable | A real vault near the 600-document target becoming available |
+| Serializing or bounding concurrent previews (7c Q2) | Limits are per preview; nothing serializes previews; 7c changes nothing here | Overlapping previews causing unacceptable aggregate storage use or contention, or an explicit concurrency requirement arising |
