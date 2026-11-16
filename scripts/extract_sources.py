@@ -47,6 +47,11 @@ def main(argv: list[str]) -> int:
     print(f"Errors: {summary['errors']}")
     print(f"Skipped (unchanged): {summary['skipped_unchanged']}")
     print(f"Skipped (unsupported): {summary['skipped_unsupported']}")
+    if summary["known_failures"]:
+        print(f"Skipped (known failure — awaits changed inputs or --force): "
+              f"{summary['skipped_known_failure']}")
+        for known in summary["known_failures"]:
+            print(f"  - {known['source_id']}: {known['skip_reason']}")
     rec = summary["install_recovery"]
     if rec["completed"] or rec["unrecoverable"] or rec["blocked"] or rec["problems"]:
         print(f"Interrupted installs completed: {len(rec['completed'])}")
@@ -58,7 +63,9 @@ def main(argv: list[str]) -> int:
         print(f"Staging cleanup skipped: {summary['staging_cleanup']['blocked']}")
     if summary["error_details"]:
         for err in summary["error_details"]:
-            print(f"  - {err['source_id']}: {err['error']}")
+            then = {"cached": " (cached: awaits changed inputs or --force)",
+                    "retry": " (retries on the next run)"}.get(err.get("retry"), "")
+            print(f"  - {err['source_id']}: {err['error']}{then}")
     for line in publication.report(summary["publication"]):
         print(line)
     print(f"Job: {summary['job_id']}")

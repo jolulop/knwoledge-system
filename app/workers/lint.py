@@ -647,6 +647,31 @@ def _check_install_journals(normalized_dir: Path) -> list[dict[str, Any]]:
     return out
 
 
+def _check_extraction_failures(manifests_dir: Path, normalized_dir: Path) -> list[dict[str, Any]]:
+    """ADR-0074 decision 6, report-only: `extraction_failed` (medium) — no usable extraction,
+    including earlier outputs kept but blocked by their install journal — and
+    `extraction_attempt_failed` (low) — a usable prior extraction retained while the latest
+    attempt failed. Each says whether it retries on the next run or awaits changed inputs / force."""
+    from app.workers import extract_attempts
+    out = []
+    for manifest in scan_manifests(manifests_dir).valid:
+        state = extract_attempts.failure_state(normalized_dir, manifest)
+        if state is None:
+            continue
+        sid = manifest["source_id"]
+        retained = state["situation"] == extract_attempts.PRIOR_RETAINED
+        out.append({"check": "extraction_attempt_failed" if retained else "extraction_failed",
+                    "severity": "low" if retained else "medium", "subject": sid,
+                    "detail": extract_attempts.describe(state),
+                    "data": {"source_id": sid, "situation": state["situation"],
+                             "reason": state["reason"], "error": state["error"],
+                             "attempted_at": state["attempted_at"], "cached": state["cached"],
+                             "remediation": ("change the input or limits, or re-extract with "
+                                             "--force" if state["cached"]
+                                             else "run extraction (scripts/extract_sources.py)")}})
+    return out
+
+
 def _check_contradiction_maintenance(gconn, *, reviews_dir: Path, claims_dir: Path,
                                      markdown_dir: Path, manifests_dir: Path) -> list[dict[str, Any]]:
     """ADR-0069 slice 2(a): proposed contradictions that maintenance would retire
@@ -862,6 +887,8 @@ def run_lint(
 
             # ADR-0074 decision 8: an extraction install that did not complete blocks its document.
             findings += _check_install_journals(markdown_dir.parent)
+            # ADR-0074 decision 6: documents whose latest extraction attempt failed (report-only).
+            findings += _check_extraction_failures(manifests_dir, markdown_dir.parent)
 
             # display_alias_rot reads wiki pages only — runs always (ADR-0060, report-only).
             findings += _check_display_alias_rot(wiki_dir)

@@ -1889,7 +1889,24 @@ def source_review_view(reviews_dir: Path, source_id: str, *, graph_db: Path | No
         view.update(details_section(reviews_dir, source_id, manifests_dir=Path(manifests_dir),
                                     enrichment_dir=_enrichment_dir(wiki_dir, enrichment_dir)))
     view["extraction_install"] = extraction_install_state(reviews_dir, source_id)
+    view["extraction_attempt"] = (extraction_attempt_state(reviews_dir, source_id,
+                                                           Path(manifests_dir))
+                                  if manifests_dir is not None else None)
     return view
+
+
+def extraction_attempt_state(reviews_dir: Path, source_id: str,
+                             manifests_dir: Path) -> dict[str, Any] | None:
+    """ADR-0074 decision 6: the latest extraction attempt's failure — a usable prior extraction
+    retained, or no usable extraction — with its wording (`text`), else None."""
+    from app.workers import extract_attempts  # lazy: the worker imports the read model
+    read = manifests.read_manifest(manifests_dir, source_id)
+    if read.state != manifests.OK:
+        return None
+    state = extract_attempts.failure_state(Path(reviews_dir).parent / "normalized", read.record)
+    if state is None:
+        return None
+    return {**state, "text": extract_attempts.describe(state)}
 
 
 def extraction_install_state(reviews_dir: Path, source_id: str) -> dict[str, str] | None:

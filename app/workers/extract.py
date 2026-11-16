@@ -7,8 +7,10 @@ chunks, tables, an extraction log), and records extraction state back on the man
 (ADR-0011). It runs offline with no API keys, treats every input as untrusted data
 (size/timeout/zip-bomb caps, ADR-0010) — the parse runs in a bounded child process
 (`app/workers/extract_runner.py`, ADR-0074 decision 5) — and is idempotent: an already-extracted,
-unchanged source is skipped unless ``force`` is given. One ``extract`` job records the
-run summary; per-source detail lives on the manifest and in the extraction log.
+unchanged source is skipped unless ``force`` is given, and so is a source whose latest attempt was
+an explicit deterministic rejection while nothing that bounded it changed (an attempt record,
+`app/workers/extract_attempts.py`, ADR-0074 decision 6). One ``extract`` job records the run
+summary; per-source detail lives on the manifest, in the extraction log and the attempt record.
 
 No raw file is ever modified; writes go only to ``normalized/``, ``raw/manifests/``,
 and ``db/jobs.sqlite``, plus publication (ADR-0068 decision 5): each document's install publishes
@@ -36,6 +38,7 @@ from app.backend.manifests import (
     sha256_file,
 )
 from app.backend.paths import safe_under
+from app.workers import extract_attempts as attempts
 from app.workers import extract_runner, publication
 from app.workers.chunking import assemble
 # The parse itself (`extract_parse`) runs only in the extraction child; the per-format extractor
@@ -136,6 +139,9 @@ def _extract_one(
     staged: dict[str, Any] | None = None
     log: dict[str, Any] = {
         "source_id": source_id,
+        # The attempt that wrote this log: a unique id per generation (ADR-0074 decision 6 binds a
+        # failed attempt's record to it — timestamps have second resolution).
+        "attempt_id": attempt_id,
         "status": "error",
         "tool": None,
         "tool_version": None,
@@ -286,6 +292,31 @@ def _already_extracted(manifest: dict[str, Any], root: Path, markdown_dir: Path,
     return True
 
 
+def _note_attempt(normalized: Path, manifest: dict[str, Any], log: dict[str, Any],
+                  attempt_id: str, digest: str | None, bounds: dict[str, Any] | None,
+                  journal_usable: bool, warnings: list[dict[str, Any]]) -> str | None:
+    """Record a failed attempt beside the extraction log, or clear the record after a success
+    (ADR-0074 decision 6); return the failure's retry category (None after a success). The record
+    is derived state: a write that fails is a warning, and the next run simply retries."""
+    source_id = manifest["source_id"]
+    try:
+        if log["status"] != "error":
+            attempts.clear(normalized, source_id)
+            return None
+        retained = bool(log.get("preserved_prior"))
+        record = attempts.new_record(manifest, log, attempt_id=attempt_id,
+                                     prior_retained=retained,
+                                     prior_usable=retained and journal_usable,
+                                     generation=attempts.generation(normalized, source_id),
+                                     fingerprint=digest, inputs=bounds)
+        attempts.write(normalized, record)
+        return record["category"]
+    except OSError as exc:
+        warnings.append({"source_id": source_id,
+                         "warning": f"attempt_record_unwritten: {type(exc).__name__}"})
+        return None if log["status"] != "error" else attempts.RETRY
+
+
 def _published(run: publication.Run, source_id: str, intent: str | None) -> bool:
     """Publish one document's Source page from its install's intent (under the write lock) and say
     whether it is published, so its install journal may close."""
@@ -410,9 +441,10 @@ def extract_sources(
 
         counts = {
             "extracted": 0, "partial": 0, "errors": 0,
-            "skipped_unchanged": 0, "skipped_unsupported": 0,
+            "skipped_unchanged": 0, "skipped_unsupported": 0, "skipped_known_failure": 0,
         }
         errors: list[dict[str, Any]] = []
+        known: list[dict[str, Any]] = []
         warnings: list[dict[str, Any]] = []
         considered = 0
 
@@ -432,9 +464,28 @@ def extract_sources(
                 errors.append({"source_id": source_id, "error": reason, "skip_reason": reason,
                                "preserved_prior": True})
                 continue
-            if not force and _already_extracted(manifest, root, dirs["markdown"], journal):
-                counts["skipped_unchanged"] += 1
-                continue
+            # Decision 6: everything that bounds this attempt, taken before it runs (a raw file
+            # changing during the attempt then differs next time: a retry, the safe direction).
+            digest, bounds = attempts.fingerprint(
+                manifest, _safe_raw_file(root, manifest), max_file_mb=max_file_mb,
+                timeout_s=timeout_s, target_chars=target_chars, max_chars=max_chars,
+                code_version=EXTRACT_CODE_VERSION)
+            if not force:
+                # The latest failure is consulted BEFORE the unchanged shortcut: a failed
+                # re-extraction keeps the prior outputs (which would read as unchanged), yet it
+                # retries — or, a cached rejection, is skipped only while its fingerprint matches.
+                record = attempts.current(normalized, manifest)
+                if record is not None:
+                    if journal.usable and attempts.known_failure(record, digest):
+                        counts["skipped_known_failure"] += 1
+                        known.append({"source_id": source_id, "skip_reason": record["reason"],
+                                      "error": record["error"],
+                                      "attempted_at": record["attempted_at"],
+                                      "preserved_prior": record["prior_retained"]})
+                        continue
+                elif _already_extracted(manifest, root, dirs["markdown"], journal):
+                    counts["skipped_unchanged"] += 1
+                    continue
 
             attempt_id = xi.new_attempt_id()
             log, persisted, staged = _extract_one(
@@ -453,6 +504,8 @@ def extract_sources(
                     errors.append({"source_id": source_id, "error": failure,
                                    "skip_reason": failure, "preserved_prior": True})
                     continue
+            retry = _note_attempt(normalized, manifest, log, attempt_id, digest, bounds,
+                                  journal.usable, warnings)
 
             status = log["status"]
             if status == "extracted":
@@ -466,6 +519,7 @@ def extract_sources(
                     "error": log["error"] or "unknown",
                     "skip_reason": log["skip_reason"],
                     "preserved_prior": log.get("preserved_prior", False),
+                    "retry": retry,
                 })
             for warn in log["warnings"]:
                 warnings.append({"source_id": source_id, "warning": warn})
@@ -478,10 +532,12 @@ def extract_sources(
             "errors": counts["errors"],
             "skipped_unchanged": counts["skipped_unchanged"],
             "skipped_unsupported": counts["skipped_unsupported"],
+            "skipped_known_failure": counts["skipped_known_failure"],
             **inventory.report(),
             "install_recovery": recovery,
             "staging_cleanup": cleanup,
             "error_details": errors,
+            "known_failures": known,
             "warnings": warnings,
             "forced": force,
             "extracted_at": now,

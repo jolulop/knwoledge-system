@@ -355,6 +355,20 @@ document's error may be `timeout`, `extractor_crashed` (the child died — e.g. 
 fixed 256 MiB cap). A re-extraction that fails keeps the previous extraction. Raise
 `EXTRACT_TIMEOUT_S` for very large documents on a slow machine.
 
+**Failed extraction attempts (ADR-0074 decision 6).** The latest failed attempt of each document is
+kept in `normalized/extraction_attempts/<source_id>.json`, beside its extraction log (never
+inside it). Only deterministic rejections — `oversize`, `decompression_bomb`, `invalid_archive`,
+`output_too_large` — are remembered: later runs skip the document (`skipped_known_failure`) until
+something that bounded the attempt changes (the raw file, a limit, the chunk or timeout settings,
+the extractor code or library versions) or you re-extract with `--force`
+(`POST /jobs/extract?force=true`). Every other failure — a timeout, a crash, a missing dependency,
+an unexplained error — is retried on every run. The document screen and lint
+(`extraction_failed`, `extraction_attempt_failed`) say whether a usable prior extraction is still
+in use (earlier outputs kept behind an interrupted or unrecoverable install are not) and whether
+the document retries or awaits changed inputs. A document whose re-extraction failed is retried
+on every ordinary run even though its earlier outputs are unchanged. The files are derived state:
+deleting them only makes the next run retry.
+
 **Interrupted extraction install (ADR-0074 decision 8).** Extraction installs each document's new
 outputs through an install journal (`normalized/.install/<source_id>.json`). A crash, kill or I/O
 failure mid-install leaves the journal open; **the next extraction run completes it first** (`uv run

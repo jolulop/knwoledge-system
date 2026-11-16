@@ -1345,6 +1345,20 @@ def _install_banner(install: dict[str, str] | None) -> str:
               "document.</p>")
 
 
+def _attempt_banner(attempt: dict[str, Any] | None) -> str:
+    """ADR-0074 decision 6: the latest extraction attempt failed — with a usable prior extraction
+    retained, or with no usable extraction — and whether it retries or awaits changed inputs."""
+    if not attempt:
+        return ""
+    title = ("Latest extraction attempt failed" if attempt.get("situation") == "prior_retained"
+             else "No usable extraction")       # no_usable, retained_unusable
+    error = attempt.get("error") or ""
+    at = attempt.get("attempted_at") or ""
+    return (f"<p class='banner'><strong>{_h(title)}</strong>: {_h(attempt.get('text') or '')}"
+            + (f" (<code>{_h(error)}</code>)" if error else "")
+            + (f", attempted {_h(at)}" if at else "") + ".</p>")
+
+
 def render_source_screen(data: dict[str, Any], *, draft: dict[str, Any] | None = None,
                          errors: list[str] | None = None, notices: list[str] | None = None,
                          warnings: list[str] | None = None,
@@ -1386,6 +1400,7 @@ def render_source_screen(data: dict[str, Any], *, draft: dict[str, Any] | None =
          "are refused until it is restored from backup, so no earlier keep or drop is lost.</p>"
          if data.get("ledger_error") else ""),
         _install_banner(data.get("extraction_install")),
+        _attempt_banner(data.get("extraction_attempt")),
         (f"<p class='banner'><strong>A merge/split touching this document is unfinished</strong> "
          f"(<code>{_h(data['in_flight_review_id'])}</code>). Tag decisions on its tags are refused until "
          "you run <a href='/ui/reviews/apply'>Apply</a> again, which finishes it.</p>"

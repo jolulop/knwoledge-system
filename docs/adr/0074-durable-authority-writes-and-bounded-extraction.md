@@ -13,8 +13,10 @@
   cleanup) implemented 2026-11-15** — `app/backend/extraction_install.py`. **Slice 5b (consistent
   consumer reads) implemented 2026-11-15** — `extraction_install.consistent_read` and every
   consumer. **Slice 6a (decisions 5, 7.1–7.2: the extraction child) implemented 2026-11-16** —
-  `app/workers/extract_runner.py`, `extract_child.py`, `extract_watchdog.py`, `extract_parse.py`;
-  slices 6b (decision 6), 6c (decisions 7.3, 7.5) and changes 7a–7c per decision 9 not yet.
+  `app/workers/extract_runner.py`, `extract_child.py`, `extract_watchdog.py`, `extract_parse.py`.
+  **Slice 6b (decision 6: attempt records and retry classification) implemented 2026-11-16** —
+  `app/workers/extract_attempts.py`; slice 6c (decisions 7.3, 7.5) and changes 7a–7c per
+  decision 9 not yet.
 - **Operational acceptance** (user decision 2026-11-14): ADR-0074 is **not operationally accepted
   until change 7a lands**. Slices continue in decision 9's order, but until 7a no document, release
   note or review answer may claim that visibility fails closed: a stale keyword / vector index can
@@ -855,7 +857,7 @@ stale-job reconciliation and cancellation (decisions 7.3 and 7.5).
   included — the watchdog failed to start). Every child-controlled value is type-checked before
   use, so no malformed message escapes as an unclassified failure. The child's own `missing_dependency`, `decompression_bomb`,
   `invalid_archive`, `unsupported` are preserved, and an unclassified parse failure keeps its
-  "Type: message" with no reason (its classification is slice 6b's). Every failure goes through
+  "Type: message" with no reason (slice 6b retries it as ambiguous). Every failure goes through
   the existing paths: last-good kept on a re-extraction, staging discarded.
 - **Cleanup**, on every path (a parent exception included): the group gets SIGTERM, the leader
   `grace` (5 s) to exit (checked with `waitid(WNOWAIT)`, not reaping), then SIGKILL — on success
@@ -876,6 +878,77 @@ stale-job reconciliation and cancellation (decisions 7.3 and 7.5).
   whose child ignores SIGTERM: the vault lock and the extract guard re-acquirable while the child is
   still alive, then the child gone within the grace**; the API route timing out a stalled parse on
   its worker thread; process failures on re-extraction keeping the last-good generation.
+
+**As implemented (slice 6b — decision 6).** `app/workers/extract_attempts.py`.
+
+- **The attempt record** is `normalized/extraction_attempts/<source_id>.json` (durably written;
+  derived state — beside, never inside, the extraction log): the latest failed attempt's reason,
+  message, retry category, time, attempt id, whether the prior outputs were retained and whether
+  they were a *usable* prior extraction (their install journal allowing reads), the generation and
+  the manifest's `extracted_at` it was taken against, and the fingerprint with its inputs. Written
+  after a failed attempt (the commit, for a first-time failure, having succeeded); removed after a
+  success. **Binding instead of ordering:** every extraction log now carries the `attempt_id`
+  that wrote it — a unique id per generation — and a record is current only while that id (the
+  retained prior's, or the failure log this attempt wrote), the manifest's `extracted_at` and the
+  retained-prior flag all still match. A later success writes a new log with a new id, so it
+  retires the record even within the same second (timestamps have second resolution) and even if
+  the removal failed; a restored manifest retires it too. A log written before 6b has no id (the
+  binding is then None, retired by the first 6b success). An
+  absent, unreadable, corrupt (bad JSON, off-schema, a `cached` category with a non-cached reason
+  or no fingerprint) or superseded record reads as no record: a retry. A record that can't be
+  written is a run warning (`attempt_record_unwritten`), and the failure is reported as retried.
+- **Classification.** Cached: `oversize`, `decompression_bomb`, `invalid_archive`,
+  `output_too_large` — and only with a complete fingerprint. No extractor raises a classified
+  malformed-document reason today, so nothing else is cached; an unclassified parse failure
+  (no reason) is ambiguous and retried, as are `timeout`, `extractor_crashed`,
+  `extractor_unavailable`, `extractor_output_invalid`, `missing_dependency`, `unsupported`,
+  `checksum_mismatch`, `missing_raw_file`, `path_escape` and I/O errors. Commit-stage failures
+  (a manifest damaged since the scan, an install left to its journal) are not attempt failures:
+  the journal and the run's errors report them, and no record is written.
+- **The fingerprint** (sha256 of canonical JSON, taken **before** the attempt): the manifest's
+  sha256 with the raw file's current size and mtime (the unchanged skip's cheap drift gate — no
+  re-hash per run; it relies on raw immutability and is **not** a fresh checksum verification,
+  which every actual attempt still performs), its suffix; the file-size limit; the ZIP entry / size / ratio limits; the
+  output cap, the receipt envelope and the protocol version; the chunk targets and the timeout;
+  `EXTRACT_CODE_VERSION`, the interpreter version and the versions of the format's extractor
+  distributions (`pypdf`, `python-docx`, `beautifulsoup4`, `pandas` / `openpyxl`). Any of it
+  undeterminable (no confined raw file, no stat, no recorded checksum, a distribution not
+  installed) → no fingerprint → retried.
+- **The run consults the current failure before the unchanged shortcut** (review round 1): a
+  failed re-extraction keeps the prior outputs, which would otherwise read as unchanged and never
+  retry. With a current record the document is attempted — unless it is skipped as
+  `skipped_known_failure` (with `known_failures` details): not forced, its install journal usable
+  (an unrecoverable install is always retried, decision 8), the record cached and the fingerprint
+  computed now equal to the record's. Without one, the unchanged shortcut applies as before.
+  A skipped known failure is not counted as an error of the run. `force` ignores the cache. Each
+  failure in `error_details` carries its category (`retry`: `cached` / `retry`), and the CLI says
+  which failures await changed inputs or `--force`.
+- **Visible.** The document screen shows a banner — "No usable extraction" or "Latest extraction
+  attempt failed" — with the shared wording "no usable extraction: <reason> — …", "no usable
+  extraction (earlier outputs kept, but their install is <state>); latest attempt failed: <reason>
+  — …" (retained bytes behind an unrecoverable or damaged install journal, read live: kept, not
+  usable) or "usable prior extraction retained; latest attempt failed: <reason> — …", ending in
+  "awaits changed inputs or a forced re-extraction" (cached) or "retries on the next run". Lint
+  reports the same text, report-only: `extraction_failed` (medium, no usable extraction — with
+  `data.situation` `no_usable` or `retained_unusable`) and `extraction_attempt_failed` (low, a
+  usable prior retained). A failed document without a current record (failed before 6b, or its
+  record lost) is described from its extraction log and retries. The wording reflects the
+  category the attempt was recorded with; a bound changed since then retries on the next run.
+- **Tests** (`tests/test_extraction_attempts.py`): every reason's category; the fingerprint
+  changing with each bound and missing with each undeterminable input; cached rejections skipped
+  without launching a child until `force`, a changed limit, configuration, raw file or code
+  version; every other reason retried on every run; oversize cached until the limit is raised,
+  then extracted with the record cleared; a real-child invalid archive and ZIP bomb cached end to
+  end; a failure after a success recorded beside the untouched good log and outputs; superseded
+  and damaged records retried and replaced; an unwritable record a warning; an unrecoverable
+  journal never skipped; the screen and lint wording for both situations and both futures; the
+  log-only fallback; lint not failing on them. Review round 1: a successful extraction, then a
+  forced attempt timing out, then ordinary runs retrying it (never `skipped_unchanged`) until it
+  succeeds; a cached failed re-extraction skipped while its fingerprint matches and retried when a
+  limit, the configuration or the code version changes; a same-second success with the record's
+  removal failing still retiring it (the generation binding); kept outputs behind an
+  unrecoverable install reported as no usable extraction, their bytes and log untouched, and
+  retried.
 
 ### Decision 8 — roll-forward install journal for extraction (grill Q8)
 
