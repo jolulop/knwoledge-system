@@ -26,7 +26,7 @@ Two ground rules shape everything:
 ```
 raw/          immutable original files + manifests (raw/manifests/<source_id>.json)
 normalized/   extracted text: markdown/, chunks/, tables/, extraction_logs/
-wiki/         generated Markdown pages — Sources/ Claims/ Items/ Synthesis/ … + index.md   (gitignored, regenerable)
+wiki/         generated Markdown pages — Sources/ Claims/ Items/ Synthesis/ … + index.md   (gitignored; durable fields + regenerable projections, ADR-0068 d1 as amended)
 db/           SQLite — graph.sqlite (the knowledge graph), jobs.sqlite, llm_cache.sqlite
 indexes/      keyword/ (BM25) + vector/ (LanceDB) search indexes
 reviews/      the human-review ledger — pending/ approved/ rejected/ audit_log/
@@ -162,8 +162,8 @@ uv run python scripts/validate_all.py
 
 # serve + review
 uv run python -m app.backend   # blessed entrypoint (loopback-guarded; see docs/Operations.md) → http://127.0.0.1:18000/ui/reviews
-# decide items in the UI, then hit Apply (it refreshes index + keyword itself when it changed
-# anything; re-run reindex_keyword.py only if it warns keyword_reindex_failed), then validate_all
+# decide items in the UI, then hit Apply (it publishes what it executed and refreshes index + keyword
+# itself; if it reports publication_pending, Retry publishing / scripts/republish.py), then validate_all
 
 # browse the vault
 GALLIUM_DRIVER=d3d12 obsidian --no-sandbox --ozone-platform=wayland --use-gl=angle --use-angle=gl &   # WSLg, GPU; open the  wiki/  folder as a vault

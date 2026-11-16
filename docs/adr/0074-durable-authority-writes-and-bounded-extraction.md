@@ -20,8 +20,8 @@
   complete. **Change 7a grilled 2026-11-16** (see "Change 7a" in Part C); **7a-1 (Q1, Q2, Q6:
   retrieval gating, graph Source nodes, silent exclusion) implemented 2026-11-16**; **7a-2 (Q3–Q5:
   the final model-call check, the guarded save, the warning rename) implemented 2026-11-16** —
-  change 7a complete. **Change 7b grilled 2026-11-16** (see "Change 7b" in Part C; docs only).
-  Change 7c not yet.
+  change 7a complete. **Change 7b grilled and implemented 2026-11-16** (see "Change 7b" in Part
+  C; docs only). Change 7c not yet.
 - **Operational acceptance** (user decision 2026-11-14): ADR-0074 was **not operationally accepted
   until change 7a landed**; with 7a-2 it is. Visibility now fails closed for `/search` and `/query`
   retrieval, for the model call (from the final check on) and for saving an answer, despite a
@@ -1435,8 +1435,10 @@ there too (the grill's scan found only the marker; ADR-0071's title authority is
 
 **Q4 — the agent write path (an explicit policy clarification, not wording alone).** Supported
 system operations are the **only** agent write path for wiki content: pipeline producers, review
-decisions and Apply, and the screen / API actions (tagging, hide / unhide, provenance confirmation,
-saving a query). A direct file edit bypasses the write lock, the revision and the publication
+decisions and Apply (which executes hide / unhide, among the other review types), and the screen /
+API actions (tagging, provenance confirmation, saving a query). *(Corrected at implementation:
+the grill text listed hide / unhide among the screen actions; they are review item types that
+Apply executes.)* A direct file edit bypasses the write lock, the revision and the publication
 contract, and preserving frontmatter cannot make it safe.
 - **Each operation's actual guarantee is stated**, not a blanket "publishes and refreshes search":
   a review decision records intent and Apply executes it; producers publish per document and
@@ -1463,6 +1465,28 @@ instructions agents actually load:
   maintenance.
 - **`vault-review`:** decisions record intent; Apply executes and publishes them.
 - `vault-maintenance` and `vault-query` are unchanged.
+
+**As implemented (2026-11-16).** Docs only; no code, test or hook changed.
+- `AGENTS.md`: the durable-field principle; "Required behavior" states the write-path policy, each
+  operation's actual guarantee (producers, review decisions vs Apply, screen actions, a saved
+  Query's navigation-stale state), the durable-field rule, the invariants and the checks for
+  producer / renderer / template changes; the hooks as structural checks only.
+- `CLAUDE.md` § Ingest: what the pipeline performs, pointing to the `vault-ingest` skill.
+- `vault-ingest`: the supported operations in stage order (intake, extraction, enrichment, claims,
+  items, promotion, synthesis, validation), retry publication on `saved_publication_pending`,
+  manual reindex for diagnosed repair only. `vault-review`: decisions record intent, Apply executes
+  and publishes; audit entries are written by those operations.
+- Build Specification: the snapshot paragraph and its diagram (no post-run `reindex_keyword`), §3.2
+  amended (durable fields vs projections, raw sources still the source of truth for facts), the §7
+  note, §10 (hooks as structural checks).
+- `README.md`, `REANCHOR.md`, `docs/Workflow.md`: the one-line rewording, and the Apply advice in
+  README and the Workflow cheat sheet now says retry publication on `publication_pending`.
+- ADR-0068 decision 1: the dated amendment (Q3). The scan of ADRs 0069–0074 found no other durable
+  page field.
+- Left as is: `CONTEXT.md`'s split entry ("since `wiki/` is regenerable") is a dated design rationale
+  inside an explanatory entry; vault-maintenance's explicit reindex is maintenance by design.
+- Validation: scoped search for "regenerable" / "disposable" / post-run reindex wording across the
+  current-guidance documents, diff review, `tests/test_operational_refs.py`, `validate_all`.
 
 ### Deferred items and reopening triggers
 

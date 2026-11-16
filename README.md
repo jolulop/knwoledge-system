@@ -84,15 +84,17 @@ uv run python scripts/validate_all.py
 
 # serve loopback UI/API
 uv run python -m app.backend
-# decide review items at /ui/reviews, then apply. Apply refreshes wiki/index.md + the keyword index
-# itself when it changed anything; re-run reindex_keyword.py only if it warns keyword_reindex_failed
+# decide review items at /ui/reviews, then apply. Apply publishes what it executed and refreshes
+# wiki/index.md + the keyword index itself; if it reports publication_pending, retry publication:
+# uv run python scripts/republish.py
 uv run python scripts/validate_all.py
 ```
 
 ## Repository principles
 
 - Raw files are source of truth and must not be modified by agents.
-- Wiki pages are derived, reviewable, and regenerable.
+- Wiki pages combine durable, human-owned fields with regenerable projections (ADR-0068 decision 1,
+  as amended); they change only through the system's operations, never by direct edits.
 - Every major wiki page must include a `> [!summary]` callout.
 - Claims require citations or must be marked unsourced.
 - Deletion, contradiction resolution, item merging, and deprecation require human approval.

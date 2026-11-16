@@ -11,8 +11,8 @@ first after an app restart, then `wiki/index.md` if working in the vault._
 ## Project
 
 Local-first **LLM Wiki** knowledge-system. Immutable `raw/` → derived `normalized/` →
-generated `wiki/` (gitignored, regenerable) → `db/` SQLite (graph, jobs, llm_cache) →
-`reviews/`, `policies/`. ADR-driven (`docs/adr/0001–0074`). See `CLAUDE.md` for the
+generated `wiki/` (gitignored; durable fields + regenerable projections, ADR-0068 d1 as
+amended) → `db/` SQLite (graph, jobs, llm_cache) → `reviews/`, `policies/`. ADR-driven (`docs/adr/0001–0074`). See `CLAUDE.md` for the
 critical rules and `CONTEXT.md` for the glossary.
 
 ## Where we are

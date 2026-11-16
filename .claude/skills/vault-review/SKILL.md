@@ -17,8 +17,12 @@ Prepare and apply human-reviewed decisions while preserving auditability.
 
 - Never perform destructive or semantic governance actions without explicit human approval.
 - Show evidence before asking for or applying a decision.
-- Write review outcomes to `reviews/audit_log/`.
-- Update affected wiki pages, graph edges, and indexes after approved changes.
+- Review outcomes are recorded in `reviews/audit_log/` by the decision and Apply operations.
+- A decision (approve, reject, defer, reopen) records intent only; **Apply** executes approved
+  decisions and publishes the affected pages, graph edges and indexes (`POST /reviews/apply` with a
+  clean preview's token, or `scripts/apply_reviews.py apply --token <id>`). Never edit `wiki/` pages
+  or the graph directly (ADR-0074 change 7b). If Apply reports `publication_pending`, retry
+  publication (`POST /publication/retry` or `scripts/republish.py`).
 
 ## Review item types
 

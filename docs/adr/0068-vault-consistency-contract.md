@@ -54,6 +54,20 @@ A page can hold both durable fields and generated sections. Authority is declare
 | Synthesis (`wiki/Synthesis/`) | `status` (`hidden`) | projection |
 | Source pages, `index.md`, `wiki/Authors/` (ADR-0066 part 3), backlink and list sections everywhere, summary callouts, `generation_status`, `input_fingerprint` | — | **pure projection**, rebuildable at any time |
 
+> **Amendment (2026-11-16, ADR-0074 change 7b).** This table, with this note, is the one exact list
+> of durable page fields; guidance documents point here as "ADR-0068 decision 1, as amended". The
+> rows above are kept as decided. Later durable fields:
+> - **Claim — the supersede completion marker** (ADR-0073 decision 16): `superseded_by_review`,
+>   `superseded_by_approval`, `superseded_by_claim`. All three or none (a partial or malformed
+>   marker is unreadable evidence). It is durable historical completion evidence, separate from
+>   `status`: every render carries it forward unchanged, hidden states included, and it is never
+>   regenerated from defaults or discarded as projection.
+>
+> A writer that cannot read the durable fields it must carry forward refuses rather than re-render
+> (ADR-0074 decision 4). Checked at the amendment: ADRs 0069–0074 add no other durable page field
+> (ADR-0071's title authority is the existing `title`; ADR-0073's synthesis version fields live in
+> the review item and the artifact, not the page).
+
 - **One exception, for publication only** (slice 2 review round, user 2026-10-29): publication
   copies every saved item field, `status` included, except that it may move a tag between `active`
   and `unused` per its saved keep/drop decisions (the ADR-0066 rule). Those decisions are the

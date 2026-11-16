@@ -27,20 +27,22 @@ Concept/Entity/Person/Organization/Project page families exist only in historica
 Current high-level workflow:
 
 ```text
-raw/inbox -> scan_inbox -> extract_sources -> generate_wiki
-          -> reindex_keyword + rebuild_index
+raw/inbox -> scan_inbox -> extract_sources (publishes each Source page)
           -> enrich/extract_claims/extract_items/promote/generate_synthesis
           (contradiction judging is not a pipeline step: ADR-0069 — an occasional, scoped check)
-          -> reindex_keyword + rebuild_index + validate_all
+          -> validate_all
           -> tag each document: keep / drop / never suggest its suggested tags (ADR-0066)
-          -> review decide + dry-run/apply (apply refreshes index + keyword itself) + validate_all
+          -> review decide + dry-run/apply (apply executes and publishes) + validate_all
           -> search/query/maintenance/evals
 ```
 
-The semantic producers rebuild `wiki/index.md` when they change pages but do **not** refresh the
-keyword/navigation index, so the second `reindex_keyword` is required before new Item/Claim/Synthesis
-pages appear in `/search`. Review apply refreshes both itself when it changed anything (it warns
-`keyword_reindex_failed` if the keyword refresh fails — re-run `reindex_keyword` then).
+Every producer commits and publishes per document, then refreshes `wiki/index.md` and keyword search
+once at run completion (ADR-0068 decision 5); a run whose refresh fails reports
+`saved_publication_pending` and its work stays queued for retry (`scripts/republish.py`,
+`POST /publication/retry`). Apply publishes what it executed the same way (`publication_pending`
+if a refresh fails). Manual `rebuild_index` / `reindex_keyword` remain for diagnosed repair and
+explicit maintenance, not as a step after every producer run. Wiki content changes only through
+these supported operations, never by editing pages directly (ADR-0074 change 7b).
 
 ## 1. Executive Summary
 
@@ -169,7 +171,16 @@ Raw sources may be copied, parsed, indexed, summarized, archived, or marked as d
 
 ### 3.2 The Wiki Is Derived, Reviewable, and Regenerable
 
-The wiki is a generated interpretation layer. It should be useful, browsable, and editable, but it is not the source of truth.
+The wiki is a generated interpretation layer. It should be useful, browsable, and reviewable; raw
+sources remain the source of truth for its facts.
+
+*Amended by ADR-0068 decision 1:* wiki pages combine **durable, human-owned fields** with
+**regenerable projections**, and rebuilding projections must preserve those fields. Item pages own
+their names, descriptions, classification, lifecycle / review state and lineage; Claim and Synthesis
+pages own their `status`, and Claim pages also their supersede completion marker. The rest of those
+pages' content — generated sections, backlinks, lists and summary callouts — is projection, as are
+Source pages, `wiki/index.md` and `wiki/Authors/`. The exact field list is ADR-0068 decision 1, as
+amended. Durable fields change only through the operation that owns them (ADR-0074 change 7b).
 
 Every generated factual claim must cite raw evidence where possible.
 
@@ -404,7 +415,7 @@ Note: implementation annotations (original v0.1 target kept as historical intent
 > This diagram is the original design target and still names the retired Concept/Entity/Person/
 > Organization/Project page families. The **current** flow is the *Current Implementation Snapshot*
 > at the top of this document (ADR-0059 knowledge items, separate `extract_claims` / `extract_items` /
-> `promote` passes, explicit `reindex_keyword` after semantic generation). Operator steps live in
+> `promote` passes, each producer publishing and refreshing search itself, ADR-0068). Operator steps live in
 > `docs/Workflow.md` and `docs/Operations.md`.
 
 ```text
@@ -508,8 +519,12 @@ Agents may propose and write content, but deterministic scripts must enforce str
 
 The hooks below are Claude Code agent-edit hooks (`.claude/hooks/*.sh`, registered via
 `.claude/settings.example.json`): they fire when an agent edits a file, not during pipeline script
-runs — pipeline operators run `reindex_keyword` / `rebuild_index` / `validate_all` explicitly (see the
-snapshot at the top). The validators run together via `scripts/validate_all.py`.
+runs. Pipeline runs publish and refresh search themselves (see the snapshot at the top); operators
+run `validate_all` after them, and `reindex_keyword` / `rebuild_index` only for diagnosed repair or
+explicit maintenance. The validators run together via `scripts/validate_all.py`. The hooks are
+**structural checks**, not concurrency or durability protection: they cannot make an ad hoc page edit
+safe or stand in for the write lock, the revision and publication (ADR-0068); wiki content changes
+only through the supported operations (ADR-0074 change 7b).
 
 | Hook | Trigger | Action |
 |---|---|---|

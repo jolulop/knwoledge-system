@@ -61,14 +61,18 @@ scripts/      deterministic maintenance scripts
 
 ### Ingest
 
-1. Detect or receive files from `raw/inbox/`.
-2. Create manifest and checksum.
-3. Extract and normalize to Markdown/JSON under `normalized/`.
-4. Generate/update wiki pages under `wiki/`.
-5. Create/update graph edges and search indexes.
-6. Run validators.
-7. Create review items for semantic/destructive decisions.
-8. Rebuild `wiki/index.md` and append `wiki/log.md`.
+What the pipeline performs (the `vault-ingest` skill names the operations to invoke). Wiki pages,
+graph edges and indexes are written only by these operations, never edited directly (ADR-0074
+change 7b):
+
+1. Intake detects files in `raw/inbox/` and creates each manifest and checksum.
+2. Extraction normalizes them to Markdown/JSON under `normalized/` and publishes each Source page.
+3. The LLM producers (enrichment, claims, items, synthesis) propose semantic structure; extracted
+   items are per-document tag suggestions, and semantic/destructive decisions become review items.
+4. Each producer commits and publishes per document, then refreshes `wiki/index.md` and keyword
+   search once at run completion; failed publication stays pending for retry. `wiki/log.md`
+   records Source-page generation, saved queries and maintenance passes.
+5. Validators check the result (`scripts/validate_all.py`).
 
 ### Query
 
