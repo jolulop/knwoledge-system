@@ -610,3 +610,63 @@ curl -fsS http://127.0.0.1:18000/evals/results | python3 -m json.tool
 Durable results live under `evals/reports/answers/` (gitignored) and store **only ids/flags/scores/
 metadata** — never the prompt, evidence, answer prose, or any absolute path. The headline is a
 reproducibility-stamped snapshot, **not** a CI gate (answer generation is nondeterministic).
+
+### Apply preview benchmark (ADR-0074 change 7c)
+
+A key-free, operator-run benchmark of the copy-based Apply preview at the 600-document target. It
+measures the snapshot's write-lock hold, a tag keep issued while the snapshot copies, the preview's end
+to end time and its peak temporary storage, against limits fixed before measuring (ADR-0074 "Change
+7c", Q2). It never touches the live vault.
+
+```bash
+# 1. build the synthetic fixture OUTSIDE the repository (refuses the live vault and any nonempty
+#    directory; ~1 hour at 600 documents; do not edit the repository's code while it runs — a
+#    preview refuses with restart_required when the code on disk changes)
+uv run python scripts/bench_fixture.py build /tmp/ks-bench --scale 600 --seed 1
+# 2. measure (heavy = the judged 50-item backlog stress queue; light = the 5-item batch, not judged)
+uv run python scripts/bench_apply_preview.py run /tmp/ks-bench --profile heavy
+uv run python scripts/bench_apply_preview.py run /tmp/ks-bench --profile light
+```
+
+- **Fixture.** `DEST/corpus`, `DEST/heavy`, `DEST/light` and `DEST/fixture.json` (the declaration:
+  size distribution, counts by family, queue counts by executor type, fan-out, fingerprints). It is
+  built by the real pipeline with fake model adapters and validated (`validate_all`, plus one real
+  preview with every approval `applied`) before it is declared built.
+- **Refusals (exit 3, nothing created).** The runner refuses:
+  - a fixture whose declaration schema isn't current (rebuild it);
+  - a profile vault that isn't a real directory, or that holds a symbolic link or a non-regular
+    file;
+  - a profile whose content no longer matches the fingerprint declared at build time (it was
+    modified after the build);
+  - a `FIXTURE/_work` that is a link or isn't owned by you.
+- **Scratch.** Each run works in its own `FIXTURE/_work/<profile>-<random>` directory, holding an
+  ownership marker. It deletes only inside that directory, never through a link. Concurrent runs
+  never touch each other's directories. A directory left by an interrupted run is never removed
+  automatically: delete it by hand once no run is using it.
+- **Runner.** It restores a work copy for every repetition, hashes it against the declared
+  fingerprint (outside every timed interval; a mismatch invalidates the trial), and runs the real
+  preview path. The defaults are 1 warm-up, 20 warm, 20 contention, 5 uncontended keeps, 5 storage
+  and 3 cold runs, at a 50 ms sampling interval.
+  - Cold runs need `sudo -n` to drop the page cache; otherwise they are recorded as unavailable.
+  - Invalid trials are reported and excluded: no proven lock overlap, an approval not `applied`, a
+    non-equivalent start, or a restored copy that doesn't match the fingerprint.
+- **Report.** Written to `evals/reports/bench/` (gitignored), with no absolute paths. The command
+  prints its sha256 digest and the verdict:
+  - `pass` or `fail`: a complete judged result. Only `fail` triggers the follow-up.
+  - `incomplete`: any of these:
+    - fewer than 20 valid runs for a timed limit;
+    - no valid warm-up;
+    - fewer than 5 valid storage runs;
+    - settings below the baseline (warm-up 1, warm 20, contention 20, storage 5, interval ≤ 50 ms);
+    - a run error;
+    - fixture code that differs from the executing code.
+
+    Counts are of **valid** trials, not requested ones. An invalid warm-up stays in the report. Any exceedance is listed as a **provisional** breach and
+    triggers nothing.
+  - `not_judged`: the light profile, the `smoke` preset, or a scale below the 600-document target.
+- **Code.** The preview's sandbox runs the code copied into the fixture at build time. The report
+  records that code's fingerprint beside the fingerprint of the code running the benchmark. Build
+  the fixture from the revision you measure.
+- **Timings.** Every preview result now carries `timings`: monotonic marks and phase durations
+  (lock wait / held, after-lock copy, sandbox run with its own phases, cleanup, the token lock).
+  These are diagnostics only and never an input to the token.

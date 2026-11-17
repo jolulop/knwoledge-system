@@ -38,7 +38,35 @@ _PIPE = "a pipe descriptor of the extraction child protocol, never a file (ADR-0
 _NORMALIZED = "normalized/ derived state outside the extraction install (ADR-0074 decision 8)"
 _EVAL = "an evaluation report / scratch vault outside the live vault"
 _INDEX = "an index / model-cache directory, rebuildable (not an authority directory)"
+_BENCH = ("the 7c benchmark's disposable fixture or its gitignored report — never the live vault "
+          "(ADR-0074 change 7c; the generator's destination guard refuses the live vault and any "
+          "nonempty destination)")
+_BENCH_SCRATCH = ("the 7c runner's own run directory under FIXTURE/_work (exclusive mkdtemp + "
+                  "ownership marker). Deletion is confined: `remove_owned` checks the marker names "
+                  "this run, the target is inside it, no path component is a link and the target is "
+                  "a real directory owned by the user, and uses link-safe rmtree; `_work` itself must "
+                  "be a real directory and is removed only when empty; the pristine profile is "
+                  "verified link-free and fingerprint-matched before anything is created "
+                  "(ADR-0074 change 7c-1 review)")
 ALLOWED: dict[tuple[str, str, str], str] = {
+    ("scripts/bench_apply_preview.py", "open_work", "os.mkdir"): _BENCH_SCRATCH,
+    ("scripts/bench_apply_preview.py", "open_work", "tempfile.mkdtemp"): _BENCH_SCRATCH,
+    ("scripts/bench_apply_preview.py", "open_work", "open(x)"): _BENCH_SCRATCH + " (the marker)",
+    ("scripts/bench_apply_preview.py", "open_work", "json.dump"): _BENCH_SCRATCH + " (the marker)",
+    ("scripts/bench_apply_preview.py", "remove_owned", "shutil.rmtree"): _BENCH_SCRATCH,
+    ("scripts/bench_apply_preview.py", "remove_owned", "shutil.rmtree (reference)"):
+        _BENCH_SCRATCH + " (reads `avoids_symlink_attacks`; deletes nothing)",
+    ("scripts/bench_apply_preview.py", "close_work", ".rmdir"): _BENCH_SCRATCH + " (`_work` when empty)",
+    ("scripts/bench_apply_preview.py", "_restore", "shutil.copytree"): _BENCH_SCRATCH,
+    ("scripts/bench_apply_preview.py", "run", "os.mkdir"): _BENCH_SCRATCH + " (its TMPDIR)",
+    ("scripts/bench_apply_preview.py", "run", ".mkdir"): _BENCH + " (the report directory)",
+    ("scripts/bench_apply_preview.py", "run", ".write_bytes"): _BENCH + " (the report)",
+    ("scripts/bench_fixture.py", "write_raw", ".mkdir"): _BENCH,
+    ("scripts/bench_fixture.py", "write_raw", ".write_bytes"): _BENCH + " (raw/inbox of the fixture)",
+    ("scripts/bench_fixture.py", "_copy_code", "shutil.copytree"): _BENCH,
+    ("scripts/bench_fixture.py", "build", ".mkdir"): _BENCH,
+    ("scripts/bench_fixture.py", "build", ".write_text"): _BENCH + " (plan.json / fixture.json)",
+    ("scripts/bench_fixture.py", "build", "shutil.copytree"): _BENCH,
     ("app/workers/extract_child.py", "_send", "os.write"): _PIPE,
     ("app/workers/extract_child.py", "run", "os.write"): _PIPE,
     ("app/workers/extract_runner.py", "_stand_down", "os.write"): _PIPE,

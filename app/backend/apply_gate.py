@@ -24,6 +24,7 @@ import dataclasses
 import hashlib
 import json
 import re
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -168,6 +169,35 @@ def _failed(reason: str, exc: BaseException) -> dict[str, Any]:
             "preview_token": None}
 
 
+# ADR-0074 change 7c (Q4): the preview's phase marks, additive diagnostics on every result. Each is a
+# `time.monotonic_ns()` reading (CLOCK_MONOTONIC: system-wide, so comparable with another process's
+# readings). `lock_released` is read right after the hold exits, so `lock_held` includes everything
+# done before the release, the release itself included. No byte accounting happens here.
+_PHASES = (("lock_wait", "lock_requested", "lock_acquired"),
+           ("lock_held", "lock_acquired", "lock_released"),
+           ("after_lock_copy", "lock_released", "after_lock_copied"),
+           ("sandbox_run", "after_lock_copied", "sandbox_evaluated"),
+           ("cleanup", "sandbox_evaluated", "sandbox_cleaned"),
+           ("token_lock_wait", "token_lock_requested", "token_lock_acquired"),
+           ("token_lock_held", "token_lock_acquired", "token_lock_released"),
+           ("total", "started", "finished"))
+
+
+def _mark(marks: dict[str, int], name: str) -> None:
+    marks[name] = time.monotonic_ns()
+
+
+def preview_timings(marks: dict[str, int], sandbox_phases_ms: dict[str, float] | None = None
+                    ) -> dict[str, Any]:
+    """The `timings` block: the raw marks and the derived phase durations (ms) whose marks exist."""
+    phases = {name: round((marks[b] - marks[a]) / 1e6, 3) for name, a, b in _PHASES
+              if a in marks and b in marks}
+    out: dict[str, Any] = {"clock": "monotonic_ns", "marks_ns": dict(marks), "phases_ms": phases}
+    if sandbox_phases_ms:
+        out["sandbox_phases_ms"] = dict(sandbox_phases_ms)
+    return out
+
+
 def preview(st: Settings, *, evaluate: Callable[[Settings], dict[str, Any]],
             loaded_code: str | None = None, repo: Path | None = None,
             options: dict[str, Any] | None = None, now: str | None = None) -> dict[str, Any]:
@@ -175,20 +205,38 @@ def preview(st: Settings, *, evaluate: Callable[[Settings], dict[str, Any]],
 
     A result that is otherwise `ok` but gets no token says why in `token_withheld`:
     `code_changed`, `revision_changed`, `settings_changed` or `authorization_write_failed`. A failed copy is a failed
-    preview (`copy_failed`), never `ok`."""
+    preview (`copy_failed`), never `ok`. Every returned result carries `timings` (ADR-0074 7c)."""
+    marks: dict[str, int] = {}
+    _mark(marks, "started")
+    result = _preview(st, evaluate=evaluate, loaded_code=loaded_code, repo=repo, options=options,
+                      now=now, marks=marks)
+    _mark(marks, "finished")
+    result["timings"] = preview_timings(marks, result.pop("sandbox_phases_ms", None))
+    return result
+
+
+def _preview(st: Settings, *, evaluate: Callable[[Settings], dict[str, Any]],
+             loaded_code: str | None, repo: Path | None, options: dict[str, Any] | None,
+             now: str | None, marks: dict[str, int]) -> dict[str, Any]:
     options = dict(options or {})
     check_loaded_code(loaded_code, repo)
     tmp_root: Path | None = None
     try:
-        with write_lock.hold(st.reviews_dir, authority=False, changes=False):
-            if (problems := _approved_preflight(st)) is not None:
-                return _blocked_preview(problems)          # no copy, no run, no token
-            rev = revision.current(st.root)
-            # The settings this preview executes with, captured with the snapshot: the sandbox must
-            # reproduce them, and the authorization binds exactly these.
-            live = settings_fingerprint(get_settings(st.root))
-            settings_fp = effective_settings_fingerprint(st)
-            tmp_root = apply_sandbox.copy_state(st)
+        _mark(marks, "lock_requested")
+        try:
+            with write_lock.hold(st.reviews_dir, authority=False, changes=False):
+                _mark(marks, "lock_acquired")
+                if (problems := _approved_preflight(st)) is not None:
+                    return _blocked_preview(problems)          # no copy, no run, no token
+                rev = revision.current(st.root)
+                # The settings this preview executes with, captured with the snapshot: the sandbox
+                # must reproduce them, and the authorization binds exactly these.
+                live = settings_fingerprint(get_settings(st.root))
+                settings_fp = effective_settings_fingerprint(st)
+                tmp_root = apply_sandbox.copy_state(st)
+        finally:
+            if "lock_acquired" in marks:
+                _mark(marks, "lock_released")
         apply_sandbox.copy_code_and_raw(st, tmp_root)
         carry_env(st, tmp_root)
         code = code_fingerprint(tmp_root)
@@ -205,10 +253,13 @@ def preview(st: Settings, *, evaluate: Callable[[Settings], dict[str, Any]],
             apply_sandbox.cleanup_sandbox(tmp_root)
         return _failed("settings_not_carried" if isinstance(exc, _SettingsNotCarried)
                        else "copy_failed", exc)
+    _mark(marks, "after_lock_copied")
     try:
         result = evaluate(sandbox)
     finally:
+        _mark(marks, "sandbox_evaluated")
         apply_sandbox.cleanup_sandbox(tmp_root)
+        _mark(marks, "sandbox_cleaned")
     result["preview_token"] = None
     # A recovered revision or authorization store is reported, never a blocker (its copy is evidence).
     if revision.damaged_copies(st.root):
@@ -221,15 +272,21 @@ def preview(st: Settings, *, evaluate: Callable[[Settings], dict[str, Any]],
         result["token_withheld"] = "code_changed"
         return result
     try:
-        with write_lock.hold(st.reviews_dir, authority=False, changes=False):
-            if revision.current(st.root) != rev:
-                result["token_withheld"] = "revision_changed"
-                return result
-            if effective_settings_fingerprint(st) != settings_fp:
-                result["token_withheld"] = "settings_changed"   # e.g. .env edited mid-preview
-                return result
-            token = apply_authorization.issue(st.root, rev=rev, code=code, settings=settings_fp,
-                                              options=options, now=now)
+        _mark(marks, "token_lock_requested")
+        try:
+            with write_lock.hold(st.reviews_dir, authority=False, changes=False):
+                _mark(marks, "token_lock_acquired")
+                if revision.current(st.root) != rev:
+                    result["token_withheld"] = "revision_changed"
+                    return result
+                if effective_settings_fingerprint(st) != settings_fp:
+                    result["token_withheld"] = "settings_changed"   # e.g. .env edited mid-preview
+                    return result
+                token = apply_authorization.issue(st.root, rev=rev, code=code,
+                                                  settings=settings_fp, options=options, now=now)
+        finally:
+            if "token_lock_acquired" in marks:
+                _mark(marks, "token_lock_released")
     except (apply_authorization.StoreUnavailable, revision.RevisionUnavailable):
         result["token_withheld"] = "authorization_write_failed"
         return result

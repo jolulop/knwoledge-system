@@ -10,6 +10,7 @@ import os
 import re
 import sqlite3
 import sys
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -1840,7 +1841,11 @@ def _evaluate_preview(sandbox: Any) -> dict[str, Any]:
     not_appliable = [{"review_id": it["review_id"], "type": it["type"],
                       "reason": "no_executor_in_phase_6"}
                      for it in approved if not it["appliable"]]
+    # ADR-0074 change 7c: the sandbox run's own phases, so a benchmark can attribute executor work
+    # against snapshot cost (additive diagnostics; `apply_gate.preview` nests them in `timings`).
+    t0 = time.monotonic_ns()
     before = apply_sandbox.snapshot_state(sandbox)
+    t1 = time.monotonic_ns()
     try:
         result = run_apply(sandbox)
     except GraphUnavailable:
@@ -1860,8 +1865,10 @@ def _evaluate_preview(sandbox: Any) -> dict[str, Any]:
             "diff": None, "items": [], "not_appliable": not_appliable,
             "validators": {"passed": False, "failures": []}, "warnings": ["executor_error"],
         }
+    t2 = time.monotonic_ns()
     after = apply_sandbox.snapshot_state(sandbox)
     diff = apply_sandbox.diff_states(before, after)
+    t3 = time.monotonic_ns()
     items = [{"review_id": it["review_id"], "type": it["type"], "targets": it["targets"],
               "effects": _attribute_effects(it, diff)} for it in approved if it["appliable"]]
     # Overall cleanliness uses run_apply's status (validators AND the ADR-0043 hide-reindex-stale
@@ -1876,6 +1883,9 @@ def _evaluate_preview(sandbox: Any) -> dict[str, Any]:
         # ADR-0072: the sandbox run's per-review outcomes drive the readable preview.
         "handled": result.get("handled") or [], "outcomes": result.get("outcomes") or [],
         "advisories": result.get("advisories") or [],
+        "sandbox_phases_ms": {"snapshot_before": round((t1 - t0) / 1e6, 3),
+                              "run_apply": round((t2 - t1) / 1e6, 3),
+                              "snapshot_after_and_diff": round((t3 - t2) / 1e6, 3)},
     }
 
 

@@ -21,7 +21,8 @@
   retrieval gating, graph Source nodes, silent exclusion) implemented 2026-11-16**; **7a-2 (Q3–Q5:
   the final model-call check, the guarded save, the warning rename) implemented 2026-11-16** —
   change 7a complete. **Change 7b grilled and implemented 2026-11-16** (see "Change 7b" in Part
-  C; docs only). **Change 7c grilled 2026-11-16** (see "Change 7c"); not yet implemented.
+  C; docs only). **Change 7c grilled 2026-11-16** (see "Change 7c"); **7c-1 (generator, runner,
+  diagnostic hooks, smoke test) implemented 2026-11-16**; 7c-2 (the measured baseline) not yet.
 - **Operational acceptance** (user decision 2026-11-14): ADR-0074 was **not operationally accepted
   until change 7a landed**; with 7a-2 it is. Visibility now fails closed for `/search` and `/query`
   retrieval, for the model call (from the final check on) and for saving an answer, despite a
@@ -1608,6 +1609,125 @@ The baseline is a declared workload, not a claim about average or worst-case use
 **Implementation split (user, 2026-11-16).** **7c-1:** generator, runner, diagnostic hooks and smoke
 test, under the normal code gate. **7c-2:** the manual 600-document baseline measurement and the
 committed summary with the report digest in this section. Each starts on explicit authorization.
+
+**7c-1 as implemented (2026-11-16).**
+- **Diagnostic hooks.**
+  - `apply_gate.preview` records `time.monotonic_ns()` marks (CLOCK_MONOTONIC, comparable across
+    processes) around the real hold: `lock_requested`, `lock_acquired`, and `lock_released` read
+    right after the hold exits, so the hold covers everything before release. It also marks the
+    after-lock copy, the sandbox run, cleanup and the token lock.
+  - Every result carries `timings` (`marks_ns`, derived `phases_ms`, and the sandbox run's own
+    `sandbox_phases_ms`: snapshot before, `run_apply`, snapshot after and diff). `_evaluate_preview`
+    supplies the sandbox phases; `ReviewDryRunResponse.timings` exposes them.
+  - The preview does no byte accounting. Nothing changes in the token, the decision or any refusal.
+- **Generator** (`scripts/bench_fixture.py`).
+  - **Destination guard.** It refuses the live vault (the repository or the configured root, or
+    anything containing or inside either) and any nonempty destination.
+  - **Pipeline.** Intake, extraction, enrichment, claims, items, keeps, provenance, synthesis and
+    the contradiction check run through their real worker entry points. The fake adapters sit
+    behind the real `LLMClient`, so its schema validation and quote grounding still apply.
+  - **Setup Applies.** Two live Applies, each through a real preview token, seed the active and
+    hidden targets: syntheses C and D activated, then D, a source, two items and two claims hidden.
+  - **Queues.** `DEST/heavy` and `DEST/light` are copies of `DEST/corpus` with their queue filed
+    through the review routes (`POST /reviews/{id}/approve`, `POST /reviews/merge`). Each must pass
+    `validate_all` and one real preview with every approval `applied`.
+  - **Declaration** (`fixture.json`): the size distribution, counts and bytes by family, exact
+    queue counts by executor type, fan-out (documents and edges) of each merge, retype and split,
+    the contention targets, and content fingerprints.
+  - **Calibration** (UAT aggregate ratios): raw sizes log-normal, median 565 KB, σ 1.35, clipped to
+    [16 KB, 48 MB], with every 100th document in [44, 48] MB; 64 KB of text and about 83 claims per
+    document; 15 suggestions per document, 3 from a 40-tag head set (round robin, so a head tag
+    has about 45 documents at 600) and the rest from the long tail; tail keeps at 6 %.
+  - **Provenance documents.** Eight synthesis documents and eight contradiction documents carry
+    distinct authors. The synthesis documents keep only their own topic and the contradiction
+    documents keep nothing, so independence creates no unplanned synthesis topics.
+- **Two fixture adjustments found while building.**
+  - Item deprecations target never-kept candidates: deprecating a kept tag leaves kept links to a
+    deprecated tag, which `validate_tag_links` rejects, and ADR-0066 files item deprecations from
+    tombstones, not from kept tags.
+  - Each claim target is its document's first claim by id, whatever its status, so the queue
+    unhides exactly the claims the setup hid.
+- **Runner** (`scripts/bench_apply_preview.py`).
+  - **Processes.** A preview driver, a keeper and a storage sampler run as separate processes on a
+    restored work copy in the run's own scratch directory (below). The sandbox goes to a
+    benchmark-owned `TMPDIR`.
+  - **Keeps.** The keeper waits for the sandbox directory, then keeps through
+    `POST /reviews/sources/{id}/links`; overlap is proven from the marks. Keep outcomes and the
+    preview's token outcome (typically `revision_changed`) are recorded.
+  - **Storage.** The sampler walks the temporary directory, recording allocated (`st_blocks` ×
+    512) and logical bytes.
+  - **Equivalent starts.** Each trial's revision and approved listing must equal the first trial's,
+    and each restored copy must match the declared content fingerprint (below).
+  - **What is judged.** Only the heavy profile, at the baseline preset and a scale of at least 600,
+    is judged; any other run reports `not_judged`. A judged run is `pass` or `fail` only when it is
+    complete; otherwise it is `incomplete` (below).
+  - **The report** carries the nearest-rank percentiles, classification against the Q2 limits,
+    sanitized errors and metadata, the schema version, the code revision, the fixture fingerprint
+    and the digest.
+- **Smoke test** (`tests/test_bench_apply_preview.py`, in the gate): percentile and classification
+  on deterministic inputs, validity, overlap, sanitizing, the digest, plan determinism and
+  disjoint targets, the destination guard, PDF padding, and one end-to-end build and run at the
+  smoke preset (48 documents). It makes no wall-clock assertion. The write guard
+  (`tests/test_authority_write_guard.py`) lists the scripts' raw writes, all confined to the
+  disposable fixture, the runner's scratch copy or the gitignored report.
+- **Review round 1 (2026-11-17): three safety and validity gaps fixed.**
+  - **Scratch ownership.** The runner deleted `FIXTURE/_work/<profile>` without checking where it
+    led: a `_work` link to an unrelated directory lost a file there. Now:
+    - each run creates its own `_work/<profile>-<random>` (exclusive `mkdtemp`, mode 0700) with an
+      ownership marker naming the run;
+    - `_work` must be a real directory owned by the user, never a link;
+    - deletion (`remove_owned`) requires that the marker names this run, that the target is a real
+      directory inside the run directory, and that no path component is a link. It uses the
+      link-safe `rmtree`;
+    - `_work` is removed only when it is empty;
+    - concurrent runs never touch each other's directories, and a leftover directory from an
+      interrupted run is never deleted automatically.
+
+    The write guard's exemption cites these checks. The pristine profile must be a real
+    directory holding only real directories and regular files.
+  - **Acceptance needs a complete result.** One breaching sample used to set the follow-up while
+    the verdict said insufficient runs. Now `pass` and `fail` need a complete result: every timed
+    limit with 20 valid runs, a storage peak, and no blocker. Blockers are:
+    - settings below the baseline (warm-up ≥ 1, warm ≥ 20, contention ≥ 20, storage runs ≥ 5,
+      sampling interval ≤ 50 ms);
+    - a run error;
+    - fixture code that differs from the executing code.
+
+    Anything less is `incomplete`: exceedances are listed as **provisional** breaches. Only a
+    complete, valid, judged `fail` (breaches `confirmed`) triggers the optimization grill.
+  - **The fingerprint is verified, not copied.**
+    - Before anything is created, the runner refuses a profile whose content no longer matches the
+      fingerprint declared at build time, or a declaration whose schema isn't current.
+    - Every restored work copy is hashed after the restore and before the preview, outside every
+      timed interval. A mismatch invalidates the trial.
+    - The fingerprint walk never follows a link. It hashes a link as a link, so it covers raw
+      bytes, the graph, review payloads and every other file, but never content outside the vault.
+    - The declaration (schema 2) records the fixture's **code fingerprint** (`app/`, `scripts/`,
+      `templates/`: what the preview's sandbox copies and runs). The report records it beside the
+      fingerprint of the code executing the runner, and a difference blocks acceptance.
+  - **Regressions:**
+    - an escaping `_work` link refused with the external files preserved;
+    - deletion confined to the run's own directory, never through a link;
+    - concurrent runners, forged markers and leftovers;
+    - provisional breaches that trigger nothing;
+    - the settings check, including the warm-up;
+    - fixtures mutated after the build (raw bytes, graph, a review payload, an added file) refused
+      before anything is created;
+    - links and old declarations refused;
+    - the code-fingerprint scope.
+- **Review round 2 (2026-11-17): valid counts, not requested counts.** Acceptance checked only the
+  requested warm-up and storage counts. The warm-up result was discarded, so an invalid warm-up
+  couldn't block acceptance. One valid storage trial among five gave `pass`. Now:
+  - a complete verdict needs at least **1 valid warm-up** and **5 valid storage runs**. The user
+    confirmed five storage runs and a sampling interval of 50 ms or less as the baseline, with the
+    documented sampling limitation;
+  - warm-ups are kept in the report, an invalid one with its reason. They never enter a metric;
+  - either shortage gives `incomplete`, with exceedances provisional and no follow-up triggered.
+
+  Regressions cover the classification, and a report that reproduces the review (one valid
+  storage trial and four invalid ones; an invalid warm-up).
+- **Build cost** (measured at 60 baseline documents): claims dominate, at about 1 s per 100 claim
+  pages (durable writes). A 600-document build takes about an hour.
 
 ### Deferred items and reopening triggers
 

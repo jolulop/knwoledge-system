@@ -664,3 +664,7 @@ class ReviewDryRunResponse(BaseModel):
     handled: list[dict[str, Any]] = []
     outcomes: list[dict[str, Any]] = []
     advisories: list[dict[str, Any]] = []
+    # ADR-0074 change 7c: additive diagnostics — the preview's monotonic phase marks (`marks_ns`),
+    # derived `phases_ms` (lock wait / held, after-lock copy, sandbox run, cleanup, token lock) and
+    # the sandbox run's own `sandbox_phases_ms`. Never an input to the token or the decision.
+    timings: dict[str, Any] | None = None
