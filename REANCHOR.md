@@ -1,6 +1,6 @@
 # REANCHOR — session status
 
-_Last updated: 2026-11-13. **Reanchor command:** "read REANCHOR.md and reanchor". Read this
+_Last updated: 2026-11-17 (work paused by the user). **Reanchor command:** "read REANCHOR.md and reanchor". Read this
 first after an app restart, then `wiki/index.md` if working in the vault._
 
 > [!warning] This is a periodically-refreshed snapshot and can lag the live state. The authoritative
@@ -17,8 +17,56 @@ critical rules and `CONTEXT.md` for the glossary.
 
 ## Where we are
 
-- **2026-11-13 — ADR-0074 in progress (durable authority writes and bounded extraction); tip
-  `90c48e0`, NOT pushed (`main` 6 ahead of `origin/main`).** The tree holds **slice 3b
+- **2026-11-17 — ADR-0074 complete through change 7c (every slice 1–6 and change 7a–7c); tip
+  `229b8c6`, NOT pushed (`main` 22 ahead of `origin/main`).** The tree is clean except the user's
+  `.vscode/`. **Work is paused.** The next step is the triggered preview-optimization grill (see
+  "Next step"), on the user's go. Since `90c48e0`:
+  - **Slices 3b–6c** (`b05de69` review transitions + typed record reads · `12d9b63` 3c policies,
+    journals, db records · `7efcede` 4 manifest recovery + Details history · `2cc7fe8` 5a
+    extraction install journal · `efa41ce` 5b consistent consumer reads · `9be623f` 6a bounded
+    extraction child · `b00d982` 6b attempt records + retry classification · `cb05e28` 6c stale
+    extraction jobs + cancellation). Each was reviewed, gated green and committed separately.
+  - **Change 7a**, visibility fail-closed (`58862f4` grill · `bf0d68a` 7a-1 manifest visibility in
+    retrieval · `919b5c9` 7a-2 final visibility check + guarded query save). With 7a-2,
+    **ADR-0074 is operationally accepted**. Retained limitation: Query pages saved before a hide
+    stay discoverable (deferred).
+  - **Change 7b**, docs reconciliation (`c4be88a` grill · `6cb7c11`). Wiki pages are durable
+    human-owned fields plus regenerable projections (ADR-0068 d1 as amended). Supported operations
+    are the only agent write path; hooks are structural checks only.
+  - **Change 7c**, Apply preview benchmark (`1440233` grill · `78879d4` 7c-1 generator, runner,
+    preview `timings`, smoke test + review rounds 1–2 · `229b8c6` 7c-2 measured baseline).
+    - `scripts/bench_fixture.py build DEST` builds a synthetic vault: the real pipeline, with fake
+      model adapters.
+    - `scripts/bench_apply_preview.py run FIXTURE --profile heavy|light` runs it. It uses owned
+      per-run scratch, verified fingerprints and code, and a sanitized report with a digest in
+      gitignored `evals/reports/bench/`.
+    - **7c-2 result (600 documents, about 53,000 pages):** the judged heavy profile **fails**
+      lock hold (p95 3.60 s, limit 2 s), keep during copy (16.8 s vs 3 s) and end to end (400 s
+      vs 60 s). Storage passes (1.65 GB vs 5 GiB). These are confirmed breaches, so they
+      **trigger the optimization grill**.
+    - Observations: the sandbox `run_apply` is about 97 % of the preview. A large share of the
+      work is independent of queue length (light, 5 items, takes 277 s against heavy's 376 s
+      median). Dependence on vault size is **not yet measured**. An uncontended keep already
+      takes about 8 s. The effective storage sampling interval was about 5 s.
+    - Digests: heavy `sha256:9e1b8dd3…`, light `sha256:bdd6e62b…`. Full summary in ADR-0074
+      "7c-2 baseline".
+  - **Kept on disk for the grill (the user will not delete it):** the 600-document fixture,
+    4.7 GB, built in 1 h 21 min from `78879d4`, at
+    `/tmp/claude-1000/-home-jolulop-code-knowledge-system/dad67bd7-f4f9-419c-82c8-fc7f0548a077/scratchpad/fx600`.
+    - Its copied code must equal the code that runs it, or acceptance is blocked. Any code change
+      since `78879d4` means a rebuild for a judged rerun.
+    - It is still fine for diagnostic (unjudged) runs.
+    - Of the four reports, the two dated `20261117T17…` / `20261117T20…` are the baseline. The
+      other two are early 60-document trial runs.
+  - Gate at `78879d4`: **3383 passed, 2 skipped**, ruff clean, 16 validators. (7c-2 changed docs
+    only.)
+  - **Open validation concern (still tracked):** the one-off 67-failure gate run of 2026-11-11
+    never reproduced in any later gate.
+  - Housekeeping: a few orphaned `tests/extract_child_stub.py` processes from earlier gates were
+    idle in the background (0 % CPU). They are harmless and gone after a reboot.
+- **2026-11-13 (historical; superseded by the entry above) — ADR-0074 in progress (durable
+  authority writes and bounded extraction); tip `90c48e0`, NOT pushed (`main` 6 ahead of
+  `origin/main`).** The tree holds **slice 3b
   uncommitted** (17 files + `tests/test_review_record_states.py`) plus the user's `.vscode/`.
   Since `06f3d56`:
   - `dfda610` — item descriptions survive frontmatter round trips (external review finding 2).
@@ -689,7 +737,7 @@ critical rules and `CONTEXT.md` for the glossary.
 | **ADR-0071 item page filenames (B1b)** | **Complete + pushed** (`d59ef84` design · `661b877` B1b + review rounds 1–2) |
 | **ADR-0072 B2 (Apply outcomes, tagging history, bulk decisions)** | **Complete + pushed** (`878d375` design · `33a39e1` B2a + rounds 1–4 · `f32ce67` B2c + round 1 · `94a05c8` B2b + round 1); look-through of B1b–B5 passed 2026-11-06 |
 | **ADR-0073 executor follow-ups** (synthesis version binding · guarded supersede · supersede repair) | **Complete + pushed** (`c5db004` design · `dea4c38` slice 1 · `6ef0d06` + `dbc6a71` slice 2 + rounds 1–2 · `5b46280` + `06f3d56` slice 3); validators 15→16; a hand look-through needs a fresh UAT clone |
-| **ADR-0074 durable authority writes + bounded extraction** | **In progress** (`84823d9` design · `96c2ccd` slice 1 · `a8105be` slice 2 · `90c48e0` slice 3a; **slice 3b uncommitted, gate green**; next 3c, then 4–6, 7a–7c) — none pushed |
+| **ADR-0074 durable authority writes + bounded extraction** | **Complete through 7c, NOT pushed** (`84823d9` design · `96c2ccd` 1 · `a8105be` 2 · `90c48e0` 3a · `b05de69` 3b · `12d9b63` 3c · `7efcede` 4 · `2cc7fe8` 5a · `efa41ce` 5b · `9be623f` 6a · `b00d982` 6b · `cb05e28` 6c · `58862f4`/`bf0d68a`/`919b5c9` 7a · `c4be88a`/`6cb7c11` 7b · `1440233`/`78879d4`/`229b8c6` 7c); operationally accepted; 7c-2 baseline **fails** latency limits, which triggers the preview optimization grill |
 
 ## Next step
 
@@ -706,11 +754,18 @@ critical rules and `CONTEXT.md` for the glossary.
   — set `ENRICH_LOCAL_BASE_URL` + add `local:<model>` to a tier chain (start with
   `ENRICH_MODEL_LIGHT`). No-cost resolve-check snippet in that doc.
 - **NEXT (each step on the user's go; each new design starts with a `grill-phase`):**
-  0. **ADR-0074 (current):** user reviews slice 3b → commit it (one commit, `.vscode/` excluded,
-     unpushed) → slice **3c** (policies, journals, `db/*.json` authority records; read discipline
-     per decision 4, behavioural tests per family) → 4 `scripts/repair_manifest.py` → 5 extraction
-     install journal → 6 extraction child process → 7a / 7b / 7c (each with its own short grill).
-     Each slice starts on the user's "implement now"; push only on request.
+  0. **ADR-0074 follow-up (current): the preview optimization grill**, triggered by 7c-2 (the
+     deferred row "Preview storage optimization", marked "Trigger met 2026-11-17"). Its scope is
+     mainly preview **latency**, not storage. Likely questions:
+     - where `run_apply`'s 4–6 minutes go (finer timing first);
+     - whether a preview must rebuild everything or only what its approvals touch;
+     - why a single keep costs about 8 s at this scale (publication, search refresh);
+     - whether 60 s is realistic at 600 documents;
+     - how cost depends on vault size (not yet measured).
+
+     It starts with `/grill-phase` on the user's go; no optimization is authorized before it.
+     The fixture above is kept for it. **Pushing** the 22 local commits is also pending the
+     user's request.
   1. **After ADR-0073** (complete; Slice B look-through passed 2026-11-06):
      a. a fresh UAT clone to look through ADR-0073 by hand: approve / reject a synthesis (the
         version is recorded; a regenerated text is refused); a pre-existing approved synthesis
