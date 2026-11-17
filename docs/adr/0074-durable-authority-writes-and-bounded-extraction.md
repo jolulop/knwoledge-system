@@ -22,7 +22,9 @@
   the final model-call check, the guarded save, the warning rename) implemented 2026-11-16** —
   change 7a complete. **Change 7b grilled and implemented 2026-11-16** (see "Change 7b" in Part
   C; docs only). **Change 7c grilled 2026-11-16** (see "Change 7c"); **7c-1 (generator, runner,
-  diagnostic hooks, smoke test) implemented 2026-11-16**; 7c-2 (the measured baseline) not yet.
+  diagnostic hooks, smoke test) implemented 2026-11-16**; **7c-2 (the measured baseline) measured
+  2026-11-17: the judged heavy profile FAILS three limits (lock hold, keep during copy, end to
+  end), storage passes; the optimization grill is triggered** (see "7c-2 baseline").
 - **Operational acceptance** (user decision 2026-11-14): ADR-0074 was **not operationally accepted
   until change 7a landed**; with 7a-2 it is. Visibility now fails closed for `/search` and `/query`
   retrieval, for the model call (from the final check on) and for saving an answer, despite a
@@ -1729,6 +1731,96 @@ committed summary with the report digest in this section. Each starts on explici
 - **Build cost** (measured at 60 baseline documents): claims dominate, at about 1 s per 100 claim
   pages (durable writes). A 600-document build takes about an hour.
 
+**7c-2 baseline (measured 2026-11-17): synthetic baseline, per preview.**
+- **Verdict.** The judged heavy profile **fails** three limits. This is a complete, valid result:
+  20 valid runs per timed limit, 1 valid warm-up, 5 valid storage runs, baseline settings,
+  verified fingerprints, matching code and no run errors. All breaches are **confirmed**, so the
+  **preview optimization grill is triggered** (the deferred table). 7c authorizes no optimization.
+- **Reports** (gitignored, `evals/reports/bench/`), identified by digest:
+  - heavy (judged): `sha256:9e1b8dd30773b0fc6b510ebe1a4cd92be682b1033a7b44ec5139fb4b9472682f`
+  - light (not judged): `sha256:bdd6e62b157e5edfc8364c8ebb90c29fa2378df3eff789a4b2c8d5765f6b6aa8`
+- **Provenance.**
+  - The code was commit `78879d4` with clean code. The fixture's copied code fingerprint equals the
+    executing code's (`sha256:8b4ce6be…`).
+  - The fixture is generator version 1, declaration schema 2, preset `baseline`, seed 1, scale 600.
+    Profile fingerprints were verified before measuring and on every restore: heavy
+    `sha256:663434c8…`, light `sha256:d6a80c6b…`, corpus `sha256:aa52b083…`.
+- **Fixture as built** (1 h 21 min):
+  - 600 raw files, 1.12 GB, median 556 KB, maximum 49 MB;
+  - 53,000 graph nodes (50,385 claims, 1,956 items of which 423 active, 600 sources, 4 syntheses)
+    and 62,252 edges;
+  - 52,945 wiki pages;
+  - `db/` 65 MB, `normalized/` 108 MB, `wiki/` 78 MB.
+- **Environment.**
+  - Intel Core Ultra 9 275HX, 24 logical CPUs, 31 GiB RAM;
+  - WSL2 (kernel 6.6.87.2), Python 3.12.13;
+  - the vault and temporary storage on ext4 (no reflinks), with 935 GB free (so the 5 GiB storage
+    cap binds).
+  - Cold-cache runs were **unavailable** (no passwordless `sudo` to drop the page cache). They are
+    recorded as invalid and are never judged.
+- **Results.** p95 of the valid runs, nearest rank, with the median in brackets:
+
+  | Metric | Limit | Heavy (judged) | Light (not judged) |
+  |---|---|---|---|
+  | Snapshot write-lock hold | ≤ 2 s | **3.60 s** (2.86) — fail | 2.08 s (1.84) |
+  | Keep issued during the snapshot copy | ≤ 3 s | **16.8 s** (15.6) — fail | 9.65 s (9.52) |
+  | Preview end to end | ≤ 60 s | **400 s** (376) — fail | 292 s (277) |
+  | Temporary storage, maximum observed peak | ≤ 5 GiB | 1.65 GB — pass | 1.65 GB |
+
+  Supporting measurements:
+
+  | Measure | Heavy | Light |
+  |---|---|---|
+  | Lock wait p95 | 19 ms | 16 ms |
+  | Keep with no preview running (5 runs, p95) | **8.63 s** | **7.93 s** |
+  | Phase p95: after-lock copy | 1.52 s | 0.88 s |
+  | Phase p95: sandbox `run_apply` | **388 s** | **284 s** |
+  | Phase p95: snapshot before + snapshot after and diff | 3.97 + 3.40 s | 2.19 + 2.30 s |
+  | Phase p95: cleanup | 1.23 s | 0.80 s |
+  | Logical bytes copied | 1.356 GB | 1.356 GB |
+  | Amplification (peak allocated ÷ logical) | 1.22 | 1.22 |
+  | Peak observed in phase | after the after-lock copy | after the after-lock copy |
+
+  - **Contention.** Every contention keep was a real `kept`, with overlap with the hold proven. The
+    preview's token outcome was always `revision_changed`: the keep invalidates the preview's
+    authorization, as designed.
+  - **Trials.** 54 per profile, 51 valid. The only invalid ones are the 3 cold runs.
+- **What the numbers attribute** (observations for the optimization grill, not decisions):
+  - **End to end is executor work, not the copy.** `run_apply` inside the sandbox is about 97 % of
+    the preview (heavy 388 of 400 s), and the snapshot, copy and diff phases together are about
+    12 s.
+  - **That cost is largely fixed.** The 5-item light queue costs 73 % of the 50-item heavy one
+    (277 vs 376 s median). That suggests substantial work independent of queue length; both
+    profiles use the same corpus, so dependence on vault size remains to be measured. The phase
+    hooks don't break `run_apply` down further: executors,
+    rendering, the projection and index rebuild, and validators are one interval. Finding where
+    the time goes is the grill's first step.
+  - **The keep limit fails even without contention.** An uncontended keep already takes 7.9–8.6 s
+    at this scale, so most of the contended 9.7–16.8 s is the keep's own cost (its publication).
+    Contention adds about 1.7 s (light) to 7 s (heavy). The 3 s limit is unreachable without
+    making the keep itself cheaper, whatever the snapshot does.
+  - **The lock hold is over the limit, but modestly.** Heavy 3.6 s and light 2.1 s copy the same
+    vault. The difference isn't attributed by these measurements.
+  - **Storage has a wide margin.** The peak is 1.65 GB, about 31 % of the 5 GiB cap, with
+    amplification 1.22. The peak falls right after the copy completes.
+- **Limitations, stated honestly.**
+  - **Sampling.** A sampler walk of the temporary tree took about 5 s (mean 5.2 s heavy, 4.8 s
+    light), so the effective sampling interval was about 5 s, not the 50 ms setting. 271 and 265
+    samples were taken. A peak shorter than about 5 s could be missed. The judged storage figure
+    is the maximum observed, with a 3× margin, and the copy itself is fully counted (logical
+    bytes are known exactly).
+  - **Sampler overhead.** The sampler used about 1,270–1,420 CPU-seconds over the 5 storage runs.
+    Storage runs, which ran last, nevertheless finished faster than the warm runs (median 295 vs
+    376 s heavy, 251 vs 277 s light). That is unexplained by these measurements: machine state
+    drifted over the 3.5–4.8 h runs, so absolute times carry run-to-run variance (heavy end to end
+    ranged 338–402 s).
+  - **The workload is declared and synthetic.** It is not a claim about average or worst-case use
+    and proves nothing about other corpora (the real-corpus confirmation stays deferred). The
+    results are per preview; concurrent previews multiply demand.
+- **Run cost.** Heavy took 4 h 48 min and light 3 h 26 min, each with the default settings (1
+    warm-up, 20 warm, 20 contention, 5 uncontended keeps, 5 storage and 3 cold runs, 50 ms
+    interval).
+
 ### Deferred items and reopening triggers
 
 | Item | Deferred because | Reopening trigger |
@@ -1739,6 +1831,6 @@ committed summary with the report digest in this section. Each starts on explici
 | Stale-`running` job reconciliation for producers other than extraction (decision 7.3) | Needs an audit of guard ownership and job-type mappings first | A hard-killed run of another producer observed left `running`, or the audit being scheduled |
 | Bounded backoff for repeatedly timing-out documents (decision 6) | Timeouts are ambiguous and always retried; no evidence of cost yet | Repeated timeouts becoming operationally costly (run time dominated by retried timeouts) |
 | Retracting or re-checking Query pages saved before a hide (change 7a, Q4) | 7a suppresses source evidence and refuses newly ineligible saves; earlier saved quotations stay discoverable | A hide that must also retract saved answers |
-| Preview storage optimization (change 7c) | Benchmark results come first | The 7c benchmark exceeding the agreed latency / storage limits (7c Q2; a separate grill — reflinks are unavailable on ext4) |
+| Preview storage optimization (change 7c) | Benchmark results come first | The 7c benchmark exceeding the agreed latency / storage limits (7c Q2; a separate grill — reflinks are unavailable on ext4). **Trigger met 2026-11-17** (7c-2: lock hold, keep during copy and end to end fail on the judged heavy profile; storage passes). The measured costs are executor work and the keep's own publication, more than storage, so the grill's scope covers preview **latency**. The grill is not yet held. |
 | Real-corpus confirmation of the 7c benchmark (Q1) | No real 600-document vault exists; ingesting one would be billable | A real vault near the 600-document target becoming available |
 | Serializing or bounding concurrent previews (7c Q2) | Limits are per preview; nothing serializes previews; 7c changes nothing here | Overlapping previews causing unacceptable aggregate storage use or contention, or an explicit concurrency requirement arising |
