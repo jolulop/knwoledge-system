@@ -18,7 +18,7 @@ critical rules and `CONTEXT.md` for the glossary.
 ## Where we are
 
 - **2026-11-17 — ADR-0074 complete through change 7c (every slice 1–6 and change 7a–7c); tip
-  `229b8c6`, NOT pushed (`main` 22 ahead of `origin/main`).** The tree is clean except the user's
+  `229b8c6` (plus this refresh), **pushed 2026-11-17, in sync with `origin/main`**.** The tree is clean except the user's
   `.vscode/`. **Work is paused.** The next step is the triggered preview-optimization grill (see
   "Next step"), on the user's go. Since `90c48e0`:
   - **Slices 3b–6c** (`b05de69` review transitions + typed record reads · `12d9b63` 3c policies,
@@ -737,7 +737,7 @@ critical rules and `CONTEXT.md` for the glossary.
 | **ADR-0071 item page filenames (B1b)** | **Complete + pushed** (`d59ef84` design · `661b877` B1b + review rounds 1–2) |
 | **ADR-0072 B2 (Apply outcomes, tagging history, bulk decisions)** | **Complete + pushed** (`878d375` design · `33a39e1` B2a + rounds 1–4 · `f32ce67` B2c + round 1 · `94a05c8` B2b + round 1); look-through of B1b–B5 passed 2026-11-06 |
 | **ADR-0073 executor follow-ups** (synthesis version binding · guarded supersede · supersede repair) | **Complete + pushed** (`c5db004` design · `dea4c38` slice 1 · `6ef0d06` + `dbc6a71` slice 2 + rounds 1–2 · `5b46280` + `06f3d56` slice 3); validators 15→16; a hand look-through needs a fresh UAT clone |
-| **ADR-0074 durable authority writes + bounded extraction** | **Complete through 7c, NOT pushed** (`84823d9` design · `96c2ccd` 1 · `a8105be` 2 · `90c48e0` 3a · `b05de69` 3b · `12d9b63` 3c · `7efcede` 4 · `2cc7fe8` 5a · `efa41ce` 5b · `9be623f` 6a · `b00d982` 6b · `cb05e28` 6c · `58862f4`/`bf0d68a`/`919b5c9` 7a · `c4be88a`/`6cb7c11` 7b · `1440233`/`78879d4`/`229b8c6` 7c); operationally accepted; 7c-2 baseline **fails** latency limits, which triggers the preview optimization grill |
+| **ADR-0074 durable authority writes + bounded extraction** | **Complete through 7c + pushed** (`84823d9` design · `96c2ccd` 1 · `a8105be` 2 · `90c48e0` 3a · `b05de69` 3b · `12d9b63` 3c · `7efcede` 4 · `2cc7fe8` 5a · `efa41ce` 5b · `9be623f` 6a · `b00d982` 6b · `cb05e28` 6c · `58862f4`/`bf0d68a`/`919b5c9` 7a · `c4be88a`/`6cb7c11` 7b · `1440233`/`78879d4`/`229b8c6` 7c); operationally accepted; 7c-2 baseline **fails** latency limits, which triggers the preview optimization grill |
 
 ## Next step
 
@@ -764,8 +764,7 @@ critical rules and `CONTEXT.md` for the glossary.
      - how cost depends on vault size (not yet measured).
 
      It starts with `/grill-phase` on the user's go; no optimization is authorized before it.
-     The fixture above is kept for it. **Pushing** the 22 local commits is also pending the
-     user's request.
+     The fixture above is kept for it.
   1. **After ADR-0073** (complete; Slice B look-through passed 2026-11-06):
      a. a fresh UAT clone to look through ADR-0073 by hand: approve / reject a synthesis (the
         version is recorded; a regenerated text is refused); a pre-existing approved synthesis
